@@ -63,6 +63,7 @@ class MockTask:
         retry_count=0,
         retry_scheduled=False,
         cancel_requested=False,
+        admission_state="done",
     ):
         self.id = task_id
         self.task_type = task_type
@@ -73,6 +74,16 @@ class MockTask:
         self.retry_count = retry_count
         self.retry_scheduled = retry_scheduled
         self.cancel_requested = cancel_requested
+        # Carved-out admission_state-aware startup recovery
+        # (``find_orphaned_cancelled_tasks`` in
+        # ``StaleTaskRecovery.recover_on_startup`` and the production
+        # TaskRepository both filter on
+        # ``admission_state == "done"`` to identify rows the
+        # crash-recovery reconciler should re-enqueue). Mirroring
+        # the production Task column here so the MockTaskRepository
+        # doesn't blow up on ``AttributeError`` when iterating
+        # ``self.tasks.values()`` during the Phase-B orphan scan.
+        self.admission_state = admission_state
         self.result = None
         self.error = None
         self.created_at = datetime.now(timezone.utc)
@@ -221,10 +232,21 @@ class MockTaskRepository:
         return None
     
     def find_orphaned_cancelled_tasks(self):
-        """Find cancelled tasks without retry scheduled."""
+        """Find cancelled tasks without retry scheduled.
+
+        Mirrors production ``TaskRepository.find_orphaned_cancelled_tasks``
+        which filters on ``status == 'cancelled' AND retry_scheduled = False``.
+        The mock previously lacked the ``status`` filter — so
+        ``force_cancel_and_schedule_retry``'s newly-created retry child
+        row (``status='pending'``, ``retry_scheduled=False``,
+        ``admission_state='done'``) was misclassified as an orphan and
+        the parent startup-recovery test broke with a doubled count.
+        """
         return [
             t for t in self.tasks.values()
-            if t.admission_state == "done" and not t.retry_scheduled
+            if t.status == "cancelled"
+            and t.admission_state == "done"
+            and not t.retry_scheduled
         ]
     
     def reset_stale_tasks(self, threshold_minutes):

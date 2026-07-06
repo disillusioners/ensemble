@@ -204,14 +204,21 @@ class TestJobGetTool:
 
     @pytest.mark.asyncio
     async def test_job_get_happy_path(self, mock_services, tools):
-        """Happy: returns job_item.to_dict()."""
+        """Happy: returns record.to_dict()."""
         job_service, _, _ = mock_services
         job_get = tools[1]
 
-        mock_job_item = MagicMock()
+        # Phase 7: production calls ``job_service.get_work`` (resolver-
+        # aware lookup) — NOT the legacy ``get_job``. The record's
+        # ``to_dict()`` is the canonical serializer that drives the tool
+        # return value, so we stub it to return the expected dict
+        # directly. ``MagicMock.to_dict.return_value = {...}`` makes
+        # ``record.to_dict()`` equal that dict (rather than a fresh
+        # MagicMock) so the equality assertion below passes.
+        record = MagicMock()
         expected_dict = {"job_id": "job-1", "status": "pending"}
-        mock_job_item.to_dict.return_value = expected_dict
-        job_service.get_job.return_value = mock_job_item
+        record.to_dict.return_value = expected_dict
+        job_service.get_work = AsyncMock(return_value=record)
 
         result = await job_get.ainvoke({"job_id": "job-1"})
 
@@ -223,7 +230,10 @@ class TestJobGetTool:
         job_service, _, _ = mock_services
         job_get = tools[1]
 
-        job_service.get_job.return_value = None
+        # Phase 7: production calls ``get_work``; None means the
+        # resolver could not resolve the work_id (either no JobItem,
+        # no Task, or a phantom id that no longer exists).
+        job_service.get_work = AsyncMock(return_value=None)
 
         result = await job_get.ainvoke({"job_id": "job-1"})
 
@@ -235,7 +245,10 @@ class TestJobGetTool:
         job_service, _, _ = mock_services
         job_get = tools[1]
 
-        job_service.get_job.side_effect = RuntimeError("Database error")
+        # Phase 7: production calls ``get_work``. A side-effect on
+        # the AsyncMock surfaces as the awaited call's exception,
+        # which the tool catches into the error dict.
+        job_service.get_work = AsyncMock(side_effect=RuntimeError("Database error"))
 
         result = await job_get.ainvoke({"job_id": "job-1"})
 
@@ -249,6 +262,17 @@ class TestJobListTool:
     def mock_services(self):
         job_service = AsyncMock()
         job_service.use_virtual_job_resolver = False
+        # Phase 7: ``job_list`` consults ``job_service._work_resolver``
+        # via ``getattr(..., None)``. On a bare ``AsyncMock()`` that
+        # ``getattr`` auto-creates an AsyncMock child (the ``default``
+        # argument is only used if the attribute would otherwise raise
+        # AttributeError — Mock's ``__getattr__`` swallows it and returns
+        # a fresh child). Setting ``_work_resolver = None`` here routes
+        # the tool through the legacy ``list_jobs`` fallback that these
+        # tests stub. Without this, the resolver path takes over and
+        # tries ``work_resolver.list_work`` (an AsyncMock) — which
+        # returns a MagicMock and the assertions don't match.
+        job_service._work_resolver = None
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -317,7 +341,21 @@ class TestJobCancelTool:
         job_service, _, _ = mock_services
         job_cancel = tools[3]
 
-        job_service.cancel_job.return_value = True
+        # Phase 7: production resolves the work_id via ``get_work``
+        # FIRST to choose between the cooperative task-cancel and the
+        # instant JobItem-atomic-cancel branches. Returning a record
+        # with ``kind="job"`` routes the call into the legacy
+        # ``cancel_job`` path that this test is exercising. Without
+        # this, the bare AsyncMock's auto-attribute ``record.kind``
+        # is a MagicMock (truthy and ``!= "job"``), so production
+        # takes the task-cancel branch and returns the cooperative
+        # "Task repository not available" error instead.
+        record = _make_work_record(
+            "job-1", kind="job", status="processing",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.cancel_job = AsyncMock(return_value=True)
 
         result = await job_cancel.ainvoke({"job_id": "job-1"})
 
@@ -329,7 +367,15 @@ class TestJobCancelTool:
         job_service, _, _ = mock_services
         job_cancel = tools[3]
 
-        job_service.cancel_job.return_value = False
+        # See ``test_job_cancel_success`` for why ``get_work`` is
+        # stubbed with a ``kind="job"`` record (production takes the
+        # ``cancel_job`` branch only for JobItem work_ids).
+        record = _make_work_record(
+            "job-1", kind="job", status="processing",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.cancel_job = AsyncMock(return_value=False)
 
         result = await job_cancel.ainvoke({"job_id": "job-1"})
 
@@ -341,7 +387,14 @@ class TestJobCancelTool:
         job_service, _, _ = mock_services
         job_cancel = tools[3]
 
-        job_service.cancel_job.side_effect = RuntimeError("Service unavailable")
+        # See ``test_job_cancel_success`` for why ``get_work`` is
+        # stubbed with a ``kind="job"`` record.
+        record = _make_work_record(
+            "job-1", kind="job", status="processing",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.cancel_job = AsyncMock(side_effect=RuntimeError("Service unavailable"))
 
         result = await job_cancel.ainvoke({"job_id": "job-1"})
 
@@ -374,8 +427,20 @@ class TestJobRetryTool:
         job_service, _, _ = mock_services
         job_retry = tools[4]
 
+        # Phase 7 P-D guard: production calls ``get_work`` first to
+        # classify the work (JobItem vs Task). A ``kind="job"`` record
+        # routes into the legacy ``retry_job`` path; a ``kind != "job"``
+        # record returns the precise "no retry path for task-type
+        # work" error instead. See TestJobCancelTool for the same
+        # rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="failed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
         mock_job_item = MagicMock()
-        job_service.retry_job.return_value = mock_job_item
+        job_service.retry_job = AsyncMock(return_value=mock_job_item)
 
         result = await job_retry.ainvoke({"job_id": "job-1"})
 
@@ -389,7 +454,14 @@ class TestJobRetryTool:
         job_service, _, _ = mock_services
         job_retry = tools[4]
 
-        job_service.retry_job.return_value = None
+        # See ``test_job_retry_success`` for the kind="job" rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="failed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        job_service.retry_job = AsyncMock(return_value=None)
 
         result = await job_retry.ainvoke({"job_id": "job-1"})
 
@@ -401,7 +473,14 @@ class TestJobRetryTool:
         job_service, _, _ = mock_services
         job_retry = tools[4]
 
-        job_service.retry_job.side_effect = RuntimeError("Service error")
+        # See ``test_job_retry_success`` for the kind="job" rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="failed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        job_service.retry_job = AsyncMock(side_effect=RuntimeError("Service error"))
 
         result = await job_retry.ainvoke({"job_id": "job-1"})
 
@@ -434,8 +513,17 @@ class TestJobDeleteTool:
         job_service, _, _ = mock_services
         job_delete = tools[5]
 
+        # Phase 7 P-D guard: production calls ``get_work`` first;
+        # ``kind="job"`` routes into the legacy ``soft_delete_job``
+        # path. See TestJobCancelTool for the same pattern.
+        record = _make_work_record(
+            "job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
         mock_job_item = MagicMock()
-        job_service.soft_delete_job.return_value = mock_job_item
+        job_service.soft_delete_job = AsyncMock(return_value=mock_job_item)
 
         result = await job_delete.ainvoke({"job_id": "job-1"})
 
@@ -447,7 +535,14 @@ class TestJobDeleteTool:
         job_service, _, _ = mock_services
         job_delete = tools[5]
 
-        job_service.soft_delete_job.return_value = None
+        # See ``test_job_delete_success`` for the kind="job" rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        job_service.soft_delete_job = AsyncMock(return_value=None)
 
         result = await job_delete.ainvoke({"job_id": "job-1"})
 
@@ -459,7 +554,14 @@ class TestJobDeleteTool:
         job_service, _, _ = mock_services
         job_delete = tools[5]
 
-        job_service.soft_delete_job.side_effect = RuntimeError("Database error")
+        # See ``test_job_delete_success`` for the kind="job" rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        job_service.soft_delete_job = AsyncMock(side_effect=RuntimeError("Database error"))
 
         result = await job_delete.ainvoke({"job_id": "job-1"})
 
@@ -492,8 +594,16 @@ class TestJobRestoreTool:
         job_service, _, _ = mock_services
         job_restore = tools[6]
 
+        # Phase 7 P-D guard: production calls ``get_work`` first;
+        # ``kind="job"`` routes into the legacy ``restore_job`` path.
+        record = _make_work_record(
+            "job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
         mock_job_item = MagicMock()
-        job_service.restore_job.return_value = mock_job_item
+        job_service.restore_job = AsyncMock(return_value=mock_job_item)
 
         result = await job_restore.ainvoke({"job_id": "job-1"})
 
@@ -505,7 +615,14 @@ class TestJobRestoreTool:
         job_service, _, _ = mock_services
         job_restore = tools[6]
 
-        job_service.restore_job.return_value = None
+        # See ``test_job_restore_success`` for the kind="job" rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        job_service.restore_job = AsyncMock(return_value=None)
 
         result = await job_restore.ainvoke({"job_id": "job-1"})
 
@@ -517,7 +634,14 @@ class TestJobRestoreTool:
         job_service, _, _ = mock_services
         job_restore = tools[6]
 
-        job_service.restore_job.side_effect = RuntimeError("Service error")
+        # See ``test_job_restore_success`` for the kind="job" rationale.
+        record = _make_work_record(
+            "job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        job_service.restore_job = AsyncMock(side_effect=RuntimeError("Service error"))
 
         result = await job_restore.ainvoke({"job_id": "job-1"})
 
@@ -905,11 +1029,29 @@ class TestJobContinueTool:
 
     @pytest.fixture
     def mock_manager(self):
-        """Build a manager mock with _instance_repository and enqueue_message."""
+        """Build a manager mock with _instance_repository and ``enqueue_message_job``.
+
+        Phase 5 (2026-06-27, the message-Job cutover) renamed the
+        manager-side hook from ``enqueue_message`` to
+        ``enqueue_message_job`` so the public facade can return a
+        ``job_id`` alongside the message id (Phase 5's POC declared the
+        message-Job item to be a first-class work primitive). The
+        ``job_continue`` tool calls ``manager.enqueue_message_job`` —
+        NOT ``manager.enqueue_message``. The Phase-2.5 fixture still
+        mocked the legacy ``enqueue_message`` name, which leaves
+        ``enqueue_message_job`` auto-mocked (returns MagicMock) and
+        every continue test fails with a ``KeyError`` on the missing
+        ``message_id``/``new_job_id`` keys.
+        """
         manager = MagicMock()
         instance_repo = MagicMock()
         manager._instance_repository = instance_repo
-        manager.enqueue_message = AsyncMock()
+        # Phase 5 cutover: ``enqueue_message_job`` is the renamed
+        # replacement for ``enqueue_message`` on the public manager
+        # facade. ``job_continue`` calls
+        # ``manager.enqueue_message_job(instance_id=..., message=...,
+        # source=...)`` and expects an ``AsyncMessageResult`` back.
+        manager.enqueue_message_job = AsyncMock()
         # Phase 2.5 (Task 2.5.8): ``job_continue`` no longer consults
         # ``JobRepository.find_processing_message_jobs_by_instance`` —
         # that method is removed (no MESSAGE ``JobItem`` rows post-D13).
@@ -950,8 +1092,20 @@ class TestJobContinueTool:
 
     def _mock_happy_path(self, job_service, mock_manager, *, instance_status="running"):
         """Configure all mocks for the happy path; return the new_job_id used."""
+        # Phase 7 P-B: the resolver is now ALWAYS the lookup path.
+        # ``get_work`` returns a ``kind="job"`` record (the
+        # ``status`` and ``instance_id`` flow through the tool's
+        # terminal-state check and instance_id extraction). ``get_job``
+        # is still called on the ``kind="job"`` branch — it's a cheap
+        # follow-up that loads the soft-delete column
+        # (``JobItem.deleted_at``) which WorkRecord doesn't carry.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
         old_job = self._make_old_job(instance_id="inst-1")
-        job_service.get_job.return_value = old_job
+        job_service.get_job = AsyncMock(return_value=old_job)
         # No in-flight Task rows for this instance (Phase 2.5 gate).
         # The legacy ``find_processing_message_jobs_by_instance`` mock
         # on ``job_service._repository`` is gone — the gate moved to
@@ -962,15 +1116,20 @@ class TestJobContinueTool:
         mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
         # Instance is healthy
         instance = self._make_instance(status=instance_status)
-        mock_manager._instance_repository.get.return_value = instance
-        # enqueue returns an AsyncMessageResult-like object
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
+        # Phase 5 cutover: ``manager.enqueue_message_job`` (renamed
+        # from ``enqueue_message``) returns an ``AsyncMessageResult``
+        # that carries the new ``job_id`` for the message mirror. The
+        # tool uses ``result.message_id``, ``result.job_id``,
+        # ``result.status`` — those attributes must be present on
+        # the returned object.
         from daemon.manager import AsyncMessageResult
-        mock_manager.enqueue_message.return_value = AsyncMessageResult(
+        mock_manager.enqueue_message_job = AsyncMock(return_value=AsyncMessageResult(
             message_id="msg-1",
             instance_id="inst-1",
             status="queued",
             job_id="new-job-1",
-        )
+        ))
         return "new-job-1"
 
     @pytest.mark.asyncio
@@ -992,15 +1151,19 @@ class TestJobContinueTool:
             "new_job_id": new_job_id,
             "status": "queued",
         }
-        mock_manager.enqueue_message.assert_awaited_once()
+        mock_manager.enqueue_message_job.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_job_continue_job_not_found(self, mock_services, tools):
-        """Error: job_service.get_job returns None → {'error': 'Job {id} not found'}."""
+        """Error: job_service.get_work returns None → {'error': 'Job {id} not found'}."""
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
-        job_service.get_job.return_value = None
+        # Phase 7 P-B: the resolver is ALWAYS the lookup. None means
+        # the work_id is unknown (no JobItem, no Task). The follow-up
+        # ``get_job`` is irrelevant on the not-found branch — the
+        # tool returns before reaching it.
+        job_service.get_work = AsyncMock(return_value=None)
 
         result = await job_continue.ainvoke({
             "old_job_id": "missing-job",
@@ -1015,7 +1178,25 @@ class TestJobContinueTool:
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
-        job_service.get_job.return_value = self._make_old_job(status="processing")
+        # Phase 7 P-B: the terminal check is on the WorkRecord's
+        # status (``record.status``), not on the legacy
+        # ``JobItem.status``. ``processing`` is not in
+        # ``TERMINAL_STATES`` so the tool returns the precise
+        # "not in a terminal state" error. Because ``record.kind``
+        # is ``"job"``, production enters the ``get_job`` follow-up
+        # for the soft-delete guard FIRST — so we stub ``get_job``
+        # to return an undeleted JobItem (``deleted_at=None``) to
+        # let the test reach the terminal check rather than
+        # aborting on the soft-delete path.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="processing",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=self._make_old_job(
+            status="processing",
+            deleted_at=None,
+        ))
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1032,10 +1213,20 @@ class TestJobContinueTool:
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
-        job_service.get_job.return_value = self._make_old_job(
+        # Phase 7 P-B: resolver returns a kind="job" record, then
+        # production makes the follow-up ``get_job`` call purely to
+        # check ``JobItem.deleted_at``. A non-None ``deleted_at`` makes
+        # the tool return the precise "has been deleted" error
+        # without invoking the manager.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=self._make_old_job(
             status="completed",
             deleted_at=MagicMock(),  # any non-None value
-        )
+        ))
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1050,9 +1241,18 @@ class TestJobContinueTool:
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
-        job_service.get_job.return_value = self._make_old_job()
+        # Phase 7 P-B: resolver first, then follow-up ``get_job`` for
+        # the soft-delete column. The terminal-state and deleted_at
+        # checks both pass; the error comes from the instance-status
+        # guard inside the manager path.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=self._make_old_job())
         instance = self._make_instance(status="terminated")
-        mock_manager._instance_repository.get.return_value = instance
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1060,7 +1260,7 @@ class TestJobContinueTool:
         })
 
         assert result == {"error": "Instance is terminated — spawn a new instance instead"}
-        mock_manager.enqueue_message.assert_not_awaited()
+        mock_manager.enqueue_message_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_instance_paused(self, mock_services, mock_manager, tools):
@@ -1068,9 +1268,17 @@ class TestJobContinueTool:
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
-        job_service.get_job.return_value = self._make_old_job()
+        # See ``test_job_continue_instance_terminated`` for the
+        # general setup. The pre-check on ``InstanceStatus.PAUSED``
+        # short-circuits before the in-flight Task check.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=self._make_old_job())
         instance = self._make_instance(status="paused")
-        mock_manager._instance_repository.get.return_value = instance
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1078,7 +1286,7 @@ class TestJobContinueTool:
         })
 
         assert result == {"error": "Instance is paused — unpause it first"}
-        mock_manager.enqueue_message.assert_not_awaited()
+        mock_manager.enqueue_message_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_manager_is_none(self, mock_services, tools):
@@ -1091,7 +1299,21 @@ class TestJobContinueTool:
         )
         job_continue = tools_no_mgr[12]
 
-        job_service.get_job.return_value = self._make_old_job()
+        # Phase 7 P-B: resolver returns a kind="job" terminal record.
+        # Because the record is ``kind="job"``, production enters
+        # the soft-delete follow-up first and would short-circuit
+        # with "has been deleted" against an auto-mocked
+        # ``get_job`` (whose ``deleted_at`` defaults to a MagicMock).
+        # Stub ``get_job`` to return an undeleted JobItem so the
+        # test reaches the manager-is-None guard.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=self._make_old_job(
+            deleted_at=None,
+        ))
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1117,9 +1339,19 @@ class TestJobContinueTool:
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
-        job_service.get_job.return_value = self._make_old_job()
+        # Phase 7 P-B: resolver returns a kind="job" terminal record,
+        # the follow-up ``get_job`` returns an undeleted JobItem, the
+        # instance is running. The only thing standing between us
+        # and ``enqueue_message_job`` is the Phase 2.5 in-flight Task
+        # gate — which the test flips to True below.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=self._make_old_job())
         instance = self._make_instance(status="running")
-        mock_manager._instance_repository.get.return_value = instance
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
         # Phase 2.5 gate: a Task is already driving this instance.
         mock_manager._task_repo.has_inflight_task = MagicMock(return_value=True)
 
@@ -1131,8 +1363,9 @@ class TestJobContinueTool:
         assert "error" in result
         assert "has a task still in flight" in result["error"]
         assert "inst-1" in result["error"]
-        # Critical: enqueue should NOT have been called
-        mock_manager.enqueue_message.assert_not_awaited()
+        # Critical: enqueue should NOT have been called.
+        # Phase 5 rename: production calls ``enqueue_message_job``.
+        mock_manager.enqueue_message_job.assert_not_awaited()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1684,7 +1917,12 @@ class TestJobContinueResolverAware:
         manager = MagicMock()
         instance_repo = MagicMock()
         manager._instance_repository = instance_repo
-        manager.enqueue_message = AsyncMock()
+        # Phase 5 cutover: the manager-side hook is named
+        # ``enqueue_message_job`` (NOT ``enqueue_message``) so the
+        # public facade can return a ``job_id`` alongside the message
+        # id. See ``mock_manager`` fixture in TestJobContinueTool for
+        # the same fix.
+        manager.enqueue_message_job = AsyncMock()
         task_repo = MagicMock()
         task_repo.has_inflight_task = MagicMock(return_value=False)
         manager._task_repo = task_repo
@@ -1717,7 +1955,7 @@ class TestJobContinueResolverAware:
         instance_meta = MagicMock()
         instance_meta.status = "running"
         manager._instance_repository.get.return_value = instance_meta
-        manager.enqueue_message.return_value = AsyncMessageResult(
+        manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-2",
             instance_id="root-inst-1",
             status="queued",
@@ -1745,7 +1983,7 @@ class TestJobContinueResolverAware:
         assert result["old_job_id"] == task_work_id
         assert result["new_job_id"] == "task-zzzz9999"
         assert result["status"] == "queued"
-        manager.enqueue_message.assert_awaited_once()
+        manager.enqueue_message_job.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_job_continue_from_job_work_id(self):
@@ -1773,7 +2011,7 @@ class TestJobContinueResolverAware:
         instance_meta = MagicMock()
         instance_meta.status = "running"
         manager._instance_repository.get.return_value = instance_meta
-        manager.enqueue_message.return_value = AsyncMessageResult(
+        manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-2",
             instance_id="root-inst-1",
             status="queued",
@@ -1797,7 +2035,7 @@ class TestJobContinueResolverAware:
         job_service.get_work.assert_awaited_once_with(job_work_id)
         job_service.get_job.assert_awaited_once_with(job_work_id)
         assert result["instance_id"] == "root-inst-1"
-        manager.enqueue_message.assert_awaited_once()
+        manager.enqueue_message_job.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_job_continue_soft_deleted_job_rejected(self):
@@ -1834,7 +2072,7 @@ class TestJobContinueResolverAware:
 
         assert result == {"error": f"Job {job_work_id} has been deleted and cannot be continued"}
         # CRITICAL: enqueue must NOT have been called
-        manager.enqueue_message.assert_not_awaited()
+        manager.enqueue_message_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_task_kind_skips_deleted_check(self):
@@ -1857,7 +2095,7 @@ class TestJobContinueResolverAware:
         instance_meta = MagicMock()
         instance_meta.status = "running"
         manager._instance_repository.get.return_value = instance_meta
-        manager.enqueue_message.return_value = AsyncMessageResult(
+        manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-2",
             instance_id="root-inst-1",
             status="queued",
@@ -1883,7 +2121,7 @@ class TestJobContinueResolverAware:
         job_service.get_job.assert_not_called()
         # And the enqueue happened normally
         assert result["instance_id"] == "root-inst-1"
-        manager.enqueue_message.assert_awaited_once()
+        manager.enqueue_message_job.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_job_continue_get_work_race(self):
@@ -1920,7 +2158,7 @@ class TestJobContinueResolverAware:
         # so callers can't distinguish the race from a real soft-delete.
         assert result == {"error": f"Job {job_work_id} has been deleted and cannot be continued"}
         # CRITICAL: enqueue must NOT have been called (no phantom work_id flow)
-        manager.enqueue_message.assert_not_awaited()
+        manager.enqueue_message_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_resolver_not_found(self):
@@ -1946,7 +2184,7 @@ class TestJobContinueResolverAware:
 
         assert result == {"error": "Job missing-work-id not found"}
         # enqueue must NOT have been called
-        manager.enqueue_message.assert_not_awaited()
+        manager.enqueue_message_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_task_kind_not_terminal(self):
@@ -1981,4 +2219,4 @@ class TestJobContinueResolverAware:
         assert "processing" in result["error"]
         # No follow-up get_job, no enqueue
         job_service.get_job.assert_not_called()
-        manager.enqueue_message.assert_not_awaited()
+        manager.enqueue_message_job.assert_not_awaited()

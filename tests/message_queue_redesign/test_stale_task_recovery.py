@@ -38,6 +38,14 @@ def create_stale_task(
         'retry_count': retry_count,
         'retry_scheduled': retry_scheduled,
         'cancel_requested': cancel_requested,
+        # Mirror the conftest ``MockTask`` admission_state default —
+        # ``StaleTaskRecovery.recover_on_startup`` calls
+        # ``self._task_repo.find_orphaned_cancelled_tasks()`` which
+        # iterates ``self.tasks.values()`` and reads ``t.admission_state``.
+        # Without this attribute, that Phase-B scan raises
+        # ``AttributeError`` even though the test's intended scenario
+        # has nothing to do with orphaned cancelled tasks.
+        'admission_state': 'done',
         'started_at': datetime.now(timezone.utc) - timedelta(minutes=age_minutes),
         'created_at': datetime.now(timezone.utc),
     })()
@@ -322,6 +330,11 @@ class TestStaleTaskRecovery:
             'retry_scheduled': False,  # Orphaned!
             'cancel_requested': True,
             'created_at': datetime.now(timezone.utc) - timedelta(hours=1),
+            # Mirror conftest ``MockTask`` default — required so
+            # ``find_orphaned_cancelled_tasks`` (which scans
+            # ``self.tasks.values()`` for ``admission_state == "done"``)
+            # recognises this orphan as a candidate.
+            'admission_state': 'done',
         })()
         mock_task_repository.tasks[100] = task
         # Don't add to stale_tasks (not stale running)
