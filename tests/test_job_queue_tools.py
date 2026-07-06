@@ -1228,7 +1228,7 @@ class TestResolverRoutedTools:
     @pytest.mark.asyncio
     async def test_job_get_resolver_path_task(self):
         """``job_get`` with flag ON returns the WorkRecord dict for a
-        Task (``kind="turn"``). Verifies the resolver path resolves
+        Task (``kind="report"``). Verifies the resolver path resolves
         worker-pool rows, not just JobItems.
         """
         job_service = AsyncMock()
@@ -1240,7 +1240,7 @@ class TestResolverRoutedTools:
 
         work_id = "task-abcdef12-3456"
         record = _make_work_record(
-            work_id, kind="turn", status="running",
+            work_id, kind="report", status="running",
             instance_id="inst-1", project_id="proj-1", agent_id="developer",
             error=None,
         )
@@ -1249,7 +1249,7 @@ class TestResolverRoutedTools:
         result = await job_get.ainvoke({"job_id": work_id})
 
         assert result == record.to_dict()
-        assert result["kind"] == "turn"
+        assert result["kind"] == "report"
         assert result["status"] == "running"
         job_service.get_work.assert_awaited_once_with(work_id)
         job_service.get_job.assert_not_called()
@@ -1285,7 +1285,7 @@ class TestResolverRoutedTools:
             instance_id="inst-1", project_id="proj-1", agent_id="developer",
         )
         rec_task = _make_work_record(
-            "task-bbbb2222", kind="turn", status="running",
+            "task-bbbb2222", kind="report", status="running",
             instance_id="inst-1", project_id="proj-1", agent_id="developer",
         )
         work_resolver.list_work = MagicMock(return_value=[rec_job, rec_task])
@@ -1302,17 +1302,17 @@ class TestResolverRoutedTools:
 
     @pytest.mark.asyncio
     async def test_job_cancel_resolver_path_task(self):
-        """``job_cancel`` with flag ON on a Task (``kind="turn"``)
+        """``job_cancel`` with flag ON on a Task (``kind="report"``)
         goes through the **cooperative** ``task_repo.request_cancel``
         path — NOT ``cancel_job``. Returns the cooperative-cancel
         message that documents the asynchronous semantics.
 
         THIS IS THE HIGH 2 REGRESSION GUARD: pre-fix the tool used
         ``record.kind != "task"`` but the resolver emits
-        ``kind="turn"`` / ``kind="report"``, so every Task cancel was
-        routed into ``cancel_job`` (instant atomic cancel that does
-        nothing for worker-pool rows). The corrected check is
-        ``record.kind != "job"``.
+        ``kind="report"`` (Tasks are reports post-Phase 4), so every
+        Task cancel was routed into ``cancel_job`` (instant atomic
+        cancel that does nothing for worker-pool rows). The
+        corrected check is ``record.kind != "job"``.
         """
         job_service = AsyncMock()
         job_service.use_virtual_job_resolver = True
@@ -1329,7 +1329,7 @@ class TestResolverRoutedTools:
 
         work_id = "task-abcdef12-3456"
         record = _make_work_record(
-            work_id, kind="turn", status="running",
+            work_id, kind="report", status="running",
             instance_id="inst-1", project_id="proj-1", agent_id="developer",
         )
         job_service.get_work = AsyncMock(return_value=record)
@@ -1518,7 +1518,7 @@ class TestJobRetryDeleteRestoreTaskKindMessage:
     """
 
     @staticmethod
-    def _build_resolver_service(task_work_id="task-aaaa1111", kind="turn",
+    def _build_resolver_service(task_work_id="task-aaaa1111", kind="report",
                                   instance_id="inst-1"):
         """Build a job_service mock where the resolver returns a
         task-kind WorkRecord and the legacy retry/delete/restore path
@@ -1545,7 +1545,7 @@ class TestJobRetryDeleteRestoreTaskKindMessage:
         JobItem-only ``retry_job`` path.
         """
         job_service = self._build_resolver_service(
-            task_work_id="task-abcdef12-3456", kind="turn"
+            task_work_id="task-abcdef12-3456", kind="report"
         )
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
@@ -1558,7 +1558,7 @@ class TestJobRetryDeleteRestoreTaskKindMessage:
         assert result.startswith("ERROR:")
         assert "task-abc" in result  # 8-char prefix slice ([:8])
         assert "task-type work" in result
-        assert "turn" in result  # the kind name
+        assert "report" in result  # the kind name (post-Phase 4 Tasks are reports)
         assert "retry path" in result
         # The legacy JobItem path must NOT have been called
         job_service.retry_job.assert_not_called()
@@ -1593,7 +1593,7 @@ class TestJobRetryDeleteRestoreTaskKindMessage:
         JobItem-only ``restore_job`` path.
         """
         job_service = self._build_resolver_service(
-            task_work_id="task-abcdef12-3456", kind="turn"
+            task_work_id="task-abcdef12-3456", kind="report"
         )
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
@@ -1605,7 +1605,7 @@ class TestJobRetryDeleteRestoreTaskKindMessage:
         assert result.startswith("ERROR:")
         assert "task-abc" in result
         assert "task-type work" in result
-        assert "turn" in result
+        assert "report" in result  # the kind name (post-Phase 4 Tasks are reports)
         assert "restore path" in result
         job_service.restore_job.assert_not_called()
 
@@ -1705,7 +1705,7 @@ class TestJobContinueResolverAware:
         job_service, manager = self._build_continue_services(instance_id="root-inst-1")
         task_work_id = "task-abcdef12-3456"
         record = _make_work_record(
-            task_work_id, kind="turn", status="completed",
+            task_work_id, kind="report", status="completed",
             instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
         )
         job_service.get_work = AsyncMock(return_value=record)
@@ -1838,7 +1838,7 @@ class TestJobContinueResolverAware:
 
     @pytest.mark.asyncio
     async def test_job_continue_task_kind_skips_deleted_check(self):
-        """``kind="turn"`` (task) → NO ``get_job`` call, NO
+        """``kind="report"`` (Task) → NO ``get_job`` call, NO
         deleted_at check (tasks are not soft-deletable). The P-B
         rewrite SKIPS the ``get_job`` follow-up entirely on the
         task branch so the lookup cost stays constant.
@@ -1848,7 +1848,7 @@ class TestJobContinueResolverAware:
         job_service, manager = self._build_continue_services(instance_id="root-inst-1")
         task_work_id = "task-abcdef12-3456"
         record = _make_work_record(
-            task_work_id, kind="turn", status="completed",
+            task_work_id, kind="report", status="completed",
             instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
         )
         job_service.get_work = AsyncMock(return_value=record)
@@ -1950,7 +1950,7 @@ class TestJobContinueResolverAware:
 
     @pytest.mark.asyncio
     async def test_job_continue_task_kind_not_terminal(self):
-        """``kind="turn"`` + non-terminal status → rejected. The P-B
+        """``kind="report"`` + non-terminal status → rejected. The P-B
         rewrite uses ``work_status.is_terminal`` (canonical) so a
         Task's "running" (canonical "processing") is correctly
         classified as non-terminal.
@@ -1958,7 +1958,7 @@ class TestJobContinueResolverAware:
         job_service, manager = self._build_continue_services()
         task_work_id = "task-abcdef12-3456"
         record = _make_work_record(
-            task_work_id, kind="turn", status="processing",  # canonical non-terminal
+            task_work_id, kind="report", status="processing",  # canonical non-terminal
             instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
         )
         job_service.get_work = AsyncMock(return_value=record)

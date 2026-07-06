@@ -13,7 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
 from ..instance.models import Instance, InstanceStatus
-from ..job_queue.models import active_admission_states_sql
+from ..job_queue.models import AdmissionState, active_admission_states_sql
 from .models import Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -668,6 +668,13 @@ class TaskRepository:
                 # this repository (e.g. schedule_retry).
                 "is_deferred_true": True,
                 "is_deferred_false": False,
+                # Carve-out (admission_state-aware, 2026-07-06):
+                # bind the two admission_state values so the
+                # bifurcated carve-out can distinguish stuck-queued
+                # mirrors (F1 case) from actively-processing
+                # JobItems (restored original behavior).
+                "status_queued_admission": AdmissionState.QUEUED.value,
+                "status_active_admission": AdmissionState.ACTIVE.value,
             }).fetchone()
 
             if row is None:
@@ -712,7 +719,7 @@ class TaskRepository:
         return f"CAST(json_extract({column}, '$.{key}') AS TEXT)"
 
     def _admitted_task_carve_out_sql(self, job_alias: str) -> str:
-        """Return the NULL-safe unified-dispatcher admission carve-out.
+        """Return the admission_state-aware unified-dispatcher carve-out.
 
         Single source of truth for the "a JobItem is NOT actively
         blocking its instance's task when a matching Task row exists"
@@ -722,6 +729,35 @@ class TaskRepository:
         disagree — the "MUST stay in sync" comment that used to sit
         between them is now enforced by sharing one string.
 
+        The carve-out is **admission_state-aware** — the F1 fix
+        (commit ``386a22be``, 2026-07-03) removed the status filter on
+        the Task side to fix a stuck-queued mirror JobItem self-
+        deadlock on PostgreSQL, but that broke the active-JobItem case:
+        a COMPLETED Task with matching ``message_id`` would
+        incorrectly release the guard for a *different* ``message_id``
+        Task (e.g. a child-completion report arriving while the
+        parent's user message JobItem is still in ``active`` state,
+        which would race the parent's astream).
+
+        The fix bifurcates the carve-out on ``admission_state``:
+
+        * ``queued`` JobItems are stuck mirror rows that never made it
+          to ``active`` because the PostgreSQL
+          ``trg_job_queue_items_active_lock_guard`` trigger rejected
+          the eager activation (MESSAGE-type JobItems have no
+          ``job_locks`` row). They are NOT driving ``graph.astream``
+          and MUST NOT block any new Task — ANY matching Task
+          (including a COMPLETED one from the prior cycle) releases
+          the guard. This is the F1 fix case; it remains correct.
+
+        * ``active`` JobItems ARE driving ``graph.astream``. Only a
+          PENDING / RUNNING Task with matching ``message_id`` can
+          release the guard — a COMPLETED Task means the prior cycle
+          ended and a fresh Task with a DIFFERENT ``message_id`` is
+          a different operation that must wait. Restoring the status
+          filter on this branch fixes the active-side regression
+          without re-introducing the stuck-queued deadlock.
+
         Args:
             job_alias: The outer query's alias for ``job_queue_items``
                 (``"j"`` for the claim path, ``"j_running"`` for the
@@ -729,45 +765,50 @@ class TaskRepository:
 
         Returns:
             SQL text with no leading ``AND``; the caller prefixes
-            ``AND``. The fragment references no bind parameters.
-
-        Note:
-            The predicate matches ANY Task with the same ``message_id``,
-            regardless of Task status. The previous filter
-            ``status IN ('pending', 'running')`` was correct for the
-            original TASK-type use case (the JobProcessor's
-            ``start_job_atomic_with_lock`` transitions the JobItem to
-            ``active`` on claim, so a stuck-queued JobItem was a
-            transient race). For MESSAGE-type mirror JobItems
-            (Phase 5 cutover: every public message creates a JobItem
-            alongside the Task row), the JobItem cannot transition to
-            ``active`` because the PostgreSQL
-            ``trg_job_queue_items_active_lock_guard`` constraint
-            requires a ``job_locks`` row that the message flow never
-            creates. The JobItem stays in ``queued`` after the Task
-            completes — until the observer finalize sweep catches it
-            — so the original ``(pending, running)`` filter would
-            falsely identify the stuck mirror
-            as a blocker for the next message on the same instance.
-            Matching ANY Task state (pending, running, completed,
-            failed, cancelled) restores the carve-out's documented
-            intent: "if a matching Task row exists, the JobItem is
-            not actively blocking". The per-instance guard in
-            :meth:`claim_pending_task` (``instance_id NOT IN (...
-            status_running_guard)``) still prevents two concurrent
-            RUNNING tasks for the same instance, so dropping the
-            in-flight filter from the carve-out does not open a
-            race window.
+            ``AND``. The fragment references the bound parameters
+            ``:status_pending`` and ``:status_running``, which the
+            caller MUST supply in its execute params.
         """
         json_extract = self._json_extract_text_sql(
             column=f"{job_alias}.metadata", key="message_id"
         )
         return (
-            f"{json_extract} IS NOT NULL\n"
-            f"                AND NOT EXISTS (\n"
-            f"                    SELECT 1 FROM task _admitted\n"
-            f"                    WHERE _admitted.message_id = {json_extract}\n"
-            f"                )"
+            # NULL-safe guard (Phase 3 P1, 2026-06-30): JobItems
+            # without a stamped ``message_id`` are the legacy /
+            # dispatch-only case and MUST NOT block their instance's
+            # Task — the original ``json_extract(...) = task.message_id``
+            # comparison would resolve to UNKNOWN (NULL = X) and
+            # default the carve-out to "blocker". The IS NOT NULL
+            # precondition keeps the legacy path inert without
+            # removing it from the active path.
+            f"({json_extract} IS NOT NULL\n"
+            f"                AND (\n"
+            # Branch 1 — ``queued`` JobItem (stuck mirror, F1 case):
+            # any Task with matching message_id (regardless of Task
+            # status) releases the guard. The JobItem is stuck and
+            # never drove astream; a COMPLETED Task from the prior
+            # cycle is sufficient evidence that the mirror is
+            # orphaned.
+            f"                    ({job_alias}.admission_state = :status_queued_admission\n"
+            f"                     AND NOT EXISTS (\n"
+            f"                         SELECT 1 FROM task _admitted\n"
+            f"                         WHERE _admitted.message_id = {json_extract}\n"
+            f"                     ))\n"
+            f"                    OR\n"
+            # Branch 2 — ``active`` JobItem (real processing,
+            # original behavior restored 2026-07-06): only a
+            # PENDING or RUNNING Task with matching message_id
+            # releases the guard. A COMPLETED Task means the prior
+            # cycle ended; a fresh Task with a DIFFERENT message_id
+            # is a distinct operation that must wait for the
+            # parent's astream to finish.
+            f"                    ({job_alias}.admission_state = :status_active_admission\n"
+            f"                     AND NOT EXISTS (\n"
+            f"                         SELECT 1 FROM task _admitted\n"
+            f"                         WHERE _admitted.message_id = {json_extract}\n"
+            f"                           AND _admitted.status IN (:status_pending, :status_running)\n"
+            f"                     ))\n"
+            f"                ))"
         )
 
     def requeue_task_with_backoff(
@@ -1319,6 +1360,15 @@ class TaskRepository:
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
+                # Carve-out (admission_state-aware, 2026-07-06):
+                # bind the two admission_state values so the
+                # bifurcated carve-out can distinguish stuck-queued
+                # mirrors (F1 case) from actively-processing
+                # JobItems (restored original behavior). MUST match
+                # the bind set on :meth:`claim_pending_task` so the
+                # two gates can never disagree.
+                "status_queued_admission": AdmissionState.QUEUED.value,
+                "status_active_admission": AdmissionState.ACTIVE.value,
             }).fetchone()
             return row is not None
 

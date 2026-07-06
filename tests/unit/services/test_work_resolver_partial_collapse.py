@@ -443,11 +443,13 @@ class TestPartialCollapse_ResolveWorkStillResolvesReports:
         record = resolver.resolve_work(wid)
 
         assert record is not None
-        # Defensive fallback: unknown task_type → "report".
-        assert record.kind in {"report", "turn"}, (
-            f"Legacy process_message Task should resolve as either "
-            f"'report' (defensive) or 'turn' (backward-compat). "
-            f"Got: {record.kind!r}"
+        # Phase 4 collapse: unknown task_type (process_message is no
+        # longer in REPORT_TASK_TYPES) → "report" as defensive
+        # fallback (the kind_from_task_type helper defaults to
+        # "report" when the type is unrecognised).
+        assert record.kind == "report", (
+            f"Legacy process_message Task should resolve as 'report' "
+            f"(Phase 4 defensive fallback). Got: {record.kind!r}"
         )
 
     def test_resolve_work_on_missing_returns_none(self, engine, resolver):

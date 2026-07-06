@@ -2483,10 +2483,66 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
+            # ─── UPDATE 3: job_queue_items → ACTIVE (resume mirror) ────
+            # RF3 (2026-07-06): Phase 4 removed the JobItem PAUSED → ACTIVE
+            # transition from this cascade (Plan §8.1 — pause/resume is an
+            # Instance concern only). That left message-type JobItems in
+            # ``admission_state='paused'`` after resume (a non-canonical
+            # value in the 4-state ``AdmissionState`` enum, written by
+            # legacy pre-Phase-5 paths or by drift reconcilers that flip
+            # the legacy ``status`` mirror). ``_finalize_job_db_sync``'s
+            # Step 1 WHERE clause (``admission_state IN ('active',
+            # 'queued')``) then missed these rows → rowcount=0 →
+            # silent no-op → JobItem leaked as ``paused`` forever.
+            #
+            # This UPDATE restores the transition in the SAME
+            # ``WriteGuardSession`` as UPDATE 1 + UPDATE 2 — atomic
+            # commit, no half-resumed state across the three tables.
+            # The ``job_type='message'`` filter scopes the UPDATE to the
+            # message-type JobItem mirror (``instance_messaging.enqueue_
+            # message`` writes ``job_type='message'``); task-type JobItems
+            # are unaffected by resume (their lifecycle is driven by the
+            # task UPDATE above).
+            #
+            # The ``admission_state IN ('active', 'paused')`` guard is
+            # intentionally permissive:
+            #   * ``active`` — the no-op current state (pause is a
+            #     no-op under Phase 4 / ``_LEGACY_TO_ADMISSION``: both
+            #     legacy ``paused`` and ``processing`` map to ``active``,
+            #     so the column value does not change through the
+            #     pause/resume cycle for the canonical path). The
+            #     UPDATE still matches and is idempotent.
+            #   * ``paused`` — defensive guard for any legacy / drift
+            #     path that wrote the non-canonical literal ``paused``
+            #     to ``admission_state``. The final WHERE-row UPDATE
+            #     lifts it back to the canonical ``active`` state so the
+            #     finalize guard accepts it.
+            # The UPDATE is safe to run repeatedly (rowcount drops to 0
+            # on the second pass — ``active`` is already the target).
+            session.execute(
+                text(
+                    "UPDATE job_queue_items "
+                    "SET admission_state = :active_admission "
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND job_type = :message_job_type "
+                    "  AND admission_state IN ("
+                    "    :active_admission, :paused_legacy"
+                    "  )"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "active_admission": AdmissionState.ACTIVE.value,
+                    "paused_legacy": "paused",
+                    "message_job_type": "message",
+                    "tree_ids": tree_ids,
+                },
+            )
+
             # Single commit for ALL DB writes (Phase 3 / W2 atomicity;
-            # Phase 4 / Plan §8.1 — pause/resume is an Instance concern,
-            # job_queue_items is no longer touched here). If any UPDATE
-            # raises, none of them commit — the
+            # RF3 fix: ``job_queue_items`` is once again part of the
+            # resume cascade — the 3 UPDATEs commit together or not at
+            # all). If any UPDATE raises, none of them commit — the
             # ``WriteGuardSession.__exit__`` rolls back via the
             # underlying ``Session.close``.
             session.commit()

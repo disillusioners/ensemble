@@ -25,7 +25,7 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
-    }.get(status, "queued")
+    }.get(status, status)  # Default to status (matches the production _LEGACY_TO_ADMISSION semantics — see daemon/repositories/job_queue/repository.py)
 
 
 def _create_task_with_status(
@@ -868,6 +868,122 @@ class TestTaskClaiming:
         # with a non-matching message_id, so the parent's PROCESSING
         # MESSAGE job still actively blocks.
         assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+
+    def test_claim_wave_spawn_two_children_both_claimable(self, repository, engine):
+        """Wave spawn: leader spawns 2 children in one LLM turn; both
+        initial-message Tasks + their JobItem mirrors (stuck-queued on
+        PG) must be claimable concurrently.
+
+        Production scenario (E2E test_wave_spawn_with_defer_queue,
+        regressed in 2026-07-06): the leader's wave message creates
+        two child instances via spawn_instance x2, then two initial
+        messages via send_message x2 — all inside ONE LLM turn. The
+        two child Tasks land in PENDING with two queued JobItem mirrors
+        (one per child, distinct instance_ids). The pre-fix carve-out
+        could falsely identify the queued mirrors as cross-system
+        blockers for the second child's Task under specific
+        message_id bookkeeping — the regression surfaced as the second
+        child never completing.
+
+        Bifurcated carve-out (2026-07-06): for ``queued`` JobItem mirrors
+        (the stuck-mirror case F1 fixed), ANY matching Task (regardless
+        of status) releases the guard. Both child Tasks carry matching
+        message_ids on their own mirrors → both are claimable in FIFO
+        order, one worker per child.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            # Child 1 — instance + queued mirror with stamped message_id
+            session.add(Instance(
+                instance_id="wave-child-1",
+                agent_id="developer",
+                agent_dir="agents/developer",
+                status="running",
+            ))
+            session.add(JobItem(
+                job_id="wave-ji-1",
+                agent_id="developer",
+                agent_dir="agents/developer",
+                message="m1",
+                source="api",
+                # Stuck-queued mirror (PostgreSQL
+                # trg_job_queue_items_active_lock_guard rejects
+                # eager activation for MESSAGE-type rows).
+                admission_state=status_to_admission(AdmissionState.QUEUED.value),
+                job_type="message",
+                instance_id="wave-child-1",
+                job_metadata={"message_id": "wave-msg-1"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            # Child 2 — independent instance + queued mirror with
+            # distinct message_id (different message_id stamps;
+            # cross-system guard must not link them via JobItem).
+            session.add(Instance(
+                instance_id="wave-child-2",
+                agent_id="developer",
+                agent_dir="agents/developer",
+                status="running",
+            ))
+            session.add(JobItem(
+                job_id="wave-ji-2",
+                agent_id="developer",
+                agent_dir="agents/developer",
+                message="m2",
+                source="api",
+                admission_state=status_to_admission(AdmissionState.QUEUED.value),
+                job_type="message",
+                instance_id="wave-child-2",
+                job_metadata={"message_id": "wave-msg-2"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # Two PENDING Tasks, one per child instance.
+        t1 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="wave-child-1",
+            message_id="wave-msg-1",
+        )
+        t2 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="wave-child-2",
+            message_id="wave-msg-2",
+        )
+
+        # Both must be claimable (FIFO order by created_at; the test
+        # creates t1 first so it claims first).
+        c1 = repository.claim_pending_task(worker_id="wave-w1")
+        assert c1 is not None, (
+            "Wave spawn regression: child 1's Task was not claimable. "
+            "The bifurcated carve-out must release the guard for the "
+            "queued mirror's matching Task."
+        )
+        assert c1.id == t1.id
+        assert c1.instance_id == "wave-child-1"
+
+        c2 = repository.claim_pending_task(worker_id="wave-w2")
+        assert c2 is not None, (
+            "Wave spawn regression: child 2's Task was not claimable "
+            "after child 1 was claimed. The bifurcated carve-out must "
+            "release the guard independently per-instance."
+        )
+        assert c2.id == t2.id
+        assert c2.instance_id == "wave-child-2"
+
+        # No more pending — the busy-instance probe also reports False
+        # because both mirrors are now matched by RUNNING Tasks on
+        # their respective instances.
+        c3 = repository.claim_pending_task(worker_id="wave-w3")
+        assert c3 is None
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
     def test_claim_blocked_when_matching_task_is_terminal(self, repository, engine):
         """status filter: a Task row in a terminal status

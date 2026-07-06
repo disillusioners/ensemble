@@ -718,24 +718,21 @@ class JobFeedbackObserver:
                 instance_id=instance_id, job_id=job.job_id
             )
         if job is not None and job.admission_state == AdmissionState.QUEUED.value:
-            # C1 fix: only match ``queued`` JobItems whose Task row
-            # is actually RUNNING. Without this gate, a freshly-created
-            # ``queued`` JobItem whose message Task is still ``pending``
-            # (worker hasn't claimed it yet) can be found and finalized
-            # by ANY unrelated lifecycle event arriving for the same
-            # instance — the observer flips JobItem ``queued→done``,
-            # marks the instance terminal, and the message Task is
-            # silently dropped (data-loss bug). The Task's RUNNING
-            # status is the authoritative serialization gate.
-            #
-            # Access ``_task_repo`` via the instance manager — same
-            # pattern already used by ``_resolve_watchable_work_id``
-            # (line 1063) and the finalize post-commit watcher notify
-            # block (line 1546). The ``getattr`` + ``hasattr`` guard
-            # keeps the helper robust against test mocks that build
-            # a partial manager.
+            # C1 fix (broadened 2026-07-06): only match ``queued``
+            # JobItems whose Task row has progressed past ``pending``
+            # (i.e. ``status != PENDING``). Previously the gate was
+            # ``== RUNNING`` which leaked mirrors as ``queued``
+            # forever when ``complete_task`` committed BEFORE the
+            # observer read Task state (the Task was already
+            # COMPLETED / FAILED / CANCELLED at read time). The
+            # broadened gate is correct because:
+            # - PENDING means the Task hasn't been claimed yet → the
+            #   JobItem must stay queued (the turn hasn't started)
+            # - Any non-PENDING status means the Task was claimed
+            #   (or will never be claimed) → the JobItem can be
+            #   finalized safely.
             task_row = await self._get_task_row_by_work_id(job.job_id)
-            if task_row is not None and task_row.status == TaskStatus.RUNNING.value:
+            if task_row is not None and task_row.status != TaskStatus.PENDING.value:
                 return _ProcessingJobContext(
                     instance_id=instance_id, job_id=job.job_id
                 )
@@ -774,16 +771,19 @@ class JobFeedbackObserver:
                 active_job is not None
                 and active_job.admission_state == AdmissionState.QUEUED.value
             ):
-                # C1 fix (defense-in-depth re-query path): same
-                # Task-status gate as the first lookup. A queued
-                # JobItem only counts as "the active processing job"
-                # when its Task row is actually RUNNING — see the
-                # comment on the first-lookup ``QUEUED`` branch
-                # above for the full data-loss-bug rationale.
+                # C1 fix (broadened 2026-07-06, defense-in-depth
+                # re-query path): same broadened Task-status gate as
+                # the first lookup. A queued JobItem only counts as
+                # "the active processing job" when its Task row has
+                # progressed past ``pending`` — see the comment on the
+                # first-lookup ``QUEUED`` branch above for the full
+                # data-loss-bug rationale and the rationale for
+                # widening the gate from ``== RUNNING`` to
+                # ``!= PENDING``.
                 task_row = await self._get_task_row_by_work_id(active_job.job_id)
                 if (
                     task_row is not None
-                    and task_row.status == TaskStatus.RUNNING.value
+                    and task_row.status != TaskStatus.PENDING.value
                 ):
                     return _ProcessingJobContext(
                         instance_id=instance_id, job_id=active_job.job_id
@@ -3073,10 +3073,26 @@ class JobFeedbackObserver:
                     # and ``dead`` rows are still excluded (they were
                     # already filtered upstream / by prior
                     # finalization).
+                    #
+                    # RF3 safety net (2026-07-06): ALSO match the
+                    # non-canonical literal ``paused`` so a JobItem
+                    # whose ``admission_state`` was written to
+                    # ``paused`` by a legacy / drift path (e.g. the
+                    # pre-Phase-5 ``status`` mirror, or a
+                    # ``job_recovery_service`` ``atomic_transition``
+                    # call whose legacy ``paused`` value survived a
+                    # Phase 5 column drop + backfill gap) is still
+                    # finalizable. ``_resume_cascade_db_sync`` UPDATE 3
+                    # normally lifts the mirror back to ``active`` so
+                    # this branch is defensive — it costs one extra
+                    # string in the IN-list and lets the finalize
+                    # path clean up any residual ``paused`` mirror
+                    # that escaped the resume cascade.
                     .where(
                         JobItem.admission_state.in_([
                             AdmissionState.ACTIVE.value,
                             AdmissionState.QUEUED.value,
+                            "paused",
                         ])
                     )
                     .values(**update_values)
