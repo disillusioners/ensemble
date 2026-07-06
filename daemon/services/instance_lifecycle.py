@@ -474,9 +474,18 @@ class InstanceLifecycleService:
             ValueError: If max_children_per_instance limit is exceeded,
                 or if agent_id is not found.
         """
-        # Normalize project_id: accept "null"/"none"/""/None as system default
-        if project_id is not None:
-            project_id = normalize_project_id(project_id)
+        # Normalize project_id: accept "null"/"none"/""/None as system
+        # default. The None case MUST be normalised too — root instances
+        # (direct messages, source mappings, spawn calls without an
+        # explicit project) default to project_id=None. Skipping
+        # normalisation for None stores an empty/NULL project_id, which
+        # makes the instance invisible to project-scoped gates such as
+        # the defer-queue idle check
+        # (``TaskRepository.has_active_non_deferred_work``): a paused
+        # non-deferred instance on the system default project then fails
+        # to hold back the system_defer_queue (defer jobs start
+        # prematurely — bug reproduced 2026-07-07).
+        project_id = normalize_project_id(project_id)
 
         # Resolve agent
         registry = get_registry()

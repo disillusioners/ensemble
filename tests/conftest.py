@@ -554,6 +554,37 @@ def reset_reasoning_echo_models():
     ThinkingChatOpenAI.reasoning_echo_models = original
 
 
+@pytest.fixture(autouse=True)
+def _ensure_system_default_project_id():
+    """Set ``SYSTEM_DEFAULT_PROJECT_ID`` for every test (mirrors startup).
+
+    Production always initialises the system default project during app
+    lifespan startup (``api.py`` → ``ensure_system_default_project``)
+    BEFORE any instance is spawned. The system default ``project_id`` is
+    therefore an invariant the codebase relies on — notably
+    ``InstanceLifecycleService.spawn_instance`` normalises
+    ``project_id=None`` to it, and the defer-queue idle gate keys off it.
+
+    Tests that construct an ``InstanceManager`` and call ``spawn_instance``
+    directly (without going through lifespan) would otherwise hit
+    ``normalize_project_id`` while the global is still ``None`` and raise.
+    This fixture seeds the deterministic uuid5 value used everywhere else
+    (``tests/job_queue/conftest.py``, ``tests/integration/conftest.py``,
+    the SQLite/PG backfill migrations). Tests that need a custom value (or
+    ``None``) assign ``constants.SYSTEM_DEFAULT_PROJECT_ID`` directly in
+    the test body — the snapshot/restore here preserves their isolation.
+    """
+    from daemon import constants
+
+    _DETERMINISTIC_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+    original = constants.SYSTEM_DEFAULT_PROJECT_ID
+    constants.SYSTEM_DEFAULT_PROJECT_ID = _DETERMINISTIC_ID
+    try:
+        yield
+    finally:
+        constants.SYSTEM_DEFAULT_PROJECT_ID = original
+
+
 # ==================== Scheduler Test Fixtures ====================
 
 

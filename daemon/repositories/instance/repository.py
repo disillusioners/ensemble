@@ -930,3 +930,40 @@ class SQLModelInstanceRepository:
             result = db_session.exec(stmt)
             db_session.commit()
             return result.rowcount
+
+    def backfill_system_default_project_id(self, project_id: str) -> int:
+        """Idempotently assign ``project_id`` to instances missing one.
+
+        Background: ``InstanceLifecycleService.spawn_instance`` used to
+        skip ``normalize_project_id`` when the caller passed
+        ``project_id=None`` (root instances, direct messages, source
+        mappings). Those rows were stored with a NULL / empty
+        ``project_id`` instead of the system default UUID, which made
+        them invisible to project-scoped gates such as the defer-queue
+        idle check (``TaskRepository.has_active_non_deferred_work``).
+        A paused non-deferred instance on the system default project
+        then failed to hold back ``system_defer_queue`` and defer jobs
+        started prematurely (bug reproduced 2026-07-07). The spawn path
+        is now fixed; this method repairs the legacy rows on every
+        startup so the fix takes effect immediately on existing data.
+
+        Args:
+            project_id: The system default project ID to stamp onto
+                rows whose ``project_id`` is NULL or empty. The caller
+                (``ensure_system_default_project`` startup hook)
+                guarantees this row exists.
+
+        Returns:
+            Number of instance rows updated (0 on a clean / already
+            backfilled database).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            result = db_session.exec(
+                text(
+                    "UPDATE instances SET project_id = :project_id "
+                    "WHERE project_id IS NULL OR project_id = ''"
+                ),
+                params={"project_id": project_id},
+            )
+            db_session.commit()
+            return result.rowcount

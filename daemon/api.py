@@ -466,6 +466,26 @@ async def lifespan(app: FastAPI):
         system_project_id = manager._project_repository.ensure_system_default_project()
         constants.SYSTEM_DEFAULT_PROJECT_ID = system_project_id
         await job_queue_mgmt_service.auto_provision_system_queues(system_project_id)
+        # Backfill legacy instances whose project_id is NULL/empty. Such
+        # rows (created before the spawn_instance normalisation fix) are
+        # invisible to project-scoped gates like the defer-queue idle
+        # check, so a paused non-deferred instance on the system default
+        # project fails to hold back system_defer_queue. Idempotent
+        # (no-op on a clean database); runs every startup.
+        try:
+            backfilled = await asyncio.to_thread(
+                manager._instance_repository.backfill_system_default_project_id,
+                system_project_id,
+            )
+            if backfilled:
+                logger.info(
+                    f"Backfilled {backfilled} instance(s) with system default "
+                    f"project_id {system_project_id}"
+                )
+        except Exception as backfill_err:
+            logger.warning(
+                f"Failed to backfill system default project_id on instances: {backfill_err}"
+            )
         logger.info(f"System default project bootstrapped: {system_project_id}")
     except Exception as e:
         logger.warning(f"Failed to bootstrap system default project: {e}")
