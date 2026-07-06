@@ -486,6 +486,28 @@ async def lifespan(app: FastAPI):
             logger.warning(
                 f"Failed to backfill system default project_id on instances: {backfill_err}"
             )
+        # Backfill legacy job_queue_items whose project_id is NULL/empty.
+        # The SQLite migration ``20260424_000001`` does this on SQLite,
+        # but the migration runner is a NO-OP on PostgreSQL, so PG rows
+        # keep a NULL project_id. Those rows are invisible to the Jobs
+        # UI's project-scoped refresh (``GET /api/jobs?project_id=…``):
+        # a paused job on the system default project disappears on
+        # refresh even though it shows on initial (unfiltered) page
+        # load. Idempotent; runs every startup on both dialects.
+        try:
+            jobs_backfilled = await asyncio.to_thread(
+                job_repository.backfill_system_default_project_id,
+                system_project_id,
+            )
+            if jobs_backfilled:
+                logger.info(
+                    f"Backfilled {jobs_backfilled} job_queue_items row(s) with "
+                    f"system default project_id {system_project_id}"
+                )
+        except Exception as backfill_err:
+            logger.warning(
+                f"Failed to backfill system default project_id on jobs: {backfill_err}"
+            )
         logger.info(f"System default project bootstrapped: {system_project_id}")
     except Exception as e:
         logger.warning(f"Failed to bootstrap system default project: {e}")

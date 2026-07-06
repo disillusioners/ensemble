@@ -579,6 +579,41 @@ class JobRepository:
             )
             return db_session.exec(stmt).one()
 
+    def backfill_system_default_project_id(self, project_id: str) -> int:
+        """Idempotently assign ``project_id`` to job rows missing one.
+
+        Background: the SQLite-only migration
+        ``20260424_000001_backfill_null_project_ids.sql`` repairs
+        NULL/empty ``project_id`` on ``job_queue_items`` (and
+        ``dead_letter_items``), but the migration runner is a NO-OP on
+        PostgreSQL (``runner.py`` skips non-SQLite engines). On PG those
+        legacy rows keep a NULL ``project_id``, which makes them
+        invisible to project-scoped filters — e.g. the Jobs UI refresh
+        (``GET /api/jobs?project_id=…``) drops a paused job whose
+        ``project_id`` is NULL even though it belongs to the system
+        default project. This method runs at startup (right after
+        ``ensure_system_default_project``) on BOTH dialects so the
+        repair takes effect on existing data immediately.
+
+        Args:
+            project_id: The system default project ID to stamp onto
+                rows whose ``project_id`` is NULL or empty.
+
+        Returns:
+            Number of ``job_queue_items`` rows updated (0 on a clean /
+            already-backfilled database).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            result = db_session.exec(
+                text(
+                    "UPDATE job_queue_items SET project_id = :project_id "
+                    "WHERE project_id IS NULL OR project_id = ''"
+                ),
+                params={"project_id": project_id},
+            )
+            db_session.commit()
+            return result.rowcount
+
     # --------------------------------------------------------
     # LIST
     # --------------------------------------------------------

@@ -29,9 +29,12 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import text
+from sqlmodel import Session as SQLModelSession
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.job_queue.models import AdmissionState
+from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 
@@ -213,3 +216,107 @@ class TestDeferGateSeesBackfilledPausedInstance:
         # project-scoped defer gate (and the system-wide probe too).
         assert task_repo.has_active_non_deferred_work(SYSTEM_DEFAULT_ID) is True
         assert task_repo.has_active_non_deferred_work(None) is True
+
+
+# ── Job backfill ──────────────────────────────────────────────────────────────
+#
+# The SQLite migration ``20260424_000001`` repairs NULL/empty
+# ``project_id`` on ``job_queue_items``, but the migration runner is a
+# NO-OP on PostgreSQL, so PG rows keep a NULL project_id. Those rows
+# vanish from the Jobs UI's project-scoped refresh
+# (``GET /api/jobs?project_id=…``) — e.g. a paused job on the system
+# default project disappears on refresh even though it shows on the
+# initial (unfiltered) page load.
+
+
+def _insert_job(engine, job_id: str, project_id: str | None) -> None:
+    """Insert a ``job_queue_items`` row via the SQLModel (raw project_id).
+
+    The table has many NOT NULL columns without DB-level defaults, so we
+    build a full ``JobItem`` (which supplies all model defaults) and then
+    override ``project_id`` with a raw UPDATE so the test controls the
+    exact NULL / empty / set value.
+    """
+    from daemon.repositories.job_queue.models import JobItem
+
+    with SQLModelSession(engine) as session:
+        session.add(
+            JobItem(
+                job_id=job_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="say hi",
+                project_id="placeholder",  # set to satisfy NOT NULL, overwritten below
+                admission_state=AdmissionState.ACTIVE.value,
+            )
+        )
+        session.commit()
+        session.exec(
+            text(
+                "UPDATE job_queue_items SET project_id = :project_id "
+                "WHERE job_id = :job_id"
+            ),
+            params={"project_id": project_id, "job_id": job_id},
+        )
+        session.commit()
+
+
+def _job_project_id(engine, job_id: str) -> str | None:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT project_id FROM job_queue_items WHERE job_id = :jid"),
+            {"jid": job_id},
+        ).fetchone()
+        return row[0] if row else None
+
+
+@pytest.fixture
+def job_repo(engine):
+    return JobRepository(engine)
+
+
+class TestBackfillSystemDefaultProjectIdOnJobs:
+    """``JobRepository.backfill_system_default_project_id`` for
+    ``job_queue_items`` (the PG counterpart of the SQLite migration)."""
+
+    def test_backfills_null_project_id(self, job_repo, engine):
+        _insert_job(engine, "job-null", project_id=None)
+
+        updated = job_repo.backfill_system_default_project_id(SYSTEM_DEFAULT_ID)
+
+        assert updated == 1
+        assert _job_project_id(engine, "job-null") == SYSTEM_DEFAULT_ID
+
+    def test_backfills_empty_string_project_id(self, job_repo, engine):
+        _insert_job(engine, "job-empty", project_id="")
+
+        updated = job_repo.backfill_system_default_project_id(SYSTEM_DEFAULT_ID)
+
+        assert updated == 1
+        assert _job_project_id(engine, "job-empty") == SYSTEM_DEFAULT_ID
+
+    def test_does_not_touch_already_set_project_id(self, job_repo, engine):
+        _insert_job(engine, "job-set", project_id="user-project-1")
+
+        updated = job_repo.backfill_system_default_project_id(SYSTEM_DEFAULT_ID)
+
+        assert updated == 0
+        assert _job_project_id(engine, "job-set") == "user-project-1"
+
+    def test_backfills_only_null_or_empty_rows(self, job_repo, engine):
+        _insert_job(engine, "job-null", project_id=None)
+        _insert_job(engine, "job-empty", project_id="")
+        _insert_job(engine, "job-keep", project_id="user-project-2")
+
+        updated = job_repo.backfill_system_default_project_id(SYSTEM_DEFAULT_ID)
+
+        assert updated == 2
+        assert _job_project_id(engine, "job-null") == SYSTEM_DEFAULT_ID
+        assert _job_project_id(engine, "job-empty") == SYSTEM_DEFAULT_ID
+        assert _job_project_id(engine, "job-keep") == "user-project-2"
+
+    def test_idempotent(self, job_repo, engine):
+        _insert_job(engine, "job-null", project_id=None)
+        assert job_repo.backfill_system_default_project_id(SYSTEM_DEFAULT_ID) == 1
+        # Second run is a no-op — the row already has a project_id.
+        assert job_repo.backfill_system_default_project_id(SYSTEM_DEFAULT_ID) == 0
