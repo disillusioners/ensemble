@@ -950,8 +950,9 @@ def _get_system_defer_queue_id(project_id: str) -> str | None:
 # Virtual Job Management Surface helpers (Phase 4 — feature/virtual-job-management-surface)
 # --------------------------------------------------------------------------- #
 # ``GET /api/work`` exposes the unified WorkRecord view-model: ``work_id``,
-# ``kind`` (``"job"`` | ``"turn"`` | ``"report"`` | ``"task"``), ``status``,
-# ``instance_id``, ``project_id``, ``agent_id``, ``result_summary``,
+# ``kind`` (``"job"`` | ``"report"``; Phase 4 collapse removed ``"turn"``
+# and ``"task"`` — message turns are now JobItems with ``kind="job"``),
+# ``status``, ``instance_id``, ``project_id``, ``agent_id``, ``result_summary``,
 # ``error``, ``created_at``. The same ``work_id`` is also accepted at
 # ``GET /api/jobs/{work_id}/events`` (SSE) and ``POST /api/jobs/{work_id}/cancel``
 # for JobItem-backed rows. For message-driven tasks, ``message_id == work_id``.
@@ -977,8 +978,10 @@ def _get_work_by_instance(
 
     Args:
         instance_id: Instance whose work to fetch.
-        kind: Optional filter (``"job"`` | ``"turn"`` | ``"report"`` |
-            ``"task"``). ``None`` returns all kinds (UNION).
+        kind: Optional filter (``"job"`` | ``"report"``; Phase 4 collapse
+            removed ``"turn"`` and ``"task"`` — message turns are now
+            JobItems with ``kind="job"``). ``None`` returns all kinds
+            (UNION).
 
     Returns:
         A list of WorkRecord dicts, newest-first.
@@ -1197,31 +1200,32 @@ def test_parent_child_workflow_happy_path():
             leader_id[:8] + "...",
         )
 
-        # 1. List turns via the unified surface
-        instance_turns = _get_work_by_instance(leader_id, kind="turn")
+        # 1. List work records via the unified surface (Phase 5: all
+        # message-driven work resolves as kind="job").
+        instance_turns = _get_work_by_instance(leader_id, kind="job")
         assert instance_turns, (
-            f"No turn records returned for leader {leader_id[:8]}... — "
+            f"No work records returned for leader {leader_id[:8]}... — "
             f"virtual job surface failed to surface message-driven work"
         )
 
-        # Find the turn whose result_summary.message_id matches msg_id
+        # Find the work record whose result_summary.message_id matches msg_id
         work_record: dict | None = None
         for tr in instance_turns:
             rs = tr.get("result_summary") or ""
             if msg_id in rs:
                 work_record = tr
                 break
-        # Fallback: take the most recent turn if no result_summary match
+        # Fallback: take the most recent work record if no result_summary match
         if work_record is None:
             logger.warning(
-                "[VJM] no turn matched msg_id=%s via result_summary — "
-                "using most recent turn record",
+                "[VJM] no job record matched msg_id=%s via result_summary — "
+                "using most recent record",
                 msg_id,
             )
             work_record = instance_turns[0]
 
-        assert work_record["kind"] == "turn", (
-            f"Expected kind='turn' for message-driven work, got "
+        assert work_record["kind"] == "job", (
+            f"Expected kind='job' for message-driven work, got "
             f"kind='{work_record['kind']}'"
         )
         assert work_record["status"] in ("completed", "processing"), (
@@ -1231,24 +1235,23 @@ def test_parent_child_workflow_happy_path():
         work_id = work_record["work_id"]
         assert work_id, "WorkRecord missing work_id"
         logger.info(
-            "[VJM] ✓ job_get resolves message as kind='turn', "
+            "[VJM] ✓ job_get resolves message as kind='job', "
             "status='%s', work_id=%s",
             work_record["status"],
             work_id,
         )
 
-        # 2. job_list returns UNION: both jobs and turns should exist for this instance
+        # 2. job_list returns UNION: at least one job record exists for this instance
         instance_work = _get_work_by_instance(leader_id)
         kinds_present = {w["kind"] for w in instance_work}
-        # With ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED=true, message-driven work
-        # surfaces as kind="job" (JobItem mirror) instead of kind="turn" (Task).
-        # VJM dedup keys on (instance_id, message_id) and prefers JobItem when both exist.
-        assert "turn" in kinds_present or "job" in kinds_present, (
-            f"Expected 'turn' or 'job' kind in work list for instance, got "
+        # Phase 5: all message-driven work surfaces as kind="job" (JobItem).
+        # VJM dedup keys on (instance_id, message_id).
+        assert "job" in kinds_present, (
+            f"Expected 'job' kind in work list for instance, got "
             f"kinds={kinds_present}"
         )
         logger.info(
-            "[VJM] ✓ job_list UNION contains kind='turn' (kinds present: %s)",
+            "[VJM] ✓ job_list UNION contains kind='job' (kinds present: %s)",
             kinds_present,
         )
 
@@ -1349,13 +1352,13 @@ def test_parent_child_workflow_happy_path():
 
         # ---- Virtual Job Management Surface: verify Phase 2 work_id ----
         # The reused leader should produce a NEW work record (Phase 2
-        # message) visible via GET /api/work as kind="turn". Same
-        # work_id-vs-message_id note as Phase 1: resolve via instance.
-        p2_instance_turns = _get_work_by_instance(leader_id, kind="turn")
+        # message) visible via GET /api/work as kind="job" (Phase 5).
+        # Same work_id-vs-message_id note as Phase 1: resolve via instance.
+        p2_instance_turns = _get_work_by_instance(leader_id, kind="job")
         assert p2_instance_turns, (
-            f"Phase 2: no turn records returned for leader {leader_id[:8]}..."
+            f"Phase 2: no work records returned for leader {leader_id[:8]}..."
         )
-        # Find the turn whose result_summary.message_id matches p2_msg_id
+        # Find the record whose result_summary.message_id matches p2_msg_id
         p2_work_record: dict | None = None
         for tr in p2_instance_turns:
             rs = tr.get("result_summary") or ""
@@ -1364,17 +1367,17 @@ def test_parent_child_workflow_happy_path():
                 break
         if p2_work_record is None:
             logger.warning(
-                "[VJM] Phase 2: no turn matched p2_msg_id=%s via "
-                "result_summary — using most recent turn record",
+                "[VJM] Phase 2: no job record matched p2_msg_id=%s via "
+                "result_summary — using most recent record",
                 p2_msg_id,
             )
             p2_work_record = p2_instance_turns[0]
-        assert p2_work_record["kind"] == "turn", (
-            f"Phase 2: expected kind='turn' for message-driven work, "
+        assert p2_work_record["kind"] == "job", (
+            f"Phase 2: expected kind='job' for message-driven work, "
             f"got kind='{p2_work_record['kind']}'"
         )
         logger.info(
-            "[VJM] ✓ Phase 2 message resolves as kind='turn' with "
+            "[VJM] ✓ Phase 2 message resolves as kind='job' with "
             "work_id=%s",
             p2_work_record["work_id"],
         )
@@ -1752,22 +1755,22 @@ def test_pause_after_spawn_then_resume():
             cancel_target_id,
         )
 
-        # Verify the leader has visible turn records (UNION contains
-        # message-driven work as kind="turn").
-        leader_turns = _get_work_by_instance(leader_id, kind="turn")
+        # Verify the leader has visible job records (UNION contains
+        # message-driven work as kind="job" in Phase 5).
+        leader_turns = _get_work_by_instance(leader_id, kind="job")
         if leader_turns:
             sample = leader_turns[0]
-            assert sample["kind"] == "turn", (
-                f"Expected kind='turn' for leader turn record, got "
+            assert sample["kind"] == "job", (
+                f"Expected kind='job' for leader work record, got "
                 f"kind='{sample['kind']}'"
             )
             logger.info(
-                "[VJM] ✓ leader has %d turn record(s) via /work",
+                "[VJM] ✓ leader has %d job record(s) via /work",
                 len(leader_turns),
             )
         else:
             logger.info(
-                "[VJM] no turn records visible for leader — may be "
+                "[VJM] no job records visible for leader — may be "
                 "compacted by the time the test runs the check"
             )
 
@@ -2325,12 +2328,11 @@ def test_wave_spawn_with_defer_queue():
                 "Expected at least one kind in work UNION for leader"
             )
             # The leader processed the wave message → there should be
-            # at least one "turn" record for this instance.
-            # With ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED=true, message-driven work
-            # surfaces as kind="job" (JobItem mirror) instead of kind="turn" (Task).
-            # VJM dedup keys on (instance_id, message_id) and prefers JobItem when both exist.
-            assert "turn" in kinds_in_union or "job" in kinds_in_union, (
-                f"Expected 'turn' or 'job' in work UNION for leader, got "
+            # at least one "job" record for this instance.
+            # Phase 5: message-driven work surfaces as kind="job" (JobItem).
+            # VJM dedup keys on (instance_id, message_id).
+            assert "job" in kinds_in_union, (
+                f"Expected 'job' in work UNION for leader, got "
                 f"kinds={kinds_in_union}"
             )
         else:
@@ -2354,17 +2356,17 @@ def test_wave_spawn_with_defer_queue():
             job_id,
         )
 
-        # 3. The kind="turn" filter should isolate message-driven work
-        turn_work = _get_work_by_instance(leader_id, kind="turn")
+        # 3. The kind="job" filter should isolate message-driven work
+        turn_work = _get_work_by_instance(leader_id, kind="job")
         if turn_work:
             sample = turn_work[0]
-            assert sample["kind"] == "turn", (
-                f"Expected kind='turn' from kind filter, got "
+            assert sample["kind"] == "job", (
+                f"Expected kind='job' from kind filter, got "
                 f"kind='{sample['kind']}'"
             )
             assert sample["work_id"], "WorkRecord missing work_id"
             logger.info(
-                "[VJM] ✓ kind='turn' filter isolates %d turn record(s); "
+                "[VJM] ✓ kind='job' filter isolates %d record(s); "
                 "sample work_id=%s",
                 len(turn_work),
                 sample["work_id"],
