@@ -7,7 +7,11 @@
 // existing helpers do the same to dodge module-resolution issues
 // in isolated test runs.
 
-export type WorkKind = 'job' | 'turn' | 'report';
+// WorkKind redefined here — the test helpers intentionally avoid
+// importing from ``../models/work.model`` to dodge module-resolution
+// issues in isolated test runs. Phase 4 partial collapse (2026-07-06)
+// dropped ``'turn'`` — message turns are now JobItems.
+export type WorkKind = 'job' | 'report';
 
 export interface Work {
   work_id: string;

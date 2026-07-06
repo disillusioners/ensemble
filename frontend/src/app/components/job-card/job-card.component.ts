@@ -104,13 +104,17 @@ export class JobCardComponent {
   // ── Kind chip (Phase 4 — Virtual Job Management Surface) ────────────
   //
   // Effective kind defaults to ``'job'`` for the legacy Job surface
-  // (where ``kind`` is unset) and surfaces ``'turn'`` / ``'report'``
-  // for task-backed work records synthesised by the Jobs page.
+  // (where ``kind`` is unset) and surfaces ``'report'`` for
+  // task-backed work records synthesised by the Jobs page.
   //
   // The chip is ALWAYS shown when the record has an explicit non-job
   // kind — that is the user-visible guardrail that tells them this
   // row is task-backed and not part of any real queue. For pure Job
   // rows the chip stays hidden so the existing UI does not change.
+  //
+  // Phase 4 partial collapse (2026-07-06): ``'turn'`` is no longer a
+  // possible kind value — message turns are now JobItems
+  // (``kind='job'``). Only ``'report'`` surfaces as a chip.
 
   effectiveKind = computed<JobWorkKind>(() => this.job().kind ?? 'job');
 
@@ -119,7 +123,8 @@ export class JobCardComponent {
   kindIcon = computed(() => getKindIcon(this.effectiveKind()));
 
   /**
-   * Show the kind chip only for task-backed work kinds (turn / report).
+   * Show the kind chip only for task-backed work kinds (report only —
+   * Phase 4 partial collapse removed ``'turn'``).
    *
    * For the default ``'job'`` kind the chip is suppressed so existing
    * cards look identical to the pre-Phase-4 surface — keeping the
@@ -131,8 +136,8 @@ export class JobCardComponent {
    * True if the card represents a real queued job (kind === 'job' OR
    * kind unset). Queue badge is hidden when this is false.
    *
-   * This is the Phase 4 guardrail: turn/report rows must NEVER show a
-   * queue badge even if a stale ``queue_id`` happens to be attached.
+   * This is the Phase 4 guardrail: report rows must NEVER show a queue
+   * badge even if a stale ``queue_id`` happens to be attached.
    */
   isJobKind = computed(() => this.effectiveKind() === 'job');
 

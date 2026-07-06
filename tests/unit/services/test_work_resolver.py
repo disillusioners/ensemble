@@ -428,13 +428,23 @@ class TestResolveWork:
     ):
         """``resolve_work(task.work_id)`` returns a Task-backed record,
         including the agent_id lookup from the instance and the
-        result_summary parse from ``Task.result`` JSON."""
+        result_summary parse from ``Task.result`` JSON.
+
+        Phase 4 partial collapse (2026-07-06): Tasks are report-only.
+        The seeded Task is a ``process_report`` Task so the
+        resolver's Task branch is exercised end-to-end (resolve_work
+        is unaffected by the collapse, but only report Tasks can be
+        seeded here — process_message Tasks would resolve to a
+        ``JobItem`` in production since the ``job_create`` flow owns
+        them now).
+        """
         _seed_instance(engine, instance_id="inst-task", agent_id="developer")
         # Task.result is a JSON string carrying the assistant payload.
         result_payload = json.dumps({"answer": "42", "sources": ["a", "b"]})
         wid = _seed_task(
             engine,
             instance_id="inst-task",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
             result=result_payload,
         )
@@ -442,12 +452,9 @@ class TestResolveWork:
         record = resolver.resolve_work(wid)
 
         assert record is not None
-        # Phase 4 (2026-06-27): ``process_message`` tasks now surface
-        # as ``kind="turn"`` (split off the previous ``"task"``
-        # vocabulary). ``kind="task"`` is kept as a backward-compat
-        # filter alias for the union of turn + report, but individual
-        # records expose the specific subtype.
-        assert record.kind == "turn"
+        # Phase 4 partial collapse: Tasks are report-only, so the
+        # Task-backed record exposes ``kind="report"``.
+        assert record.kind == "report"
         assert record.work_id == wid
         # Task "running" canonicalises to "processing".
         assert record.status == "processing"
@@ -563,7 +570,12 @@ class TestResolveWork:
     ):
         """Task-first lookup order means a Task row's ``work_id`` shadows
         any JobItem row that happens to share the value (defence against
-        the theoretical UUID collision case)."""
+        the theoretical UUID collision case).
+
+        Phase 4 partial collapse: Tasks are report-only. The seeded
+        Task uses ``process_report`` so it surfaces a
+        ``kind="report"`` record.
+        """
         # Both tables get the same identifier — only one row can win.
         shared_id = str(uuid.uuid4())
         _seed_instance(engine, instance_id="inst-shadow")
@@ -571,6 +583,7 @@ class TestResolveWork:
             engine,
             work_id=shared_id,
             instance_id="inst-shadow",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
         _seed_job(
@@ -582,16 +595,22 @@ class TestResolveWork:
 
         record = resolver.resolve_work(shared_id)
 
-        # The task-first branch wins. ``process_message`` task →
-        # ``kind="turn"`` under Phase 4 (2026-06-27).
+        # The task-first branch wins. Phase 4 partial collapse:
+        # report Task → ``kind="report"``.
         assert record is not None
-        assert record.kind == "turn"
+        assert record.kind == "report"
 
     def test_resolve_work_task_without_instance_returns_none_agent_id(
         self, engine, resolver
     ):
         """A task whose instance was deleted returns ``agent_id=None``
-        (orphaned work unit) without blowing up."""
+        (orphaned work unit) without blowing up.
+
+        Phase 4 partial collapse: Tasks are report-only. The seeded
+        Task uses ``process_report`` so the resolver's Task branch is
+        exercised; the ``kind`` assertion reflects the post-collapse
+        value.
+        """
         # Insert a task referencing an instance that doesn't exist in
         # the Instance table — the resolver must degrade gracefully.
         # ``seed_instance=False`` opts out of the fixture's auto-seeding
@@ -599,6 +618,7 @@ class TestResolveWork:
         wid = _seed_task(
             engine,
             instance_id="ghost-instance",
+            task_type="process_report",
             status=TaskStatus.COMPLETED.value,
             seed_instance=False,
         )
@@ -606,8 +626,8 @@ class TestResolveWork:
         record = resolver.resolve_work(wid)
 
         assert record is not None
-        # Phase 4 (2026-06-27): ``process_message`` → ``kind="turn"``.
-        assert record.kind == "turn"
+        # Phase 4 partial collapse: report Task → ``kind="report"``.
+        assert record.kind == "report"
         assert record.instance_id == "ghost-instance"
         assert record.agent_id is None
 
@@ -624,11 +644,19 @@ class TestListWork:
         assert resolver.list_work() == []
 
     def test_list_work_returns_both_kinds(self, engine, resolver):
-        """With no filters, ``list_work`` returns rows from both tables."""
+        """With no filters, ``list_work`` returns JobItem rows + report Task rows.
+
+        Phase 4 partial collapse (2026-07-06): ``process_message`` Tasks no
+        longer appear in ``list_work`` — message turns flow through
+        ``job_create`` and surface as JobItems. The Task side is report-only.
+        """
         _seed_instance(engine, instance_id="inst-a")
         _seed_instance(engine, instance_id="inst-b")
         task_id = _seed_task(
-            engine, instance_id="inst-a", status=TaskStatus.PENDING.value
+            engine,
+            instance_id="inst-a",
+            task_type="process_report",
+            status=TaskStatus.PENDING.value,
         )
         job_id = _seed_job(
             engine, instance_id="inst-b", status=AdmissionState.QUEUED.value
@@ -639,15 +667,23 @@ class TestListWork:
         assert len(records) == 2
         work_ids = {r.work_id for r in records}
         assert work_ids == {task_id, job_id}
-        # Phase 4 (2026-06-27): the seeded ``process_message`` task
-        # surfaces as ``kind="turn"`` (split off the previous
-        # ``"task"`` vocabulary). The JobItem stays ``kind="job"``.
-        assert {r.kind for r in records} == {"turn", "job"}
+        # Phase 4 partial collapse: the seeded ``process_report`` task
+        # surfaces as ``kind="report"``; the JobItem stays ``kind="job"``.
+        assert {r.kind for r in records} == {"report", "job"}
 
     def test_list_work_filter_by_project_id(self, engine, resolver):
-        """``project_id`` filter narrows results to one project."""
-        _seed_task(engine, instance_id="i1", project_id="proj-A")
-        _seed_task(engine, instance_id="i2", project_id="proj-B")
+        """``project_id`` filter narrows results to one project.
+
+        Phase 4 partial collapse: Tasks are report-only (``process_report``).
+        """
+        _seed_task(
+            engine, instance_id="i1", project_id="proj-A",
+            task_type="process_report",
+        )
+        _seed_task(
+            engine, instance_id="i2", project_id="proj-B",
+            task_type="process_report",
+        )
         _seed_job(engine, project_id="proj-A")
         _seed_job(engine, project_id="proj-B")
 
@@ -656,125 +692,38 @@ class TestListWork:
         assert len(records) == 2
         assert {r.project_id for r in records} == {"proj-A"}
 
-    def test_active_orchestration_promotes_newest_completed_turn(
-        self, engine, resolver
-    ):
-        """A ``completed`` turn on an actively-orchestrating instance
-        (``running`` / ``waiting_children``) is promoted to
-        ``processing`` so the jober's "check running jobs" query
-        surfaces in-flight multi-turn work (e.g. a ``job_continue``
-        continuation whose single turn is done while children resolve).
-
-        Mirrors the jober's actual call path: ``job_list`` with
-        multiple statuses passes ``status=None`` to ``list_work`` (no
-        DB-level status filter) and post-filters, so the promotion —
-        which runs after the Task fetch — is what surfaces the
-        in-flight work.
-        """
-        # An instance actively orchestrating children (parent waiting).
-        _seed_instance(
-            engine, instance_id="inst-active", status="waiting_children"
-        )
-        # Older completed turn — keeps ``completed`` (history).
-        older_wid = _seed_task(
-            engine, instance_id="inst-active", status=TaskStatus.COMPLETED.value
-        )
-        # Newest completed turn — promoted to ``processing``.
-        newest_wid = _seed_task(
-            engine, instance_id="inst-active", status=TaskStatus.COMPLETED.value
-        )
-
-        records = resolver.list_work()
-        by_id = {r.work_id: r.status for r in records}
-
-        # The newest completed turn is surfaced as in-flight work.
-        assert by_id.get(newest_wid) == "processing", (
-            f"Newest completed turn on a waiting_children instance must "
-            f"be promoted to 'processing'. Got: {by_id}"
-        )
-        # The older completed turn keeps its per-turn status (history
-        # preserved — only the newest turn per instance inherits the
-        # orchestration status).
-        assert by_id.get(older_wid) == "completed", (
-            f"Older completed turn must NOT be promoted. Got: {by_id}"
-        )
-
-    def test_quiescent_instance_keeps_turn_status(self, engine, resolver):
-        """A ``completed`` turn on a quiescent instance (``idle``) is
-        NOT promoted — the work is genuinely done."""
-        _seed_instance(engine, instance_id="inst-idle", status="idle")
-        wid = _seed_task(
-            engine, instance_id="inst-idle", status=TaskStatus.COMPLETED.value
-        )
-
-        records = resolver.list_work(status="completed")
-
-        assert any(r.work_id == wid and r.status == "completed" for r in records), (
-            "Completed turn on an idle instance must stay 'completed' "
-            "(quiescent instance = work done, not orchestrating)."
-        )
-
-    def test_single_status_processing_surfaces_active_turn(
-        self, engine, resolver
-    ):
-        """A single-status ``list_work(status="processing")`` broadens
-        the Task fetch to include ``completed`` rows so the
-        active-orchestration promotion can flip an eligible completed
-        turn (instance ``waiting_children``) to ``processing`` and
-        surface it. Without the DB-fetch broadening the completed row
-        would be filtered out at SQL level before promotion."""
-        _seed_instance(
-            engine, instance_id="inst-active2", status="waiting_children"
-        )
-        wid = _seed_task(
-            engine, instance_id="inst-active2", status=TaskStatus.COMPLETED.value
-        )
-        # A genuinely completed turn on a quiescent instance — must NOT
-        # leak into the ``processing`` result.
-        _seed_instance(engine, instance_id="inst-done", status="idle")
-        done_wid = _seed_task(
-            engine, instance_id="inst-done", status=TaskStatus.COMPLETED.value
-        )
-
-        records = resolver.list_work(status="processing")
-        ids = {r.work_id for r in records}
-
-        assert wid in ids, (
-            "Active-orchestration promotion must surface the completed "
-            "turn on a waiting_children instance under status='processing'."
-        )
-        assert done_wid not in ids, (
-            "Completed turn on an idle instance must NOT appear under "
-            "status='processing' (no promotion for quiescent instances)."
-        )
-
     def test_list_work_filter_by_instance_id(self, engine, resolver):
         """``instance_id`` filter narrows results to one instance.
 
-        Task and JobItem are seeded on distinct instances so the
-        P-C(i) dedup (which drops a Task turn sharing an
-        ``instance_id`` with a JobItem) does not shrink the
-        result — the filter test stays focused on the
-        ``instance_id`` filter itself.
+        Phase 4 partial collapse: Tasks are report-only. The seeds use
+        ``process_report`` so each ``_seed_task`` row is visible to
+        ``list_work`` (``process_message`` Tasks are now JobItems, not
+        Task rows).
         """
-        _seed_task(engine, instance_id="inst-target-task")
-        _seed_task(engine, instance_id="inst-other-task")
+        _seed_task(
+            engine, instance_id="inst-target-task",
+            task_type="process_report",
+        )
+        _seed_task(
+            engine, instance_id="inst-other-task",
+            task_type="process_report",
+        )
         _seed_job(engine, instance_id="inst-target-job")
         _seed_job(engine, instance_id="inst-other-job")
 
         # Use a regex-style filter? No — the API takes one
         # ``instance_id`` at a time. To exercise the filter's narrowing
-        # effect against both tables at once without invoking dedup,
-        # filter twice and combine.
+        # effect against both tables at once, filter twice and combine.
         target_task_records = resolver.list_work(instance_id="inst-target-task")
         target_job_records = resolver.list_work(instance_id="inst-target-job")
 
-        # Each side returns exactly one record — Task on the task
+        # Each side returns exactly one record — report Task on the task
         # instance, JobItem on the job instance. Both tables respect
         # the filter.
         assert len(target_task_records) == 1
         assert target_task_records[0].instance_id == "inst-target-task"
-        assert target_task_records[0].kind == "turn"
+        # Phase 4 partial collapse: report Task surfaces as ``kind="report"``.
+        assert target_task_records[0].kind == "report"
         assert len(target_job_records) == 1
         assert target_job_records[0].instance_id == "inst-target-job"
         assert target_job_records[0].kind == "job"
@@ -791,9 +740,19 @@ class TestListWork:
         job, and verify the resolver canonicalizes ``running`` →
         ``processing`` for the JobItem side as it does for the Task
         side.
+
+        Phase 4 partial collapse: Tasks are report-only, so the Task
+        row is seeded with ``task_type="process_report"`` to keep it
+        visible in ``list_work``.
         """
-        _seed_task(engine, instance_id="i1", status=TaskStatus.RUNNING.value)
-        _seed_task(engine, instance_id="i2", status=TaskStatus.PENDING.value)
+        _seed_task(
+            engine, instance_id="i1", task_type="process_report",
+            status=TaskStatus.RUNNING.value,
+        )
+        _seed_task(
+            engine, instance_id="i2", task_type="process_report",
+            status=TaskStatus.PENDING.value,
+        )
         # Phase 4: jobs need an instance to source execution status.
         # The Instance ``running`` status canonicalizes to
         # ``"processing"`` via the work_status map.
@@ -811,10 +770,10 @@ class TestListWork:
         assert len(records) == 2
         assert {r.status for r in records} == {"processing"}
         # One Task (status="running") and one JobItem (instance
-        # status="running") both canonicalise to "processing". Phase
-        # 4 (2026-06-27): the Task row surfaces as ``kind="turn"``
-        # (process_message → turn), not the legacy ``kind="task"``.
-        assert {r.kind for r in records} == {"turn", "job"}
+        # status="running") both canonicalise to "processing".
+        # Phase 4 partial collapse: the report Task surfaces as
+        # ``kind="report"``.
+        assert {r.kind for r in records} == {"report", "job"}
 
     def test_list_work_filter_by_status_dead_letter_only_matches_jobs(
         self, engine, resolver
@@ -830,24 +789,48 @@ class TestListWork:
         assert records[0].kind == "job"
         assert records[0].status == "dead_letter"
 
-    def test_list_work_filter_by_kind_task(self, engine, resolver):
-        """``kind="task"`` excludes JobItem rows.
+    def test_list_work_filter_by_kind_report(self, engine, resolver):
+        """Phase 4 partial collapse: ``kind="report"`` excludes JobItem rows.
 
-        Phase 4 (2026-06-27): ``kind="task"`` is now a backward-
-        compatible *filter* alias meaning "all task rows" (turn +
-        report). The returned records still expose the specific
-        subtype — ``kind="turn"`` for ``process_message``, ``kind=
-        "report"`` for ``process_report``/``send_report`` — so the
-        seeded ``process_message`` row surfaces as ``kind="turn"``
-        here, not ``kind="task"``.
+        The previous ``kind="task"`` alias (returning the union of turn
+        + report) is GONE — message turns now surface as JobItems, so
+        ``kind="task"`` returns zero rows. The only Task-side kind is
+        ``"report"``.
         """
-        _seed_task(engine, instance_id="i1")
+        # Seed a report Task (the only Task kind visible to list_work).
+        report_wid = _seed_task(
+            engine, instance_id="i1", task_type="process_report",
+        )
+        # A JobItem — excluded by ``kind="report"``.
         _seed_job(engine, instance_id="i2")
 
-        records = resolver.list_work(kind="task")
+        records = resolver.list_work(kind="report")
 
         assert len(records) == 1
-        assert records[0].kind == "turn"
+        assert records[0].work_id == report_wid
+        assert records[0].kind == "report"
+
+    def test_list_work_filter_by_kind_task_returns_empty(self, engine, resolver):
+        """``kind="turn"`` and ``kind="task"`` (the pre-collapse Task-side
+        kinds) return zero records.
+
+        Phase 4 partial collapse: turns are JobItems now. Literal
+        ``kind="turn"`` / ``kind="task"`` filters match no Task rows
+        (Task is report-only) and no JobItem rows (their kind is
+        ``"job"``). The router rejects these values with HTTP 400;
+        this unit-level test verifies the resolver is a defence-in-
+        depth layer that returns ``[]`` if a bad value somehow reaches
+        it (e.g. an internal caller bypassing the router).
+        """
+        _seed_task(
+            engine, instance_id="i1", task_type="process_report",
+        )
+        _seed_job(engine, instance_id="i2")
+
+        # Both legacy kinds map to "no records".
+        assert resolver.list_work(kind="turn") == []
+        assert resolver.list_work(kind="task") == []
+
 
     def test_list_work_filter_by_kind_job(self, engine, resolver):
         """``kind="job"`` excludes Task rows."""
@@ -860,10 +843,14 @@ class TestListWork:
         assert records[0].kind == "job"
 
     def test_list_work_sort_newest_first(self, engine, resolver):
-        """Records are returned ordered by ``created_at`` DESC."""
+        """Records are returned ordered by ``created_at`` DESC.
+
+        Phase 4 partial collapse: Task rows are report-only.
+        """
         older = _seed_task(
             engine,
             instance_id="i1",
+            task_type="process_report",
             created_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         )
         newer = _seed_job(
@@ -880,7 +867,11 @@ class TestListWork:
 
     def test_list_work_excludes_soft_deleted_jobs(self, engine, resolver):
         """``deleted_at IS NOT NULL`` JobItems are invisible to the
-        virtual job surface (matches ``JobRepository.list`` default)."""
+        virtual job surface (matches ``JobRepository.list`` default).
+
+        Phase 4 partial collapse: Tasks are report-only — the seeded
+        Task uses ``process_report`` so it surfaces in ``list_work``.
+        """
         active_id = _seed_job(
             engine, status=AdmissionState.QUEUED.value, deleted_at=None
         )
@@ -888,36 +879,42 @@ class TestListWork:
             engine, status=AdmissionState.QUEUED.value,
             deleted_at=datetime.now(timezone.utc).isoformat(),
         )
-        _seed_task(engine, instance_id="i-task")
+        _seed_task(
+            engine, instance_id="i-task", task_type="process_report",
+        )
 
         records = resolver.list_work()
 
         work_ids = {r.work_id for r in records}
         assert active_id in work_ids
         # The soft-deleted job must NOT appear.
-        assert len(records) == 2  # 1 task + 1 active job
+        assert len(records) == 2  # 1 report task + 1 active job
 
     def test_list_work_combines_multiple_filters(self, engine, resolver):
         """Filters compose with AND semantics.
 
-        Task and JobItem are seeded on **distinct** instances
-        (``i-match-task`` vs ``i-match-job``) so the P-C(i) dedup
-        (which drops a Task turn sharing an ``instance_id`` with a
-        JobItem) does not shrink the result. The combined-filter
-        contract under test is "AND across project / instance /
-        status" — the dedup is tested separately in
-        :class:`TestListWorkDedup`.
+        Report Task and JobItem are seeded on **distinct** instances
+        (``i-match-task`` vs ``i-match-job``) so the filter test stays
+        focused on the AND-composition contract. ``root_only`` is the
+        default (``True``) — both seeded instances are roots, so
+        neither is filtered out by the parent_id guard.
+
+        Phase 4 partial collapse: Tasks are report-only
+        (``process_report``). ``process_message`` Tasks are no longer
+        queryable through ``list_work`` (turns are JobItems now).
         """
         _seed_task(
             engine,
             instance_id="i-match-task",
             project_id="proj-match",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
         _seed_task(
             engine,
             instance_id="i-other-task",
             project_id="proj-match",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
         _seed_job(
@@ -929,8 +926,7 @@ class TestListWork:
 
         # Filter twice (Task and Job side each accept one
         # ``instance_id`` at a time) and combine — preserves the
-        # multi-filter AND-composition assertion without invoking
-        # dedup.
+        # multi-filter AND-composition assertion.
         task_records = resolver.list_work(
             project_id="proj-match",
             instance_id="i-match-task",
@@ -942,13 +938,13 @@ class TestListWork:
             status="processing",
         )
 
-        # 1 task + 1 job, each matching all three filters on their
-        # own instance.
+        # 1 report task + 1 job, each matching all three filters on
+        # their own instance.
         assert len(task_records) == 1
         assert len(job_records) == 1
-        # Phase 4 (2026-06-27): Task ``process_message`` →
-        # ``kind="turn"``.
-        assert task_records[0].kind == "turn"
+        # Phase 4 partial collapse: report Task surfaces as
+        # ``kind="report"``.
+        assert task_records[0].kind == "report"
         assert job_records[0].kind == "job"
         for r in task_records + job_records:
             assert r.project_id == "proj-match"
@@ -978,20 +974,26 @@ class TestListWorkRootOnly:
     def test_list_work_root_only_excludes_children(
         self, engine, resolver
     ):
-        """With ``root_only=True`` only the root's Task is returned;
-        ``root_only=False`` returns both root and child.
+        """With ``root_only=True`` only the root's report Task is
+        returned; ``root_only=False`` returns both root and child.
 
-        The default ``root_only=True`` (P-A) drops child-instance
-        Task rows. The explicit ``False`` opt-out returns the union
-        so callers can still get the pre-P-A view.
+        Phase 4 partial collapse: Tasks are report-only — the seeded
+        Tasks use ``process_report`` so they surface in ``list_work``
+        regardless of instance. ``process_message`` Tasks are now
+        JobItems; a child JobItem bound to the child instance is
+        excluded by ``root_only=True`` for symmetry with reports.
         """
-        # Seed a root instance + a child instance, one Task each.
+        # Seed a root instance + a child instance, one report Task each.
         root_id = _seed_instance(engine, instance_id="inst-root")
         child_id = _seed_instance(
             engine, instance_id="inst-child", parent_id="inst-root"
         )
-        root_wid = _seed_task(engine, instance_id="inst-root")
-        child_wid = _seed_task(engine, instance_id="inst-child")
+        root_wid = _seed_task(
+            engine, instance_id="inst-root", task_type="process_report",
+        )
+        child_wid = _seed_task(
+            engine, instance_id="inst-child", task_type="process_report",
+        )
 
         # Default (root_only=True) → only root.
         root_scoped = resolver.list_work()
@@ -1049,10 +1051,17 @@ class TestListWorkRootOnly:
         ``Task.instance_id`` to the ROOT instance's id, not the
         child's. So they are STILL visible under ``root_only=True``.
 
-        Reviewer S2: this is the intended behaviour. Only child
-        ``process_message`` turns (the child's private execution
-        rows) are excluded — reports surface under the root and
-        are part of the jober's management view.
+        Reviewer S2: this is the intended behaviour. Report Tasks
+        surface under the root and are part of the jober's
+        management view.
+
+        Phase 4 partial collapse: the contrast child turn (which used
+        to be a ``process_message`` Task on the child instance) is
+        now modelled as a JobItem on the child instance — message
+        turns flow through ``job_create`` and surface as JobItems.
+        ``root_only=True`` excludes the child JobItem for the same
+        reasons the old child-turn Task was excluded: the backing
+        instance has a non-null ``parent_id``.
         """
         root_id = _seed_instance(engine, instance_id="inst-report-root")
         # A report task is attributed to the ROOT instance (not the
@@ -1064,21 +1073,20 @@ class TestListWorkRootOnly:
             task_type="process_report",
             status=TaskStatus.PENDING.value,
         )
-        # Contrast: a child-instance process_message turn IS
-        # excluded.
+        # Contrast: a child-instance JobItem (the message turn that
+        # drove the child) IS excluded by ``root_only=True``.
         child_id = _seed_instance(
             engine, instance_id="inst-report-child", parent_id="inst-report-root"
         )
-        _seed_task(
+        _seed_job(
             engine,
             instance_id=child_id,
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
         records = resolver.list_work()
 
-        # Report (root-bound) survives the filter; child turn is
+        # Report (root-bound) survives the filter; child JobItem is
         # dropped.
         work_ids = {r.work_id for r in records}
         assert report_wid in work_ids
@@ -1098,11 +1106,10 @@ class TestListWorkRootOnly:
         pagination/limit, so a capped page cannot shrink
         unpredictably after the slice (reviewer W1).
 
-        Concretely: seed 30 tasks where 10 are child-instance
-        (excluded). With ``root_only=True`` the resolver returns
-        exactly 20 records — proving the filter happened at the
-        resolver layer (not deferred to a router/UI slice where a
-        limit=20 would yield 10 records).
+        Phase 4 partial collapse: Tasks are report-only — the
+        pagination test seeds ``process_report`` Tasks so they
+        surface in ``list_work`` and the root-scoping filter
+        behaviour can be exercised.
         """
         root_id = _seed_instance(engine, instance_id="inst-pg-root")
         child_id = _seed_instance(
@@ -1111,12 +1118,16 @@ class TestListWorkRootOnly:
         root_wids: list[str] = []
         for _ in range(20):
             root_wids.append(
-                _seed_task(engine, instance_id=root_id)
+                _seed_task(
+                    engine, instance_id=root_id, task_type="process_report",
+                )
             )
         child_wids: list[str] = []
         for _ in range(10):
             child_wids.append(
-                _seed_task(engine, instance_id=child_id)
+                _seed_task(
+                    engine, instance_id=child_id, task_type="process_report",
+                )
             )
 
         # root_only=True: only the 20 root tasks come back.
@@ -1133,566 +1144,6 @@ class TestListWorkRootOnly:
             {r.work_id for r in all_records}
             == set(root_wids) | set(child_wids)
         )
-
-
-# ─── P-C(i): WorkResolverService.list_work Task-turn deduplication ──────────
-# Phase 5 (2026-06-27) of ``feature/virtual-job-management-surface``. The
-# ``job_create`` flow emits BOTH a JobItem (the handle the orchestrator
-# holds) AND a Task turn on the same ``instance_id`` (the message that
-# drove the job). The virtual-job surface wants one row per logical
-# work unit — the JobItem is that handle — so ``list_work`` drops the
-# duplicate Task turn at query time. Standalone Task turns (no matching
-# JobItem) stay visible; report tasks are NEVER deduped because they
-# carry the child's completion payload that the JobItem itself does not.
-#
-# Constraints (from the P-C(i) spec):
-#
-# * ``list_work`` is the ONLY surface affected — ``resolve_work``
-#   always returns the exact record.
-# * Apply AFTER root-scoping, BEFORE the sort/pagination boundary.
-# * Status drift guard: if the JobItem and the dropped Task disagree
-#   on status, log a warning pointing the operator at
-#   ``JobFeedbackObserver`` (which is responsible for keeping the two
-#   in sync).
-
-
-class TestListWorkDedup:
-    """``list_work`` dedupes Task turns whose ``instance_id`` matches a
-    JobItem in the same result set. Single-record lookups via
-    ``resolve_work`` are NOT affected.
-
-    The dedup is applied after root-scoping and before the sort, so
-    the visible record count matches the count of logical work units
-    rather than the raw union of Task + JobItem rows.
-    """
-
-    def test_dedup_job_create_pair_shows_one_row(
-        self, engine, resolver
-    ):
-        """A JobItem + Task (kind=turn) sharing the same
-        ``(instance_id, message_id)`` → ``list_work`` returns ONLY
-        the JobItem.
-
-        The ``job_create`` flow models this: it inserts a JobItem
-        (the handle the orchestrator created and holds) AND a Task
-        turn (the message that drove the job) on the same
-        ``instance_id``. The JobItem's ``metadata.message_id`` is
-        stamped (Phase 1) with the driving message's UUID4 — the
-        same UUID4 the Task carries on its native ``message_id``
-        column. Without dedup the virtual-job surface would show
-        two rows for one logical work unit; with F1 it shows
-        one — the JobItem.
-
-        F1 spec: dedup key is ``(instance_id, message_id)``, NOT
-        just ``instance_id``. So the Task turn must carry the same
-        ``message_id`` as the JobItem's ``metadata.message_id`` for
-        the dedup to fire. A Task with ``message_id=None`` is
-        NEVER suppressed (matches the F1 spec).
-        """
-        # Seed a single root instance and the pair on it.
-        _seed_instance(engine, instance_id="inst-job-pair")
-        driving_message_id = "msg-driving-1"
-        jid = _seed_job(
-            engine,
-            instance_id="inst-job-pair",
-            status=AdmissionState.QUEUED.value,
-            metadata_message_id=driving_message_id,
-        )
-        # Task turn on the same instance AND same message_id — the
-        # driving message of the ``job_create`` flow.
-        _seed_task(
-            engine,
-            instance_id="inst-job-pair",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=driving_message_id,
-        )
-
-        records = resolver.list_work()
-
-        # Exactly one record back — the JobItem wins, the Task turn
-        # is deduped (matching ``(instance_id, message_id)``).
-        assert len(records) == 1
-        assert records[0].work_id == jid
-        assert records[0].kind == "job"
-
-    def test_dedup_does_not_affect_standalone_turns(
-        self, engine, resolver
-    ):
-        """A Task turn with NO matching JobItem → stays visible.
-
-        Standalone turns are the steady-state of ``POST /messages``
-        and ``job_continue`` calls that are not part of a
-        ``job_create`` pair. They are NOT deduped because no JobItem
-        is shadowing them.
-        """
-        _seed_instance(engine, instance_id="inst-standalone")
-        # A standalone Task turn on its own instance — no JobItem
-        # ever paired with it.
-        wid = _seed_task(
-            engine,
-            instance_id="inst-standalone",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-        )
-
-        records = resolver.list_work()
-
-        # No matching JobItem → the standalone Task turn survives.
-        assert len(records) == 1
-        assert records[0].work_id == wid
-        assert records[0].kind == "turn"
-
-    def test_dedup_does_not_affect_reports(self, engine, resolver):
-        """A Report Task (``kind=report``) + a JobItem sharing the
-        same ``instance_id`` → Report stays visible.
-
-        Reports carry the child's completion payload that the
-        JobItem itself does not (the JobItem is the parent-side
-        handle; the Report is the inbound notification). The P-C(i)
-        spec only dedupes ``kind="turn"`` — never ``kind="report"``,
-        so a Report paired with a JobItem on the same instance must
-        surface as its own row.
-        """
-        # Seed a root instance. The Report task's ``instance_id`` is
-        # set to the ROOT (parent-bound; see ``child_reports.py``),
-        # so we use the root for both rows.
-        _seed_instance(engine, instance_id="inst-report-root")
-        jid = _seed_job(
-            engine,
-            instance_id="inst-report-root",
-            status=AdmissionState.ACTIVE.value,
-        )
-        report_wid = _seed_task(
-            engine,
-            instance_id="inst-report-root",
-            task_type="process_report",
-            status=TaskStatus.RUNNING.value,
-        )
-
-        records = resolver.list_work()
-
-        # Both rows survive: the JobItem (its handle) AND the Report
-        # (the child's completion payload). The dedup only targets
-        # ``kind="turn"`` rows.
-        assert len(records) == 2
-        work_ids = {r.work_id for r in records}
-        assert work_ids == {jid, report_wid}
-        kinds = {r.kind for r in records}
-        assert kinds == {"job", "report"}
-
-    def test_dedup_works_across_statuses(self, engine, resolver):
-        """Dedup holds for BOTH terminal AND non-terminal JobItem
-        statuses (F1 spec).
-
-        The F1 dedup is keyed on the ``(instance_id, message_id)``
-        tuple — NOT on JobItem status alone. So a JobItem in any
-        state (pending, processing, paused, completed, failed,
-        cancelled, dead_letter) still shadows a Task turn whose
-        ``message_id`` matches its ``metadata.message_id``. This
-        test exercises the two ends of the terminal /
-        non-terminal spectrum to pin the contract.
-        """
-        # ── Case A: non-terminal JobItem (processing).
-        _seed_instance(engine, instance_id="inst-processing")
-        jid_processing = _seed_job(
-            engine,
-            instance_id="inst-processing",
-            status=AdmissionState.ACTIVE.value,
-            metadata_message_id="msg-proc",
-        )
-        _seed_task(
-            engine,
-            instance_id="inst-processing",
-            task_type="process_message",
-            status=TaskStatus.RUNNING.value,
-            message_id="msg-proc",
-        )
-
-        # ── Case B: terminal JobItem (completed).
-        _seed_instance(engine, instance_id="inst-completed")
-        jid_completed = _seed_job(
-            engine,
-            instance_id="inst-completed",
-            status=AdmissionState.DONE.value,
-            metadata_message_id="msg-comp",
-            terminal_reason="completed",
-        )
-        _seed_task(
-            engine,
-            instance_id="inst-completed",
-            task_type="process_message",
-            status=TaskStatus.COMPLETED.value,
-            message_id="msg-comp",
-        )
-
-        # ── Case C: pending JobItem (also non-terminal).
-        _seed_instance(engine, instance_id="inst-pending")
-        jid_pending = _seed_job(
-            engine,
-            instance_id="inst-pending",
-            status=AdmissionState.QUEUED.value,
-            metadata_message_id="msg-pend",
-        )
-        _seed_task(
-            engine,
-            instance_id="inst-pending",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id="msg-pend",
-        )
-
-        records = resolver.list_work()
-
-        # One row per instance — the three JobItems won, the three
-        # Task turns were deduped (matching ``(instance_id,
-        # message_id)`` tuples).
-        assert len(records) == 3
-        work_ids = {r.work_id for r in records}
-        assert work_ids == {jid_processing, jid_completed, jid_pending}
-        # Every returned row is the JobItem handle, not the Task turn.
-        assert {r.kind for r in records} == {"job"}
-
-    def test_dedup_logs_warning_on_status_drift(
-        self, engine, resolver, caplog
-    ):
-        """When a JobItem and its shadowed Task turn disagree on
-        status, ``list_work`` still dedupes the Task AND logs a
-        warning so an operator can investigate.
-
-        The ``JobFeedbackObserver`` is supposed to keep the JobItem
-        status in sync with the driving Task turn — a disagreement
-        is an ops signal, not a user-facing one (the user still
-        sees a single, JobItem-backed row).
-
-        Phase 1 (Job as Queue Proxy): the JobItem's effective status
-        is now sourced from the joined Instance (the execution
-        authority) rather than the JobItem mirror. To preserve the
-        "drift between JobItem and Task" semantics the test seeds the
-        Instance in ``completed`` state — the WorkRecord surfaces
-        ``status="completed"`` (matching the JobItem mirror) and the
-        Task's ``running`` status is the one that drifts.
-
-        F1 spec: dedup key is ``(instance_id, message_id)``, so both
-        rows must share the same message_id for the dedup to fire
-        (Task with ``message_id=None`` is never suppressed).
-        """
-        import logging
-        # Phase 1: set the Instance to ``completed`` so the JobItem's
-        # effective status (read off the Instance) is ``completed``
-        # and the drift surfaces against the Task's ``running``.
-        _seed_instance(engine, instance_id="inst-drift", status="completed")
-        # JobItem in COMPLETED (canonical: "completed"). Task turn in
-        # RUNNING (canonical: "processing"). The two disagree — drift.
-        # F1: shared message_id so the dedup fires.
-        shared_msg = "msg-drift"
-        jid = _seed_job(
-            engine,
-            instance_id="inst-drift",
-            status=AdmissionState.DONE.value,
-            metadata_message_id=shared_msg,
-            terminal_reason="completed",
-        )
-        wid = _seed_task(
-            engine,
-            instance_id="inst-drift",
-            task_type="process_message",
-            status=TaskStatus.RUNNING.value,
-            message_id=shared_msg,
-        )
-
-        # Capture log records from the resolver's logger.
-        with caplog.at_level(
-            logging.WARNING, logger="daemon.services.work_resolver"
-        ):
-            records = resolver.list_work()
-
-        # Dedup still proceeds — the JobItem wins.
-        assert len(records) == 1
-        assert records[0].work_id == jid
-        assert records[0].kind == "job"
-        assert records[0].status == "completed"
-        # The Task turn's work_id must NOT be in the result set.
-        assert all(r.work_id != wid for r in records)
-
-        # The status drift warning was logged with all three
-        # identifying fields (instance_id, message_id, job_status,
-        # task_status) so an operator can pinpoint the offending
-        # pair.
-        drift_records = [
-            rec for rec in caplog.records
-            if "status drift detected" in rec.getMessage()
-        ]
-        assert len(drift_records) == 1, (
-            f"Expected exactly one status-drift warning, got "
-            f"{len(drift_records)}: {[r.getMessage() for r in drift_records]}"
-        )
-        message = drift_records[0].getMessage()
-        assert "instance_id=inst-drift" in message
-        assert f"message_id={shared_msg}" in message
-        assert "JobItem status=completed" in message
-        # Task RUNNING canonicalises to "processing" — assert the
-        # canonical value (what ``list_work`` actually compares), not
-        # the source Task.status string.
-        assert "Task status=processing" in message
-
-
-# ─── F1: list_work dedup-by-message_id (Phase 1 of defer-seam bugfix) ──────
-# Bug F1: pre-F1 ``list_work`` matched Task turns to JobItems by
-# ``instance_id`` ONLY. A standalone message Task (T2) on an instance
-# that also has a JobItem (J) caused BOTH the driving Task (T1) AND
-# T2 to be dropped from the work surface — the JobItem's instance_id
-# shadowed T2 even though T2 was a different logical message.
-#
-# F1 fix: dedup key is ``(instance_id, message_id)``. Task turns with
-# ``message_id=None`` are NEVER suppressed (they can't match). The
-# spec test seeds:
-#   * JobItem J (with metadata.message_id = msg1)
-#   * Task T1 (message_id = msg1, driving message of the job_create)
-#   * Task T2 (message_id = msg2, standalone follow-up POST /messages)
-# And verifies both T1 (suppressed by J) and T2 (kept) appear in
-# ``list_work(instance_id=I)``.
-
-
-class TestListWorkDedupByMessageId:
-    """F1: ``list_work`` dedupes Task turns whose ``(instance_id,
-    message_id)`` tuple matches a JobItem's. Task turns with
-    ``message_id=None`` are NEVER suppressed.
-
-    The seed model is the production ``job_create`` + ``POST /messages``
-    sequence:
-
-    1. ``job_create(project)`` creates instance I, JobItem J (the
-       orchestrator's handle), and the driving message Task T1 with
-       ``message_id = msg1``. J's ``metadata.message_id`` is also
-       stamped to ``msg1`` (``stamp_message_id`` in Phase 1).
-    2. Later, ``POST /messages`` on I creates Task T2 with
-       ``message_id = msg2``. There is NO JobItem for T2 — it's
-       a standalone message on the same instance.
-
-    Pre-F1, ``list_work(instance_id=I)`` returned ONLY the JobItem
-    (T1 suppressed by ``instance_id`` match; T2 wrongly suppressed
-    too because it shared the same ``instance_id``). F1 must return
-    BOTH the JobItem (T1 may be suppressed by J but is also fine to
-    surface via J) AND T2.
-    """
-
-    def test_f1_job_create_with_standalone_followup_message(
-        self, engine, resolver
-    ):
-        """The F1 spec test: ``list_work(instance_id=I)`` returns BOTH
-        the JobItem J AND the standalone Task T2.
-
-        Seed:
-          * Instance I
-          * JobItem J (metadata.message_id = msg1)
-          * Task T1 (message_id = msg1, driving message of job_create)
-          * Task T2 (message_id = msg2, standalone POST /messages)
-
-        Expected result: 2 records — J (kind=job) and T2 (kind=turn).
-        T1 is suppressed (its ``(instance_id, message_id)`` matches
-        J's tuple), T2 is kept (different message_id).
-        """
-        _seed_instance(engine, instance_id="inst-f1")
-        msg1 = "msg-driving"
-        msg2 = "msg-followup"
-
-        # JobItem J with metadata.message_id = msg1 (stamped at
-        # job_create end-of-enqueue).
-        jid = _seed_job(
-            engine,
-            instance_id="inst-f1",
-            status=AdmissionState.QUEUED.value,
-            metadata_message_id=msg1,
-        )
-
-        # Task T1 — the driving message of the job_create, with
-        # matching message_id (so it gets deduped by J).
-        _seed_task(
-            engine,
-            instance_id="inst-f1",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=msg1,
-        )
-
-        # Task T2 — the standalone follow-up POST /messages with
-        # a DIFFERENT message_id (so it survives the F1 dedup).
-        t2_wid = _seed_task(
-            engine,
-            instance_id="inst-f1",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=msg2,
-        )
-
-        records = resolver.list_work(instance_id="inst-f1")
-
-        # Two records: JobItem J + standalone Task T2.
-        assert len(records) == 2
-        work_ids = {r.work_id for r in records}
-        assert work_ids == {jid, t2_wid}
-        # The standalone Task must surface (the F1 spec requirement).
-        assert any(r.kind == "turn" and r.work_id == t2_wid for r in records)
-        # The JobItem must surface.
-        assert any(r.kind == "job" and r.work_id == jid for r in records)
-
-    def test_f1_standalone_task_with_none_message_id_never_suppressed(
-        self, engine, resolver
-    ):
-        """A Task turn with ``message_id=None`` is NEVER suppressed by
-        a JobItem on the same instance (F1 spec).
-
-        Pre-F1 this would have wrongly dropped the Task. Under F1 the
-        Task with ``message_id=None`` can never match a JobItem's
-        ``(instance_id, message_id)`` tuple (JobItem-derived tuples
-        only carry non-None message_ids via the F1 dedup set insert
-        guard), so the Task is always kept.
-        """
-        _seed_instance(engine, instance_id="inst-f1-none")
-        msg1 = "msg-only-job"
-
-        jid = _seed_job(
-            engine,
-            instance_id="inst-f1-none",
-            status=AdmissionState.QUEUED.value,
-            metadata_message_id=msg1,
-        )
-
-        # Task turn with NO message_id (legacy / pre-Phase-1 state).
-        t_wid = _seed_task(
-            engine,
-            instance_id="inst-f1-none",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=None,
-        )
-
-        records = resolver.list_work(instance_id="inst-f1-none")
-
-        # Both rows surface — the Task with None message_id is not
-        # suppressed by the JobItem's message_id match.
-        assert len(records) == 2
-        assert {r.work_id for r in records} == {jid, t_wid}
-        assert {r.kind for r in records} == {"job", "turn"}
-
-    def test_f1_task_with_mismatched_message_id_not_suppressed(
-        self, engine, resolver
-    ):
-        """A Task turn whose ``message_id`` DIFFERS from the JobItem's
-        ``metadata.message_id`` is not suppressed (F1 spec).
-
-        The (instance_id, message_id) tuple of the Task does NOT
-        match the JobItem's tuple, so the F1 dedup leaves the Task
-        visible.
-        """
-        _seed_instance(engine, instance_id="inst-f1-mismatch")
-        j_msg = "msg-job-msg"
-        t_msg = "msg-task-msg"  # different message_id
-
-        jid = _seed_job(
-            engine,
-            instance_id="inst-f1-mismatch",
-            status=AdmissionState.QUEUED.value,
-            metadata_message_id=j_msg,
-        )
-        t_wid = _seed_task(
-            engine,
-            instance_id="inst-f1-mismatch",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=t_msg,
-        )
-
-        records = resolver.list_work(instance_id="inst-f1-mismatch")
-
-        # Both rows surface.
-        assert len(records) == 2
-        assert {r.work_id for r in records} == {jid, t_wid}
-
-    def test_f1_workrecord_carries_message_id(self, engine, resolver):
-        """Both Task- and JobItem-backed ``WorkRecord``s surface their
-        ``message_id`` (F1 fix exposes the cross-system correlation
-        key on the public view-model).
-
-        Asserts:
-          * ``Task.message_id`` propagates to ``WorkRecord.message_id``
-            (kind="turn" / "report").
-          * ``JobItem.job_metadata['message_id']`` propagates to
-            ``WorkRecord.message_id`` (kind="job").
-        """
-        _seed_instance(engine, instance_id="inst-f1-surf")
-        msg = "msg-shared"
-
-        _seed_job(
-            engine,
-            instance_id="inst-f1-surf",
-            status=AdmissionState.QUEUED.value,
-            metadata_message_id=msg,
-        )
-        _seed_task(
-            engine,
-            instance_id="inst-f1-surf",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=msg,
-        )
-        # A second standalone Task with a different message_id so we
-        # have two turns to inspect (the F1 dedup set only has the
-        # JobItem tuple, so the driving Task gets deduped and the
-        # standalone Task survives).
-        t2_wid = _seed_task(
-            engine,
-            instance_id="inst-f1-surf",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id="msg-standalone",
-        )
-
-        records = resolver.list_work(instance_id="inst-f1-surf")
-
-        # Build a per-work_id map for assertion.
-        by_work_id = {r.work_id: r for r in records}
-        # The JobItem surfaces — its WorkRecord carries the
-        # metadata-derived message_id.
-        job_record = next(r for r in records if r.kind == "job")
-        assert job_record.message_id == msg
-        # The standalone Task surfaces with its native message_id.
-        assert by_work_id[t2_wid].message_id == "msg-standalone"
-        # ``to_dict()`` exposes message_id on the JSON-friendly shape.
-        d = job_record.to_dict()
-        assert d["message_id"] == msg
-
-    def test_f1_dedup_works_with_no_message_id_on_either_side(
-        self, engine, resolver
-    ):
-        """Pre-Phase-1 JobItem (no metadata.message_id) + Task with
-        ``message_id=None`` → F1 keeps both visible (no dedup fires
-        because the JobItem-derived dedup set excludes ``None``
-        tuples and Task-side None tuples never match).
-        """
-        _seed_instance(engine, instance_id="inst-f1-legacy")
-        jid = _seed_job(
-            engine,
-            instance_id="inst-f1-legacy",
-            status=AdmissionState.QUEUED.value,
-            # metadata_message_id defaults to None — pre-Phase-1
-            # JobItem state.
-        )
-        t_wid = _seed_task(
-            engine,
-            instance_id="inst-f1-legacy",
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-            message_id=None,
-        )
-
-        records = resolver.list_work(instance_id="inst-f1-legacy")
-
-        # Both surface — neither has a message_id, so no (I, M)
-        # tuple match can fire on the F1 dedup set.
-        assert len(records) == 2
-        assert {r.work_id for r in records} == {jid, t_wid}
 
 
 # ─── F3: Lossy status map fix (Phase 2 of defer-seam bugfix) ───────────────
@@ -2009,6 +1460,11 @@ class TestListWorkStatusFilterTerminalReason:
         filter on the Task side resolves via
         ``_CANONICAL_TO_SOURCES["failed"] = {"failed"}`` and matches
         only Task rows with ``Task.status='failed'``.
+
+        Phase 4 partial collapse: Tasks are report-only — the
+        seeded Tasks use ``process_report`` so they survive the
+        resolver's task_type filter. The behavioural contract under
+        test (terminal_reason doesn't leak to Tasks) is unchanged.
         """
         _seed_instance(engine, instance_id="inst-f3-taskside")
 
@@ -2017,16 +1473,19 @@ class TestListWorkStatusFilterTerminalReason:
         failed_t_wid = _seed_task(
             engine,
             instance_id="inst-f3-taskside",
+            task_type="process_report",
             status=TaskStatus.FAILED.value,
         )
         _seed_task(
             engine,
             instance_id="inst-f3-taskside",
+            task_type="process_report",
             status=TaskStatus.COMPLETED.value,
         )
         _seed_task(
             engine,
             instance_id="inst-f3-taskside",
+            task_type="process_report",
             status=TaskStatus.CANCELLED.value,
         )
 
@@ -2038,7 +1497,9 @@ class TestListWorkStatusFilterTerminalReason:
         # just the failed Task).
         assert len(records) == 1
         assert records[0].work_id == failed_t_wid
-        assert records[0].kind == "turn"
+        # Phase 4 partial collapse: Tasks are report-only, so
+        # ``kind="report"`` (not the pre-collapse ``"turn"``).
+        assert records[0].kind == "report"
 
 
 # ─── Phase 2 (Batch 3): JobQueueService.get_work and reconcile_terminal_watches ─
@@ -2157,28 +1618,24 @@ class TestGetWork:
     async def test_get_work_resolves_task(self, engine, job_queue_service_with_resolver):
         """``get_work(task.work_id)`` returns the Task-backed WorkRecord.
 
-        Sanity-checks the service-level wrapper around
-        ``WorkResolverService.resolve_work``: same return shape, same
-        ``kind='task'`` / ``status='processing'`` / ``agent_id``
-        looked-up-from-instance semantics that the resolver already
-        documents.
+        Phase 4 partial collapse: Tasks are report-only. The seeded
+        Task uses ``process_report`` so the service-level wrapper
+        resolves it as a Task-backed ``kind="report"`` record.
         """
         _seed_instance(engine, instance_id="inst-gw-task", agent_id="developer")
         wid = _seed_task(
             engine,
             instance_id="inst-gw-task",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
 
         record = await job_queue_service_with_resolver.get_work(wid)
 
         assert record is not None
-        # Phase 4 (2026-06-27): ``process_message`` Task surfaces as
-        # ``kind="turn"`` (split off the previous ``"task"``
-        # vocabulary). The docstring above was written pre-Phase-4 and
-        # still says ``kind='task'`` — that's the filter alias, not
-        # the resolved record's ``kind`` value.
-        assert record.kind == "turn"
+        # Phase 4 partial collapse: report Task surfaces as
+        # ``kind="report"``.
+        assert record.kind == "report"
         assert record.work_id == wid
         # Task ``running`` canonicalises to ``processing``.
         assert record.status == "processing"
@@ -2749,7 +2206,8 @@ class TestCancelTaskViaJobCancel:
         The test mirrors the production ``job_cancel`` tool's task branch
         (see ``tools/job_queue.py:497-529``):
 
-        1. ``resolver.resolve_work(wid)`` returns ``kind="task"``.
+        1. ``resolver.resolve_work(wid)`` returns ``kind="report"``
+           (Phase 4 partial collapse: Tasks are report-only).
         2. ``task_repo.get_by_work_id(wid)`` returns the Task.
         3. ``task_repo.request_cancel(task.id)`` flips
            ``cancel_requested=True`` and returns True.
@@ -2762,19 +2220,20 @@ class TestCancelTaskViaJobCancel:
         wid = _seed_task(
             engine,
             instance_id="inst-cancel-task",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
         task_id = _lookup_task_id(engine, wid)
 
-        # Step 1: resolver routes to kind="turn" (Phase 4 split:
-        # ``process_message`` → ``"turn"``; was the legacy
-        # ``"task"`` pre-2026-06-27). The job_cancel tool branches on
-        # whether ``record.kind`` is in the task side (turn/report)
-        # vs ``"job"`` — the cooperative-vs-atomic decision is
-        # unchanged by the split.
+        # Step 1: resolver routes to kind="report" (Phase 4 partial
+        # collapse: Tasks are report-only; process_message Tasks are
+        # JobItems now). The job_cancel tool branches on whether
+        # ``record.kind`` is in the task side (``"report"``) vs
+        # ``"job"`` — the cooperative-vs-atomic decision is unchanged
+        # by the split.
         record = resolver.resolve_work(wid)
         assert record is not None
-        assert record.kind == "turn"
+        assert record.kind == "report"
         assert record.status == "processing"  # RUNNING canonicalises
 
         # Step 2 + 3: cooperative cancel — this is the production
@@ -2900,8 +2359,8 @@ class TestJobListUnion:
     def test_job_list_union(
         self, engine, resolver,
     ):
-        """One PENDING JobItem + one RUNNING Task → both surface in
-        ``list_work()`` with the correct ``kind`` and canonical
+        """One PENDING JobItem + one RUNNING report Task → both surface
+        in ``list_work()`` with the correct ``kind`` and canonical
         ``status``.
 
         Phase 1 (Job as Queue Proxy): the JobItem's effective status
@@ -2911,6 +2370,10 @@ class TestJobListUnion:
         (queue-stage row) so the canonical status falls back to the
         JobItem mirror (``"pending"``). The Task still gets its
         ``RUNNING → processing`` canonicalization.
+
+        Phase 4 partial collapse: Tasks are report-only — the
+        seeded Task uses ``process_report`` so it surfaces as
+        ``kind="report"`` (not the pre-collapse ``"turn"``).
         """
         # No Instance seed for the JobItem — the JobItem is
         # queue-stage (``instance_id=None``), so the JobItem mirror
@@ -2920,6 +2383,7 @@ class TestJobListUnion:
         task_id = _seed_task(
             engine,
             instance_id="inst-union-task",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
         job_id = _seed_job(
@@ -2930,13 +2394,13 @@ class TestJobListUnion:
 
         records = resolver.list_work()
 
-        # Both rows surface. Phase 4 (2026-06-27): the seeded
-        # ``process_message`` Task is now exposed as ``kind="turn"``
-        # (the legacy single ``"task"`` kind was split into
-        # ``turn`` + ``report`` based on ``Task.task_type``).
+        # Both rows surface. Phase 4 partial collapse: the report
+        # Task is exposed as ``kind="report"`` (the legacy single
+        # ``"task"`` kind was collapsed — message turns are JobItems
+        # now).
         assert len(records) == 2
         by_kind: dict[str, Any] = {r.kind: r for r in records}
-        assert set(by_kind.keys()) == {"turn", "job"}
+        assert set(by_kind.keys()) == {"report", "job"}
 
         # The JobItem shows up with kind="job" and the canonical
         # ``pending`` status (JobItem PENDING maps to PENDING; the
@@ -2946,17 +2410,16 @@ class TestJobListUnion:
         assert by_kind["job"].kind == "job"
         assert by_kind["job"].status == "pending"
 
-        # The Task shows up with kind="turn" (Phase 4 split:
-        # ``process_message`` → ``"turn"``) and the canonical
-        # ``processing`` status (Task RUNNING canonicalises to
-        # ``processing``).
-        assert by_kind["turn"].work_id == task_id
-        assert by_kind["turn"].kind == "turn"
-        assert by_kind["turn"].status == "processing"
+        # The Task shows up with kind="report" (Phase 4 partial
+        # collapse: report-only Task) and the canonical ``processing``
+        # status (Task RUNNING canonicalises to ``processing``).
+        assert by_kind["report"].work_id == task_id
+        assert by_kind["report"].kind == "report"
+        assert by_kind["report"].status == "processing"
         # ``agent_id`` is looked up from the matching Instance row on
         # the Task branch — proves the Task-side instance lookup works
         # inside ``list_work``.
-        assert by_kind["turn"].agent_id == "developer"
+        assert by_kind["report"].agent_id == "developer"
 
 
 # ─── 6. work_id returned by enqueue flow is resolvable via resolve_work ──
@@ -2994,18 +2457,27 @@ class TestJobContinueReturnsRealWorkId:
           (the model's ``default_factory`` always populates it — NOT
           NULL on the column).
         * ``resolver.resolve_work(job_id)`` returns a non-None
-          ``WorkRecord`` with ``kind="task"``.
+          ``WorkRecord`` with ``kind="report"``.
         * The resolved ``work_id`` matches the value the enqueue flow
           would have returned as ``AsyncMessageResult.job_id``.
+
+        Phase 4 partial collapse: Tasks are report-only. The test
+        seeds a ``process_report`` Task so the Task-side resolver
+        branch is exercised end-to-end. (``task_repo.create`` would
+        reject ``process_message`` at production-time because
+        ``task_type="process_message"`` is no longer a valid
+        task type post-collapse — message turns flow through
+        ``job_create`` and surface as JobItems, not Tasks.)
         """
         _seed_instance(engine, instance_id="inst-continuable", agent_id="developer")
 
         # Simulate the enqueue flow: ``task_repo.create`` writes the
         # Task row the same way ``_prepare_enqueued_message`` does —
         # both rely on the model's ``default_factory`` to mint a
-        # UUID4 ``work_id``.
+        # UUID4 ``work_id``. Phase 4 partial collapse: only report
+        # task types are valid Task models post-collapse.
         task = task_repo.create(
-            task_type="process_message",
+            task_type="process_report",
             instance_id="inst-continuable",
         )
 
@@ -3027,12 +2499,9 @@ class TestJobContinueReturnsRealWorkId:
             f"{job_id!r} — the resolver cannot see Task-created work"
         )
         assert record.work_id == job_id
-        # Phase 4 (2026-06-27): ``process_message`` Task surfaces as
-        # ``kind="turn"`` (split off the previous ``"task"``
-        # vocabulary). ``kind="task"`` is kept as a backward-compat
-        # *filter* alias but the resolved record exposes the specific
-        # ``task_type``-derived subtype.
-        assert record.kind == "turn"
+        # Phase 4 partial collapse: Tasks are report-only, so the
+        # Task-backed record exposes ``kind="report"``.
+        assert record.kind == "report"
         # ``agent_id`` is looked up from the matching Instance row,
         # proving the resolver sees the full Task-side context.
         assert record.agent_id == "developer"
@@ -3409,16 +2878,24 @@ class TestJobListMultiStatusFilter:
         ``statuses=["running", "done"]`` should resolve to canonical
         ``["processing", "completed"]`` and match the rows in those
         canonical states.
+
+        Phase 4 partial collapse: Tasks are report-only. The seeded
+        ``running_wid`` is a ``process_report`` Task so it surfaces
+        in ``list_work``. (Pre-collapse the test used a
+        ``process_message`` Task; message turns now flow through
+        ``job_create`` as JobItems, so the Task row would not
+        surface post-collapse.)
         """
         from daemon.tools.job_queue import create_job_tools
 
         _seed_instance(engine, instance_id="inst-alias-1", agent_id="developer")
         _seed_instance(engine, instance_id="inst-alias-2", agent_id="developer")
-        # A Task (uses "running" source value, canonicalises to
+        # A report Task (uses "running" source value, canonicalises to
         # "processing") and a JobItem in "completed".
         running_wid = _seed_task(
             engine,
             instance_id="inst-alias-1",
+            task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
         completed_jid = _seed_job(
@@ -3429,6 +2906,7 @@ class TestJobListMultiStatusFilter:
         pending_wid = _seed_task(
             engine,
             instance_id="inst-alias-2",
+            task_type="process_report",
             status=TaskStatus.PENDING.value,
         )
 
@@ -4242,6 +3720,7 @@ class TestDeferredWorkIdWatchable:
             engine,
             work_id="wid-deferred-known",
             instance_id="inst-deferred-task",
+            task_type="process_report",
             status=TaskStatus.PENDING.value,
             is_deferred=True,
         )
@@ -4268,11 +3747,11 @@ class TestDeferredWorkIdWatchable:
             "virtual job surface treats deferred work as invisible. "
             "Phase 3 Part B3 regression."
         )
-        # Phase 4 (2026-06-27): deferred ``process_message`` tasks
-        # surface as ``kind="turn"``. ``is_deferred=True`` is a
-        # separate orthogonal flag (defer-queue idle gate) — it does
-        # NOT change the ``task_type``-derived ``kind`` value.
-        assert record.kind == "turn"
+        # Phase 4 partial collapse: deferred report Tasks surface as
+        # ``kind="report"``. ``is_deferred=True`` is a separate
+        # orthogonal flag (defer-queue idle gate) — it does NOT
+        # change the ``task_type``-derived ``kind`` value.
+        assert record.kind == "report"
         assert record.work_id == deferred_wid
         # The canonical status mirrors the source PENDING ("pending"
         # is unchanged by canonicalize_status — see work_status.py).

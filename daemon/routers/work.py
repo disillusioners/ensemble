@@ -96,11 +96,14 @@ def set_work_resolver(resolver: "WorkResolverService") -> None:
 # ── Routes ────────────────────────────────────────────────────────────────
 
 
-# Accepted ``kind`` values for the GET /work endpoint. The
-# resolver itself accepts all four (``"job"`` / ``"turn"`` /
-# ``"report"`` / ``"task"``) but the router rejects unknown values
-# with 400 so a typo doesn't silently return an empty list.
-_KIND_VALUES: frozenset[str] = frozenset({"job", "turn", "report", "task"})
+# Accepted ``kind`` values for the GET /work endpoint. Phase 4
+# partial collapse (2026-07-06) removed ``"turn"`` and ``"task"`` —
+# message turns are now JobItems (``kind="job"``), and the
+# ``"task"`` backward-compat alias no longer maps to any record
+# (the Task table is report-only post-collapse). The router
+# rejects unknown values with 400 so a typo doesn't silently
+# return an empty list.
+_KIND_VALUES: frozenset[str] = frozenset({"job", "report"})
 
 
 @router.get("/work", response_model=list[dict[str, Any]])
@@ -119,7 +122,7 @@ async def list_work(
     ),
     kind: str | None = Query(
         default=None,
-        description="Work kind: job, turn, report, or task",
+        description="Work kind: job or report (Phase 4 partial collapse removed 'turn' and 'task').",
     ),
     root_only: bool = Query(
         default=True,
@@ -145,9 +148,11 @@ async def list_work(
             ``cancelled``, ``dead_letter``).
         project_id: Optional project ID filter.
         instance_id: Optional instance ID filter.
-        kind: Optional kind filter (``job``, ``turn``, ``report``,
-            or ``task`` for the backward-compatible turn+report
-            union).
+        kind: Optional kind filter (``job`` or ``report``).
+            The legacy ``turn`` / ``task`` values were removed in
+            Phase 4 partial collapse (message turns are now JobItems;
+            the Task table is report-only). Pass ``kind=None`` to
+            return the union.
         root_only: When ``True`` (default), drop child-instance
             work so the management view stays scoped to the roots
             the jober bound jobs to. ``False`` returns the full

@@ -268,18 +268,23 @@ class TestListWorkBasic:
     """Top-level coverage: GET /work with no filters and no data."""
 
     def test_list_work_returns_jobs_and_tasks(self, client: TestClient, engine: Engine):
-        """Seed one of each kind — GET /work returns all three."""
+        """Seed a Job + a report Task — GET /work returns both.
+
+        Phase 4 partial collapse (2026-07-06): ``process_message``
+        Tasks no longer appear in ``list_work`` — message turns flow
+        through ``job_create`` and surface as JobItems. The Task side
+        is report-only. The test pins the post-collapse union of one
+        JobItem + one report Task.
+        """
         job_id = _seed_job(engine)
-        turn_id = _seed_task(engine, task_type="process_message")
         report_id = _seed_task(engine, task_type="process_report")
 
         resp = client.get("/api/work")
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert len(body) == 3
+        assert len(body) == 2
         kinds = {item["work_id"]: item["kind"] for item in body}
         assert kinds[job_id] == "job"
-        assert kinds[turn_id] == "turn"
         assert kinds[report_id] == "report"
 
     def test_empty_result_returns_empty_array(self, client: TestClient):
@@ -304,17 +309,24 @@ class TestKindFilter:
         assert body[0]["work_id"] == job_id
         assert body[0]["kind"] == "job"
 
-    def test_kind_filter_turn_returns_only_turns(self, client: TestClient, engine: Engine):
+    def test_kind_filter_turn_returns_400(self, client: TestClient, engine: Engine):
+        """Phase 4 partial collapse: ``kind=turn`` is rejected with HTTP 400.
+
+        The ``"turn"`` kind was the pre-collapse Task-side kind for
+        ``process_message`` Tasks. Post-collapse, message turns flow
+        through ``job_create`` and surface as JobItems
+        (``kind="job"``); the router rejects ``kind="turn"`` so a
+        typo doesn't silently return an empty list.
+        """
         _seed_job(engine)
-        turn_id = _seed_task(engine, task_type="process_message")
+        _seed_task(engine, task_type="process_message")
         _seed_task(engine, task_type="process_report")
 
         resp = client.get("/api/work?kind=turn")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert len(body) == 1
-        assert body[0]["work_id"] == turn_id
-        assert body[0]["kind"] == "turn"
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "turn" in detail["error"]
+        assert set(detail["accepted"]) == {"job", "report"}
 
     def test_kind_filter_report_returns_only_reports(self, client: TestClient, engine: Engine):
         _seed_job(engine)
@@ -328,19 +340,24 @@ class TestKindFilter:
         assert body[0]["work_id"] == report_id
         assert body[0]["kind"] == "report"
 
-    def test_kind_filter_task_returns_all_task_kinds(self, client: TestClient, engine: Engine):
-        """``kind=task`` is the backward-compat alias for turn+report."""
+    def test_kind_filter_task_returns_400(self, client: TestClient, engine: Engine):
+        """Phase 4 partial collapse: ``kind=task`` is rejected with HTTP 400.
+
+        The ``"task"`` kind was a backward-compat alias for the union
+        of turn + report before collapse. Post-collapse, turns are
+        JobItems and the only remaining Task-side kind is ``report``,
+        so the alias no longer maps to any record. The router rejects
+        the value to fail loudly on legacy callers.
+        """
         _seed_job(engine)
         _seed_task(engine, task_type="process_message")
         _seed_task(engine, task_type="process_report")
 
         resp = client.get("/api/work?kind=task")
-        assert resp.status_code == 200
-        body = resp.json()
-        # Job filtered out; both process_message and process_report present
-        assert len(body) == 2
-        kinds = {item["kind"] for item in body}
-        assert kinds == {"turn", "report"}
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "task" in detail["error"]
+        assert set(detail["accepted"]) == {"job", "report"}
 
     def test_kind_filter_report_includes_send_report_type(self, client: TestClient, engine: Engine):
         """``send_report`` TaskType should also map to kind='report'."""
@@ -352,22 +369,51 @@ class TestKindFilter:
         assert body[0]["kind"] == "report"
 
     def test_kind_filter_no_match_returns_empty(self, client: TestClient, engine: Engine):
-        """``?kind=turn`` with no turns seeded → empty list."""
-        _seed_job(engine)
-        _seed_task(engine, task_type="process_report")
+        """``?kind=report`` with no report seeded → empty list.
 
-        resp = client.get("/api/work?kind=turn")
+        Phase 4 partial collapse: the test exercises the
+        kind-filter narrowing with a valid (``"report"``) kind and
+        no report-seed — the resolver returns the JobItem only when
+        ``kind="job"`` is requested, but ``kind="report"`` with no
+        report-seed returns ``[]``. (The pre-collapse equivalent
+        used ``?kind=turn`` which now returns 400.)
+        """
+        _seed_job(engine)
+        # No report seeded — ``kind=report`` returns empty.
+
+        resp = client.get("/api/work?kind=report")
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+    def test_kind_filter_job_with_only_jobs_returns_jobs(self, client: TestClient, engine: Engine):
+        """``kind=job`` with a job seeded + a report Task → returns only the job.
+
+        Companion to ``test_kind_filter_no_match_returns_empty`` —
+        exercises the JobItem branch of the kind filter.
+        """
+        job_id = _seed_job(engine)
+        _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work?kind=job")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == job_id
 
 
 class TestStatusFilter:
     """Canonical status filter — Task ``running`` maps to ``processing``."""
 
     def test_status_filter_processing_returns_running_task(self, client: TestClient, engine: Engine):
-        _seed_task(engine, status=TaskStatus.PENDING.value)
-        running_id = _seed_task(engine, status=TaskStatus.RUNNING.value)
-        _seed_task(engine, status=TaskStatus.COMPLETED.value)
+        """``?status=processing`` returns the report Task in RUNNING.
+
+        Phase 4 partial collapse: only report Tasks surface in
+        ``list_work`` (``process_message`` Tasks are JobItems now).
+        """
+        _seed_task(engine, task_type="process_report", status=TaskStatus.PENDING.value)
+        running_id = _seed_task(engine, task_type="process_report", status=TaskStatus.RUNNING.value)
+        _seed_task(engine, task_type="process_report", status=TaskStatus.COMPLETED.value)
 
         resp = client.get("/api/work?status=processing")
         assert resp.status_code == 200
@@ -387,10 +433,13 @@ class TestStatusFilter:
         the fix, the resolver splits on ``,`` and unions the per-token
         source-status sets, so a pending task AND a running task (which
         canonicalises to ``processing``) both come back.
+
+        Phase 4 partial collapse: only report Tasks surface in
+        ``list_work``.
         """
-        pending_id = _seed_task(engine, status=TaskStatus.PENDING.value)
-        running_id = _seed_task(engine, status=TaskStatus.RUNNING.value)
-        _seed_task(engine, status=TaskStatus.COMPLETED.value)
+        pending_id = _seed_task(engine, task_type="process_report", status=TaskStatus.PENDING.value)
+        running_id = _seed_task(engine, task_type="process_report", status=TaskStatus.RUNNING.value)
+        _seed_task(engine, task_type="process_report", status=TaskStatus.COMPLETED.value)
 
         resp = client.get("/api/work?status=pending,processing")
         assert resp.status_code == 200
@@ -404,8 +453,11 @@ class TestStatusFilter:
     def test_status_filter_comma_separated_handles_whitespace_and_dupes(
         self, client: TestClient, engine: Engine
     ):
-        """Whitespace stripping and deduplication on the comma list."""
-        running_id = _seed_task(engine, status=TaskStatus.RUNNING.value)
+        """Whitespace stripping and deduplication on the comma list.
+
+        Phase 4 partial collapse: uses a report Task.
+        """
+        running_id = _seed_task(engine, task_type="process_report", status=TaskStatus.RUNNING.value)
 
         # Note the spaces, the mixed case, and the duplicate token.
         resp = client.get("/api/work?status=%20processing%20,PROCESSING,running")
@@ -419,10 +471,15 @@ class TestInstanceFilter:
     """instance_id filter narrows the result to one instance."""
 
     def test_instance_id_filter(self, client: TestClient, engine: Engine):
+        """instance_id filter narrows the result to one instance.
+
+        Phase 4 partial collapse: only report Tasks surface in
+        ``list_work``, so the seeded Tasks use ``process_report``.
+        """
         inst_a = _seed_instance(engine, instance_id="inst-a")
         inst_b = _seed_instance(engine, instance_id="inst-b")
-        task_a_id = _seed_task(engine, instance_id=inst_a)
-        _seed_task(engine, instance_id=inst_b)
+        task_a_id = _seed_task(engine, instance_id=inst_a, task_type="process_report")
+        _seed_task(engine, instance_id=inst_b, task_type="process_report")
 
         resp = client.get(f"/api/work?instance_id={inst_a}")
         assert resp.status_code == 200
@@ -449,27 +506,31 @@ class TestCombinedFilters:
     """kind and status compose with AND."""
 
     def test_kind_and_status_compose(self, client: TestClient, engine: Engine):
-        running_turn = _seed_task(
-            engine,
-            task_type="process_message",
-            status=TaskStatus.RUNNING.value,
-        )
-        _seed_task(
-            engine,
-            task_type="process_message",
-            status=TaskStatus.PENDING.value,
-        )
-        _seed_task(
+        """kind and status compose with AND.
+
+        Phase 4 partial collapse: only ``kind="report"`` is valid
+        post-collapse; ``kind="turn"`` / ``kind="task"`` return HTTP
+        400. The test seeds a running report Task + a pending
+        report Task + a running report (with deferred-flag-cleanup)
+        and filters by ``kind=report&status=processing`` — only the
+        running one surfaces.
+        """
+        running_report = _seed_task(
             engine,
             task_type="process_report",
             status=TaskStatus.RUNNING.value,
         )
+        _seed_task(
+            engine,
+            task_type="process_report",
+            status=TaskStatus.PENDING.value,
+        )
 
-        resp = client.get("/api/work?kind=turn&status=processing")
+        resp = client.get("/api/work?kind=report&status=processing")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body) == 1
-        assert body[0]["work_id"] == running_turn
+        assert body[0]["work_id"] == running_report
 
 
 class TestErrorResponses:
@@ -480,7 +541,10 @@ class TestErrorResponses:
         assert resp.status_code == 400
         detail = resp.json()["detail"]
         assert "invalid" in detail["error"].lower()
-        assert set(detail["accepted"]) == {"job", "task", "report", "turn"}
+        # Phase 4 partial collapse: ``kind=turn`` and ``kind=task``
+        # are now rejections of their own — the only accepted kinds
+        # are ``"job"`` and ``"report"``.
+        assert set(detail["accepted"]) == {"job", "report"}
 
     def test_uninitialized_resolver_returns_503(self):
         """Without ``set_work_resolver``, GET /work should 503."""
@@ -499,7 +563,9 @@ class TestSerialization:
     """JSON serialization shape — the frontend contract."""
 
     def test_created_at_serialized_as_iso8601(self, client: TestClient, engine: Engine):
-        wid = _seed_task(engine)
+        """Phase 4 partial collapse: only report Tasks surface in
+        ``list_work``, so the test seeds a ``process_report`` Task."""
+        wid = _seed_task(engine, task_type="process_report")
         resp = client.get("/api/work")
         assert resp.status_code == 200
         body = resp.json()
@@ -525,6 +591,11 @@ class TestSerialization:
         cross-system correlation key. ``None`` for legacy rows that
         pre-date the F1 fix; UUID strings for rows stamped at
         enqueue time.
+
+        Phase 4 partial collapse: only report Tasks surface in
+        ``list_work``. The Task is seeded as ``process_report`` so
+        the assertion sees ``kind="report"`` (the post-collapse
+        Task-side kind).
         """
         # Result is a JSON object — WorkResolverService's
         # ``_parse_task_result_summary`` re-serialises non-string JSON
@@ -533,7 +604,7 @@ class TestSerialization:
         # dict (the API contract is JSON-safe strings).
         wid = _seed_task(
             engine,
-            task_type="process_message",
+            task_type="process_report",
             result='{"output": "hello"}',
         )
         resp = client.get("/api/work")
@@ -552,7 +623,10 @@ class TestSerialization:
             # UUID strings on rows stamped at enqueue time.
             "message_id",
         }
-        assert item["kind"] == "turn"
+        # Phase 4 partial collapse: report Task surfaces as
+        # ``kind="report"`` (the legacy ``"turn"`` is gone — turns
+        # are JobItems now).
+        assert item["kind"] == "report"
         assert item["result_summary"] == '{"output": "hello"}'
         # Timing fields are present on the wire (Phase 1) but ``None``
         # for Task-backed rows because the Task-side WorkRecord does
@@ -561,8 +635,12 @@ class TestSerialization:
         assert item["completed_at"] is None
 
     def test_none_fields_serialized_as_null(self, client: TestClient, engine: Engine):
-        """None values round-trip as JSON null (not omitted)."""
-        wid = _seed_task(engine)
+        """None values round-trip as JSON null (not omitted).
+
+        Phase 4 partial collapse: seeds a report Task (only report
+        Tasks surface in ``list_work``).
+        """
+        wid = _seed_task(engine, task_type="process_report")
         resp = client.get("/api/work")
         body = resp.json()
         item = next(i for i in body if i["work_id"] == wid)
@@ -597,6 +675,9 @@ class TestRootOnlyParam:
         boundary — proves the new query param is plumbed through
         end-to-end and that the management view defaults to the
         root-scoped subset the jober cares about.
+
+        Phase 4 partial collapse: only report Tasks surface in
+        ``list_work``. The seeded Tasks use ``process_report``.
         """
         root_id = _seed_instance(engine, instance_id="inst-router-root")
         child_id = _seed_instance(
@@ -604,8 +685,8 @@ class TestRootOnlyParam:
             instance_id="inst-router-child",
             parent_id="inst-router-root",
         )
-        root_wid = _seed_task(engine, instance_id=root_id)
-        child_wid = _seed_task(engine, instance_id=child_id)
+        root_wid = _seed_task(engine, instance_id=root_id, task_type="process_report")
+        child_wid = _seed_task(engine, instance_id=child_id, task_type="process_report")
 
         # Default (root_only=True) → only the root task is returned.
         resp = client.get("/api/work")

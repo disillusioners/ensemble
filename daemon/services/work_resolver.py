@@ -69,16 +69,6 @@ from .work_status import (
     canonicalize_status,
 )
 
-# Instance statuses that represent an ACTIVE multi-turn orchestration in
-# flight (the instance is doing work, not quiescent). Used by
-# ``list_work``'s active-orchestration status promotion (Option 3):
-# only these states promote a Task record's status to the instance's.
-# ``idle`` / ``waiting`` / ``queued`` are quiescent; terminal states
-# are handled by ``is_terminal``.
-_ACTIVE_ORCHESTRATION_STATUSES: frozenset[str] = frozenset(
-    {"running", "waiting_children"}
-)
-
 if TYPE_CHECKING:
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
     from daemon.repositories.job_queue.repository import JobRepository
@@ -106,17 +96,20 @@ from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS
 
 # ── Kind discrimination within the Task side ─────────────────────────────
 # The Task table carries a ``task_type`` column that distinguishes
-# message turns (user→agent) from report tasks (child→parent completion
-# report). The WorkRecord exposes this as ``kind="turn"`` vs
-# ``kind="report"``. ``kind="task"`` is kept as a backward-compatible
-# alias for clients that haven't migrated to the split vocabulary and
-# matches BOTH process_message AND process_report rows.
+# report tasks (child→parent completion report) from the now-removed
+# message turns (which are JobItems in Phase 3+). The WorkRecord
+# exposes this as ``kind="report"`` — the only remaining Task-side kind
+# after Phase 4 partial collapse. ``kind="job"`` continues to model
+# JobItem-backed records.
 #
-# Phase 4 (2026-06-27): split kind into turn/report based on
-# ``Task.task_type``. See ``daemon/repositories/task/models.py``
-# (TaskType enum, lines 19-34).
-
-TURN_TASK_TYPES: frozenset[str] = frozenset({"process_message"})
+# Phase 4 partial collapse (2026-07-06): the previous turn/report
+# split is gone. ``TURN_TASK_TYPES`` was deleted because message
+# turns now flow through ``job_create`` and surface as JobItems
+# (``kind="job"``); the Task table only carries report rows
+# (``kind="report"``). ``_kind_from_task_type`` is retained for
+# defensive use by ``_task_to_record`` (e.g. legacy data ingested
+# before the collapse) but only the ``"report"`` branch is exercised
+# by the live code path.
 
 REPORT_TASK_TYPES: frozenset[str] = frozenset({
     "process_report",
@@ -127,25 +120,27 @@ REPORT_TASK_TYPES: frozenset[str] = frozenset({
 def _kind_from_task_type(task_type: str | None) -> str:
     """Map a ``Task.task_type`` to a WorkRecord ``kind`` value.
 
-    Phase 4 (2026-06-27): the resolver splits what was previously a
-    single ``kind="task"`` into ``"turn"`` (message turn) and
-    ``"report"`` (child completion report) so the frontend can render
-    queue badges only on jobs.
+    Phase 4 partial collapse (2026-07-06): only ``"report"`` is
+    produced for known TaskType values. The previous
+    ``"process_message"`` → ``"turn"`` mapping is gone (turns are
+    now JobItems). Unknown / ``None`` defensively maps to
+    ``"report"`` so a stale row ingested before the collapse still
+    surfaces as a Task-backed record rather than ``None`` (callers
+    expect a non-empty kind).
 
-    * ``"process_message"`` → ``"turn"``
     * ``"process_report"``, ``"send_report"`` → ``"report"``
-    * Unknown / ``None`` → ``"turn"`` (safe default; ``process_message``
-      is the dominant TaskType in production today).
+    * Unknown / ``None`` → ``"report"`` (defensive fallback)
 
     Args:
         task_type: The Task.task_type string value.
 
     Returns:
-        The corresponding WorkRecord ``kind`` value.
+        The corresponding WorkRecord ``kind`` value. Always
+        ``"report"`` post-collapse (Task rows are report-only).
     """
     if task_type in REPORT_TASK_TYPES:
         return "report"
-    return "turn"
+    return "report"
 
 
 # ── WorkRecord ─────────────────────────────────────────────────────────────
@@ -163,13 +158,16 @@ class WorkRecord:
 
     * ``work_id`` — stable cross-system UUID4 handle (the same value
       callers use to look the row up).
-    * ``kind`` — ``"turn"`` (user message turn on an instance),
-      ``"report"`` (child completion report riding the same delivery
-      pipeline), or ``"job"`` (job queue). The resolver normalises
-      away which table backs the row. Phase 4 (2026-06-27) split the
-      previous ``"task"`` value into ``"turn"`` vs ``"report"`` based
-      on ``Task.task_type`` so the frontend can distinguish message
-      turns from report-only records (queue badges show only on jobs).
+    * ``kind`` — ``"report"`` (child completion report — the only
+      Task-side kind after Phase 4 partial collapse; report rows
+      ride the same delivery pipeline as the legacy turns) or
+      ``"job"`` (job queue). The resolver normalises away which
+      table backs the row. Phase 4 (2026-07-06) removed the
+      previous ``"turn"`` / ``"task"`` values; message turns are
+      now JobItems (``kind="job"``) by way of the
+      ``job_create`` → JobItem enqueue path. Report Tasks
+      (``process_report`` / ``send_report``) are retained as
+      ``kind="report"`` per AD-6 (RF2).
     * ``status`` — canonical status string (see ``work_status``). Task
       ``"running"`` becomes ``"processing"``; JobItem ``"processing"``
       stays ``"processing"``; both ``"paused"`` map onto ``"paused"``;
@@ -204,7 +202,7 @@ class WorkRecord:
     """
 
     work_id: str
-    kind: str          # "turn" | "report" | "job"
+    kind: str          # "report" | "job" (Phase 4 partial collapse)
     status: str        # canonical status (via work_status.canonicalize_status)
     instance_id: str | None
     project_id: str | None
@@ -774,14 +772,11 @@ class WorkResolverService:
     def resolve_work(self, work_id: str) -> WorkRecord | None:
         """Resolve a ``work_id`` to its :class:`WorkRecord`, or ``None``.
 
-        Lookup order is task-first, then job — this matches the order
-        used by the unified dispatcher (messages create Task rows; only
-        legacy dispatch-queue jobs create JobItem rows). The task-first
-        order means a Task row's ``work_id`` shadows any JobItem row
-        that happens to share the value (which shouldn't happen because
-        ``task.work_id`` is ``unique=True`` and JobItem ``job_id`` is
-        its own UUID4, but defending the order is cheaper than
-        reasoning about UUID collisions).
+        Lookup order is task-first, then job. The Task branch is
+        retained in Phase 4 partial collapse for **report** work_ids
+        (``process_report`` / ``send_report`` Task rows). The JobItem
+        branch handles message-driven work (turns are JobItems
+        post-collapse).
 
         Args:
             work_id: The UUID4 work identifier (Task.work_id or
@@ -845,21 +840,20 @@ class WorkResolverService:
           resulting source-status sets are unioned into one ``IN``
           clause. Tokens are stripped of surrounding whitespace and
           lowercased; duplicates are collapsed.
-        * ``kind`` — Phase 4 (2026-06-27): the filter is now
-          five-valued:
+        * ``kind`` — Phase 4 partial collapse (2026-07-06). The
+          filter is now **two-valued**:
 
-          * ``"job"`` — query only the JobItem table.
-          * ``"turn"`` — query only the Task table, restricted to
-            ``task_type IN ("process_message")``.
+          * ``"job"`` — query only the JobItem table. This is the
+            message-turn path post-collapse: turns are JobItems.
           * ``"report"`` — query only the Task table, restricted to
-            ``task_type IN ("process_report", "send_report")``.
-          * ``"task"`` — query only the Task table, no ``task_type``
-            filter. Backward-compatible alias for the union of
-            ``"turn"`` + ``"report"`` (the previous single-kind
-            behaviour). New clients should prefer the split
-            vocabulary.
-          * ``None`` (default) — query both tables, no
-            ``task_type`` filter.
+            ``task_type IN ("process_report", "send_report")``. The
+            only remaining Task-side kind. Report Task rows are
+            parent-bound and surface on the jober's management view
+            per AD-6 (RF2 review).
+          * ``"turn"`` / ``"task"`` — **removed** in Phase 4. The
+            router rejects these values with HTTP 400. Pass
+            ``kind=None`` (or omit) to return the union of JobItems
+            and report Tasks.
 
         * ``root_only`` — P-A (2026-06-27) root-instance scoping.
           When ``True`` (default), drop any work whose backing
@@ -894,24 +888,18 @@ class WorkResolverService:
           parent relationship and are part of the jober's
           management view.
 
-        * **P-C(i) (2026-06-27) Task-turn deduplication** — the
-          ``job_create`` flow emits BOTH a JobItem (the handle the
-          orchestrator created and holds) AND a Task turn on the
-          same ``instance_id`` (the message that drove the job).
-          The virtual-job surface wants one row per logical work
-          unit, so ``list_work`` drops Task turns whose
-          ``instance_id`` matches a JobItem's. Standalone Task
-          turns (``POST /messages`` / ``job_continue`` with no
-          matching JobItem) stay visible; report tasks
-          (``kind="report"``) are NEVER deduped because they carry
-          the child's completion payload and are not paired with a
-          JobItem. Applied after root-scoping and before the
-          sort/pagination boundary (matches the
-          filter-before-pagination contract from reviewer W1).
+        * **P-C(i) — REMOVED in Phase 4 partial collapse.**
+          The previous Task-turn deduplication that dropped
+          ``process_message`` Tasks whose ``instance_id`` matched a
+          JobItem (the ``job_create`` flow emission pair) is
+          GONE: turns no longer surface as Tasks at all — they
+          are JobItems from the entry point on. Reports
+          (``kind="report"``) were never deduped and that
+          behaviour is preserved.
 
           Single-record lookups via :meth:`resolve_work` are
-          **not** affected — ``list_work`` is the only surface that
-          dedupes.
+          unaffected by Phase 4 (the Task branch still resolves
+          report work_ids).
 
         Sort order is ``created_at DESC`` across the merged result.
         JobItem ``created_at`` is a string and Task ``created_at``
@@ -932,8 +920,10 @@ class WorkResolverService:
                 ``GET /api/jobs`` behaviour — each token is
                 independently translated to source statuses and
                 unioned.
-            kind: Optional kind filter (``"job"``, ``"turn"``,
-                ``"report"``, ``"task"``).
+            kind: Optional kind filter (``"job"`` or
+                ``"report"``). The legacy ``"turn"`` / ``"task"``
+                values are removed in Phase 4 and rejected by the
+                router.
             root_only: When ``True`` (default), drop work whose
                 backing instance has a non-null ``parent_id``.
                 ``False`` returns the union of root + child work
@@ -993,29 +983,26 @@ class WorkResolverService:
         records: list[WorkRecord] = []
 
         # Translate kind filter into per-table predicates.
-        # ``"job"`` excludes the Task side, ``"task"``/``"turn"``/
-        # ``"report"`` exclude the JobItem side, ``None`` includes
-        # both. ``"task"`` is the backward-compat alias meaning
-        # "all task rows" (turn + report).
-        query_tasks_table = kind != "job"
-        query_jobs_table = kind != "task" and kind != "turn" and kind != "report"
-        # ``task_postfilter`` is set inside ``query_tasks_table`` when the
-        # Task DB fetch is broadened to include ``completed`` (so the
-        # active-orchestration promotion can flip eligible rows). It is
-        # re-applied in Python AFTER the promotion. Initialised here so
-        # it is in scope for the post-promotion filter regardless of
-        # which table branch ran.
-        task_postfilter: set[str] | None = None
+        # Phase 4 partial collapse (2026-07-06): the only valid kind
+        # values are ``"job"`` / ``"report"`` (and ``None`` for the
+        # union). ``"turn"`` / ``"task"`` are rejected by the router
+        # and should never reach this method; we still defend against
+        # them by mapping them to "no records" so a buggy caller does
+        # not silently fall back to the union.
+        #
+        # ``"job"`` excludes the Task side entirely; ``"report"``
+        # excludes the JobItem side. ``None`` queries both.
+        query_tasks_table = kind is None or kind == "report"
+        query_jobs_table = kind is None or kind == "job"
 
         # Map kind filter to a task_type set for the Task SELECT.
-        # ``None`` means no task_type filter (query all task rows).
-        task_type_filter: set[str] | None = None
-        if kind == "turn":
-            task_type_filter = set(TURN_TASK_TYPES)
-        elif kind == "report":
-            task_type_filter = set(REPORT_TASK_TYPES)
-        elif kind == "task":
-            task_type_filter = None  # backward-compat: all task rows
+        # Phase 4 partial collapse: the Task query is ALWAYS report-only.
+        # ``kind="report"`` filters to report task types; ``kind=None``
+        # (union path) returns JobItems + all report Tasks but never
+        # process_message Tasks (which are now JobItems). Router
+        # rejects ``kind="turn"`` / ``kind="task"`` with HTTP 400; if
+        # they reach here defensively, no Task rows match them anyway.
+        task_type_filter: set[str] = set(REPORT_TASK_TYPES)
 
         if query_tasks_table:
             # Task table has no ``project_id`` column — the filter is
@@ -1029,34 +1016,23 @@ class WorkResolverService:
             # round-trip to evaluate the parent_id guard. The lookup
             # is reused by ``_task_to_record`` via the optional
             # ``instance=`` parameter.
-            # Broaden the Task DB fetch when "processing" is requested
-            # to ALSO include ``completed`` rows: the
-            # active-orchestration promotion (applied later, after
-            # instance lookup) flips eligible completed turns on a
-            # ``running`` / ``waiting_children`` instance to
-            # ``processing``. Without broadening, those rows are
-            # filtered out at SQL level before the promotion can run,
-            # so a single-status ``list_work(status="processing")``
-            # would miss in-flight multi-turn work. The original
-            # status filter is re-applied in Python after the
-            # promotion (see ``_task_status_postfilter`` below).
-            db_task_statuses = source_statuses
-            if (
-                source_statuses is not None
-                and "processing" in canonical_statuses
-            ):
-                db_task_statuses = set(source_statuses) | {"completed"}
-                task_postfilter = source_statuses
-
-            tasks = self._query_tasks(instance_id, db_task_statuses, task_type_filter)
+            #
+            # Phase 4 partial collapse: the previous Task fetch
+            # broadening (include ``completed`` so the
+            # active-orchestration promotion could flip eligible rows
+            # to ``processing``) is GONE — promotion is deleted and
+            # turns are JobItems, so the broadened fetch is no longer
+            # needed. The DB Task fetch now applies the source-status
+            # filter verbatim.
+            tasks = self._query_tasks(instance_id, source_statuses, task_type_filter)
             for task in tasks:
                 instance = self._lookup_instance(task.instance_id)
                 # Reviewer S2: report tasks are parent-bound (their
                 # ``Task.instance_id`` is set to the ROOT instance by
                 # ``child_reports.py:649-656``), so this guard only
-                # excludes child-instance ``process_message`` turns —
-                # the child's private execution rows. Reports stay
-                # visible under ``root_only=True``.
+                # excludes child-instance ``process_report`` Tasks —
+                # but in practice reports are always parent-bound so
+                # they always survive ``root_only=True``.
                 if root_only and instance is not None and instance.parent_id:
                     continue
                 record = self._task_to_record(task, instance=instance)
@@ -1103,155 +1079,37 @@ class WorkResolverService:
                     for j in jobs
                 )
 
-        # Bug F1 fix (Phase 1 of defer-seam bugfix, 2026-06-30): Task-turn
-        # deduplication is now keyed on ``(instance_id, message_id)``
-        # tuples — NOT just ``instance_id``. The pre-F1 instance-only
-        # key caused a standalone Task turn (e.g. ``POST /messages`` on
-        # an instance that also has a JobItem) to be incorrectly
-        # dropped because the JobItem was already shadowing the
-        # ``instance_id`` even though the Task turn belonged to a
-        # different message.
+        # Phase 4 partial collapse (2026-07-06): the previous
+        # Task-turn deduplication, F10 status-drift warning, and
+        # active-orchestration status promotion are ALL removed.
+        # Turns are no longer Task rows (they are JobItems from the
+        # entry point on), so:
         #
-        # The new dedup set is built from JobItem records as a set of
-        # ``(instance_id, message_id)`` tuples — ``message_id`` is
-        # sourced from ``job.job_metadata['message_id']`` (stamped by
-        # ``JobRepository.stamp_message_id`` at the end of the
-        # ``job_create`` enqueue flow). A Task turn is suppressed ONLY
-        # if its ``(instance_id, message_id)`` tuple matches a tuple
-        # already in the set AND its ``message_id`` is not None
-        # (a ``message_id=None`` Task can never match because we
-        # never insert ``None`` tuples into the JobItem-side set —
-        # see the ``message_id is not None`` guard in the loop).
-        # This matches the F1 spec: "Task turns with ``message_id=None``
-        # are NEVER suppressed (they can't match)".
+        # * **P-C(i) dedup** — gone. JobItems now surface as their
+        #   own ``kind="job"`` records; there are no
+        #   ``kind="turn"`` Task rows to suppress.
+        # * **F10 drift warning** — gone. The previous code logged
+        #   when a dropped turn's status disagreed with the
+        #   shadowing JobItem's status. With no dedup there is no
+        #   drift to detect; JobFeedbackObserver still keeps
+        #   JobItem statuses authoritative (via
+        #   ``_job_to_record``), but no warning is needed because
+        #   the surface now shows only one row per logical work
+        #   unit by construction.
+        # * **Active-orchestration promotion** — gone. JobItem
+        #   ``kind="job"`` records source their status from the
+        #   joined Instance row in ``_job_to_record`` (Phase 1,
+        #   Job as Queue Proxy). Report Tasks (``kind="report"``)
+        #   keep their own ``Task.status`` (they are
+        #   parent-bound delivery records, not active
+        #   orchestrations), so promotion is unnecessary for them
+        #   too.
         #
-        # Pre-F1 behaviour for the report-tasks-never-deduped contract
-        # is preserved: only ``kind="turn"`` rows are eligible for
-        # dedup, ``kind="job"`` / ``kind="report"`` rows stay
-        # unconditionally.
-        #
-        # The status-drift warning (JobFeedbackObserver should keep
-        # the JobItem status in sync with the driving Task turn) is
-        # also preserved — we still compare canonical status strings
-        # so the warning fires on the same condition the pre-F1 code
-        # detected.
-        #
-        # Applied AFTER root-scoping (so we don't waste effort
-        # deduping child rows that the ``root_only`` guard already
-        # filtered) and BEFORE the sort/pagination boundary (so a
-        # future ``limit=20`` cannot drop a JobItem and surface its
-        # ghost Task turn instead — matching the
-        # filter-before-pagination contract reviewer W1 nailed down
-        # for P-A).
-        if records:
-            job_status_by_pair: dict[tuple[str, str | None], str] = {}
-            for r in records:
-                if r.kind == "job" and r.instance_id is not None:
-                    # Only insert tuples where the JobItem carries a
-                    # non-None ``message_id`` — a tuple with a None
-                    # second component could never be matched by a
-                    # Task turn (whose ``message_id`` is always
-                    # either a real UUID or None, and the F1 rule
-                    # forbids matching ``None``-message_id Tasks at
-                    # all). Skipping the insert here is purely an
-                    # optimisation; the same result obtains if we
-                    # insert and then never match against it.
-                    if r.message_id is not None:
-                        job_status_by_pair[(r.instance_id, r.message_id)] = r.status
-            if job_status_by_pair:
-                kept: list[WorkRecord] = []
-                for r in records:
-                    # Only Task turns are eligible for dedup. Jobs
-                    # and report tasks are kept unconditionally.
-                    # ``message_id is not None`` is the F1 explicit
-                    # rule: Task turns with None message_id are
-                    # NEVER suppressed.
-                    if (
-                        r.kind == "turn"
-                        and r.instance_id is not None
-                        and r.message_id is not None
-                        and (r.instance_id, r.message_id) in job_status_by_pair
-                    ):
-                        # Status drift guard: the JobFeedbackObserver
-                        # is supposed to keep the JobItem status in
-                        # sync with the driving Task turn. If they
-                        # disagree, log a warning so an operator can
-                        # investigate — the dedup itself still
-                        # proceeds (JobItem wins) so the user-facing
-                        # surface stays consistent.
-                        job_status = job_status_by_pair[(r.instance_id, r.message_id)]
-                        if r.status != job_status:
-                            logger.warning(
-                                "work_resolver: status drift detected for "
-                                "instance_id=%s message_id=%s: JobItem status=%s, "
-                                "Task status=%s. "
-                                "JobFeedbackObserver should have synced these.",
-                                r.instance_id,
-                                r.message_id,
-                                job_status,
-                                r.status,
-                            )
-                        continue
-                    kept.append(r)
-                records = kept
-
-        # Active-orchestration status (Option 3): a Task row models ONE
-        # graph turn — it flips to ``completed`` the instant that turn
-        # ends, even when the instance is still orchestrating children
-        # (``waiting_children`` / ``running``). For each NON-terminal
-        # instance, promote its NEWEST Task record to the instance's
-        # orchestration status so ``job_list(statuses=["processing"])``
-        # surfaces in-flight work (e.g. a ``job_continue`` continuation
-        # whose turn is done while children resolve). Older completed
-        # turns keep their own per-turn status, preserving history.
-        # JobItem records already source status from the instance
-        # (``_job_to_record``), so only Task records (turn/report) need
-        # this promotion.
-        task_records = [r for r in records if r.kind in ("turn", "report")]
-        if task_records:
-            newest_by_instance: dict[str, WorkRecord] = {}
-            for r in task_records:
-                if not r.instance_id:
-                    continue
-                cur = newest_by_instance.get(r.instance_id)
-                if (
-                    cur is None
-                    or _normalize_sort_key(r.created_at)
-                    > _normalize_sort_key(cur.created_at)
-                ):
-                    newest_by_instance[r.instance_id] = r
-            for inst_id, rec in newest_by_instance.items():
-                inst = self._lookup_instance(inst_id)
-                if inst is None:
-                    continue
-                # Promote ONLY when the newest Task turn is itself
-                # ``completed`` (its single graph turn is done) but the
-                # instance is actively orchestrating children
-                # (``running`` / ``waiting_children``). Pending / running
-                # / failed turns keep their own status. ``idle`` /
-                # ``waiting`` / ``queued`` are quiescent (work done,
-                # awaiting input) — their newest turn stays
-                # ``completed``. This is exactly the ``job_continue``
-                # continuation case (turn done, children resolving).
-                if rec.status != "completed":
-                    continue
-                if inst.status not in _ACTIVE_ORCHESTRATION_STATUSES:
-                    continue
-                rec.status = canonicalize_status(inst.status)
-
-        # Re-apply the original Task status filter AFTER promotion. The
-        # DB fetch was broadened to include ``completed`` (so promotion
-        # could flip eligible rows to ``processing``); rows that were
-        # NOT promoted (older turns / quiescent instances) must now be
-        # dropped so the caller's filter is honoured. Only Task records
-        # (turn/report) are affected — JobItem rows were DB-filtered
-        # correctly on their own and need no post-filter.
-        if task_postfilter is not None:
-            allowed = {canonicalize_status(s) for s in task_postfilter}
-            records = [
-                r for r in records
-                if r.kind not in ("turn", "report") or r.status in allowed
-            ]
+        # The single-record ``resolve_work`` path is unaffected by
+        # any of these deletions — Task-side record conversion in
+        # ``_task_to_record`` still works for any
+        # ``process_report`` / ``send_report`` row a caller
+        # resolves directly.
 
         # Sort newest-first. Use ``_normalize_sort_key`` to coerce
         # every key to tz-aware UTC — Task rows come back from SQLite

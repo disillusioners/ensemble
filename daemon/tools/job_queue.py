@@ -488,12 +488,16 @@ def create_job_tools(
             if record is None:
                 return f"ERROR: Could not cancel job {job_id}. Job not found."
 
-            # Phase 4: the resolver never emits ``kind="task"`` — Task
-            # rows are split into ``kind="turn"`` (process_message)
-            # or ``kind="report"`` (process_report / send_report).
-            # Both Task kinds need the cooperative ``request_cancel``
-            # path; only ``kind="job"`` (JobItem rows) goes through
-            # the instant ``cancel_job`` path.
+            # Phase 4 partial collapse (2026-07-06): the previous
+            # ``kind="turn"`` (process_message) / ``kind="report"``
+            # (process_report / send_report) split on Task rows is
+            # gone — ``kind="turn"`` Tasks no longer exist (turns are
+            # JobItems from the entry point on). The only remaining
+            # Task-side kind is ``"report"``. Both ``kind="report"``
+            # (Task) and ``kind="job"`` (JobItem) still go through the
+            # cooperative ``request_cancel`` vs instant ``cancel_job``
+            # split as before; only ``kind="job"`` (JobItem rows) goes
+            # through the instant ``cancel_job`` path.
             if record.kind != "job":
                 # Cooperative task cancel: look up the Task by
                 # ``work_id`` and call ``task_repo.request_cancel``

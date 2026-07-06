@@ -134,12 +134,12 @@ describe('WorkService', () => {
       service.getWork({
         status: 'pending',
         project_id: 'project-123',
-        kind: 'turn'
+        kind: 'report'
       }).pipe().subscribe(() => {});
       const qs = service.lastQueryString;
       expect(qs).toContain('status=pending');
       expect(qs).toContain('project_id=project-123');
-      expect(qs).toContain('kind=turn');
+      expect(qs).toContain('kind=report');
     });
   });
 

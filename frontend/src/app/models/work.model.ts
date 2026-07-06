@@ -1,29 +1,29 @@
-// Work Models — Virtual Job Management Surface (Phase 4)
+// Work Models — Virtual Job Management Surface (Phase 4 partial collapse)
 //
-// The Work type is the unified view-model that collapses three distinct
+// The Work type is the unified view-model that collapses the two remaining
 // backend concepts onto one shape:
 //
 // * ``job`` — queued work backed by the ``job_queue_items`` table
 //   (the "real queue" surface — has a ``queue_id``, lives in the queue
-//   sidebar, shows a queue badge in the card).
-// * ``turn`` — a Task row whose lifecycle is tied to one instance turn
-//   (worker-pool backed, lives in ``task`` table, no queue badge).
+//   sidebar, shows a queue badge in the card). Message turns now surface
+//   here too (Phase 4 partial collapse: turns are JobItems).
 // * ``report`` — a Task row whose payload is a child process report
 //   flowing up to the parent (worker-pool backed, no queue badge).
 //
-// Both turn and report kinds are surfaced ONLY via the kind chip —
-// never via a queue badge — so the UI does not lie about which backing
-// table the row came from. This is the guardrail that keeps the queue
-// metaphor honest: real queues stay real, task rows stay tasks.
+// Post-collapse the only Task-side kind is ``report``. Turn Tasks are
+// gone — message-driven work is JobItems. Both ``job`` and ``report``
+// are surfaced via the kind chip; only ``job`` additionally shows a
+// queue badge. The UI does not lie about which backing table the row
+// came from.
 
 /**
  * The kind of work record.
  *
- * * ``'job'``    — real queued work (queue badge shown).
- * * ``'turn'``   — instance turn task (no queue badge, kind chip only).
+ * * ``'job'``    — real queued work (queue badge shown). Message
+ *   turns are JobItems post-collapse.
  * * ``'report'`` — child process report (no queue badge, kind chip only).
  */
-export type WorkKind = 'job' | 'turn' | 'report';
+export type WorkKind = 'job' | 'report';
 
 /**
  * Unified work record returned by ``GET /api/work``.
@@ -84,8 +84,6 @@ export function getKindColor(kind: WorkKind | undefined | null): string {
   switch (kind) {
     case 'job':
       return '#3B82F6'; // blue-500
-    case 'turn':
-      return '#22C55E'; // green-500
     case 'report':
       return '#7C3AED'; // purple-600
     default:
@@ -102,8 +100,6 @@ export function getKindLabel(kind: WorkKind | undefined | null): string {
   switch (kind) {
     case 'job':
       return 'Job';
-    case 'turn':
-      return 'Turn';
     case 'report':
       return 'Report';
     default:
@@ -112,14 +108,15 @@ export function getKindLabel(kind: WorkKind | undefined | null): string {
 }
 
 /**
- * True if the kind is a task-backed work record (turn or report).
+ * True if the kind is a task-backed work record (report only — Phase 4
+ * partial collapse, 2026-07-06).
  *
  * Task-backed records do NOT show a queue badge — they are surfaced
- * only via the kind chip. This is the guardrail the Phase 4 spec
- * calls out.
+ * only via the kind chip. Post-collapse the only Task-side kind is
+ * ``"report"`` (``"turn"`` is gone — message turns are now JobItems).
  */
 export function isTaskBackedKind(kind: WorkKind | undefined | null): boolean {
-  return kind === 'turn' || kind === 'report';
+  return kind === 'report';
 }
 
 /**
@@ -132,8 +129,6 @@ export function getKindIcon(kind: WorkKind | undefined | null): string {
   switch (kind) {
     case 'job':
       return 'work_outline';
-    case 'turn':
-      return 'forum';
     case 'report':
       return 'description';
     default:

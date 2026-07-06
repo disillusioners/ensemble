@@ -8,12 +8,13 @@ export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
  * WorkKind subset that may appear on a Job record.
  *
  * Only ``'job'`` is meaningful for jobs surfaced through
- * ``JobService``; ``'turn'`` / ``'report'`` are reserved for the
- * unified Work surface so a Job-shaped object synthesised from a
- * ``Work`` record can carry the kind forward without re-typing the
- * ``work.model`` namespace everywhere.
+ * ``JobService``; ``'report'`` is reserved for the unified Work
+ * surface so a Job-shaped object synthesised from a ``Work`` record
+ * can carry the kind forward without re-typing the ``work.model``
+ * namespace everywhere. ``'turn'`` was removed in Phase 4 partial
+ * collapse (2026-07-06) — message turns are now JobItems.
  */
-export type JobWorkKind = 'job' | 'turn' | 'report';
+export type JobWorkKind = 'job' | 'report';
 
 export interface Job {
   job_id: string;
