@@ -122,8 +122,16 @@ def mock_manager():
     mock_config.agents.directory = "/default/agents"
     manager.config = mock_config
     
-    # Mock enqueue_message (async method called by registry)
-    manager.enqueue_message = AsyncMock()
+    # Mock enqueue_message_job (Phase 5 cutover: production calls this async method).
+    # ``enqueue_message`` still exists on the manager for internal-only callers,
+    # but every public/external entry point (registry, send_message tool) now
+    # dispatches through enqueue_message_job.
+    manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+        message_id="msg-test-id",
+        instance_id="instance-123",
+        status="queued",
+        job_id="job-test-id",
+    ))
     
     # Mock spawn_instance_with_mcp
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
@@ -320,11 +328,11 @@ async def test_handle_message_calls_queue_enqueue(conn, mock_manager):
         # Call handle_message
         await registry._handle_message("test-source", msg)
         
-        # Verify enqueue_message was called
-        mock_manager.enqueue_message.assert_called_once()
-        
+        # Verify enqueue_message_job was called
+        mock_manager.enqueue_message_job.assert_called_once()
+
         # Check the call parameters
-        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
+        call_kwargs = mock_manager.enqueue_message_job.call_args.kwargs
         assert call_kwargs["instance_id"] == "instance-123"
         assert call_kwargs["message"] == "Hello world"
         assert call_kwargs["source"] == "test-source:user123"
@@ -353,8 +361,8 @@ async def test_handle_message_checks_duplicate(conn, mock_manager):
     # Verify duplicate check was called
     mock_manager._source_repo.check_and_mark_processed.assert_called_once_with("test-source", "duplicate-msg-id")
     
-    # enqueue_message should NOT be called for duplicates
-    mock_manager.enqueue_message.assert_not_called()
+    # enqueue_message_job should NOT be called for duplicates
+    mock_manager.enqueue_message_job.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -394,9 +402,9 @@ async def test_handle_message_creates_instance_for_new_user(conn, mock_manager):
         # Verify spawn_instance was called (through mapper)
         mock_mapper_instance.get_or_create_instance.assert_called_once()
         
-        # Verify enqueue_message was called with the new instance
-        mock_manager.enqueue_message.assert_called_once()
-        assert mock_manager.enqueue_message.call_args.kwargs["instance_id"] == "new-instance-id"
+        # Verify enqueue_message_job was called with the new instance
+        mock_manager.enqueue_message_job.assert_called_once()
+        assert mock_manager.enqueue_message_job.call_args.kwargs["instance_id"] == "new-instance-id"
 
 
 @pytest.mark.asyncio
