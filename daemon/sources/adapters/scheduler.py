@@ -80,13 +80,12 @@ class SchedulerAdapter(MessageSourceAdapter):
                 immediate execution.
             source_repo: Optional SourceRepository for instance mode run counter tracking.
             instance_repo: Optional InstanceRepository for checking instance status in reuse_instance mode.
-            manager: Optional InstanceManager (Phase 3). Required for the
-                ``message_jobs_enabled`` inline dispatch path
-                (:meth:`_route_via_job_queue`). When None, the flag is
-                treated as OFF and the legacy TASK-job poll-loop path is
-                used unconditionally — preserving byte-identical
-                pre-Phase-3 behavior for any test/integration that does
-                not wire up a manager.
+            manager: Optional InstanceManager (Phase 5). Required for the
+                inline message-Job dispatch path
+                (:meth:`_route_via_job_queue`). When None, the inline
+                path raises immediately — the legacy TASK-job poll-loop
+                path through :meth:`JobQueueService.enqueue` was removed
+                in Phase 5; messages must always be JobItems now.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
@@ -683,8 +682,11 @@ Original scheduled task:
                     metadata["scheduler"]["schedule_type"] = self._schedule_type
                     metadata["scheduler"]["run_at"] = self._run_at.isoformat()
             
-            # Route through JobQueueService if project_id configured (scheduled only)
-            if trigger_type == "scheduled" and self._project_id and self._job_queue_service:
+            # Route through inline message-Job dispatch (scheduled only).
+            # Phase 5 (cutover): the inline path is the only path; the
+            # legacy TASK-job poll-loop was removed. ``_project_id`` is
+            # still required (it scopes the InstanceMapper lookup).
+            if trigger_type == "scheduled" and self._project_id:
                 await self._route_via_job_queue(execution_id, formatted_message, metadata)
             else:
                 await self._execute_immediate(execution_id, formatted_message, metadata)
@@ -712,17 +714,16 @@ Original scheduled task:
                 self._execution_semaphore.release()
 
     async def _route_via_job_queue(self, execution_id: str, formatted_message: str, metadata: dict) -> None:
-        """Route execution through job queue (scheduled triggers only).
+        """Route scheduled execution through the inline message-Job path.
 
-        Phase 3 (2026-07-06): when ``message_jobs_enabled`` is ON, route
-        through the flag-checked dispatcher — get/create the instance
-        inline via :class:`InstanceMapper` then enqueue the message-Job
-        via :meth:`InstanceManager._enqueue_message_with_flag`. This
-        creates a ``JobItem`` mirror alongside the ``Task`` row and
-        dispatches inline (no poll-loop wait). Flag OFF keeps the
-        legacy TASK-job poll-loop path through
-        :meth:`JobQueueService.enqueue` — byte-identical to the
-        pre-Phase-3 baseline.
+        Phase 5 (cutover): the inline path is the ONLY path. Get/create
+        the instance via :class:`InstanceMapper`, then enqueue the
+        message-Job via :meth:`InstanceManager.enqueue_message_job`.
+        This creates a ``JobItem`` mirror alongside the ``Task`` row
+        and dispatches inline (no poll-loop wait). The legacy TASK-job
+        poll-loop path through :meth:`JobQueueService.enqueue` was
+        removed in Phase 5 — messages must always carry a JobItem now
+        so the public facade can read both sides of the union.
         """
         try:
             agent_id = self._agent
@@ -735,87 +736,55 @@ Original scheduled task:
             if resolved_agent_id:
                 agent_id = resolved_agent_id
 
-            # Phase 3: flag-checked dispatch. Inline path requires the
-            # instance to already exist (or be created) — see plan
-            # Phase 3 lines 69-73.
-            if self._manager is not None and self._manager.config.job_system.message_jobs_enabled:
-                # Inline path: get/create instance now, then enqueue
-                # the message-Job directly. Reuses the same mapper
-                # pattern as the external-source chokepoint so the
-                # mapping lifecycle (mapping check, stale-mapping
-                # recovery, force_new handling) is identical.
-                from daemon.sources.mapper import InstanceMapper
+            assert self._manager is not None, (
+                "InstanceManager is required for the inline message-Job dispatch path"
+            )
 
-                # self._source_repo is SQLModelSourceRepository at
-                # runtime (the constructor accepts the abstract
-                # SourceRepository type for testability); cast through
-                # type ignore since the LSP can't narrow the union.
-                mapper = InstanceMapper(self._source_repo, self._manager)  # type: ignore[arg-type]
-                force_new = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
-                instance_id = await mapper.get_or_create_instance(
-                    source_id=self.source_id,
-                    external_user_id=self.source_id,
-                    agent_id=agent_id,
-                    force_new=force_new,
-                )
+            # Phase 5 (cutover): inline path is the only path. Reuses the
+            # same mapper pattern as the external-source chokepoint so
+            # the mapping lifecycle (mapping check, stale-mapping
+            # recovery, force_new handling) is identical.
+            from daemon.sources.mapper import InstanceMapper
 
-                result = await self._manager._enqueue_message_with_flag(
-                    instance_id=instance_id,
-                    message=formatted_message,
-                    source="scheduler",
-                    priority=self._priority,
-                    images=None,  # scheduler does not currently pass images
-                    metadata=metadata,
-                )
+            # self._source_repo is SQLModelSourceRepository at
+            # runtime (the constructor accepts the abstract
+            # SourceRepository type for testability); cast through
+            # type ignore since the LSP can't narrow the union.
+            mapper = InstanceMapper(self._source_repo, self._manager)  # type: ignore[arg-type]
+            force_new = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
+            instance_id = await mapper.get_or_create_instance(
+                source_id=self.source_id,
+                external_user_id=self.source_id,
+                agent_id=agent_id,
+                force_new=force_new,
+            )
 
-                logger.info(
-                    f"Scheduled job enqueued (inline): source={self.source_id}, "
-                    f"execution_id={execution_id}, instance_id={instance_id[:8]}..., "
-                    f"job_id={result.job_id}, message_id={result.message_id[:8] if result.message_id else None}"
-                )
+            result = await self._manager.enqueue_message_job(
+                instance_id=instance_id,
+                message=formatted_message,
+                source="scheduler",
+                priority=self._priority,
+                images=None,  # scheduler does not currently pass images
+                metadata=metadata,
+            )
 
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status=ExecutionStatus.QUEUED.value,
-                            instance_id=instance_id,
-                            error_message=None,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
-            else:
-                # Legacy poll-loop path (Phase 3, flag OFF or no
-                # manager wired up — both cases preserve the
-                # byte-identical pre-Phase-3 baseline): TASK-type
-                # JobItem picked up by the JobProcessor.
-                job_item = await self._job_queue_service.enqueue(
-                    agent_id=agent_id,
-                    message=formatted_message,
-                    source="scheduler",
-                    project_id=self._project_id,
-                    priority=self._priority,
-                    metadata=metadata,
-                )
+            logger.info(
+                f"Scheduled job enqueued (inline): source={self.source_id}, "
+                f"execution_id={execution_id}, instance_id={instance_id[:8]}..., "
+                f"job_id={result.job_id}, message_id={result.message_id[:8] if result.message_id else None}"
+            )
 
-                logger.info(
-                    f"Scheduled job queued: source={self.source_id}, "
-                    f"execution_id={execution_id}, job_id={job_item.job_id}, "
-                    f"admission_state={job_item.admission_state}"
-                )
-
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status=ExecutionStatus.QUEUED.value,
-                            instance_id=job_item.instance_id,
-                            error_message=None,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
+            if self._execution_callback:
+                try:
+                    self._execution_callback(
+                        execution_id=execution_id,
+                        schedule_id=self.source_id,
+                        status=ExecutionStatus.QUEUED.value,
+                        instance_id=instance_id,
+                        error_message=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"Execution callback error: {e}")
         except Exception as e:
             logger.error(f"Failed to queue scheduled job: {execution_id}, error={e}", exc_info=True)
             # Don't call callback here - let _execute_run's outer exception handler

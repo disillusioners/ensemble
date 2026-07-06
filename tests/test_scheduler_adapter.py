@@ -862,42 +862,56 @@ class TestSemaphoreTimeout:
 
 
 # ==================== TestJobQueueRouting ====================
+# Phase 5 (cutover): scheduled triggers with project_id route through the
+# inline message-Job path (``manager.enqueue_message_job``), NOT through
+# ``JobQueueService.enqueue``. The legacy poll-loop path was removed.
 
 
 class TestJobQueueRouting:
-    """Tests for job queue routing behavior."""
+    """Tests for inline message-Job routing (Phase 5 cutover)."""
 
     @pytest.mark.asyncio
-    async def test_scheduled_trigger_routes_through_job_queue(self, mock_on_message, mock_execution_callback):
-        """Test that scheduled triggers with project_id use job queue."""
-        mock_jqs = AsyncMock()
-        mock_jqs.enqueue = AsyncMock(return_value=MagicMock(
+    async def test_scheduled_trigger_routes_through_inline_message_job(
+        self, mock_on_message, mock_execution_callback
+    ):
+        """Test that scheduled triggers with project_id use the inline message-Job path."""
+        # Mock manager with the inline message-Job entry point.
+        mock_manager = AsyncMock()
+        mock_manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
             job_id="test-job-123",
-            instance_id="test-instance-456",
-            status="pending"
+            message_id="test-msg-456",
+            instance_id="test-instance-789",
+            status="queued",
         ))
-        
+        # Mapper calls spawn_instance_with_mcp when no mapping exists.
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-789")
+
+        # Mock source_repo for InstanceMapper.
+        mock_source_repo = MagicMock()
+        mock_source_repo.get_instance_mapping = MagicMock(return_value=None)
+
         config = make_config("test-jq-scheduled", {
             "interval_seconds": 3600,
             "project_id": "test-project",
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(
-            config, mock_on_message, mock_execution_callback, job_queue_service=mock_jqs
+            config, mock_on_message, mock_execution_callback, manager=mock_manager,
+            source_repo=mock_source_repo,
         )
         await adapter.start()
-        
+
         # Trigger scheduled execution
         await adapter._emit_scheduled_message()
-        
+
         # Give time for async operations
         await asyncio.sleep(0.2)
-        
-        # Verify job queue was called
-        mock_jqs.enqueue.assert_called_once()
-        
+
+        # Verify inline message-Job path was called
+        mock_manager.enqueue_message_job.assert_called_once()
+
         await adapter.stop()
 
     @pytest.mark.asyncio
@@ -908,89 +922,96 @@ class TestJobQueueRouting:
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(config, mock_on_message, mock_execution_callback)
         await adapter.start()
-        
+
         # Trigger scheduled execution
         await adapter._emit_scheduled_message()
-        
+
         # Give time for async operations
         await asyncio.sleep(0.2)
-        
+
         # Verify on_message was called (immediate execution)
         mock_on_message.assert_called_once()
-        
+
         await adapter.stop()
 
     @pytest.mark.asyncio
     async def test_manual_trigger_always_immediate(self, mock_on_message, mock_execution_callback):
         """Test that manual triggers always use immediate execution even with project_id."""
-        mock_jqs = AsyncMock()
-        mock_jqs.enqueue = AsyncMock(return_value=MagicMock(
+        mock_manager = AsyncMock()
+        mock_manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
             job_id="test-job-123",
-            instance_id="test-instance-456",
-            status="pending"
+            message_id="test-msg-456",
+            instance_id="test-instance-789",
+            status="queued",
         ))
-        
+        mock_source_repo = MagicMock()
+
         config = make_config("test-jq-manual", {
             "interval_seconds": 3600,
             "project_id": "test-project",
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(
-            config, mock_on_message, mock_execution_callback, job_queue_service=mock_jqs
+            config, mock_on_message, mock_execution_callback, manager=mock_manager,
+            source_repo=mock_source_repo,
         )
         await adapter.start()
-        
+
         # Manual trigger
         await adapter.manual_trigger()
-        
+
         # Give time for async operations
         await asyncio.sleep(0.2)
-        
-        # Verify job queue was NOT called (manual always immediate)
-        mock_jqs.enqueue.assert_not_called()
-        
+
+        # Verify inline message-Job was NOT called (manual always immediate)
+        mock_manager.enqueue_message_job.assert_not_called()
+
         # Verify on_message was called (immediate execution)
         mock_on_message.assert_called_once()
-        
+
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_job_queue_enqueue_failure_handled(self, mock_on_message, mock_execution_callback):
-        """Test that job queue enqueue failure is handled gracefully."""
-        mock_jqs = AsyncMock()
-        mock_jqs.enqueue = AsyncMock(side_effect=Exception("Queue service unavailable"))
-        
+    async def test_inline_message_job_failure_handled(self, mock_on_message, mock_execution_callback):
+        """Test that inline message-Job failure is handled gracefully."""
+        mock_manager = AsyncMock()
+        mock_manager.enqueue_message_job = AsyncMock(side_effect=Exception("Queue service unavailable"))
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-fail")
+        mock_source_repo = MagicMock()
+        mock_source_repo.get_instance_mapping = MagicMock(return_value=None)
+
         config = make_config("test-jq-fail", {
             "interval_seconds": 3600,
             "project_id": "test-project",
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(
-            config, mock_on_message, mock_execution_callback, job_queue_service=mock_jqs
+            config, mock_on_message, mock_execution_callback, manager=mock_manager,
+            source_repo=mock_source_repo,
         )
         await adapter.start()
-        
+
         # Trigger scheduled execution
         await adapter._emit_scheduled_message()
-        
+
         # Give time for async operations
         await asyncio.sleep(0.2)
-        
+
         # Verify callback was called with 'failed' status
         failed_calls = [
             call for call in mock_execution_callback.call_args_list
             if call.kwargs.get("status") == "failed"
         ]
-        
+
         assert len(failed_calls) > 0, "Expected at least one failed callback"
-        
+
         await adapter.stop()
 
 
@@ -1469,27 +1490,31 @@ class TestErrorPaths:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_queue_enqueue_failure_recorded(self, mock_on_message, mock_execution_callback):
-        """Test that queue enqueue failure is properly recorded."""
-        mock_jqs = AsyncMock()
-        mock_jqs.enqueue = AsyncMock(side_effect=ValueError("queue full"))
-        
+    async def test_inline_message_job_failure_recorded(self, mock_on_message, mock_execution_callback):
+        """Test that inline message-Job failure is properly recorded."""
+        mock_manager = AsyncMock()
+        mock_manager.enqueue_message_job = AsyncMock(side_effect=ValueError("queue full"))
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-record")
+        mock_source_repo = MagicMock()
+        mock_source_repo.get_instance_mapping = MagicMock(return_value=None)
+
         config = make_config("test-queue-fail", {
             "interval_seconds": 3600,
             "project_id": "test-project",
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(
-            config, mock_on_message, mock_execution_callback, job_queue_service=mock_jqs
+            config, mock_on_message, mock_execution_callback, manager=mock_manager,
+            source_repo=mock_source_repo,
         )
         await adapter.start()
-        
+
         # Trigger scheduled execution
         await adapter._emit_scheduled_message()
         await asyncio.sleep(0.2)
-        
+
         # Verify callback was called with 'failed' status and correct error
         failed_calls = [
             call for call in mock_execution_callback.call_args_list
@@ -1497,14 +1522,14 @@ class TestErrorPaths:
         ]
 
         assert len(failed_calls) > 0, "Expected at least one failed callback"
-        
+
         # Check error message contains "queue full"
         failed_call = failed_calls[0]
         error_msg = failed_call.kwargs.get("error_message")
-        
+
         assert error_msg is not None
         assert "queue" in error_msg.lower() or "full" in error_msg.lower()
-        
+
         await adapter.stop()
 
     @pytest.mark.asyncio

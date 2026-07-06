@@ -381,12 +381,10 @@ class Worker(threading.Thread):
         milliseconds under normal load; we cap at 5s to bound the
         worker-thread stall when the main loop is congested.
 
-        ``InvalidTransitionError`` (JobItem not in ``queued`` —
-        already finalized, or the legacy ``message_jobs_enabled``
-        path where no JobItem exists) is the common path; logged at
-        debug and swallowed — the activation is informational
-        mirroring, the Task row alone is sufficient to process the
-        message.
+        ``InvalidTransitionError`` (JobItem not in ``queued`` — already
+        finalized) is the common path; logged at debug and swallowed —
+        the activation is informational mirroring, the Task row alone
+        is sufficient to process the message.
 
         Args:
             work_id: UUID4 of the Task row — same UUID as the JobItem's

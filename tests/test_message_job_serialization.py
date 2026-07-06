@@ -132,8 +132,9 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._repository = job_repository
 
-    # Config with feature flag — default OFF; tests override per-case.
-    manager.config = Config(job_system=JobSystemConfig(message_jobs_enabled=False))
+    # Config -- Phase 5 cutover: ``message_jobs_enabled`` was removed,
+    # there is only one public path now.
+    manager.config = Config(job_system=JobSystemConfig())
 
     # Title generation fires via MainLoopBridge; we'll patch it out.
     manager._generate_and_broadcast_title = AsyncMock()
@@ -281,12 +282,10 @@ class TestTwoMessageJobsSerialize:
         job_repository,
         task_repository,
     ):
-        # ── Flag ON ──
+        # ── Phase 5: every public message is a JobItem ──
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
-
         messaging_service = InstanceMessagingService(
             manager=manager,
             cancellation_service=MagicMock(
@@ -481,8 +480,6 @@ class TestEagerActivationOnSqlite:
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
-
         messaging_service = InstanceMessagingService(
             manager=manager,
             cancellation_service=MagicMock(
@@ -603,8 +600,6 @@ class TestFailedMessageJobGoesToDone:
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
-
         messaging_service = InstanceMessagingService(
             manager=manager,
             cancellation_service=MagicMock(

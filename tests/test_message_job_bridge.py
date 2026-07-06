@@ -1,23 +1,23 @@
-"""Tests for the JobItem <-> Task message bridge (Phase 1, Task 5).
+"""Tests for the JobItem <-> Task message bridge (Phase 5 cutover).
 
-The Job-as-Front-Primitive POC creates a JobItem mirror
+After Phase 5, every public message creates a JobItem mirror
 ``(job_type='message', job_id=task.work_id, max_retries=0)`` alongside
-the existing Task + MessageQueue rows when the ``message_jobs_enabled``
-feature flag is ON.
+the existing Task + MessageQueue rows. The ``message_jobs_enabled``
+feature flag was removed; there is only one public path now.
 
 This file is the Phase 1 deliverable tests (per
 ``.agents/shared/planning/job-as-front-primitive/phase1-plan.md``
-Task 8):
+Task 8), updated for the cutover:
 
   (a) atomic creation -- work_id == job_id
   (b) message_id stamped on JobItem
   (c) observer finalizes queued message-JobItem to done (PG trigger failure)
-  (d) flag-OFF path creates no JobItem
+  (d) raw ``enqueue_message()`` path (internal-only) creates no JobItem
   (e) max_retries=0 on message JobItems
 
 Run with::
 
-    pytest tests/test_message_job_bridge.py -v
+  pytest tests/test_message_job_bridge.py -v
 """
 
 from __future__ import annotations
@@ -134,8 +134,9 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._repository = job_repository
 
-    # Config with feature flag -- default OFF; tests override per-case.
-    manager.config = Config(job_system=JobSystemConfig(message_jobs_enabled=False))
+    # Config -- Phase 5 cutover: ``message_jobs_enabled`` was removed,
+    # there is only one public path now.
+    manager.config = Config(job_system=JobSystemConfig())
 
     # Title generation fires via MainLoopBridge; we'll patch it out.
     manager._generate_and_broadcast_title = AsyncMock()
@@ -262,21 +263,19 @@ def _load_message_job_items(engine) -> list[JobItem]:
 
 
 class TestAtomicCreationWithFlagOn:
-    """``message_jobs_enabled = True`` => ``enqueue_message_job()`` creates
-    a JobItem mirror with ``job_type='message'`` alongside the Task +
-    ``MessageQueue`` rows in one call. The JobItem's ``job_id`` equals
-    the Task's ``work_id`` (same UUID4 string) -- the linkage contract.
+    """``enqueue_message_job()`` creates a JobItem mirror with
+    ``job_type='message'`` alongside the Task + ``MessageQueue`` rows
+    in one call. The JobItem's ``job_id`` equals the Task's
+    ``work_id`` (same UUID4 string) -- the linkage contract.
     """
 
     @pytest.mark.asyncio
     async def test_a_work_id_equals_job_id(
         self, engine, instance_repository, write_guard, job_repository
     ):
-        # Flag ON (mirrors what the router reads from config).
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
 
         messaging_service = InstanceMessagingService(
             manager=manager,
@@ -363,7 +362,6 @@ class TestMessageIdStamped:
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
 
         messaging_service = InstanceMessagingService(
             manager=manager,
@@ -447,11 +445,10 @@ class TestObserverFinalizesQueuedJobItem:
         job_repository,
         task_repository,
     ):
-        # ── Flag ON, enqueue_message_job ──
+        # ── Phase 5 cutover: every public message is a JobItem ──
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
 
         messaging_service = InstanceMessagingService(
             manager=manager,
@@ -556,25 +553,26 @@ class TestObserverFinalizesQueuedJobItem:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Test (d): flag-OFF path creates no JobItem
+# Test (d): internal-only ``enqueue_message()`` path creates no JobItem
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestFlagOffNoJobItem:
-    """``message_jobs_enabled = False`` => ``enqueue_message()`` does NOT
-    create a JobItem row. Task + ``MessageQueue`` rows ARE created --
-    the legacy D13 single-writer behaviour is preserved byte-identically.
+class TestInternalEnqueueMessageNoJobItem:
+    """``enqueue_message()`` (the internal-only path used by reports,
+    nudges, ``[JOB_EVENT]`` delivery, compaction, ``invoke_and_wait``)
+    does NOT create a JobItem row. Task + ``MessageQueue`` rows ARE
+    created -- the raw D13 single-writer behaviour. The JobItem mirror
+    is the public-path contract (``enqueue_message_job()``); internal
+    callers intentionally stay invisible to the WorkResolver facade.
     """
 
     @pytest.mark.asyncio
-    async def test_d_flag_off_creates_no_jobitem(
+    async def test_d_internal_enqueue_creates_no_jobitem(
         self, engine, instance_repository, write_guard, job_repository
     ):
-        # Flag OFF (the default; also what the router honours when OFF).
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = False
 
         messaging_service = InstanceMessagingService(
             manager=manager,
@@ -590,7 +588,7 @@ class TestFlagOffNoJobItem:
         ):
             result = await messaging_service.enqueue_message(
                 instance_id="inst-1",
-                message="hello from flag-off path",
+                message="hello from internal-only path",
                 source="api",
             )
 
@@ -603,22 +601,22 @@ class TestFlagOffNoJobItem:
         # ── MessageQueue + Task rows ARE created (legacy preserved) ──
         mq_rows = _load_message_queues(engine, "inst-1")
         assert len(mq_rows) == 1, (
-            f"legacy path must still create a MessageQueue row, got {len(mq_rows)}"
+            f"internal path must still create a MessageQueue row, got {len(mq_rows)}"
         )
         task_rows = _load_tasks(engine, "inst-1")
         assert len(task_rows) == 1, (
-            f"legacy path must still create a Task row, got {len(task_rows)}"
+            f"internal path must still create a Task row, got {len(task_rows)}"
         )
 
         # ── NO JobItem rows at all ──
         msg_jobs = _load_message_job_items(engine)
         assert msg_jobs == [], (
-            f"legacy enqueue_message must NOT create a JobItem(job_type='message') "
+            f"internal enqueue_message must NOT create a JobItem(job_type='message') "
             f"row, but found {len(msg_jobs)}: {[j.job_id for j in msg_jobs]}"
         )
         all_jobs = _load_job_items(engine)
         assert all_jobs == [], (
-            f"legacy path must NOT write any JobItem rows, found {len(all_jobs)}"
+            f"internal path must NOT write any JobItem rows, found {len(all_jobs)}"
         )
 
 
@@ -644,7 +642,6 @@ class TestMaxRetriesZero:
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository
         )
-        manager.config.job_system.message_jobs_enabled = True
 
         messaging_service = InstanceMessagingService(
             manager=manager,

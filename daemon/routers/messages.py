@@ -125,18 +125,13 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
         }
     
     # --- NORMAL PATH: Not paused, enqueue message ---
-    # Phase 3: the POC feature-flag check
-    # (``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``) lives in the
-    # centralized :meth:`InstanceManager._enqueue_message_with_flag`
-    # helper. When ON, the helper routes through
-    # :meth:`enqueue_message_job` so the JobItem mirror is created
-    # alongside the Task row (WorkResolver facade reads both sides
-    # of the union). When OFF, the existing D13 flow writes
-    # Task+MessageQueue only — the frozen baseline. Both paths return
-    # an ``AsyncMessageResult`` with the same shape, so callers see
-    # no API-level difference.
+    # Phase 5 (cutover): the public message-Job path is the only path.
+    # Every HTTP POST /messages NORMAL branch creates a JobItem mirror
+    # alongside the Task row so the WorkResolver facade can read both
+    # sides of the union. The legacy flag-checked helper and the
+    # Task-only fallback were removed.
     try:
-        result = await manager._enqueue_message_with_flag(
+        result = await manager.enqueue_message_job(
             instance_id=instance_id,
             message=message.content,
             source="api",

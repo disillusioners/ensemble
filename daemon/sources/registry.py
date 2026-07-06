@@ -400,8 +400,8 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to disable scheduler {source_id}: {e}")
             
-            # Pass JobQueueService, SourceRepository, InstanceRepository, and InstanceManager (Phase 3)
-            # for queue routing, instance mode, and the message_jobs_enabled inline dispatch path.
+            # Pass JobQueueService, SourceRepository, InstanceRepository, and InstanceManager (Phase 5)
+            # for queue routing, instance mode, and the inline message-Job dispatch path.
             adapter = SchedulerAdapter(
                 config,
                 on_message,
@@ -820,10 +820,11 @@ class SourceRegistry:
             # Format source as "{source_id}:{external_user_id}"
             source = f"{source_id}:{msg.external_user_id}"
             
-            # Phase 3: route through the flag-checked dispatcher so the
-            # JobItem mirror is created when ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``
-            # is ON. Flag OFF preserves the pre-Phase-3 Task-only path.
-            await self._manager._enqueue_message_with_flag(
+            # Phase 5 (cutover): external sources always dispatch through
+            # ``enqueue_message_job`` so the JobItem mirror is created
+            # alongside the Task row. The legacy Task-only path is gone
+            # — every public/external entry point now creates a JobItem.
+            await self._manager.enqueue_message_job(
                 instance_id=instance_id,
                 message=msg.content,
                 source=source,

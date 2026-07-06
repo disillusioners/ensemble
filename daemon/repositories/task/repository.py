@@ -739,14 +739,15 @@ class TaskRepository:
             ``start_job_atomic_with_lock`` transitions the JobItem to
             ``active`` on claim, so a stuck-queued JobItem was a
             transient race). For MESSAGE-type mirror JobItems
-            (POC ``message_jobs_enabled`` path, post-D13), the
-            JobItem cannot transition to ``active`` because the
-            PostgreSQL ``trg_job_queue_items_active_lock_guard``
-            constraint requires a ``job_locks`` row that the message
-            flow never creates. The JobItem stays in ``queued``
-            after the Task completes — until the observer finalize
-            sweep catches it — so the original ``(pending,
-            running)`` filter would falsely identify the stuck mirror
+            (Phase 5 cutover: every public message creates a JobItem
+            alongside the Task row), the JobItem cannot transition to
+            ``active`` because the PostgreSQL
+            ``trg_job_queue_items_active_lock_guard`` constraint
+            requires a ``job_locks`` row that the message flow never
+            creates. The JobItem stays in ``queued`` after the Task
+            completes — until the observer finalize sweep catches it
+            — so the original ``(pending, running)`` filter would
+            falsely identify the stuck mirror
             as a blocker for the next message on the same instance.
             Matching ANY Task state (pending, running, completed,
             failed, cancelled) restores the carve-out's documented
