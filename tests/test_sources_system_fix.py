@@ -248,7 +248,12 @@ class TestMetadataForwarding:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         # Mock source repo
         mock_source_repo = MagicMock()
@@ -283,10 +288,10 @@ class TestMetadataForwarding:
             await registry._handle_message("test-source", msg)
 
             # Verify enqueue_message was called
-            manager.enqueue_message.assert_called_once()
+            manager.enqueue_message_job.assert_called_once()
 
             # Verify images were passed
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
             assert "images" in call_kwargs
             assert call_kwargs["images"] == ["https://example.com/image1.jpg", "https://example.com/image2.png"]
 
@@ -297,7 +302,12 @@ class TestMetadataForwarding:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -327,8 +337,8 @@ class TestMetadataForwarding:
 
             await registry._handle_message("test-source", msg)
 
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
 
             assert "metadata" in call_kwargs
             assert call_kwargs["metadata"] == expected_metadata
@@ -340,7 +350,12 @@ class TestMetadataForwarding:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -372,8 +387,8 @@ class TestMetadataForwarding:
             # Should not crash
             await registry._handle_message("test-source", msg)
 
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
 
             assert "images" in call_kwargs
             assert call_kwargs["images"] is None
@@ -385,7 +400,12 @@ class TestMetadataForwarding:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -415,8 +435,8 @@ class TestMetadataForwarding:
 
             await registry._handle_message("test-source", msg)
 
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
 
             assert "images" in call_kwargs
             assert call_kwargs["images"] == []
@@ -439,7 +459,12 @@ class TestPriorityExtraction:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -469,8 +494,8 @@ class TestPriorityExtraction:
             # Call _handle_message directly with priority=5
             await registry._handle_message("test-source", msg, priority=5)
 
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
             assert call_kwargs["priority"] == 5
 
     @pytest.mark.asyncio
@@ -678,7 +703,12 @@ class TestEdgeCases:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -710,7 +740,7 @@ class TestEdgeCases:
             await registry._handle_message("test-source", msg)
 
             # Verify enqueue was called
-            manager.enqueue_message.assert_called_once()
+            manager.enqueue_message_job.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_message_with_images_passes_to_enqueue(self):
@@ -719,7 +749,12 @@ class TestEdgeCases:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -748,8 +783,8 @@ class TestEdgeCases:
 
             await registry._handle_message("test-source", msg)
 
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
 
             assert call_kwargs["images"] == ["img1.jpg", "img2.jpg", "img3.jpg"]
 
@@ -760,7 +795,12 @@ class TestEdgeCases:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -792,8 +832,8 @@ class TestEdgeCases:
             extracted_priority = int(msg.metadata.get("priority", 1))
             await registry._handle_message("test-source", msg, priority=extracted_priority)
 
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
 
             # Both should be correctly passed
             assert call_kwargs["priority"] == 10
@@ -806,7 +846,12 @@ class TestEdgeCases:
         mock_config = MagicMock()
         mock_config.agents.directory = "/default/agents"
         manager.config = mock_config
-        manager.enqueue_message = AsyncMock()
+        manager.enqueue_message_job = AsyncMock(return_value=MagicMock(
+            message_id="msg-test-id",
+            instance_id="instance-123",
+            status="queued",
+            job_id="job-test-id",
+        ))
 
         mock_source_repo = MagicMock()
         mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
@@ -851,8 +896,8 @@ class TestEdgeCases:
             await registry._handle_message("telegram", msg, priority=priority)
 
             # Verify all components
-            manager.enqueue_message.assert_called_once()
-            call_kwargs = manager.enqueue_message.call_args.kwargs
+            manager.enqueue_message_job.assert_called_once()
+            call_kwargs = manager.enqueue_message_job.call_args.kwargs
 
             # Check images was forwarded
             assert "images" in call_kwargs
