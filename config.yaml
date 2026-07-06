@@ -67,6 +67,10 @@ agents:
 
 # Message Queue Settings
 queue:
+  # Safe backlog clear on startup: discards only PENDING tasks + their
+  # messages; preserves RUNNING (in-flight) and PAUSED (resumable) work
+  # so paused instances still block system_defer_queue and remain
+  # resumable across a restart.
   discard_on_startup: false
   # LLM retry settings per error category:
   #

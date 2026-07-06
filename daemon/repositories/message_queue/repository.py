@@ -835,19 +835,44 @@ class SQLModelMessageQueueRepository:
             
             return result.rowcount
 
-    def clear_all(self) -> int:
-        """Delete all messages from the queue.
-        
-        Useful for development to start with a clean queue on startup.
-        
+    def clear_all(self, preserve_in_flight: bool = False) -> int:
+        """Delete messages, optionally preserving resumable / in-flight work.
+
+        Args:
+            preserve_in_flight: When ``False`` (default) every message is
+                deleted. When ``True``, only messages that are NOT backing
+                a RUNNING or PAUSED task are deleted — i.e. the message
+                rows that keep a paused instance resumable (and an
+                in-flight instance recoverable) survive. This mirrors
+                :meth:`TaskRepository.clear_all`'s preserve mode so the
+                ``discard_on_startup`` startup hook can clear the backlog
+                without orphaning paused/running instances. The kept set
+                is resolved via ``task.message_id`` linkage.
+
         Returns:
             Number of messages deleted.
         """
         with Session(self.engine) as session:
-            stmt = sql_delete(MessageQueue)
-            result = session.exec(stmt)
+            if preserve_in_flight:
+                # Keep messages backing a RUNNING (in-flight) or PAUSED
+                # (resumable) task; discard the rest (backlog + messages
+                # whose task is pending/terminal). The task table is
+                # intact when this runs (the startup hook clears messages
+                # before tasks), so the correlated subquery is valid.
+                # Status literals mirror ``TaskStatus.RUNNING/PaUSED``;
+                # hardcoded here to avoid a cross-repo import cycle.
+                result = session.exec(
+                    text(
+                        "DELETE FROM message_queue WHERE message_id NOT IN "
+                        "(SELECT message_id FROM task "
+                        "WHERE status IN ('running', 'paused'))"
+                    )
+                )
+            else:
+                stmt = sql_delete(MessageQueue)
+                result = session.exec(stmt)
             session.commit()
-            
+
             return result.rowcount
 
     # --------------------------------------------------------

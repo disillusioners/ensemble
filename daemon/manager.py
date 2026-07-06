@@ -651,18 +651,33 @@ class InstanceManager:
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
         
-        # Development helper: discard all queued messages and tasks on startup
+        # discard_on_startup: safe "backlog clear". Clears only unstarted
+        # / terminal work (PENDING tasks + their messages); RUNNING and
+        # PAUSED tasks (and the messages backing them) are preserved so:
+        #   * a paused instance still blocks system_defer_queue after
+        #     restart (the defer idle gate reads the task table), and
+        #   * a paused instance can still be resumed after restart
+        #     (its backing message survives), and
+        #   * StaleTaskRecovery can still find in-flight RUNNING tasks.
+        # The previous implementation wiped the task + message tables
+        # unconditionally, which orphaned paused instances on restart.
         if config.queue.discard_on_startup:
-            msg_count = self._queue_repository.clear_all()
-            logger.info(f"Discarded {msg_count} messages from queue (discard_on_startup=True)")
-            
-            # Also discard tasks (linked to messages)
+            msg_count = self._queue_repository.clear_all(preserve_in_flight=True)
+            logger.info(
+                f"Cleared {msg_count} backlog message(s) "
+                f"(discard_on_startup=backlog-clear; in-flight/paused preserved)"
+            )
+
+            # Also discard backlog tasks (linked to messages)
             task_repo = TaskRepository(
                 engine=self._engine,
                 on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
             )
-            task_count = task_repo.clear_all()
-            logger.info(f"Discarded {task_count} tasks (discard_on_startup=True)")
+            task_count = task_repo.clear_all(preserve_in_flight=True)
+            logger.info(
+                f"Cleared {task_count} backlog task(s) "
+                f"(discard_on_startup=backlog-clear; running/paused preserved)"
+            )
         
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()

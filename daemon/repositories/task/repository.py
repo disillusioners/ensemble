@@ -1523,16 +1523,40 @@ class TaskRepository:
             db_session.commit()
             return result.rowcount
 
-    def clear_all(self) -> int:
-        """Delete all tasks.
+    def clear_all(self, preserve_in_flight: bool = False) -> int:
+        """Delete tasks, optionally preserving resumable / in-flight work.
 
-        Useful for development to start with a clean task queue on startup.
+        Args:
+            preserve_in_flight: When ``False`` (default) every task row is
+                deleted — the legacy "nuclear wipe" used outside the
+                startup path. When ``True``, only **backlog** work is
+                discarded: tasks whose status is neither ``running`` nor
+                ``paused``. RUNNING tasks (in-flight, recovered by
+                StaleTaskRecovery after restart) and PAUSED tasks
+                (suspended-but-resumable) are kept so that:
+
+                  * the defer-queue idle gate
+                    (``has_active_non_deferred_work``) still sees a
+                    paused instance's task and blocks ``system_defer_queue``;
+                  * a paused instance can still be resumed after restart.
+
+                This is the mode the ``discard_on_startup`` startup hook
+                uses: a clean backlog slate without orphaning resumable
+                state.
 
         Returns:
             Number of tasks deleted.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = sql_delete(Task)
+            if preserve_in_flight:
+                stmt = sql_delete(Task).where(
+                    Task.status.notin_([
+                        TaskStatus.RUNNING.value,
+                        TaskStatus.PAUSED.value,
+                    ])
+                )
+            else:
+                stmt = sql_delete(Task)
             result = db_session.exec(stmt)
             db_session.commit()
             return result.rowcount

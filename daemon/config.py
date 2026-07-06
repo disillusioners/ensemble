@@ -215,7 +215,12 @@ class QueueConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="QUEUE_")
 
-    # Development helper: discard all queued messages on startup
+    # Safe "backlog clear" on startup. When enabled, only UNSTARTED /
+    # terminal work is discarded (PENDING tasks + their messages);
+    # RUNNING (in-flight) and PAUSED (resumable) tasks — and the
+    # messages backing them — are preserved, so a paused instance
+    # still blocks system_defer_queue and can still be resumed across a
+    # restart. Safe to leave enabled in dev for a clean backlog slate.
     # Note: This field is handled specially in load_config to ensure env var
     # QUEUE_DISCARD_ON_STARTUP takes highest priority over YAML config.
     discard_on_startup: bool | None = None
