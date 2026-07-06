@@ -3,6 +3,7 @@
 import pytest
 import threading
 import time
+import uuid
 from unittest.mock import Mock
 
 from daemon.services.worker_pool import Worker, WorkerPool
@@ -244,12 +245,18 @@ class TestNotificationRaceConditions:
 
 class MockTask:
     """Mock task object for integration tests."""
-    
-    def __init__(self, task_id: int = 1, task_type: str = "process_message"):
+
+    def __init__(self, task_id: int = 1, task_type: str = "process_message", work_id: str | None = None):
         self.id = task_id
         self.task_type = task_type
         self.instance_id = "test-instance-123"
         self.message_id = "test-message-456"
+        # Phase 5 cutover: ``Worker.run`` reads ``task.work_id`` (the shared
+        # UUID4 linking Task ↔ JobItem) to fire ``_activate_message_jobitem``.
+        # A missing ``work_id`` AttributeErrors the worker on every claim, so
+        # the mock generates one by default — production never runs a
+        # ``process_message`` Task without a JobItem mirror these days.
+        self.work_id = work_id if work_id is not None else f"work-{uuid.uuid4()}"
         self.retry_count = 0
         self.status = "pending"
         self.worker_id = None
@@ -370,10 +377,10 @@ class TimeoutTriggeringProcessor:
 
 class MockTaskRepo:
     """Mock task repository for integration tests."""
-    
+
     def __init__(self, task_queue: list = None, notify_callback=None):
         """Initialize MockTaskRepo.
-        
+
         Args:
             task_queue: Reference to the task queue for auto-adding retry tasks.
             notify_callback: Optional callback to call when schedule_retry adds a task.
@@ -383,13 +390,35 @@ class MockTaskRepo:
         self.fail_task_count = 0
         self.cancel_task_count = 0
         self.retry_task = None
+        self.update_heartbeat_count = 0
+        self.has_pending_blocked_count = 0
         self._schedule_retry_called = threading.Event()
         self._fail_task_called = threading.Event()
         # Reference to the task queue for auto-adding retry tasks
         self._task_queue = task_queue
         # Callback for notifying workers (e.g., pool.notify_work)
         self._notify_callback = notify_callback
-    
+
+    def has_pending_tasks_blocked_by_busy_instance(self):
+        """Mirror the production ``TaskRepository`` API used by ``Worker.run`` on the
+        empty-claim path: while the worker did not pick up a task, the dispatch
+        loop asks the repo whether anything is currently blocked behind a busy
+        instance. The mock returns ``False`` so the worker treats the empty
+        queue as idle and immediately goes back to ``wait_for_work`` instead of
+        spinning on a phantom backoff.
+        """
+        self.has_pending_blocked_count += 1
+        return False
+
+    def update_heartbeat(self, task_id):
+        """Mirror the production ``TaskRepository`` API used by ``Worker`` /
+        ``TaskHeartbeat``: the eager first beat and every interval tick lands
+        here. The mock is a no-op that records the call so tests can assert on
+        heartbeat traffic if they need to.
+        """
+        self.update_heartbeat_count += 1
+        return True
+
     def schedule_retry(self, task_id, max_retries, backoff_base, backoff_max):
         self.schedule_retry_count += 1
         self._schedule_retry_called.set()
@@ -404,11 +433,11 @@ class MockTaskRepo:
         if self._notify_callback is not None:
             self._notify_callback()
         return retry_task
-    
+
     def fail_task(self, task_id, error):
         self.fail_task_count += 1
         self._fail_task_called.set()
-    
+
     def cancel_task(self, task_id, reason):
         self.cancel_task_count += 1
 
