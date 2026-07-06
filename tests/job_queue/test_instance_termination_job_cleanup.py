@@ -702,7 +702,14 @@ class TestTerminateInstanceJobCleanup:
     async def test_terminate_cancels_processing_message_jobs(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() completes PROCESSING MESSAGE jobs as CANCELLED."""
+        """Test that terminate_instance() SKIPS PROCESSING MESSAGE jobs (D13 contract).
+
+        D13 (commit 78dc9e3c, 2026-07-03): message JobItems are informational
+        mirrors of the authoritative Task row. The terminate cleanup loop
+        explicitly continues past ``job_type == "message"`` because the Task
+        lifecycle owns message visibility — touching the mirror row would
+        corrupt the source-of-truth state machine.
+        """
         instance_id = "terminate-instance-message"
 
         meta = MagicMock()
@@ -728,14 +735,21 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        # For PROCESSING jobs: complete_job with CANCELLED state is used
-        mock_job_queue_service.complete_job.assert_called()
+        # D13: message JobItems are skipped — neither cancel_job nor complete_job
+        # is invoked. The Task row owns message visibility.
+        mock_job_queue_service.cancel_job.assert_not_called()
+        mock_job_queue_service.complete_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_terminate_cancels_pending_message_jobs(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() cancels PENDING MESSAGE jobs."""
+        """Test that terminate_instance() SKIPS PENDING MESSAGE jobs (D13 contract).
+
+        D13 (commit 78dc9e3c, 2026-07-03): message JobItems are informational
+        mirrors. Pending message rows are likewise skipped during terminate —
+        the authoritative Task row (if any) drives cleanup on its own.
+        """
         instance_id = "terminate-instance-pending-msg"
 
         meta = MagicMock()
@@ -760,7 +774,8 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        mock_job_queue_service.cancel_job.assert_called()
+        # D13: message JobItems are skipped, even when pending.
+        mock_job_queue_service.cancel_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_terminate_cancels_failed_jobs(
@@ -880,14 +895,15 @@ class TestTerminateInstanceJobCleanup:
     async def test_terminate_cleans_up_all_job_types(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() cleans up all job types together.
+        """Test that terminate_instance() cleans up TASK jobs and skips MESSAGE mirrors.
 
-        This verifies that the comprehensive sweep (step 7.6) handles multiple
-        jobs of different types and states correctly.
+        Per the D13 contract (commit 78dc9e3c, 2026-07-03), message JobItems
+        are informational mirrors — they are not lifecycle-managed by the
+        terminate cleanup. This sweep handles TASK jobs only:
 
-        - PENDING jobs → cancel_job()
-        - PROCESSING jobs → complete_job() with CANCELLED
-        - COMPLETED jobs → skipped (terminal state)
+        - PENDING TASK → cancel_job()
+        - PROCESSING MESSAGE → SKIPPED (D13 mirror; Task row is authoritative)
+        - COMPLETED TASK → skipped (terminal state)
         """
         instance_id = "terminate-instance-multi"
 
@@ -930,9 +946,10 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        # PENDING → cancel_job, PROCESSING → complete_job, COMPLETED → skipped
-        mock_job_queue_service.cancel_job.assert_called_once()  # Only pending_task
-        mock_job_queue_service.complete_job.assert_called_once()  # Only processing_message
+        # PENDING TASK → cancel_job; PROCESSING MESSAGE skipped (D13);
+        # COMPLETED TASK skipped (terminal).
+        mock_job_queue_service.cancel_job.assert_called_once()  # pending_task only
+        mock_job_queue_service.complete_job.assert_not_called()  # message mirror skipped
 
 
 # =============================================================================
