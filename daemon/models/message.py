@@ -76,9 +76,8 @@ class MessageResponse(BaseModel):
     job_id: str | None = Field(
         default=None,
         description=(
-            "Phase 3: identifier for the dispatch work unit (JobItem when "
-            "ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED is ON; otherwise the "
-            "Task work_id). Allows callers to track the job through the "
+            "Identifier for the dispatch work unit (Task.work_id == "
+            "JobItem.job_id). Allows callers to track the job through the "
             "WorkResolver facade."
         ),
     )

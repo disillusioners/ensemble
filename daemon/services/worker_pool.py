@@ -264,8 +264,8 @@ class Worker(threading.Thread):
                             f"(type={task.task_type}, instance={task.instance_id[:8]}...)"
                         )
 
-                        # Post-claim JobItem activation (POC,
-                        # ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``).
+                        # Post-claim JobItem activation (message-Job
+                        # path is always active after Phase 5 cutover).
                         # When ``enqueue_message_job`` creates a JobItem
                         # mirror alongside the Task, this flips the
                         # mirror's ``admission_state`` from QUEUED to
