@@ -25,6 +25,7 @@ from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
 from .messaging_types import AsyncMessageResult
+from .project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -1279,6 +1280,34 @@ class InstanceMessagingService:
                         or agent_id_for_job
                     )
 
+                # Resolve the instance's project_id so the message
+                # JobItem is project-scoped. Without this the JobItem is
+                # stored with a NULL project_id and disappears from
+                # project-scoped views (e.g. the Jobs UI refresh with a
+                # project filter active drops a paused message job even
+                # though its instance belongs to the project).
+                # ``instances.project_id`` is the authoritative source
+                # (set by ``InstanceLifecycleService.spawn_instance``);
+                # normalize so a missing value falls back to the system
+                # default project instead of NULL.
+                project_id_for_job: str | None = None
+                try:
+                    instance_meta = await asyncio.to_thread(
+                        self._manager._instance_repository.get, instance_id
+                    )
+                    if instance_meta is not None:
+                        raw_project_id = (
+                            instance_meta.project_id
+                            or instance_meta.instance_metadata.get("project_id")
+                        )
+                        project_id_for_job = normalize_project_id(raw_project_id)
+                except Exception as project_err:
+                    logger.debug(
+                        f"enqueue_message_job: failed to resolve project_id "
+                        f"for instance {instance_id[:8]}...: "
+                        f"{type(project_err).__name__}: {project_err}"
+                    )
+
                 # Bypass JobQueueService.enqueue_job (D13 rejects
                 # job_type='message') and call the repository's low-level
                 # create() directly. The repository already sets
@@ -1296,6 +1325,7 @@ class InstanceMessagingService:
                     agent_dir=agent_dir_value,
                     message=message,
                     source=source,
+                    project_id=project_id_for_job,
                     priority=priority,
                     job_metadata={},
                     queue_id=None,

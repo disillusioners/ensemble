@@ -696,3 +696,110 @@ class TestMaxRetriesZero:
             f"job_repository.create must be called with max_retries=0 "
             f"kwarg (got kwargs={ {k: v for k, v in create_kwargs.items()} })"
         )
+
+    async def test_f_message_jobitem_inherits_instance_project_id(
+        self, engine, instance_repository, write_guard, job_repository
+    ):
+        """The message JobItem must carry its instance's project_id.
+
+        Regression (2026-07-07): ``enqueue_message_job`` created the
+        message JobItem via ``job_repo.create(...)`` WITHOUT a
+        ``project_id``, so the row was stored with a NULL project_id.
+        That made the job invisible to project-scoped views — the Jobs
+        UI refresh (``GET /api/jobs?project_id=…``) dropped a paused
+        message job even though its instance belonged to the project.
+        The fix resolves ``instances.project_id`` and forwards it
+        (normalised) into ``job_repo.create``.
+        """
+        manager = _build_manager(
+            engine, instance_repository, write_guard, job_repository
+        )
+
+        messaging_service = InstanceMessagingService(
+            manager=manager,
+            cancellation_service=MagicMock(
+                spec=CancellationService, is_shutting_down=False
+            ),
+        )
+
+        _seed_instance(
+            engine,
+            instance_id="inst-proj",
+            status=InstanceStatus.IDLE.value,
+            project_id="proj-message-test",
+        )
+
+        with patch(
+            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
+        ), patch("daemon.registry.get_registry") as mock_get_registry:
+            mock_registry = MagicMock()
+            mock_registry.get_resolved.return_value = None
+            mock_get_registry.return_value = mock_registry
+
+            await messaging_service.enqueue_message_job(
+                instance_id="inst-proj",
+                message="project-scoped message",
+                source="api",
+            )
+
+        jobs = _load_message_job_items(engine)
+        assert len(jobs) == 1
+        ji = jobs[0]
+
+        assert ji.project_id == "proj-message-test", (
+            f"message JobItem must inherit its instance's project_id "
+            f"(expected 'proj-message-test', got {ji.project_id!r}) — "
+            f"a NULL project_id makes the job invisible to project-"
+            f"scoped filters (Jobs UI refresh drops paused message jobs)."
+        )
+
+    async def test_f_message_jobitem_project_id_falls_back_to_system_default(
+        self, engine, instance_repository, write_guard, job_repository
+    ):
+        """When the instance has no project_id, the message JobItem
+        falls back to the system default project (via
+        ``normalize_project_id``) instead of NULL.
+        """
+        from daemon import constants
+
+        manager = _build_manager(
+            engine, instance_repository, write_guard, job_repository
+        )
+
+        messaging_service = InstanceMessagingService(
+            manager=manager,
+            cancellation_service=MagicMock(
+                spec=CancellationService, is_shutting_down=False
+            ),
+        )
+
+        # Instance with no project_id (legacy / pre-normalisation row).
+        _seed_instance(
+            engine,
+            instance_id="inst-noproj",
+            status=InstanceStatus.IDLE.value,
+            project_id=None,
+        )
+
+        with patch(
+            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
+        ), patch("daemon.registry.get_registry") as mock_get_registry:
+            mock_registry = MagicMock()
+            mock_registry.get_resolved.return_value = None
+            mock_get_registry.return_value = mock_registry
+
+            await messaging_service.enqueue_message_job(
+                instance_id="inst-noproj",
+                message="no-project message",
+                source="api",
+            )
+
+        jobs = _load_message_job_items(engine)
+        assert len(jobs) == 1
+        ji = jobs[0]
+
+        assert ji.project_id == constants.SYSTEM_DEFAULT_PROJECT_ID, (
+            f"message JobItem for a project-less instance must fall back "
+            f"to the system default project_id "
+            f"({constants.SYSTEM_DEFAULT_PROJECT_ID!r}), got {ji.project_id!r}"
+        )
