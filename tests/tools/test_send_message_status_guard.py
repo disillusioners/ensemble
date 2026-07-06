@@ -86,7 +86,11 @@ def _make_manager(*, status: str) -> MagicMock:
     manager.get_queue_stats = AsyncMock(
         return_value={"pending_count": 0, "processing_count": 0}
     )
-    manager.enqueue_message = AsyncMock(
+    # Phase 5 cutover: the ``send_message`` tool now dispatches through
+    # ``enqueue_message_job`` (public message-Job path) so the JobItem
+    # mirror is created alongside the Task row. Test mocks must target
+    # this attribute — the legacy ``enqueue_message`` is internal-only.
+    manager.enqueue_message_job = AsyncMock(
         return_value=MagicMock(message_id="msg-abc-123")
     )
     # Real code path also touches _instance_repository for the waiting_for
@@ -160,8 +164,8 @@ class TestSendMessageStatusGuard:
             f"Error should explain the rejection reason; got: {result}"
         )
 
-        # The post-guard path was NOT taken: enqueue_message was never called.
-        manager.enqueue_message.assert_not_called()
+        # The post-guard path was NOT taken: enqueue_message_job was never called.
+        manager.enqueue_message_job.assert_not_called()
 
     async def test_send_message_rejects_errored_instance(self):
         """An errored instance must be rejected with an ERROR string.
@@ -182,7 +186,7 @@ class TestSendMessageStatusGuard:
         assert "error" in result.lower()
 
         # No enqueue attempted.
-        manager.enqueue_message.assert_not_called()
+        manager.enqueue_message_job.assert_not_called()
 
     async def test_send_message_accepts_idle_instance(self):
         """An idle instance is live and must pass the status guard.
@@ -204,8 +208,8 @@ class TestSendMessageStatusGuard:
             f"Idle instance should not be rejected; got: {result!r}"
         )
 
-        # The post-guard path WAS taken: enqueue_message was called.
-        manager.enqueue_message.assert_awaited_once()
+        # The post-guard path WAS taken: enqueue_message_job was called.
+        manager.enqueue_message_job.assert_awaited_once()
 
     async def test_send_message_accepts_running_instance(self):
         """A running instance is live and must pass the status guard.
@@ -223,7 +227,7 @@ class TestSendMessageStatusGuard:
         assert not (isinstance(result, str) and result.startswith("ERROR")), (
             f"Running instance should not be rejected; got: {result!r}"
         )
-        manager.enqueue_message.assert_awaited_once()
+        manager.enqueue_message_job.assert_awaited_once()
 
     async def test_send_message_rejects_when_terminated_check_runs_first(self):
         """Sanity: the guard checks status BEFORE the in-progress check.
@@ -250,7 +254,7 @@ class TestSendMessageStatusGuard:
         # Not the in-progress error.
         assert "in progress" not in result.lower()
         # No enqueue attempted.
-        manager.enqueue_message.assert_not_called()
+        manager.enqueue_message_job.assert_not_called()
 
     async def test_send_message_does_not_use_deprecated_terminated_key(self):
         """Regression guard: the fix replaced ``instance_info.get("terminated")``

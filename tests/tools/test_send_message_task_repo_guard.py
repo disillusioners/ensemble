@@ -86,7 +86,10 @@ def _make_manager(*, status: str = "idle", task_repo=None) -> MagicMock:
     manager.get_queue_stats = AsyncMock(
         return_value={"pending_count": 0, "processing_count": 0}
     )
-    manager.enqueue_message = AsyncMock(
+    # Phase 5 cutover: ``send_message`` dispatches through
+    # ``enqueue_message_job`` (public message-Job path) so a JobItem
+    # mirror is written alongside the Task row. Mock the new attribute.
+    manager.enqueue_message_job = AsyncMock(
         return_value=MagicMock(message_id="msg-abc-123")
     )
 
