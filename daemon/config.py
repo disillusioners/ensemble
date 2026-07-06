@@ -433,9 +433,8 @@ class JobSystemConfig(BaseSettings):
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
-    # Phase 5 (cutover): ``message_jobs_enabled`` was removed. Every
-    # public/external entry point now creates a JobItem
-    # (``job_type='message'``) alongside the Task row via
+    # Phase 5 cutover: every public/external entry point creates a
+    # JobItem (``job_type='message'``) alongside the Task row via
     # :meth:`InstanceManager.enqueue_message_job`. The raw
     # :meth:`InstanceManager.enqueue_message` path remains as
     # internal-only (reports, nudges, ``[JOB_EVENT]`` delivery,

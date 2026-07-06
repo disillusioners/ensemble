@@ -2,8 +2,8 @@
 
 After Phase 5, every public message creates a JobItem mirror
 ``(job_type='message', job_id=task.work_id, max_retries=0)`` alongside
-the existing Task + MessageQueue rows. The ``message_jobs_enabled``
-feature flag was removed; there is only one public path now.
+the existing Task + MessageQueue rows. There is only one public message
+path now.
 
 This file is the Phase 1 deliverable tests (per
 ``.agents/shared/planning/job-as-front-primitive/phase1-plan.md``
@@ -134,8 +134,7 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._repository = job_repository
 
-    # Config -- Phase 5 cutover: ``message_jobs_enabled`` was removed,
-    # there is only one public path now.
+    # Config -- single public path after Phase 5 cutover.
     manager.config = Config(job_system=JobSystemConfig())
 
     # Title generation fires via MainLoopBridge; we'll patch it out.

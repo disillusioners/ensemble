@@ -925,10 +925,11 @@ class InstanceLifecycleService:
         # the per-job notify path that the helper did NOT do (the helper
         # bulk-updates job rows but does not call cancel_job per job).
         #
-        # D13: no MESSAGE-specific loop — messages no longer create
-        # ``JobItem`` rows (see :meth:`InstanceMessagingService.enqueue_message`).
-        # The generic ``find_jobs_by_instance(job_type=None)`` loop below
-        # already covers TASK-type jobs and is the only cleanup needed.
+        # Message-type JobItems (job_type='message') are pure mirrors of
+        # the Task row — they are created by enqueue_message_job but the
+        # Task lifecycle owns their visibility. The loop below skips them
+        # (see the ``if remaining_job.job_type == "message": continue``
+        # check inside). Only task-type JobItems need per-job cancel/notify.
         #
         # Why this is safe AFTER commit: the DB cancel already happened;
         # the only thing this loop does is fire the per-job side effects
