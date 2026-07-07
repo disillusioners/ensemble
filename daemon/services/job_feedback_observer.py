@@ -3344,11 +3344,31 @@ class JobFeedbackObserver:
             # FAILED so we don't leave a no-consumer instance in the DB +
             # in-memory manager.
             try:
-                await self._instance_manager.enqueue_message(
+                result = await self._instance_manager.enqueue_message(
                     instance_id=instance_id,
                     message=started_job.message,
                     source=started_job.source,
                 )
+                # Stamp the message_id back onto the JobItem so the
+                # cross-system guard in ``claim_pending_task`` can
+                # correlate active MESSAGE JobItems with their
+                # ``message_queue`` row. Mirrors the pattern in
+                # ``JobProcessor._process_next_job`` (lines 865-875).
+                # Best-effort: a failure here is logged at WARNING and
+                # swallowed — the dispatch already succeeded, and the
+                # NULL-safe guard tolerates a missing ``message_id``.
+                if result is not None and getattr(result, "message_id", None):
+                    try:
+                        await asyncio.to_thread(
+                            self._job_queue_service._repository.stamp_message_id,
+                            started_job.job_id,
+                            result.message_id,
+                        )
+                    except Exception as stamp_err:
+                        logger.warning(
+                            f"Observer: failed to stamp message_id for job "
+                            f"{started_job.job_id[:8]}...: {stamp_err}"
+                        )
             except Exception as e:
                 logger.error(
                     f"Observer: failed to enqueue message for job "

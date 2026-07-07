@@ -1507,3 +1507,262 @@ class TestObserverHealthCheck:
             config=mock_config,
         )
         assert observer._health_check_interval == 3600
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 4: regression tests for the stale ``job_type='message'`` JobItem filter
+#
+# Bug summary: ``list_pending_by_project`` and ``list_all_pending`` (in
+# ``daemon/repositories/job_queue/repository.py``) used to surface MESSAGE
+# JobItems to the JobQueue handoff. After a JOB completion, the
+# ``JobFeedbackObserver._trigger_next_job`` call would pick up a stale
+# MESSAGE JobItem (left in ``admission_state='queued'`` from a prior run),
+# then route it through ``start_job`` → ``spawn_instance_with_mcp`` →
+# ``enqueue_message`` — which is exactly the dispatch path MESSAGE JobItems
+# are NOT supposed to flow through (they are dispatched inline by the
+# ``POST /messages`` chokepoint).
+#
+# Fix 1: the two repository methods now add
+# ``.where(JobItem.job_type != "message")`` so MESSAGE rows are filtered
+# out at the SQL layer.
+#
+# The tests below pin both halves of the contract:
+#
+#   * ``test_get_next_job_filters_message_type_at_repository_layer`` —
+#     direct DB-layer test against a real ``JobRepository`` (using the
+#     ``engine`` / ``repository`` fixtures from ``tests/job_queue/conftest.py``).
+#     Insert one MESSAGE + one TASK row in the same project, both
+#     ``admission_state='queued'`` and ``deleted_at IS NULL``; assert
+#     that both ``list_pending_by_project`` and ``list_all_pending``
+#     return ONLY the TASK row. This is the lower-level invariant.
+#
+#   * ``test_trigger_next_job_skips_stale_message_jobitem`` — observer
+#     integration test. Calls ``_trigger_next_job`` directly with a
+#     ``job.project_id`` whose only pending candidate is a stale MESSAGE
+#     JobItem. The mock service's ``_get_next_job`` is wired to return
+#     ``None`` (the post-Fix-1 behavior — the repository layer filters
+#     out MESSAGE rows before they reach the service), so the observer
+#     must NOT call ``start_job``, ``spawn_instance_with_mcp``, or
+#     ``enqueue_message``. This is the upper-level invariant — the
+#     observer must not double-dispatch MESSAGE JobItems regardless of
+#     how ``_get_next_job`` arrived at ``None``.
+#
+# The two tests are deliberately independent (one tests the repo layer,
+# the other tests the observer's "no next job" branch) so that a
+# regression in either layer surfaces as a single failing test.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTriggerNextJobSkipsStaleMessageJobItem:
+    """Regression tests for the Fix 4 stale MESSAGE JobItem filter.
+
+    Pin the post-Fix-1 contract: ``_trigger_next_job`` must NOT trigger
+    ``start_job`` / ``spawn_instance_with_mcp`` / ``enqueue_message`` when
+    the only pending candidate in the project is a stale ``job_type='message'``
+    JobItem left over from a prior run. The filter lives in the
+    ``JobRepository`` (``list_pending_by_project`` / ``list_all_pending``);
+    this test exercises the observer's downstream behavior once that filter
+    has returned ``None``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trigger_next_job_skips_stale_message_jobitem(self):
+        """Stale MESSAGE JobItem is NOT picked up by ``_trigger_next_job``.
+
+        Scenario:
+          * Build a ``JobFeedbackObserver`` with mocks for every collaborator.
+          * Wire ``_job_queue_service._get_next_job`` to return ``None`` —
+            this is what the post-Fix-1 repository layer produces when only
+            stale MESSAGE JobItems remain queued in the project. (We bypass
+            ``_get_next_job`` here so the test stays a pure observer unit;
+            the repository-layer filter is covered separately in
+            ``test_get_next_job_filters_message_type_at_repository_layer``.)
+          * Call ``_trigger_next_job`` directly with a synthetic
+            ``job.project_id`` matching the project containing the stale
+            MESSAGE row.
+
+        Expected (regression contract):
+          * ``_job_queue_service.start_job`` is NOT called (no candidate).
+          * ``_instance_manager.spawn_instance_with_mcp`` is NOT called.
+          * ``_instance_manager.enqueue_message`` is NOT called.
+          * No exception escapes ``_trigger_next_job`` — the contract is
+            "best-effort, any failure is logged at WARNING and swallowed".
+
+        Pre-fix bug: the repository layer surfaced the stale MESSAGE row
+        and ``_trigger_next_job`` would push it through ``start_job`` →
+        ``spawn_instance_with_mcp`` → ``enqueue_message``, double-dispatching
+        a message that ``POST /messages`` already handled inline. The
+        observer never knew the job was a MESSAGE; it just trusted
+        ``_get_next_job``. Fix 1 closes that gap at the SQL layer; this test
+        pins the downstream side of the contract.
+        """
+        mock_job_queue_service = MagicMock()
+        # Post-Fix-1: the repository layer filtered the stale MESSAGE row,
+        # so the service returns ``None``. We wire this directly so the test
+        # is independent of the repository implementation (the repo-layer
+        # filter has its own dedicated test below).
+        mock_job_queue_service._get_next_job = AsyncMock(return_value=None)
+        # Sentinel: ``start_job`` should never be reached when the service
+        # reports "no next job".
+        mock_job_queue_service.start_job = AsyncMock(
+            side_effect=AssertionError(
+                "start_job must NOT be called when _get_next_job returns None"
+            )
+        )
+
+        mock_instance_manager = MagicMock()
+        # Sentinels: same reasoning as ``start_job`` above.
+        mock_instance_manager.spawn_instance_with_mcp = AsyncMock(
+            side_effect=AssertionError(
+                "spawn_instance_with_mcp must NOT be called when "
+                "_get_next_job returns None"
+            )
+        )
+        mock_instance_manager.enqueue_message = AsyncMock(
+            side_effect=AssertionError(
+                "enqueue_message must NOT be called when "
+                "_get_next_job returns None"
+            )
+        )
+
+        mock_job_repo = MagicMock(spec=JobRepository)
+        mock_lock_repo = MagicMock(spec=LockRepository)
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=mock_job_repo,
+            lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        # The ``job`` argument is only used to read ``job.project_id`` —
+        # we don't need a full JobItem here, just a MagicMock with the
+        # attribute set. Matches the ``MagicMock(spec=JobItem)`` pattern
+        # used elsewhere in this file (``create_mock_job``).
+        completed_job = MagicMock(spec=JobItem)
+        completed_job.job_id = "completed-job-id"
+        completed_job.project_id = "project-with-stale-message-row"
+
+        # Must not raise — ``_trigger_next_job`` is best-effort and
+        # catches all exceptions internally.
+        await observer._trigger_next_job(completed_job)
+
+        # Post-Fix-1 contract: ``_get_next_job`` is consulted exactly once,
+        # and the downstream ``start_job`` / ``spawn_instance_with_mcp`` /
+        # ``enqueue_message`` chain is NEVER entered because the service
+        # reported no candidate.
+        mock_job_queue_service._get_next_job.assert_awaited_once_with(
+            "project-with-stale-message-row"
+        )
+        # The sentinel side_effects above turn unexpected calls into
+        # ``AssertionError``; reaching the assertions below means NONE of
+        # them fired.
+        mock_job_queue_service.start_job.assert_not_called()
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
+        mock_instance_manager.enqueue_message.assert_not_called()
+
+
+class TestRepositoryFiltersMessageTypeAtPendingQueries:
+    """Repository-layer regression tests for Fix 4.
+
+    Pins the post-Fix-1 SQL contract directly against the
+    ``JobRepository``: ``list_pending_by_project`` and ``list_all_pending``
+    MUST exclude ``job_type='message'`` JobItems, even when those rows are
+    in ``admission_state='queued'`` and ``deleted_at IS NULL``.
+
+    These are the lower-level guards that the ``_trigger_next_job``
+    integration test above depends on — if these filters regress,
+    ``_get_next_job`` will start surfacing stale MESSAGE rows again and
+    the observer test will (correctly) start failing too. Keeping them as
+    separate tests means a regression in either layer produces a single,
+    clearly-attributed failure.
+    """
+
+    def test_get_next_job_filters_message_type_at_repository_layer(self, repository):
+        """``list_pending_by_project`` / ``list_all_pending`` exclude MESSAGE JobItems.
+
+        Setup: two JobItems in the same project, both freshly created
+        (``admission_state='queued'`` by default, ``deleted_at IS NULL``).
+        One ``job_type='message'`` (the stale-row candidate that triggered
+        the bug), one ``job_type='task'``.
+
+        Expected (Fix 1 contract):
+          * ``list_pending_by_project(project_id)`` returns exactly the TASK
+            row — the MESSAGE row must be filtered out.
+          * ``list_all_pending()`` (project_id-less path used by
+            ``_get_next_job`` when called without a project) also returns
+            only the TASK row.
+
+        Uses the real ``JobRepository`` backed by the in-memory SQLite
+        engine from the session-scoped ``engine`` fixture in
+        ``tests/job_queue/conftest.py`` (autouse
+        ``_truncate_tables`` fixture isolates each test). The same SQL is
+        portable to PostgreSQL — no SQLite-only constructs are used.
+        """
+        project_id = "test-project"
+
+        # Insert both rows. The repository defaults ``admission_state`` to
+        # ``QUEUED`` and leaves ``deleted_at`` NULL, which matches the
+        # exact pre-bug-state conditions where stale MESSAGE rows would
+        # surface in ``list_pending_by_project`` / ``list_all_pending``.
+        message_job = repository.create(
+            agent_id="test-agent",
+            agent_dir="./agents/test-agent",
+            message="Stale MESSAGE JobItem from a previous run",
+            source="api",
+            project_id=project_id,
+            priority=5,
+            job_type="message",
+        )
+        task_job = repository.create(
+            agent_id="test-agent",
+            agent_dir="./agents/test-agent",
+            message="Normal TASK JobItem — should be the only candidate",
+            source="api",
+            project_id=project_id,
+            priority=5,
+            job_type="task",
+        )
+
+        # Sanity: both rows were actually persisted in QUEUED state with
+        # deleted_at IS NULL — these are the conditions under which the
+        # pre-Fix-1 bug surfaced.
+        assert message_job.job_type == "message"
+        assert task_job.job_type == "task"
+        assert message_job.job_id != task_job.job_id
+
+        # ── list_pending_by_project ──
+        # Fix 1 contract: the repository MUST filter out the MESSAGE row
+        # so the JobQueue handoff (which calls this through
+        # ``_get_next_job``) cannot pick it up.
+        pending_by_project = repository.list_pending_by_project(project_id)
+
+        returned_ids = {j.job_id for j in pending_by_project}
+        assert task_job.job_id in returned_ids, (
+            "TASK row was filtered out by list_pending_by_project — "
+            "Fix 1 over-filtered and now drops legitimate task candidates"
+        )
+        assert message_job.job_id not in returned_ids, (
+            "MESSAGE row leaked through list_pending_by_project — "
+            "Fix 1 has regressed; stale MESSAGE JobItems will now be "
+            "double-dispatched via _trigger_next_job"
+        )
+
+        # ── list_all_pending ──
+        # The no-project_id code path (``_get_next_job`` with neither
+        # queue_id nor project_id) goes through ``list_all_pending`` —
+        # same filter MUST apply there.
+        pending_all = repository.list_all_pending()
+
+        returned_ids_all = {j.job_id for j in pending_all}
+        assert task_job.job_id in returned_ids_all, (
+            "TASK row was filtered out by list_all_pending — "
+            "Fix 1 over-filtered and now drops legitimate task candidates"
+        )
+        assert message_job.job_id not in returned_ids_all, (
+            "MESSAGE row leaked through list_all_pending — "
+            "Fix 1 has regressed; stale MESSAGE JobItems will now be "
+            "double-dispatched via _trigger_next_job"
+        )

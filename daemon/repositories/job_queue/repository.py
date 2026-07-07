@@ -686,6 +686,11 @@ class JobRepository:
         Under the new model, 'queued' is the admission bucket that covers
         PENDING-status jobs (the dual-write keeps status in sync).
 
+        Excludes ``job_type='message'`` JobItems, which are dispatched inline
+        (e.g. POST /messages) rather than via the JobProcessor poll loop.
+        Without this filter the poll loop would double-dispatch message jobs
+        and create a duplicate Task. (Same wording as ``list_pending_by_queue``.)
+
         Args:
             project_id: Project identifier.
 
@@ -697,6 +702,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.project_id == project_id)
                 .where(JobItem.admission_state == AdmissionState.QUEUED.value)
+                .where(JobItem.job_type != "message")
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
@@ -708,6 +714,11 @@ class JobRepository:
 
         Phase 3: queries admission_state='queued' instead of status='pending'.
 
+        Excludes ``job_type='message'`` JobItems, which are dispatched inline
+        (e.g. POST /messages) rather than via the JobProcessor poll loop.
+        Without this filter the poll loop would double-dispatch message jobs
+        and create a duplicate Task. (Same wording as ``list_pending_by_queue``.)
+
         Returns:
             List of all pending JobItem objects.
         """
@@ -715,6 +726,7 @@ class JobRepository:
             stmt = (
                 select(JobItem)
                 .where(JobItem.admission_state == AdmissionState.QUEUED.value)
+                .where(JobItem.job_type != "message")
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), col(JobItem.created_at).asc())
             )

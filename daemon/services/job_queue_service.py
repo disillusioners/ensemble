@@ -2113,9 +2113,13 @@ class JobQueueService:
                     return None
 
                 if instance.status in TERMINAL_STATUSES:
-                    # D13: all jobs are TASK-type now (message-type jobs
-                    # are rejected at enqueue). TASK jobs get fresh
-                    # instances — clear stale ref and allow normal start.
+                    # Stale instance ref: the instance pointed to by this
+                    # job is already terminal. Clear the ref so a fresh
+                    # instance is assigned below. This applies to all job
+                    # types — including message-type JobItem mirrors
+                    # created by ``enqueue_message_job`` (which bypass
+                    # ``enqueue_job``'s rejection of message jobs by
+                    # calling ``JobRepository.create`` directly).
                     logger.info(
                         f"[TRACE] start_job: clearing stale instance_id for TASK job {job_id[:8]}... "
                         f"(instance {job.instance_id[:8]}... is {instance.status})"
@@ -2129,10 +2133,13 @@ class JobQueueService:
                     )
                     return None
 
-        # Generate instance_id: TASK jobs always get a new UUID.
-        # D13: removed MESSAGE-specific ``if job.job_type == "message"
-        # and job.instance_id`` branch — no MESSAGE jobs exist anymore,
-        # so all jobs uniformly get a fresh UUID.
+        # Generate instance_id: always mint a fresh UUID for the job's
+        # target instance. The legacy MESSAGE-specific branch that
+        # preserved an existing instance_id was removed; message-type
+        # JobItem mirrors (created by ``enqueue_message_job``) are
+        # excluded from the dispatch path by the ``job_type != 'message'``
+        # filter in ``list_pending_*``, so this code only runs for
+        # genuine dispatch-queue jobs.
         instance_id = str(uuid.uuid4())
         
         # [TRACE] Log instance_id being used
