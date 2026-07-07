@@ -1308,6 +1308,42 @@ class InstanceMessagingService:
                         f"{type(project_err).__name__}: {project_err}"
                     )
 
+                # Resolve the project's ``system_fifo_queue`` so the
+                # message JobItem is queue-scoped. Without this the
+                # JobItem is stored with ``queue_id=None`` and disappears
+                # from queue-scoped counts (``GET /queues`` returns
+                # ``active_jobs``/``pending_jobs`` per queue, derived
+                # from ``JobItem.queue_id``). Counting message jobs in
+                # the project's fifo queue lets the UI surface in-flight
+                # message dispatch without affecting the poll loop —
+                # ``list_pending_by_queue`` retains the
+                # ``job_type != 'message'`` filter so message mirrors
+                # are never picked up as Tasks.
+                queue_id_for_job: str | None = None
+                if project_id_for_job is not None:
+                    queue_repo = getattr(
+                        getattr(self._manager, "_job_queue_service", None),
+                        "_repository",
+                        None,
+                    )
+                    if queue_repo is not None:
+                        try:
+                            queue = await asyncio.to_thread(
+                                queue_repo.get_by_name,
+                                project_id_for_job,
+                                "system_fifo_queue",
+                            )
+                            if queue is not None:
+                                queue_id_for_job = queue.queue_id
+                        except Exception as queue_lookup_err:
+                            logger.debug(
+                                f"enqueue_message_job: failed to resolve "
+                                f"system_fifo_queue for project "
+                                f"{project_id_for_job}: "
+                                f"{type(queue_lookup_err).__name__}: "
+                                f"{queue_lookup_err}"
+                            )
+
                 # Bypass JobQueueService.enqueue_job (D13 rejects
                 # job_type='message') and call the repository's low-level
                 # create() directly. The repository already sets
@@ -1328,7 +1364,7 @@ class InstanceMessagingService:
                     project_id=project_id_for_job,
                     priority=priority,
                     job_metadata={},
-                    queue_id=None,
+                    queue_id=queue_id_for_job,
                     idempotency_key=None,
                     job_type="message",
                     instance_id=instance_id,
