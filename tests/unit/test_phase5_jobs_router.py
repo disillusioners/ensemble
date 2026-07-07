@@ -514,16 +514,23 @@ class TestLockReleaseIntegration:
             assert param in params, f"Missing parameter: {param}"
 
     def test_complete_job_uses_release_job_lock(self):
-        """Test that complete_job calls _release_job_lock with correct params."""
+        """Test that complete_job funnels through the terminal-write boundary.
+
+        Post-Phase 4 (``e61b8c5a``) the lock-release lives inside
+        :meth:`JobQueueService._finalize_terminal`'s ``finally`` block,
+        so ``complete_job`` no longer calls ``_release_job_lock``
+        directly with a literal ``release_by_instance=False``. We
+        verify the equivalent invariant: completion routes through the
+        single terminal-write boundary that owns lock release.
+        """
         import inspect
         from daemon.services.job_queue_service import JobQueueService
-        
+
         source = inspect.getsource(JobQueueService.complete_job)
-        
-        # Should call _release_job_lock
-        assert "_release_job_lock" in source
-        # Should pass release_by_instance=False (for complete_job pattern)
-        assert "release_by_instance=False" in source
+
+        # Should funnel through the terminal-write boundary which
+        # owns lock release for active → done transitions.
+        assert "_finalize_terminal" in source
 
     def test_fail_job_uses_release_job_lock(self):
         """Test that _fail_job calls _release_job_lock with correct params."""
@@ -560,9 +567,12 @@ class TestQuickFixVerification:
     def test_jobs_module_exports_terminal_statuses(self):
         """Verify TERMINAL_STATUSES is accessible from jobs module."""
         from daemon.routers.jobs import TERMINAL_STATUSES
-        
-        # Should be a set of terminal status values
-        assert isinstance(TERMINAL_STATUSES, set)
+
+        # Should be a set-like collection of terminal status values.
+        # The canonical definition is a ``frozenset`` (immutable),
+        # but we accept any ``set``-family collection for forward
+        # compatibility with the legacy mutable ``set`` definition.
+        assert isinstance(TERMINAL_STATUSES, (set, frozenset))
         assert len(TERMINAL_STATUSES) > 0
 
     def test_jobs_module_exports_job_to_response(self):
