@@ -8,6 +8,18 @@ interface JobListResponse {
   total: number;
 }
 
+/**
+ * Result payload returned by ``POST /api/jobs/cleanup``.
+ *
+ * Counters come straight from the backend so the UI can show
+ * "Cancelled N queued, M active jobs" without a second round-trip.
+ */
+export interface JobCleanupResult {
+  cancelled_queued: number;
+  cancelled_active: number;
+  total_processed: number;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -179,6 +191,23 @@ export class JobService {
     return this.http.post<RetryAllResult>(`/api/projects/${encodeURIComponent(projectId)}/dlq/replay-all`, {}).pipe(
       catchError((err) => {
         this.error.set(err.message || 'Failed to replay all dead letter jobs');
+        throw err;
+      })
+    );
+  }
+
+  /**
+   * POST /api/jobs/cleanup
+   *
+   * Asks the backend to cancel every queued and active job across
+   * all projects. Used by the "System Cleanup" action on the Jobs
+   * page. Failures surface through the shared ``error`` signal and
+   * are re-thrown so the caller can render a snackbar.
+   */
+  cleanupAllJobs(): Observable<JobCleanupResult> {
+    return this.http.post<JobCleanupResult>(`${this.API_BASE}/cleanup`, {}).pipe(
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to cleanup jobs');
         throw err;
       })
     );

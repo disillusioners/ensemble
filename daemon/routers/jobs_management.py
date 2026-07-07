@@ -15,6 +15,7 @@ from daemon.repositories.job_queue.models import AdmissionState
 from .schemas import (
     JobResponse,
     JobNotFoundResponse,
+    JobCleanupResponse,
 )
 from .jobs_crud import (
     get_job_queue_service,
@@ -556,6 +557,71 @@ async def retry_job(
         position=position,
         message="Job queued for retry"
     )
+
+
+@router.post(
+    "/cleanup",
+    response_model=JobCleanupResponse,
+    responses={
+        200: {"description": "Cleanup completed (counts of cancelled jobs)"},
+        500: {"description": "Cleanup failed"},
+        503: {"description": "Service not initialized or writes are paused"},
+    },
+)
+async def cleanup_jobs(
+    request: Request,
+    service: JobQueueService = Depends(get_job_queue_service),
+):
+    """Cancel ALL non-terminal jobs ("system reset" for the job board).
+
+    Splits the work into two buckets so each side uses the right
+    cancellation tool:
+
+    * **queued (PENDING)** -- batch UPDATE: ``admission_state='queued'
+      -> 'done'`` with ``terminal_reason='cancelled'``. Single SQL
+      statement; no lock to release, no instance to terminate.
+    * **active (PROCESSING)** -- iterate and call :meth:`cancel_job` per
+      row. Each call cascades to the existing instance (release lock ->
+      :meth:`InstanceManager.terminate_instance` ->
+      ``_finalize_terminal(Decision.NO_RETRY)`` -> ``notify_watchers``).
+      Same semantics as a user-initiated single cancel -- reuse keeps
+      the cleanup byte-for-byte identical to that path.
+
+    Already-terminal jobs (``admission_state IN ('done', 'dead')``) and
+    soft-deleted rows are left untouched.
+
+    Returns:
+        200 with :class:`JobCleanupResponse`:
+
+        .. code-block:: json
+
+            {"cancelled_queued": N, "cancelled_active": N, "total_processed": N}
+
+    Raises:
+        503: When writes are paused for migration.
+    """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+    try:
+        result = await service.cleanup_non_terminal_jobs()
+    except Exception as exc:  # noqa: BLE001 -- defensive broad catch
+        logger.error(
+            "cleanup_jobs: cleanup_non_terminal_jobs failed: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Cleanup failed",
+                "message": str(exc),
+            },
+        ) from exc
+    return JobCleanupResponse(**result)
 
 
 __all__ = ["router"]

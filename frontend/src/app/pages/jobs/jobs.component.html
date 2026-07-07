@@ -75,6 +75,16 @@
         Refresh
       </button>
       <button
+        mat-stroked-button
+        color="warn"
+        (click)="onSystemCleanup()"
+        [disabled]="cleanupInProgress()"
+        class="cleanup-btn"
+        matTooltip="Cancel ALL pending and running jobs across ALL projects">
+        <mat-icon [class.spinning]="cleanupInProgress()">cleaning_services</mat-icon>
+        System Cleanup
+      </button>
+      <button
         mat-flat-button
         color="primary"
         (click)="onOpenCreateDialog()"

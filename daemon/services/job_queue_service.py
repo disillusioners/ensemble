@@ -1064,6 +1064,76 @@ class JobQueueService:
                 job.job_id[:8], e,
             )
         return True
+
+    async def cleanup_non_terminal_jobs(self) -> dict[str, int]:
+        """Cancel ALL non-terminal, non-deleted jobs ("system reset").
+
+        Drives the ``POST /api/jobs/cleanup`` endpoint. Splits the work
+        into two buckets so each side uses the right cancellation tool:
+
+        * **queued** — a single batch UPDATE on the JobItem table
+          (``admission_state='queued' → 'done'``,
+          ``terminal_reason='cancelled'``). No lock to release, no
+          instance to terminate — just stamp the terminal discriminator
+          atomically.
+        * **active** — one ``cancel_job`` call per row. Each call
+          cascades termination to the underlying instance (releasing
+          locks, cancelling children) before stamping the row. The
+          single-job ``cancel_job`` already handles all the bookkeeping
+          (lock release → ``_finalize_terminal(Decision.NO_RETRY)`` →
+          ``notify_watchers``) so reuse keeps the cleanup semantics
+          byte-for-byte identical to a user-initiated single cancel.
+
+        Already-terminal jobs (``admission_state IN ('done', 'dead')``)
+        are left untouched.
+
+        Returns:
+            ``{"cancelled_queued": N, "cancelled_active": M, "total_processed": N + M}``
+            where ``cancelled_queued`` is the batch UPDATE rowcount and
+            ``cancelled_active`` is the number of active-side ``cancel_job``
+            calls that returned ``True``. Per-cancel failures
+            (e.g. a race flipped ``active → done`` mid-iteration) are
+            logged at WARNING and counted as ``0`` — the endpoint still
+            returns successfully with a partial count. Best-effort
+            semantics match the existing single-job :meth:`cancel_job`
+            which also returns ``False`` for non-cancellable states.
+        """
+        # 1) Queued batch — single SQL UPDATE, no per-row logic needed.
+        cancelled_queued = await asyncio.to_thread(
+            self._repository.batch_cancel_queued
+        )
+
+        # 2) Active side — cancel each row through the existing
+        # ``cancel_job`` so the instance termination cascade runs.
+        # Snapshot first so the cancel loop is bounded (new jobs
+        # enqueued during the loop are out of scope — they post-date
+        # the cleanup request).
+        active_jobs = await asyncio.to_thread(
+            self._repository.find_active_jobs
+        )
+        cancelled_active = 0
+        for job in active_jobs:
+            try:
+                success = await self.cancel_job(job.job_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(
+                    "cleanup_non_terminal_jobs: cancel_job(%s) failed: %s",
+                    job.job_id[:8], exc,
+                )
+                continue
+            if success:
+                cancelled_active += 1
+
+        total = cancelled_queued + cancelled_active
+        logger.info(
+            "cleanup_non_terminal_jobs: cancelled_queued=%d cancelled_active=%d total=%d",
+            cancelled_queued, cancelled_active, total,
+        )
+        return {
+            "cancelled_queued": cancelled_queued,
+            "cancelled_active": cancelled_active,
+            "total_processed": total,
+        }
     
     def _is_instance_alive(self, instance_id: str) -> bool:
         """Check if an instance exists and is not in a terminal state.

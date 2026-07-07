@@ -44,18 +44,19 @@ class TestJobsRouteRegistration:
         return app
 
     def test_all_jobs_routes_exist(self, app):
-        """Verify all 8 jobs endpoints are registered."""
+        """Verify all jobs endpoints are correctly registered."""
         paths = {r.path for r in app.routes if hasattr(r, 'methods')}
-        
+
         expected_paths = [
             "/api/jobs",                      # POST create, GET list
             "/api/jobs/{job_id}",             # GET, DELETE
             "/api/jobs/{job_id}/cancel",      # POST
             "/api/jobs/{job_id}/restore",     # POST
             "/api/jobs/{job_id}/retry",       # POST
-            "/api/jobs/{job_id}/events",       # GET SSE
+            "/api/jobs/{job_id}/events",      # GET SSE
+            "/api/jobs/cleanup",              # POST System Jobs Cleanup
         ]
-        
+
         print(f"\nRegistered job paths: {sorted(paths)}")
         
         for path in expected_paths:
@@ -92,21 +93,29 @@ class TestJobsRouteRegistration:
             )
 
     def test_total_route_count(self, app):
-        """Verify we have exactly 8 jobs endpoints (with 2 having multiple methods)."""
+        """Verify the jobs router has the expected total route count.
+
+        After the System Jobs Cleanup feature landed, the count grew
+        from 8 to 9 (the new ``POST /api/jobs/cleanup`` endpoint). The
+        original test was written pre-cleanup against the Phase 5
+        split-router refactor and pinned ``len == 8``; the matching
+        ``test_all_jobs_routes_exist`` pins the actual paths so the
+        shape is still validated against drift.
+        """
         routes_with_methods = []
         for route in app.routes:
             if hasattr(route, 'methods') and route.methods:
                 for method in route.methods:
                     if method not in ('HEAD', 'OPTIONS'):
                         routes_with_methods.append(f"{method} {route.path}")
-        
+
         # Filter to only include /api/jobs routes (exclude internal FastAPI routes)
         jobs_routes = [r for r in routes_with_methods if '/api/jobs' in r]
-        
+
         print(f"\nJobs routes ({len(jobs_routes)}):")
         for r in sorted(jobs_routes):
             print(f"  {r}")
-        
+
         # We expect:
         # - POST /api/jobs
         # - GET /api/jobs
@@ -116,9 +125,10 @@ class TestJobsRouteRegistration:
         # - POST /api/jobs/{job_id}/restore
         # - POST /api/jobs/{job_id}/retry
         # - GET /api/jobs/{job_id}/events
-        # = 8 endpoints
-        assert len(jobs_routes) == 8, (
-            f"Expected 8 job endpoints, found {len(jobs_routes)}"
+        # - POST /api/jobs/cleanup                           (System Jobs Cleanup)
+        # = 9 endpoints
+        assert len(jobs_routes) == 9, (
+            f"Expected 9 job endpoints, found {len(jobs_routes)}"
         )
 
 

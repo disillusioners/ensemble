@@ -63,6 +63,7 @@ const mockJobService = {
   softDeleteJob: jest.fn(),
   restoreJob: jest.fn(),
   retryAllDeadLetterJobs: jest.fn(),
+  cleanupAllJobs: jest.fn(),
   refreshJobs: jest.fn(),
   createJob: jest.fn(),
 };
@@ -109,6 +110,9 @@ class MockJobsComponent {
   // DLQ signals
   readonly retryingAll = signal(false);
   readonly isDeadLetterFilterActive = computed(() => this.filters().status === 'dead_letter');
+
+  // System cleanup signal
+  readonly cleanupInProgress = signal(false);
   
   // SSE connection status
   readonly isConnected = mockJobSseService.isConnected;
@@ -282,6 +286,22 @@ class MockJobsComponent {
     const projectId = this.filters().project_id;
     if (!projectId) return;
     mockJobService.retryAllDeadLetterJobs(projectId);
+  }
+
+  onSystemCleanup() {
+    const projectId = this.filters().project_id;
+    if (!projectId || this.cleanupInProgress()) {
+      return;
+    }
+    this.cleanupInProgress.set(true);
+    mockJobService.cleanupAllJobs().pipe().subscribe({
+      next: (result: { cancelled_queued: number; cancelled_active: number; total_processed: number }) => {
+        this.cleanupInProgress.set(false);
+      },
+      error: () => {
+        this.cleanupInProgress.set(false);
+      },
+    });
   }
 
   onViewJobDetails(job: Job) {
@@ -521,6 +541,106 @@ describe('JobsComponent Logic', () => {
       component.filters.set({});
       component.onRetryAllDeadLetterJobs();
       expect(mockJobService.retryAllDeadLetterJobs).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('onSystemCleanup', () => {
+    /**
+     * Build a minimal mock observable that captures the ``next`` and
+     * ``error`` callbacks supplied to ``subscribe`` so a test can
+     * assert on intermediate state transitions (i.e. ``cleanupInProgress``
+     * set to ``true`` while the request is in flight and reset to
+     * ``false`` after the response).
+     */
+    const buildCleanupMock = () => {
+      let nextFn: ((r: any) => void) | null = null;
+      let errorFn: ((e: any) => void) | null = null;
+      const obs: any = {
+        pipe: () => obs,
+        subscribe: (observer: any) => {
+          if (typeof observer === 'function') {
+            nextFn = observer;
+          } else {
+            nextFn = observer.next;
+            errorFn = observer.error;
+          }
+          return { unsubscribe: () => {} };
+        },
+      };
+      return {
+        obs,
+        invokeNext: (r: any) => nextFn && nextFn(r),
+        invokeError: (e: any) => errorFn && errorFn(e),
+      };
+    };
+
+    it('should call jobService.cleanupAllJobs when project is selected', () => {
+      component.filters.set({ project_id: 'project-123' });
+      component.cleanupInProgress.set(false);
+      const { obs } = buildCleanupMock();
+      mockJobService.cleanupAllJobs.mockReturnValue(obs);
+
+      component.onSystemCleanup();
+
+      expect(mockJobService.cleanupAllJobs).toHaveBeenCalled();
+    });
+
+    it('should not call jobService.cleanupAllJobs when no project is selected', () => {
+      component.filters.set({});
+      component.cleanupInProgress.set(false);
+
+      component.onSystemCleanup();
+
+      expect(mockJobService.cleanupAllJobs).not.toHaveBeenCalled();
+    });
+
+    it('should not call jobService.cleanupAllJobs when already in progress', () => {
+      component.filters.set({ project_id: 'project-123' });
+      component.cleanupInProgress.set(true);
+
+      component.onSystemCleanup();
+
+      expect(mockJobService.cleanupAllJobs).not.toHaveBeenCalled();
+    });
+
+    it('should set cleanupInProgress true during cleanup', () => {
+      component.filters.set({ project_id: 'project-123' });
+      component.cleanupInProgress.set(false);
+      const { obs } = buildCleanupMock();
+      mockJobService.cleanupAllJobs.mockReturnValue(obs);
+
+      component.onSystemCleanup();
+
+      expect(component.cleanupInProgress()).toBe(true);
+    });
+
+    it('should reset cleanupInProgress on success', () => {
+      component.filters.set({ project_id: 'project-123' });
+      component.cleanupInProgress.set(false);
+      const { obs, invokeNext } = buildCleanupMock();
+      mockJobService.cleanupAllJobs.mockReturnValue(obs);
+
+      component.onSystemCleanup();
+      // Sanity — flag is set in flight.
+      expect(component.cleanupInProgress()).toBe(true);
+
+      invokeNext({ cancelled_queued: 1, cancelled_active: 2, total_processed: 3 });
+
+      expect(component.cleanupInProgress()).toBe(false);
+    });
+
+    it('should reset cleanupInProgress on error', () => {
+      component.filters.set({ project_id: 'project-123' });
+      component.cleanupInProgress.set(false);
+      const { obs, invokeError } = buildCleanupMock();
+      mockJobService.cleanupAllJobs.mockReturnValue(obs);
+
+      component.onSystemCleanup();
+      expect(component.cleanupInProgress()).toBe(true);
+
+      invokeError(new Error('boom'));
+
+      expect(component.cleanupInProgress()).toBe(false);
     });
   });
 

@@ -1,5 +1,5 @@
 import { signal } from '@angular/core';
-import { Job, DeadLetterItem, RetryAllResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
+import { Job, DeadLetterItem, RetryAllResult, JobCleanupResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
 import { createMockJob, createMockJobList } from '../testing/job-test-helpers';
 
 // Create a testable JobService with injected mock
@@ -223,7 +223,7 @@ class TestJobService {
 
   retryAllDeadLetterJobs(projectId: string) {
     const url = `/api/projects/${encodeURIComponent(projectId)}/dlq/replay-all`;
-    
+
     return {
       pipe: () => ({
         subscribe: (observer: any) => {
@@ -231,6 +231,27 @@ class TestJobService {
             replayed: 5,
             failed: 0,
             errors: [],
+          };
+          if (typeof observer === 'function') {
+            observer(mockResponse);
+          } else if (observer.next) {
+            observer.next(mockResponse);
+          }
+        }
+      })
+    };
+  }
+
+  cleanupAllJobs() {
+    const url = '/api/jobs/cleanup';
+
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          const mockResponse: JobCleanupResult = {
+            cancelled_queued: 5,
+            cancelled_active: 2,
+            total_processed: 7,
           };
           if (typeof observer === 'function') {
             observer(mockResponse);
@@ -572,6 +593,31 @@ describe('JobService', () => {
       expect(result?.replayed).toBe(5);
       expect(result?.failed).toBe(0);
       expect(result?.errors).toEqual([]);
+    });
+  });
+
+  describe('cleanupAllJobs', () => {
+    it('should call POST to /api/jobs/cleanup', () => {
+      const subscribeSpy = jest.fn();
+      service.cleanupAllJobs().pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should return JobCleanupResult with cancelled_queued, cancelled_active, total_processed', () => {
+      let result: JobCleanupResult | null = null;
+      service.cleanupAllJobs().pipe().subscribe(response => { result = response; });
+      expect(result).not.toBeNull();
+      expect(result).toHaveProperty('cancelled_queued');
+      expect(result).toHaveProperty('cancelled_active');
+      expect(result).toHaveProperty('total_processed');
+    });
+
+    it('should have correct counts in response', () => {
+      let result: JobCleanupResult | null = null;
+      service.cleanupAllJobs().pipe().subscribe(response => { result = response; });
+      expect(result?.cancelled_queued).toBe(5);
+      expect(result?.cancelled_active).toBe(2);
+      expect(result?.total_processed).toBe(7);
     });
   });
 });

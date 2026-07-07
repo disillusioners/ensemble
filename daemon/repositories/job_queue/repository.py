@@ -2069,6 +2069,79 @@ SET admission_state = 'queued',
                 return None
             return job
 
+    def batch_cancel_queued(self) -> int:
+        """Atomically cancel ALL queued (admission_state='queued') jobs in one UPDATE.
+
+        Used by the ``POST /api/jobs/cleanup`` "system reset" endpoint to
+        bulk-cancel the queued side of the job board. Skips active jobs
+        (they need the ``terminate_instance`` cascade) and skips terminal
+        jobs (already done/dead). Single SQL statement; race-safe under
+        PostgreSQL EvalPlanQual and SQLite single-statement atomicity.
+
+        Excludes ``job_type='message'`` JobItems, which are pure mirrors
+        of Task rows — cancelling them here would desync the JobItem
+        mirror from its authoritative Task row. Same invariant as
+        ``list_pending_by_project`` / ``list_pending_by_queue`` /
+        ``list_all_pending``.
+
+        Maps the matching rows to ``admission_state='done'`` with
+        ``terminal_reason='cancelled'`` — matches the single-job
+        :meth:`cancel_job` semantics so any downstream resolver sees the
+        same canonical ``cancelled`` discriminator.
+
+        Returns:
+            Number of rows cancelled (``rowcount`` from the UPDATE).
+        """
+        with SQLModelSession(self.engine) as session:
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
+                .where(JobItem.job_type != "message")
+                .where(JobItem.deleted_at.is_(None))
+                .values(
+                    admission_state=AdmissionState.DONE.value,
+                    terminal_reason="cancelled",
+                )
+            )
+            result = session.exec(stmt)
+            session.commit()
+            return result.rowcount or 0
+
+    def find_active_jobs(self) -> list[JobItem]:
+        """List all active (non-terminal, lock-held) jobs grouped by admission state.
+
+        Used by the cleanup endpoint to discover the active-side (lock /
+        instance) jobs that need the cancel cascade. Mirrors the
+        ``admission_state='active'`` invariant from
+        ``ACTIVE_ADMISSION_STATES`` — the caller routes queued jobs to a
+        single batch UPDATE and active jobs to one ``cancel_job`` call
+        per row.
+
+        Excludes ``job_type='message'`` JobItems. Those are pure mirrors
+        of Task rows and the cleanup cascade (``cancel_job`` ->
+        ``terminate_instance``) would either be a no-op or, worse,
+        trigger destructive instance termination on a Task that has
+        other live work. Skipping them keeps the cleanup surface to
+        real lock-holding jobs only. Same invariant as
+        ``list_pending_by_project`` / ``list_pending_by_queue`` /
+        ``list_all_pending``.
+
+        Returns:
+            List of ``JobItem`` with ``admission_state == 'active'`` and
+            ``deleted_at IS NULL``. Ordered by ``created_at`` so cancel
+            cascades fire in FIFO order — releases the oldest held lock
+            first when many active jobs cluster on one project.
+        """
+        with SQLModelSession(self.engine) as session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
+                .where(JobItem.job_type != "message")
+                .where(JobItem.deleted_at.is_(None))
+                .order_by(JobItem.created_at.asc(), JobItem.job_id)
+            )
+            return list(session.exec(stmt))
+
     def terminate_job(
         self,
         job_id: str,

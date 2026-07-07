@@ -179,6 +179,67 @@ class JobNotFoundResponse(BaseModel):
     }
 
 
+class JobCleanupResponse(BaseModel):
+    """Response for the ``POST /api/jobs/cleanup`` "system reset" endpoint.
+
+    Counter breakdown:
+      * ``cancelled_queued`` — number of PENDING (queued) jobs that
+        were batch-updated to ``admission_state='done'`` /
+        ``terminal_reason='cancelled'`` in a single SQL UPDATE.
+      * ``cancelled_active`` — number of PROCESSING (active) jobs
+        whose per-row ``cancel_job`` cascade returned ``True`` (lock
+        released + instance terminated).
+      * ``total_processed`` — sum of the two.
+    """
+
+    cancelled_queued: int = Field(
+        ...,
+        ge=0,
+        description="Number of queued (PENDING) jobs that were cancelled",
+    )
+    cancelled_active: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Number of active (PROCESSING) jobs whose cancel cascade completed"
+        ),
+    )
+    total_processed: int = Field(
+        ...,
+        ge=0,
+        description="Sum of cancelled_queued + cancelled_active",
+    )
+
+    @model_validator(mode="after")
+    def validate_total_processed(self) -> "JobCleanupResponse":
+        """Enforce ``total_processed == cancelled_queued + cancelled_active``.
+
+        The cleanup endpoint builds ``total_processed`` as the sum of the
+        two per-bucket counts; pinning the invariant here means a future
+        refactor of the service layer that drops a count (or double-
+        counts a row) cannot silently produce a misleading
+        ``total_processed`` in the response body.
+        """
+        if self.total_processed != self.cancelled_queued + self.cancelled_active:
+            raise ValueError(
+                f"total_processed ({self.total_processed}) must equal "
+                f"cancelled_queued + cancelled_active "
+                f"({self.cancelled_queued} + {self.cancelled_active} "
+                f"= {self.cancelled_queued + self.cancelled_active})"
+            )
+        return self
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "cancelled_queued": 12,
+                "cancelled_active": 3,
+                "total_processed": 15,
+            }
+        }
+    }
+
+
 # Backward compatibility aliases
 TaskCreateRequest = JobCreateRequest
 TaskResponse = JobResponse

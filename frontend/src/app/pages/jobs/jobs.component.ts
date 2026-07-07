@@ -25,6 +25,7 @@ import { JobCardComponent } from '../../components/job-card/job-card.component';
 import { JobDetailDrawerComponent } from '../../components/job-detail-drawer/job-detail-drawer.component';
 import { JobCreateDialogComponent, JobCreateDialogResult } from '../../components/job-create-dialog/job-create-dialog.component';
 import { QueueListComponent } from '../../components/queue-list/queue-list.component';
+import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
 import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
@@ -106,6 +107,11 @@ export class JobsComponent implements OnInit, OnDestroy {
   // DLQ signals
   readonly retryingAll = signal(false);
   readonly isDeadLetterFilterActive = computed(() => this.filters().status?.includes('dead_letter') ?? false);
+
+  // System cleanup signal — true while the cleanupAllJobs request is
+  // in-flight. Used to disable the System Cleanup button via
+  // [disabled] in the template.
+  readonly cleanupInProgress = signal(false);
 
   // Deleted jobs filter
   readonly showDeleted = signal(false);
@@ -845,6 +851,63 @@ export class JobsComponent implements OnInit, OnDestroy {
           }
         );
       }
+    });
+  }
+
+  /**
+   * Open the System Cleanup confirmation dialog and (on confirm) call
+   * ``POST /api/jobs/cleanup`` to cancel every queued and active job
+   * across all projects.
+   *
+   * Guards:
+   *   * Cleanup already in progress — silently no-op so a double-click
+   *     cannot fire two parallel backend requests.
+   *
+   * The backend endpoint is intentionally global (it cancels across
+   * all projects — this is a "system reset" operation), so no project
+   * filter is required here. The confirmation dialog makes the global
+   * scope explicit.
+   *
+   * On success a success snackbar reports the cancelled counts and the
+   * active view is refreshed; on error an error snackbar surfaces the
+   * failure message. The ``cleanupInProgress`` signal is always reset
+   * before the method returns so the button re-enables.
+   */
+  protected onSystemCleanup(): void {
+    if (this.cleanupInProgress()) {
+      return;
+    }
+
+    const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
+      width: '420px',
+      panelClass: 'dark-modal-panel',
+    });
+
+    dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      if (!confirmed) {
+        return;
+      }
+      this.cleanupInProgress.set(true);
+      this.jobService.cleanupAllJobs().subscribe({
+        next: (result) => {
+          this.cleanupInProgress.set(false);
+          this.snackBar.open(
+            `Cancelled ${result.cancelled_queued} queued, ${result.cancelled_active} active jobs`,
+            'Close',
+            { duration: 5000, panelClass: 'success-snackbar' }
+          );
+          this.onRefresh();
+        },
+        error: (err) => {
+          console.error('Failed to cleanup jobs:', err);
+          this.cleanupInProgress.set(false);
+          this.snackBar.open(
+            err?.message || 'Failed to cleanup jobs',
+            'Dismiss',
+            { duration: 5000, panelClass: 'error-snackbar' }
+          );
+        },
+      });
     });
   }
 
