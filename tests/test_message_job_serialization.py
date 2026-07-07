@@ -98,12 +98,36 @@ def cancellation_service():
 
 
 @pytest.fixture
+def queue_repository(engine):
+    """Real ``JobQueueRepository`` seeded with ``system_parallel_queue``
+    for ``test-project`` so the POC ``enqueue_message_job`` resolves a
+    real ``queue_id`` (string) for the JobItem mirror. Without this the
+    the previously-broken lookup (``_repository`` instead of
+    ``_queue_repo``) silently raised ``AttributeError``, leaving
+    ``queue_id=None`` on production message JobItems.
+    """
+    from daemon.repositories.job_queue.queue_repository import JobQueueRepository
+
+    repo = JobQueueRepository(engine)
+    repo.create(
+        project_id="test-project",
+        queue_name="system_parallel_queue",
+        queue_type="parallel",
+        concurrency_limit=5,
+        is_system=True,
+    )
+    return repo
+
+
+@pytest.fixture
 def write_guard():
     """Real ``WritePauseGuard`` (no active pause)."""
     return WritePauseGuard()
 
 
-def _build_manager(engine, instance_repository, write_guard, job_repository):
+def _build_manager(
+    engine, instance_repository, write_guard, job_repository, queue_repository
+):
     """Build a mock ``InstanceManager`` exposing only the attributes
     ``enqueue_message`` and ``enqueue_message_job`` actually touch.
 
@@ -111,6 +135,12 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     ``JobRepository`` so the POC's ``enqueue_message_job`` can write
     JobItem rows + stamp ``message_id`` via the repository's
     low-level path.
+
+    ``_job_queue_service._queue_repo`` is wired to the real
+    ``JobQueueRepository`` so the queue_id resolution
+    (``get_by_name("system_parallel_queue")``) returns a real
+    ``JobQueue`` with a string ``queue_id`` (not a ``MagicMock``,
+    which fails SQLite parameter binding).
     """
     manager = MagicMock()
     manager.engine = engine
@@ -131,6 +161,10 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     # via the ``_job_repository`` property on InstanceMessagingService.
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._repository = job_repository
+    # Real JobQueueRepository so the queue_id lookup returns a real
+    # ``JobQueue.queue_id`` (str). Earlier revisions resolved
+    # ``_repository`` (JobRepository) here, which lacks ``get_by_name``.
+    manager._job_queue_service._queue_repo = queue_repository
 
     # Config -- Phase 5 cutover: ``message_jobs_enabled`` was removed,
     # there is only one public path now.
@@ -281,10 +315,11 @@ class TestTwoMessageJobsSerialize:
         write_guard,
         job_repository,
         task_repository,
+        queue_repository,
     ):
         # ── Phase 5: every public message is a JobItem ──
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
         messaging_service = InstanceMessagingService(
             manager=manager,
@@ -475,10 +510,11 @@ class TestEagerActivationOnSqlite:
         instance_repository,
         write_guard,
         job_repository,
+        queue_repository,
     ):
         # ── Flag ON, instance IDLE ──
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
         messaging_service = InstanceMessagingService(
             manager=manager,
@@ -595,10 +631,11 @@ class TestFailedMessageJobGoesToDone:
         instance_repository,
         write_guard,
         job_repository,
+        queue_repository,
     ):
         # ── Flag ON, instance IDLE ──
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
         messaging_service = InstanceMessagingService(
             manager=manager,

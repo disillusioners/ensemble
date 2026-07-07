@@ -1308,22 +1308,33 @@ class InstanceMessagingService:
                         f"{type(project_err).__name__}: {project_err}"
                     )
 
-                # Resolve the project's ``system_fifo_queue`` so the
+                # Resolve the project's ``system_parallel_queue`` so the
                 # message JobItem is queue-scoped. Without this the
                 # JobItem is stored with ``queue_id=None`` and disappears
                 # from queue-scoped counts (``GET /queues`` returns
                 # ``active_jobs``/``pending_jobs`` per queue, derived
-                # from ``JobItem.queue_id``). Counting message jobs in
-                # the project's fifo queue lets the UI surface in-flight
-                # message dispatch without affecting the poll loop —
-                # ``list_pending_by_queue`` retains the
+                # from ``JobItem.queue_id``). Routing message mirrors
+                # through the parallel queue lets the UI surface
+                # in-flight message dispatch without affecting the poll
+                # loop — ``list_pending_by_queue`` retains the
                 # ``job_type != 'message'`` filter so message mirrors
-                # are never picked up as Tasks.
+                # are never picked up as Tasks — and lets concurrent
+                # messages across instances share the queue's
+                # concurrency_limit (=5) instead of serializing behind
+                # the FIFO queue's concurrency_limit=1.
                 queue_id_for_job: str | None = None
                 if project_id_for_job is not None:
+                    # ``JobQueueService`` exposes ``_queue_repo``
+                    # (``JobQueueRepository``) for queue metadata;
+                    # ``_repository`` is the ``JobRepository`` for jobs
+                    # and does not have ``get_by_name``. Earlier
+                    # revisions looked up ``_repository`` here and the
+                    # resulting ``AttributeError`` was silently
+                    # swallowed by the try/except below, leaving
+                    # ``queue_id_for_job = None`` in production.
                     queue_repo = getattr(
                         getattr(self._manager, "_job_queue_service", None),
-                        "_repository",
+                        "_queue_repo",
                         None,
                     )
                     if queue_repo is not None:
@@ -1331,14 +1342,14 @@ class InstanceMessagingService:
                             queue = await asyncio.to_thread(
                                 queue_repo.get_by_name,
                                 project_id_for_job,
-                                "system_fifo_queue",
+                                "system_parallel_queue",
                             )
                             if queue is not None:
                                 queue_id_for_job = queue.queue_id
                         except Exception as queue_lookup_err:
                             logger.debug(
                                 f"enqueue_message_job: failed to resolve "
-                                f"system_fifo_queue for project "
+                                f"system_parallel_queue for project "
                                 f"{project_id_for_job}: "
                                 f"{type(queue_lookup_err).__name__}: "
                                 f"{queue_lookup_err}"

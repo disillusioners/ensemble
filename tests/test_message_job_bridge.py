@@ -92,6 +92,27 @@ def job_repository(engine):
 
 
 @pytest.fixture
+def queue_repository(engine):
+    """Real ``JobQueueRepository`` seeded with ``system_parallel_queue``
+    for ``test-project`` so the POC ``enqueue_message_job`` resolves a
+    real ``queue_id`` (string) for the JobItem mirror instead of relying
+    on the broken pre-fix lookup that silently swallowed the
+    ``AttributeError`` on ``JobRepository.get_by_name``.
+    """
+    from daemon.repositories.job_queue.queue_repository import JobQueueRepository
+
+    repo = JobQueueRepository(engine)
+    repo.create(
+        project_id="test-project",
+        queue_name="system_parallel_queue",
+        queue_type="parallel",
+        concurrency_limit=5,
+        is_system=True,
+    )
+    return repo
+
+
+@pytest.fixture
 def cancellation_service():
     """Mock ``CancellationService`` with ``is_shutting_down=False``."""
     service = MagicMock(spec=CancellationService)
@@ -105,7 +126,9 @@ def write_guard():
     return WritePauseGuard()
 
 
-def _build_manager(engine, instance_repository, write_guard, job_repository):
+def _build_manager(
+    engine, instance_repository, write_guard, job_repository, queue_repository
+):
     """Build a mock ``InstanceManager`` exposing only the attributes
     ``enqueue_message`` and ``enqueue_message_job`` actually touch.
 
@@ -113,6 +136,12 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     ``JobRepository`` so the POC's ``enqueue_message_job`` can write
     JobItem rows + stamp ``message_id`` via the repository's
     low-level path.
+
+    ``_job_queue_service._queue_repo`` is wired to the real
+    ``JobQueueRepository`` so the queue_id resolution
+    (``get_by_name("system_parallel_queue")``) returns a real
+    ``JobQueue`` with a string ``queue_id`` (not a ``MagicMock``,
+    which fails SQLite parameter binding).
     """
     manager = MagicMock()
     manager.engine = engine
@@ -133,6 +162,12 @@ def _build_manager(engine, instance_repository, write_guard, job_repository):
     # via the ``_job_repository`` property on InstanceMessagingService.
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._repository = job_repository
+    # Wire a real JobQueueRepository so the queue_id lookup returns a
+    # real ``JobQueue.queue_id`` (str). Earlier revisions resolved
+    # ``_repository`` (JobRepository) here, which lacks
+    # ``get_by_name``; the resulting ``AttributeError`` was silently
+    # swallowed and ``queue_id_for_job`` stayed ``None`` in production.
+    manager._job_queue_service._queue_repo = queue_repository
 
     # Config -- single public path after Phase 5 cutover.
     manager.config = Config(job_system=JobSystemConfig())
@@ -270,10 +305,10 @@ class TestAtomicCreationWithFlagOn:
 
     @pytest.mark.asyncio
     async def test_a_work_id_equals_job_id(
-        self, engine, instance_repository, write_guard, job_repository
+        self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
@@ -330,6 +365,23 @@ class TestAtomicCreationWithFlagOn:
             f"JobItem.job_type must be 'message', got {ji.job_type!r}"
         )
 
+        # ── Queue routing: message JobItem is scoped to ``system_parallel_queue`` ──
+        # Without this assertion the queue_id assignment path is untested
+        # — earlier revisions resolved ``_repository`` (JobRepository,
+        # no ``get_by_name``) and silently swallowed the AttributeError,
+        # leaving ``queue_id`` NULL on the JobItem in production.
+        expected_queue = queue_repository.get_by_name(
+            "test-project", "system_parallel_queue"
+        )
+        assert expected_queue is not None, (
+            "test fixture must seed system_parallel_queue for test-project"
+        )
+        assert ji.queue_id == expected_queue.queue_id, (
+            f"JobItem.queue_id ({ji.queue_id!r}) must equal the "
+            f"system_parallel_queue.queue_id ({expected_queue.queue_id!r}) "
+            f"so message jobs appear in the project's parallel queue stats"
+        )
+
         # ── Linkage contract: task.work_id == result.job_id AND ji.job_id == task.work_id ──
         assert task.work_id == result.job_id, (
             f"Task.work_id ({task.work_id}) must equal AsyncMessageResult.job_id "
@@ -356,10 +408,10 @@ class TestMessageIdStamped:
 
     @pytest.mark.asyncio
     async def test_b_message_id_in_job_metadata(
-        self, engine, instance_repository, write_guard, job_repository
+        self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
@@ -443,10 +495,11 @@ class TestObserverFinalizesQueuedJobItem:
         write_guard,
         job_repository,
         task_repository,
+        queue_repository,
     ):
         # ── Phase 5 cutover: every public message is a JobItem ──
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
@@ -567,10 +620,10 @@ class TestInternalEnqueueMessageNoJobItem:
 
     @pytest.mark.asyncio
     async def test_d_internal_enqueue_creates_no_jobitem(
-        self, engine, instance_repository, write_guard, job_repository
+        self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
@@ -636,10 +689,10 @@ class TestMaxRetriesZero:
 
     @pytest.mark.asyncio
     async def test_e_max_retries_zero_on_message_jobitems(
-        self, engine, instance_repository, write_guard, job_repository
+        self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
@@ -697,7 +750,7 @@ class TestMaxRetriesZero:
         )
 
     async def test_f_message_jobitem_inherits_instance_project_id(
-        self, engine, instance_repository, write_guard, job_repository
+        self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         """The message JobItem must carry its instance's project_id.
 
@@ -711,7 +764,7 @@ class TestMaxRetriesZero:
         (normalised) into ``job_repo.create``.
         """
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
@@ -753,7 +806,7 @@ class TestMaxRetriesZero:
         )
 
     async def test_f_message_jobitem_project_id_falls_back_to_system_default(
-        self, engine, instance_repository, write_guard, job_repository
+        self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         """When the instance has no project_id, the message JobItem
         falls back to the system default project (via
@@ -762,7 +815,7 @@ class TestMaxRetriesZero:
         from daemon import constants
 
         manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository
+            engine, instance_repository, write_guard, job_repository, queue_repository
         )
 
         messaging_service = InstanceMessagingService(
