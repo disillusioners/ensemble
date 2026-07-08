@@ -36,6 +36,17 @@ class BuiltinServerDefinition(ABC):
         """Version of the config schema. Changes trigger schema drift detection."""
         ...
 
+    @property
+    def tool_call_timeout(self) -> int | None:
+        """Per-server tool call timeout in seconds, or None for the default.
+
+        Subclasses override to request a longer timeout for tools that may
+        run long-running operations (e.g. agent execution). Returns None
+        by default — callers fall back to the pool-wide
+        ``McpPoolConfig.tool_call_timeout``.
+        """
+        return None
+
     def get_base_config(self) -> dict[str, Any]:
         """
         Return base configuration including transport, command, and fixed args.

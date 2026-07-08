@@ -1030,7 +1030,7 @@ class InstanceManager:
                 )
                 continue
 
-            config_dict = definition.get_base_config()
+            config_dict = definition.build_config({})
             if config_dict.get("transport") != "stdio":
                 continue
 
