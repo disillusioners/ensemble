@@ -51,7 +51,7 @@ Provides up-to-date library documentation via `@upstash/context7-mcp`.
 
 #### OpenSpace
 
-Provides the self-evolving OpenSpace skill engine via `python3 -m openspace.mcp_server`. Exposes `execute_task`, `search_skills`, and `skill_evolution` tools.
+Provides the self-evolving OpenSpace skill engine via `python3 -m openspace.mcp_server`. Exposes `execute_task`, `search_skills`, `fix_skill`, and `upload_skill` tools.
 
 | Property | Value |
 |----------|-------|
@@ -524,7 +524,7 @@ Response:
     {
       "name": "openspace",
       "display_name": "OpenSpace",
-      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, and skill_evolution for evolving the skill set.",
+      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, fix_skill for repairing/refining skills, and upload_skill for publishing skills to the community.",
       "config_schema": [
         {
           "key": "openspace_model",

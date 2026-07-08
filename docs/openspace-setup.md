@@ -1,6 +1,6 @@
 # OpenSpace Setup Guide
 
-[OpenSpace](https://github.com/agents-ensemble/openspace) is an optional, **opt-in** MCP server for agents-ensemble. It provides a self-evolving skill engine that exposes `execute_task`, `search_skills`, and `skill_evolution` tools — letting agents delegate complex sub-tasks to embedded OpenSpace agents.
+[OpenSpace](https://github.com/agents-ensemble/openspace) is an optional, **opt-in** MCP server for agents-ensemble. It provides a self-evolving skill engine that exposes `execute_task`, `search_skills`, `fix_skill`, and `upload_skill` tools — letting agents delegate complex sub-tasks to embedded OpenSpace agents, repair/refine skills, and publish skills to the community.
 
 OpenSpace is **not bundled** with ensemble. You install and configure it separately. This guide covers installation, credentials, transport selection, agent enablement, and troubleshooting.
 
@@ -29,7 +29,8 @@ OpenSpace is a self-evolving AI agent task delegation system. Key capabilities:
 |------|---------|
 | `execute_task` | Run a full embedded OpenSpace agent (long-running, iterative) |
 | `search_skills` | Find reusable skills across the local/cloud skill corpus |
-| `skill_evolution` | Evolve the skill set — generate, refine, or fix skills from task outcomes |
+| `fix_skill` | Repair or refine an existing skill based on feedback or error analysis |
+| `upload_skill` | Upload a skill to the OpenSpace community skill repository |
 
 OpenSpace maintains its own skill library and improves it over time by evolving skills based on agent feedback. This makes it useful for delegating open-ended research, multi-step reasoning, or skill-reuse work to a separate agent runtime.
 
@@ -172,9 +173,9 @@ User sets OPENSPACE_LLM_API_KEY in .env
   → OpenSpace's resolver picks it up as Tier 1 credential
 ```
 
-#### Optional: `OPENSPACE_API_KEY` (Tier 2 Fallback)
+#### Optional: `OPENSPACE_API_KEY` (Cloud Publishing)
 
-If you also need a separate API key for OpenSpace's cloud backend (skill search, skill evolution), set:
+If you want to publish skills to the OpenSpace community repository via `upload_skill`, set:
 
 ```bash
 OPENSPACE_API_KEY=sk-os-xxxxxxxxxxxxxxxxxxxxxxxx
@@ -296,7 +297,7 @@ OpenSpace overrides this with a **per-server timeout of 900 seconds (15 minutes)
 | `context7` | 120s | 120s |
 | `openspace` | 120s | **900s** |
 
-This applies to all three OpenSpace tools (`execute_task`, `search_skills`, `skill_evolution`). The override is set in the definition class — no config file change required.
+This applies to all four OpenSpace tools (`execute_task`, `search_skills`, `fix_skill`, `upload_skill`). The override is set in the definition class — no config file change required.
 
 ### Why 900s and Not Higher?
 
@@ -364,7 +365,7 @@ This applies to all three OpenSpace tools (`execute_task`, `search_skills`, `ski
 1. Confirm `openspace` is in the agent's `innate_skills` in `meta.json`
 2. Confirm `mcp` is in the agent's `tools.allow` list
 3. Restart the daemon to re-bootstrap the agent
-4. Check ensemble's bootstrap logs for `OpenSpace: tool schemas loaded: ['execute_task', 'search_skills', 'skill_evolution']` (or a similar line)
+4. Check ensemble's bootstrap logs for `OpenSpace: tool schemas loaded: ['execute_task', 'search_skills', 'fix_skill', 'upload_skill']` (or a similar line)
 
 ---
 

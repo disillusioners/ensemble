@@ -1108,7 +1108,7 @@ Returns available built-in MCP server templates.
     {
       "name": "openspace",
       "display_name": "OpenSpace",
-      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, and skill_evolution for evolving the skill set.",
+      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, fix_skill for repairing/refining skills, and upload_skill for publishing skills to the community.",
       "config_schema": [
         {
           "key": "openspace_model",

@@ -2,7 +2,7 @@
 
 > OpenSpace is a self-evolving skill engine integrated into agents-ensemble as a builtin MCP server. It gives agents the ability to **search a community skill library**, **delegate complex multi-step tasks to a remote-coding-grade sub-agent**, and **evolve skills (repair, refine, or share) based on task outcomes**.
 
-This guide explains how to install OpenSpace, configure credentials, and grant agents access to its three tools.
+This guide explains how to install OpenSpace, configure credentials, and grant agents access to its four tools.
 
 ---
 
@@ -10,13 +10,14 @@ This guide explains how to install OpenSpace, configure credentials, and grant a
 
 OpenSpace (project: [HKUDS/OpenSpace](https://github.com/HKUDS/OpenSpace), MIT licensed) is a separate package that plugs into agents-ensemble as the **3rd builtin MCP server** in client mode (alongside `webfetch` and `context7`). It connects to an external OpenSpace instance. When enabled, ensemble auto-spawns the OpenSpace MCP server during the bootstrap warmup phase and exposes its tools to agents under the `mcp_openspace_*` prefix.
 
-OpenSpace ships three tools:
+OpenSpace ships four tools:
 
 | Tool | Purpose |
 |------|---------|
 | `mcp_openspace_search_skills` | Search the local + community skill library |
 | `mcp_openspace_execute_task` | Delegate a complex multi-step task to OpenSpace's internal agent |
-| `mcp_openspace_skill_evolution` | Evolve the skill set — generate, refine, fix, or share skills from task outcomes |
+| `mcp_openspace_fix_skill` | Repair or refine an existing skill based on feedback or error analysis |
+| `mcp_openspace_upload_skill` | Upload a skill to the OpenSpace community skill repository |
 
 OpenSpace brings its own dependencies (LiteLLM, Flask, rank_bm25, Pydantic v2). It is **not** bundled with ensemble — see the installation step below.
 
@@ -44,7 +45,7 @@ python3 -m openspace.mcp_server --help   # STDIO entrypoint used by ensemble
 | Variable | Required | Purpose | Default |
 |----------|----------|---------|---------|
 | `OPENSPACE_LLM_API_KEY` | Yes (STDIO mode) | LLM API key for OpenSpace's internal agent. Read from `os.environ` at config build time. | — |
-| `OPENSPACE_API_KEY` | Optional | OpenSpace cloud community key (used by some backend operations such as `skill_evolution` cloud sharing). | Empty |
+| `OPENSPACE_API_KEY` | Optional | OpenSpace cloud community key (required for `upload_skill` to publish skills to the community repository). | Empty |
 | `OPENSPACE_MODEL` | Optional | LLM model identifier for OpenSpace's embedded agent (e.g. `gpt-4o`, `claude-3-5-sonnet`). | OpenSpace default |
 | `OPENSPACE_MAX_ITERATIONS` | Optional | Maximum iterations per `execute_task` call. | `20` |
 | `OPENSPACE_BACKEND_SCOPE` | Optional | Comma-separated backend scope filter (e.g. `cloud,local`). | All backends |
@@ -200,7 +201,7 @@ This is a **reusable pattern** for any built-in with external Python dependencie
 
 > **IMPORTANT — read this section carefully.**
 >
-> Adding `"openspace"` to `innate_skills` does **not** grant MCP tool access. The `INNATE_SKILL_TOOL_CATEGORIES` system only maps innate skills to builtin tool categories (like `external_opencode`, `chart`, etc.) — it does **not** map to dynamic MCP tool names. You must **explicitly list all three `mcp_openspace_*` tools** in `tools.allow` for an agent to see and call them.
+> Adding `"openspace"` to `innate_skills` does **not** grant MCP tool access. The `INNATE_SKILL_TOOL_CATEGORIES` system only maps innate skills to builtin tool categories (like `external_opencode`, `chart`, etc.) — it does **not** map to dynamic MCP tool names. You must **explicitly list all four `mcp_openspace_*` tools** in `tools.allow` for an agent to see and call them.
 >
 > Both are required:
 >
@@ -221,17 +222,18 @@ For a new agent that should have OpenSpace as its only MCP integration:
       "bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context",
       "mcp_openspace_execute_task",
       "mcp_openspace_search_skills",
-      "mcp_openspace_skill_evolution"
+      "mcp_openspace_fix_skill",
+      "mcp_openspace_upload_skill"
     ]
   }
 }
 ```
 
-Note: `"mcp"` is the tool **category** that enables any MCP server whose tools are individually allow-listed. The three `mcp_openspace_*` lines are the individual tool grants.
+Note: `"mcp"` is the tool **category** that enables any MCP server whose tools are individually allow-listed. The four `mcp_openspace_*` lines are the individual tool grants.
 
 ### Adding to an existing agent
 
-If your agent already has a `tools.allow` list, append the three OpenSpace tools to it. Example: an agent that already uses the opencode builtin and just wants OpenSpace added:
+If your agent already has a `tools.allow` list, append the four OpenSpace tools to it. Example: an agent that already uses the opencode builtin and just wants OpenSpace added:
 
 ```json
 {
@@ -242,7 +244,8 @@ If your agent already has a `tools.allow` list, append the three OpenSpace tools
       "external_opencode_init_session",
       "mcp_openspace_search_skills",
       "mcp_openspace_execute_task",
-      "mcp_openspace_skill_evolution"
+      "mcp_openspace_fix_skill",
+      "mcp_openspace_upload_skill"
     ]
   }
 }
@@ -268,7 +271,8 @@ Each tool call is wrapped in `asyncio.timeout()`. Timeouts come from the server 
 |------|---------|-------|
 | `mcp_openspace_search_skills` | 120s (default) | Fast BM25 lookup |
 | `mcp_openspace_execute_task` | **900s (15 min)** | Extended because it runs a full multi-step sub-agent |
-| `mcp_openspace_skill_evolution` | 120s (default) | |
+| `mcp_openspace_fix_skill` | 120s (default) | |
+| `mcp_openspace_upload_skill` | 120s (default) | Requires `OPENSPACE_API_KEY` |
 
 If you hit a `mcp_openspace_execute_task` timeout, the task was too large for a single delegation. Break the work into smaller, more focused subtasks and call `execute_task` multiple times rather than one mega-prompt.
 
@@ -282,7 +286,8 @@ The default 120s timeout can be tuned globally via the `tool_call_timeout` confi
 |------|---------|------|-------------|
 | `mcp_openspace_search_skills` | 120s | Low | Before building a new skill — check if one already exists in the community library |
 | `mcp_openspace_execute_task` | 900s | **High (double-token)** | Delegate a complex, multi-step coding/research task to OpenSpace's internal agent. Reserve for tasks that justify the cost. |
-| `mcp_openspace_skill_evolution` | 120s | Low | Evolve a skill based on task outcomes — repair a broken/outdated skill, refine an existing one, or promote a reusable skill into the library |
+| `mcp_openspace_fix_skill` | 120s | Low | Repair or refine a skill that produced bad output or needs explicit correction based on known specifics |
+| `mcp_openspace_upload_skill` | 120s | Low | Publish a reusable skill to the OpenSpace community repository (requires `OPENSPACE_API_KEY`) |
 
 ---
 
@@ -291,7 +296,7 @@ The default 120s timeout can be tuned globally via the `tool_call_timeout` confi
 **Tools not visible to the agent**
 
 - Verify `meta.json` has `"innate_skills": ["openspace", ...]` — required for the skill prompt to load.
-- Verify `tools.allow` contains all three `mcp_openspace_*` entries — required for tool access.
+- Verify `tools.allow` contains all four `mcp_openspace_*` entries — required for tool access.
 - Confirm OpenSpace is installed: `python3 -c "import openspace"`.
 - Confirm the builtin is not disabled: check that `MCP_DISABLE_BUILT_IN_OPENSPACE` is not set to `true`.
 - Check the daemon log for the graceful-degradation INFO line:

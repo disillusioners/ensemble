@@ -5,14 +5,14 @@ Verifies Phase 3 of the OpenSpace MCP integration:
   agents/_prompt_system/innate-skills/ directory when an agent's meta declares
   `"innate_skills": ["openspace"]`.
 - `compose_system_prompt()` includes the openspace skill content as a section
-  in the composed system prompt (so the agent sees the 3 OpenSpace tools).
+  in the composed system prompt (so the agent sees the 4 OpenSpace tools).
 - When openspace is NOT in `innate_skills`, the composed prompt does NOT
   include the OpenSpace tool names.
 
 OpenSpace is an instructional-only innate skill:
 - It is NOT in `INNATE_SKILL_TOOL_CATEGORIES` (daemon/tools/instance.py:52-55),
   so its tools are NOT auto-granted.
-- The 3 OpenSpace tools must be granted explicitly via `tools.allow` in the
+- The 4 OpenSpace tools must be granted explicitly via `tools.allow` in the
   agent's meta.json.
 - The skill prompt itself is loaded independently of tool access by
   `load_agent_skills()`.
@@ -41,7 +41,8 @@ OPENSPACE_SKILL_FILE = AGENTS_DIR / "_prompt_system" / "innate-skills" / "opensp
 OPENSPACE_TOOL_NAMES = [
     "mcp_openspace_execute_task",
     "mcp_openspace_search_skills",
-    "mcp_openspace_skill_evolution",
+    "mcp_openspace_fix_skill",
+    "mcp_openspace_upload_skill",
 ]
 
 
@@ -82,7 +83,7 @@ class TestOpenspaceSkillDiscovery:
         )
 
     def test_openspace_skill_file_contains_tool_names(self) -> None:
-        """The real skill.md must mention all 3 OpenSpace tool names."""
+        """The real skill.md must mention all 4 OpenSpace tool names."""
         content = _read_openspace_skill()
         for tool_name in OPENSPACE_TOOL_NAMES:
             assert tool_name in content, (
@@ -187,7 +188,7 @@ class TestOpenspaceSkillInPromptComposition:
 
         system_prompt = compose_system_prompt(prompts, skills=skills)
 
-        # All 3 OpenSpace tool names must appear in the composed prompt
+        # All 4 OpenSpace tool names must appear in the composed prompt
         for tool_name in OPENSPACE_TOOL_NAMES:
             assert tool_name in system_prompt, (
                 f"Expected {tool_name!r} in composed system prompt, but it was missing."
@@ -326,7 +327,7 @@ class TestInnateSkillToolCategories:
     """Verify OpenSpace is NOT in INNATE_SKILL_TOOL_CATEGORIES.
 
     OpenSpace is instructional-only: the skill prompt is loaded by
-    load_agent_skills(), but the 3 OpenSpace tools must be granted explicitly
+    load_agent_skills(), but the 4 OpenSpace tools must be granted explicitly
     in the agent's tools.allow. This is a deliberate design decision (per
     the skill's own Agent Configuration Note section).
     """
