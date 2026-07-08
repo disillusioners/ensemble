@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
@@ -67,14 +68,25 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
     def get_base_config(self) -> dict[str, Any]:
         """Return base configuration for openspace.mcp_server.
 
-        Defaults to STDIO transport launching the module as ``python3 -m
-        openspace.mcp_server``. ``build_config()`` may override this to
-        streamable-http when ``ENS_OPENSPACE_REMOTE_URL`` is set.
+        Defaults to STDIO transport launching the module wrapped in
+        ``daemon.mcp.safe_stdout`` so that any stray ``print()`` calls
+        inside the OpenSpace server cannot corrupt the JSON-RPC stream.
+        The effective command becomes
+        ``python3 -m daemon.mcp.safe_stdout openspace.mcp_server``.
+
+        ``build_config()`` may override this to streamable-http when
+        ``ENS_OPENSPACE_REMOTE_URL`` is set.
         """
         return {
             "transport": "stdio",
-            "command": "python3",
-            "args": ["-m", "openspace.mcp_server"],
+            "command": sys.executable,  # daemon's Python, has `daemon` installed
+            # Wrap the target module with daemon.mcp.safe_stdout: text
+            # writes (print(), etc.) inside the OpenSpace server code
+            # are redirected to stderr so the stdio transport's JSON-RPC
+            # frames on sys.stdout.buffer stay intact. Opt-in per
+            # server — webfetch/context7 use external CLIs (uvx/npx)
+            # and are deliberately NOT wrapped.
+            "args": ["-m", "daemon.mcp.safe_stdout", "openspace.mcp_server"],
         }
 
     def get_config_schema(self) -> list[dict[str, Any]]:

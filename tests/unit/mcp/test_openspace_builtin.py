@@ -16,6 +16,7 @@ This module tests the OpenSpaceServerDefinition class including:
 """
 
 import os
+import sys
 
 import pytest
 
@@ -140,8 +141,10 @@ class TestOpenSpaceBaseConfig:
         """
         base = openspace_definition.get_base_config()
         assert base["transport"] == "stdio"
-        assert base["command"] == "python3"
-        assert base["args"] == ["-m", "openspace.mcp_server"]
+        assert base["command"] == sys.executable
+        # Target is wrapped with daemon.mcp.safe_stdout so any stray
+        # print() in the OpenSpace server cannot corrupt JSON-RPC.
+        assert base["args"] == ["-m", "daemon.mcp.safe_stdout", "openspace.mcp_server"]
 
     def test_get_base_config_independent_of_remote_env(self, openspace_definition):
         """Test that get_base_config ignores ENS_OPENSPACE_REMOTE_URL.
@@ -217,10 +220,10 @@ class TestOpenSpaceBuildConfigStdio:
         assert config["transport"] == "stdio"
 
     def test_stdio_default_uses_python_module(self, openspace_definition):
-        """STDIO mode launches the local python module."""
+        """STDIO mode launches the local python module (wrapped in safe_stdout)."""
         config = openspace_definition.build_config({})
-        assert config["command"] == "python3"
-        assert config["args"] == ["-m", "openspace.mcp_server"]
+        assert config["command"] == sys.executable
+        assert config["args"] == ["-m", "daemon.mcp.safe_stdout", "openspace.mcp_server"]
 
     def test_stdio_default_pins_openspace_mcp_transport(self, openspace_definition):
         """STDIO mode injects OPENSPACE_MCP_TRANSPORT=stdio.
@@ -949,12 +952,13 @@ class TestOpenSpaceParseConfig:
         assert parsed["openspace_backend_scope"] == "cloud"
 
     def test_parse_config_skips_base_args(self, openspace_definition):
-        """parse_config correctly skips base args (-m, openspace.mcp_server)."""
+        """parse_config correctly skips base args (-m, daemon.mcp.safe_stdout, openspace.mcp_server)."""
         built = openspace_definition.build_config({"openspace_model": "gpt-4o"})
         args = built.get("args", [])
         # Base args should be at the start
         assert args[0] == "-m"
-        assert args[1] == "openspace.mcp_server"
+        assert args[1] == "daemon.mcp.safe_stdout"
+        assert args[2] == "openspace.mcp_server"
 
         # Should parse user value, not confused by base args
         parsed = openspace_definition.parse_config(built)
@@ -993,8 +997,8 @@ class TestOpenSpaceEndToEnd:
 
         # STDIO base
         assert config["transport"] == "stdio"
-        assert config["command"] == "python3"
-        assert config["args"] == ["-m", "openspace.mcp_server"]
+        assert config["command"] == sys.executable
+        assert config["args"] == ["-m", "daemon.mcp.safe_stdout", "openspace.mcp_server"]
 
         # Schema env (numeric values are str()ed by the base class — env vars
         # are stringly-typed when passed to subprocesses)
