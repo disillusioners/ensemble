@@ -332,11 +332,33 @@ class LiveEventHub:
         if data:
             event["data"] = data
         await self._stream_to_connections(instance_id, event)
-    
+
+    async def stream_todo_update(
+        self,
+        instance_id: str,
+        todos: list[dict],
+    ) -> None:
+        """Stream todo update event to all active connections.
+
+        Emitted whenever the in-conversation todo list changes so the
+        frontend can re-render the checklist without a full reload.
+
+        Args:
+            instance_id: The instance this todo update belongs to.
+            todos: List of todo dicts (each with ``index``, ``text``,
+                and ``status``).
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "todo_update",
+            "todos": todos,
+        }
+        await self._stream_to_connections(instance_id, event)
+
     # -------------------------------------------------------------------------
     # Cleanup
     # -------------------------------------------------------------------------
-    
+
     async def cleanup_instance(self, instance_id: str) -> None:
         """Remove all connections for an instance.
         

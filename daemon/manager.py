@@ -68,6 +68,7 @@ from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
 from .services.event_publisher import EventPublisherService
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
+from .services.todo_manager import TodoManager
 from .cancellation import (
     CancellationToken,
     CancellationTokenSource,
@@ -710,6 +711,9 @@ class InstanceManager:
         from .repositories.event.repository import EventRepository
         event_repo = EventRepository(engine=self._engine)
         self._event_bus = EventBus(event_repo=event_repo)
+
+        # Per-instance in-memory todo state for the todo tool surface
+        self._todo_manager = TodoManager()
         
         self.source_dispatcher = ResponseDispatcher(
             registry=self.source_registry,

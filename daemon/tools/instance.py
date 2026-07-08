@@ -52,6 +52,7 @@ After delegating, just wait. The system will report back.
 INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
     "opencode": ["external_opencode"],
     "chart": ["chart"],
+    "todo": ["todo"],
 }
 
 
@@ -105,6 +106,7 @@ from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .chart_tools import create_chart_tools
+from .todo_tools import create_todo_tools
 from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
@@ -971,6 +973,19 @@ Returns:
     # to agents with innate_skills:["chart"] via INNATE_SKILL_TOOL_CATEGORIES.
     chart_tool_list = create_chart_tools(manager, current_instance_id)
     tools.extend(chart_tool_list)
+
+    # ── Todo tools (per-instance todo list with SSE emission, always available) ──
+    # NOTE: NOT inside the is_rag_enabled() block — these are always available,
+    # matching the chart/opencode pattern. The todo category is auto-granted to
+    # agents with innate_skills:["todo"] via INNATE_SKILL_TOOL_CATEGORIES.
+    # Pass manager._live_hub defensively via getattr so the factory still works
+    # in tests/environments where the hub is not wired up.
+    todo_tool_list = create_todo_tools(
+        manager,
+        current_instance_id,
+        getattr(manager, "_live_hub", None),
+    )
+    tools.extend(todo_tool_list)
 
     # ── Database tools (external DB connection management, always available) ──
     # C3: Pass shared repository and pool_manager from the manager — these are
