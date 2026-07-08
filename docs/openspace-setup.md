@@ -41,10 +41,19 @@ OpenSpace is registered as a **built-in MCP server** in ensemble. It supports **
 
 | Mode | Default | How It Works |
 |------|---------|--------------|
-| **STDIO** | ✅ Yes | Ensemble spawns `python3 -m openspace.mcp_server` as a subprocess and communicates over stdin/stdout |
+| **STDIO** | ✅ Yes | Ensemble spawns `python3 -m daemon.mcp.safe_stdout openspace.mcp_server` as a subprocess and communicates over stdin/stdout |
 | **Streamable-HTTP** | Optional | Ensemble connects to a pre-existing OpenSpace HTTP endpoint via `ENS_OPENSPACE_REMOTE_URL` |
 
 Ensemble's `BuiltinServerDefinition` framework handles transport selection, credential injection, warmup pool registration, and per-server timeout configuration. OpenSpace follows the same `build_config()` pattern as the other built-ins (`webfetch`, `context7`) but with two custom layers (see below).
+
+#### STDIO protection: the `safe_stdout` wrapper
+
+The STDIO command runs through the daemon's `daemon.mcp.safe_stdout` helper module. The wrapper installs itself on `sys.stdout` before importing `openspace.mcp_server`, then:
+
+- Forwards JSON-RPC binary bytes through `sys.stdout.buffer` untouched (the protocol channel).
+- Redirects any stray text writes — diagnostic `print()` calls inside OpenSpace or its dependencies — to `sys.stderr`.
+
+Without the wrapper, a single `print()` from the OpenSpace process would land on stdout and corrupt the JSON-RPC stream, breaking the MCP protocol. The wrapper is opt-in per built-in; `webfetch` and `context7` use external CLIs and are deliberately not wrapped.
 
 ---
 
@@ -95,6 +104,31 @@ export ENS_OPENSPACE_REMOTE_URL=http://your-openspace-host:port
 ```
 
 The remote instance is responsible for its own dependencies and credentials.
+
+#### URL validation (HTTP mode)
+
+When you set `ENS_OPENSPACE_REMOTE_URL`, the value is validated at config build time:
+
+- The URL **must** start with `http://` or `https://`. Other schemes (`ftp://`, `file://`, `ws://`, etc.) raise `McpConfigValidationError` and the build fails.
+- URLs containing userinfo (`user:pass@host`) are **rejected** — the URL is persisted in the DB and surfaces in API responses, so embedded credentials would leak. Configure auth on the remote OpenSpace instance instead.
+
+---
+
+## 4a. Graceful Degradation (When `openspace-ai` Is Not Installed)
+
+OpenSpace is an **optional** dependency. If `pip install openspace-ai` was never run, the daemon starts cleanly without it. The graceful-degradation path:
+
+1. **Bootstrap** (`_bootstrap_builtin_servers`): runs an `is_available()` pre-check on the `BuiltinServerDefinition`. For OpenSpace, this consults `required_package = "openspace-ai"` and uses `importlib.util.find_spec()` to detect whether the package is importable. If not, the daemon logs a single INFO line and skips DB record creation:
+
+   ```text
+   INFO  Builtin 'openspace' skipped — package 'openspace-ai' not installed (pip install openspace-ai)
+   ```
+
+2. **Warmup pool** (`_init_warmup_pool`): the same check runs again before pool registration. A DEBUG-level log fires here (the bootstrap INFO is the canonical "user can act on this" message; DEBUG avoids a duplicate notice).
+
+**No retries, no errors, no stacktraces.** A daemon without OpenSpace simply doesn't register the `openspace` builtin — other builtins (`webfetch`, `context7`, custom servers) continue to work normally. To enable OpenSpace later, `pip install openspace-ai` and restart the daemon.
+
+The `is_available()` pre-check is a **reusable pattern** — any built-in with optional Python dependencies can override `required_package` to inherit the same graceful-degradation behavior.
 
 ---
 
@@ -156,6 +190,16 @@ Ensemble also pins `OPENSPACE_MCP_TRANSPORT=stdio` in the subprocess env. This p
 
 Configure credentials **on the remote OpenSpace instance** directly. Ensemble only sends HTTP requests; it doesn't pass credentials over the wire.
 
+#### Credential redaction in API responses
+
+Whatever transport you choose, credentials are never exposed over the management API. The `GET /api/mcp-servers` endpoint (and its create / update / configure-builtin / reset-builtin siblings) all route their response through `redact_secrets()` in `daemon/routers/mcp_servers.py`:
+
+- For each `env` sub-dict entry, keys whose name contains `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` (case-insensitive substring match) are replaced with the literal string `"[REDACTED]"`.
+- Non-sensitive env keys (`OPENSPACE_MODEL`, `OPENSPACE_MCP_TRANSPORT`, `OPENSPACE_MAX_ITERATIONS`, `OPENSPACE_BACKEND_SCOPE`) are preserved intact.
+- For HTTP-mode servers, any userinfo (`user:pass@`) in the `url` is stripped as a defense-in-depth measure.
+
+In practice: `GET /api/mcp-servers/openspace` returns the model, transport, and backends, but API key fields show `"[REDACTED]"`. The same applies to list responses.
+
 ---
 
 ## 6. Transport Selection
@@ -164,7 +208,7 @@ Transport is resolved at **config-build time** and stored in the database. Chang
 
 | Mode | Selection | Behavior |
 |------|-----------|----------|
-| **STDIO** (default) | `ENS_OPENSPACE_REMOTE_URL` unset or empty | Spawns `python3 -m openspace.mcp_server` as subprocess |
+| **STDIO** (default) | `ENS_OPENSPACE_REMOTE_URL` unset or empty | Spawns `python3 -m daemon.mcp.safe_stdout openspace.mcp_server` as subprocess |
 | **Streamable-HTTP** | `ENS_OPENSPACE_REMOTE_URL=http://host:port` | Connects to remote OpenSpace HTTP endpoint |
 
 ### Default: STDIO (Zero-Config)

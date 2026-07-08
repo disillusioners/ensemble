@@ -51,14 +51,20 @@ Provides up-to-date library documentation via `@upstash/context7-mcp`.
 
 #### OpenSpace
 
-Provides the self-evolving OpenSpace skill engine via `python3 -m openspace.mcp_server`. Exposes `execute_task`, `search_skills`, `fix_skill`, and `upload_skill` tools.
+Provides the self-evolving OpenSpace skill engine via `python3 -m openspace.mcp_server`. Exposes `execute_task`, `search_skills`, and `skill_evolution` tools.
 
 | Property | Value |
 |----------|-------|
 | Name | `openspace` |
 | Transport | STDIO (or streamable-http when `ENS_OPENSPACE_REMOTE_URL` is set) |
-| Command | `python3 -m openspace.mcp_server` |
+| Command | `sys.executable -m daemon.mcp.safe_stdout openspace.mcp_server` |
 | Configuration | None required (all fields optional) |
+
+**STDIO protection:** the command is wrapped by the daemon's `daemon.mcp.safe_stdout` helper, which forwards JSON-RPC binary bytes through `sys.stdout.buffer` and redirects stray `print()` calls to `sys.stderr`. Without this wrapper, a single `print()` inside the OpenSpace process would corrupt the JSON-RPC stream. `webfetch` and `context7` use external CLIs and are deliberately not wrapped.
+
+**HTTP mode URL validation:** `ENS_OPENSPACE_REMOTE_URL` must start with `http://` or `https://`. URLs containing userinfo (`user:pass@host`) are rejected because the URL is persisted to the DB and surfaces in API responses. **SSRF protection** for the URL is enforced via the same loopback/private/link-local rules as other HTTP transports (see [Transport Types](#transport-types) below); set `MCP_ALLOW_LOCAL=false` for strict SSRF blocking.
+
+**Graceful degradation:** if the `openspace-ai` package is not installed, the daemon's `is_available()` pre-check on `BuiltinServerDefinition` returns `False` (via `importlib.util.find_spec()`), and the bootstrap + warmup-pool paths skip OpenSpace entirely with a single INFO log. See [Built-in Availability Pre-check](#built-in-availability-pre-check) below.
 
 **Configuration Options:**
 
@@ -67,6 +73,38 @@ Provides the self-evolving OpenSpace skill engine via `python3 -m openspace.mcp_
 | `openspace_model` | text | empty | LLM model identifier for OpenSpace agents (e.g. `gpt-4o`, `claude-3-5-sonnet`). Empty = OpenSpace default. |
 | `openspace_max_iterations` | number | empty | Maximum iterations per `execute_task` call. Empty = OpenSpace default. |
 | `openspace_backend_scope` | text | empty | Comma-separated backend scope filter (e.g. `cloud,local`). Empty = all backends. |
+
+### Built-in Availability Pre-check
+
+A built-in with external Python dependencies may not be installed in every deployment. The `BuiltinServerDefinition` base class supports a graceful-degradation pattern via the `is_available()` pre-check:
+
+```python
+# daemon/mcp/builtin_servers/base.py
+required_package: ClassVar[str | None] = None
+
+@classmethod
+def is_available(cls) -> bool:
+    if cls.required_package is None:
+        return True
+    import importlib.util
+    try:
+        return importlib.util.find_spec(cls.required_package) is not None
+    except (ImportError, ValueError):
+        return False
+```
+
+Subclasses with optional dependencies set `required_package` to the importable package name. `OpenSpaceServerDefinition` is the current consumer — it sets `required_package = "openspace-ai"`.
+
+**When `is_available()` returns `False`:**
+
+- **Bootstrap** (`_bootstrap_builtin_servers`): skips DB record creation. Single INFO log: `Builtin '<name>' skipped — package '<pkg>' not installed (pip install <pkg>)`.
+- **Warmup pool** (`_init_warmup_pool`): skips pool registration. DEBUG log to avoid duplicating the bootstrap INFO.
+
+The check runs **after** the `is_builtin_disabled()` env-var check so user intent (`MCP_DISABLE_BUILT_IN_*=true`) wins over package availability.
+
+**No retries, no errors, no stacktraces** — the daemon starts cleanly without the missing built-in. Other built-ins (`webfetch`, `context7`, custom servers) and the rest of the system continue to work normally.
+
+This is a **reusable pattern** for any built-in that depends on an optional Python package. To make a new built-in gracefully degrade when its package is missing, override `required_package` on the subclass — the base class handles the rest.
 
 ### Adding Custom MCP Servers
 
@@ -486,7 +524,7 @@ Response:
     {
       "name": "openspace",
       "display_name": "OpenSpace",
-      "description": "OpenSpace self-evolving skill engine. Provides execute_task, search_skills, fix_skill, and upload_skill tools",
+      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, and skill_evolution for evolving the skill set.",
       "config_schema": [
         {
           "key": "openspace_model",
