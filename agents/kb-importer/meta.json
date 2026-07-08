@@ -6,6 +6,7 @@
   "color": "accent-green",
   "version": "1.0.0",
   "llm_model": "quick",
+  "innate_skills": ["todo"],
   "tools": {
     "allow": ["rag", "help", "time", "mcp", "context"]
   },

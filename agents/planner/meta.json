@@ -5,7 +5,7 @@
   "icon": "📋",
   "color": "accent-indigo",
   "version": "1.0.0",
-  "innate_skills": ["opencode", "chart"],
+  "innate_skills": ["opencode", "chart", "todo"],
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
   },

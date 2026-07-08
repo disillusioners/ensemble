@@ -4,7 +4,7 @@
   "description": "Code quality, conventions, and maintainability reviewer. Operates after implementation to ensure high standards without over-engineering.",
   "icon": "🧹",
   "color": "accent-purple",
-  "innate_skills": ["opencode", "chart"],
+  "innate_skills": ["opencode", "chart", "todo"],
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
   },

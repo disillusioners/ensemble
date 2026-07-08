@@ -6,6 +6,7 @@
   "color": "accent-purple",
   "version": "1.0.0",
   "system": true,
+  "innate_skills": ["todo"],
   "tools": {
     "allow": ["instance", "self", "help", "mother", "knowledge", "mcp", "context"]
   },

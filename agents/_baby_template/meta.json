@@ -5,6 +5,7 @@
   "icon": "👶",
   "color": "accent-gray",
   "version": "1.0.0",
+  "innate_skills": ["todo"],
   "tools": {"allow": ["knowledge", "mcp", "context"]},
   "team_members": ["explorer"]
 }

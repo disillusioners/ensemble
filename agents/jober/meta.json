@@ -5,7 +5,7 @@
   "icon": "📋",
   "color": "accent-blue",
   "version": "1.0.0",
-  "innate_skills": ["job-orchestration"],
+  "innate_skills": ["job-orchestration", "todo"],
   "no_force_explore": true,
   "tools": {
     "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context"]

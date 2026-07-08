@@ -8,7 +8,7 @@
   "system": false,
   "capabilities": [],
   "tags": ["environment", "setup", "dependencies"],
-  "innate_skills": [],
+  "innate_skills": ["todo"],
   "tools": {
     "allow": ["bash", "filesystem", "help", "mcp", "context"]
   },
