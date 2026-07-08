@@ -853,3 +853,158 @@ def test_paused_to_cancelled_via_terminate_still_works(engine):
         f"terminate must succeed on a PAUSED instance, "
         f"got {inst.status}"
     )
+
+
+# ─── 11. Resume cascade returns cancelled task ids (production incident 2026-07-08) ──
+
+
+@pytest.mark.asyncio
+async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
+    lifecycle_service, engine, write_guard
+):
+    """Production incident (leader 088d3335, 2026-07-08): the resume
+    cascade's UPDATE 2 transitions paused tasks to CANCELLED with
+    ``retry_scheduled=true``. ``retry_scheduled=true`` intentionally
+    skips the retry engine's orphan-watcher sweep, so unless the resume
+    cascade itself surfaces the cancelled task ids AND the async caller
+    invokes ``cancel_bus_watchers_for_task_async`` for each, the
+    PENDING ``dependency_watchers`` rows stay alive forever and the
+    parent remains in ``waiting_children`` even after all its
+    children have terminated (the leader had 22 children all
+    ``completed``/``terminated`` but stayed ``waiting_children``
+    because a single PENDING watcher remained).
+
+    This test pins both halves of the fix:
+
+      1. ``_resume_cascade_db_sync`` returns the integer ids of the
+         tasks it just cancelled via ``RETURNING id``.
+      2. ``resume_instance_cascade`` (the async caller) awaits
+         ``cancel_bus_watchers_for_task_async`` for each id so the
+         bus's ``count_pending_for_target(parent)`` drops to 0.
+    """
+    from daemon.services.dependency_bus import (
+        DependencyBus,
+        DependencyWatcherRepository,
+        DependencyWatcherState,
+    )
+
+    # ── Seed: parent (leader) + child (developer) + a PAUSED task on the
+    # child whose PENDING watcher would otherwise keep the parent in
+    # waiting_children forever.
+    parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+    child_id = _seed_instance(
+        engine,
+        status=InstanceStatus.PAUSED.value,
+        parent_id=parent_id,
+    )
+    _seed_task(engine, instance_id=child_id, status=TaskStatus.PAUSED.value)
+    child_task_id = _read_tasks(engine, child_id)[0].id
+
+    # Wire a real bus with a watcher whose source_task_id matches the
+    # paused task. After resume the task is cancelled with
+    # ``retry_scheduled=true`` (so the retry engine will not sweep
+    # the watcher); the bus's PENDING watcher can ONLY be released
+    # by the resume cascade caller.
+    bus_repo = DependencyWatcherRepository(engine=engine)
+    bus = DependencyBus(repository=bus_repo)
+    await bus.start()
+    set_dependency_bus(bus)
+
+    from daemon.repositories.dependency_bus.models import DependencyWatcher
+
+    watcher = DependencyWatcher(
+        source_task_id=str(child_task_id),
+        target_instance_id=parent_id,
+        follow_up_payload={
+            "source": f"internal_agent:{parent_id}",
+            "message": "synthetic child completion",
+            "metadata": {"kind": "child_complete"},
+            "target_instance_id": parent_id,
+        },
+        metadata={},
+    )
+    bus_repo.insert(watcher)
+
+    # Sanity: the bus sees 1 pending watcher for the parent.
+    assert bus_repo.count_pending_for_target(parent_id) == 1
+    assert await bus.count_pending_for_target(parent_id) == 1
+
+    # ── Exercise: drive the sync cascade, then drive the async caller
+    # hook that releases the cancelled task's bus watchers.
+    result = lifecycle_service._resume_cascade_db_sync(
+        engine,
+        write_guard,
+        tree_ids=[child_id],
+        ancestor_ids=set(),
+        is_root_resume=False,
+    )
+
+    # Fix-hypothesis #1: result surfaces the integer task id of the
+    # cancelled task via ``RETURNING id``.
+    assert child_task_id in result.cancelled_task_ids, (
+        f"_resume_cascade_db_sync must RETURN the cancelled task ids "
+        f"(returned {result.cancelled_task_ids})"
+    )
+
+    # Fix-hypothesis #2: the task row is now CANCELLED with the
+    # supersede error (regression guard for the UPDATE 2 changes).
+    cancelled_rows = _read_tasks(engine, child_id)
+    assert cancelled_rows[0].status == TaskStatus.CANCELLED.value
+    # Read the ``error`` column directly via SQL — the SQLModel
+    # ``Task.error`` mapping uses a SQLite datetime adapter that is
+    # known to trip on the in-memory engine (cf. Phase 3 W2 SELECT
+    # list in ``_read_tasks``), so we sidestep it here.
+    from sqlalchemy import text as _text
+
+    with engine.connect() as _conn:
+        error_value = _conn.execute(
+            _text(
+                "SELECT error FROM task WHERE instance_id = :iid "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"iid": child_id},
+        ).scalar_one_or_none()
+    assert error_value is not None and "Superseded by resume cascade" in error_value, (
+        f"cancelled task must carry the supersede error, got {error_value!r}"
+    )
+
+    # Simulate the async caller: for each cancelled_task_id, invoke
+    # ``cancel_bus_watchers_for_task_async`` (the same helper the
+    # caller awaits in production).
+    from daemon.services.dependency_bus import (
+        cancel_bus_watchers_for_task_async,
+    )
+
+    for tid in result.cancelled_task_ids:
+        await cancel_bus_watchers_for_task_async(
+            cancelled_task_id=tid,
+            origin="resume_cascade_test",
+        )
+
+    # After release: the watcher is marked CANCELLED in the DB and the
+    # bus reports 0 pending for the parent — which is the precondition
+    # for the parent leaving ``waiting_children``.
+    watcher_state = None
+    with Session(engine) as s:
+        from sqlmodel import select as _select
+        row = s.exec(
+            _select(DependencyWatcher).where(
+                DependencyWatcher.target_instance_id == parent_id
+            )
+        ).first()
+        watcher_state = row.state if row else None
+
+    assert watcher_state == DependencyWatcherState.CANCELLED.value, (
+        f"watcher should be CANCELLED after resume cascade release, "
+        f"got {watcher_state}"
+    )
+    assert bus_repo.count_pending_for_target(parent_id) == 0, (
+        "parent must report 0 pending watchers after resume cascade "
+        "releases the cancelled-task watcher (else parent stays "
+        "waiting_children forever — the production bug)"
+    )
+    assert await bus.count_pending_for_target(parent_id) == 0
+
+    await bus.stop()
+    set_dependency_bus(None)
+

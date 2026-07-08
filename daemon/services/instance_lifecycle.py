@@ -162,6 +162,7 @@ class _CascadeUpdateResult(NamedTuple):
     updated_ids: list[str]        # IDs that were updated (skipped excluded)
     skipped_ids: list[str]        # IDs that were already in target status
     agent_ids_by_instance: dict[str, str | None]
+    cancelled_task_ids: list[int] = []  # task IDs cancelled by resume cascade (UPDATE 2)
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
@@ -1320,6 +1321,41 @@ class InstanceLifecycleService:
             resumed_ids = db_result.updated_ids
         else:
             resumed_ids = []
+            db_result = None
+
+        # Release any PENDING bus watchers keyed on the cancelled task ids.
+        # UPDATE 2 in ``_resume_cascade_db_sync`` flipped paused tasks to
+        # CANCELLED with ``retry_scheduled=true``; ``retry_scheduled=true``
+        # intentionally prevents the retry engine from running its own
+        # watcher-cancellation pass, so this caller is the only place
+        # where the watchers can be dropped. Without this the parent's
+        # ``_bus_count_pending_for_target_sync`` stays > 0 and the
+        # parent remains in ``waiting_children`` even after all
+        # children have terminated (production incident 2026-07-08,
+        # leader 088d3335).
+        cancelled_task_ids = (
+            list(db_result.cancelled_task_ids) if db_result is not None else []
+        )
+        for cancelled_task_id in cancelled_task_ids:
+            try:
+                from .dependency_bus import cancel_bus_watchers_for_task_async
+                released = await cancel_bus_watchers_for_task_async(
+                    cancelled_task_id=cancelled_task_id,
+                    origin="resume_cascade",
+                )
+                if released:
+                    logger.info(
+                        f"resume_instance_cascade: released {released} bus "
+                        f"watcher(s) for task {cancelled_task_id} (origin="
+                        f"resume_cascade)"
+                    )
+            except Exception as bus_cancel_err:
+                logger.warning(
+                    f"resume_instance_cascade: bus watcher cancellation "
+                    f"failed for task {cancelled_task_id} (non-fatal, "
+                    f"parent may stay waiting_children until next "
+                    f"reconcile): {bus_cancel_err}"
+                )
 
         # Post-commit side effects: SSE status_change per resumed node.
         for node_id in resumed_ids:
@@ -2399,6 +2435,7 @@ status=InstanceStatus.IDLE.value,
                 updated_ids=[],
                 skipped_ids=[],
                 agent_ids_by_instance={},
+                cancelled_task_ids=[],
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -2467,7 +2504,20 @@ status=InstanceStatus.IDLE.value,
             # (``find_orphaned_cancelled_tasks`` filters on
             # ``retry_scheduled=false``). The resume driver owns the
             # outcome; no retry is desired.
-            session.execute(
+            #
+            # ``RETURNING id`` captures the task ids that the cascade
+            # actually transitioned. The async caller invokes
+            # ``cancel_bus_watchers_for_task_async`` for each so any
+            # PENDING ``dependency_watchers`` rows keyed on those ids
+            # are released. Without this step those watchers stay
+            # PENDING forever and the parent remains in
+            # ``waiting_children`` (production incident 2026-07-08,
+            # leader 088d3335 stuck after pause/resume). The retry
+            # engine's ``retry_scheduled=true`` short-circuit prevents
+            # it from running its own cancellation pass; the resume
+            # cascade is therefore the only path that can drop the
+            # watchers and must do so itself.
+            cancelled_task_rows = session.execute(
                 text(
                     "UPDATE task "
                     "SET status = :cancelled_status, "
@@ -2477,7 +2527,8 @@ status=InstanceStatus.IDLE.value,
                     "    retry_scheduled = :retry_scheduled_true, "
                     "    error = :error_msg "
                     "WHERE instance_id IN :tree_ids "
-                    "  AND status = :paused_status"
+                    "  AND status = :paused_status "
+                    "RETURNING id"
                 ).bindparams(
                     bindparam("tree_ids", expanding=True),
                 ),
@@ -2491,7 +2542,8 @@ status=InstanceStatus.IDLE.value,
                     "error_msg": "Superseded by resume cascade — resume_processing_job owns graph driving",
                     "tree_ids": tree_ids,
                 },
-            )
+            ).fetchall()
+            cancelled_task_ids = [int(row[0]) for row in cancelled_task_rows] 
 
             # ─── UPDATE 3: job_queue_items → ACTIVE (resume mirror) ────
             # RF3 (2026-07-06): Phase 4 removed the JobItem PAUSED → ACTIVE
@@ -2561,4 +2613,5 @@ status=InstanceStatus.IDLE.value,
             updated_ids=list(tree_ids),
             skipped_ids=[],
             agent_ids_by_instance={},  # caller pre-fetches for SSE
+            cancelled_task_ids=cancelled_task_ids,
         )
