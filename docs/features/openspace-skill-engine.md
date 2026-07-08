@@ -47,6 +47,8 @@ python3 -m openspace.mcp_server --help   # STDIO entrypoint used by ensemble
 | `OPENSPACE_LLM_API_KEY` | Yes (STDIO mode) | LLM API key for OpenSpace's internal agent. Read from `os.environ` at config build time. | — |
 | `OPENSPACE_API_KEY` | Optional | OpenSpace cloud community key (required for `upload_skill` to publish skills to the community repository). | Empty |
 | `OPENSPACE_MODEL` | Optional | LLM model identifier for OpenSpace's embedded agent (e.g. `gpt-4o`, `claude-3-5-sonnet`). | OpenSpace default |
+| `OPENSPACE_LLM_API_BASE` | Optional | Custom LLM endpoint URL (for self-hosted/on-prem gateways, vLLM, LiteLLM-proxy). | Empty (uses provider defaults) |
+| `OPENSPACE_LLM_EXTRA_HEADERS` | Optional | Extra HTTP headers for LLM requests (JSON string). | Empty |
 | `OPENSPACE_MAX_ITERATIONS` | Optional | Maximum iterations per `execute_task` call. | `20` |
 | `OPENSPACE_BACKEND_SCOPE` | Optional | Comma-separated backend scope filter (e.g. `cloud,local`). | All backends |
 | `ENS_OPENSPACE_REMOTE_URL` | Optional | Set to use HTTP/streamable-http transport against a remote OpenSpace instance. **Unset = STDIO subprocess (default).** | unset (STDIO) |
@@ -66,6 +68,15 @@ In practice, this means you should put credentials in your `.env` file exactly l
 # .env
 OPENSPACE_LLM_API_KEY=sk-...
 OPENSPACE_API_KEY=sk-os-...   # optional — used by cloud community features
+```
+
+For self-hosted / on-prem gateways (vLLM, LiteLLM-proxy, internal endpoints), point OpenSpace at a custom base URL:
+
+```bash
+# Self-hosted / on-prem LLM gateway
+OPENSPACE_LLM_API_KEY=sk-xxx
+OPENSPACE_MODEL=openai/gpt-4o          # litellm provider prefix
+OPENSPACE_LLM_API_BASE=https://llm.internal.corp/v1
 ```
 
 Ensemble's normal env-loading machinery picks them up and hands them to OpenSpace on bootstrap.
@@ -139,7 +150,7 @@ This is a deliberate deviation from the daemon's other env handling: OpenSpace c
 
 Credentials are never exposed over the management API. The `GET /api/mcp-servers` endpoint (and the create/update/configure-builtin/reset-builtin siblings) all route their response through `redact_secrets()` in `daemon/routers/mcp_servers.py`. The redaction rule:
 
-- For each entry in the `env` sub-dict, keys whose name contains `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` (case-insensitive substring match) are replaced with the literal string `"[REDACTED]"`.
+- For each entry in the `env` sub-dict, keys whose name contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `BASE`, or `HEADERS` (case-insensitive substring match) are replaced with the literal string `"[REDACTED]"`.
 - Non-sensitive env keys (`OPENSPACE_MODEL`, `OPENSPACE_MCP_TRANSPORT`, `OPENSPACE_MAX_ITERATIONS`, `OPENSPACE_BACKEND_SCOPE`, etc.) are preserved intact.
 - For HTTP-mode servers, any userinfo (`user:pass@`) in the `url` is stripped as a defense-in-depth measure, even though `build_config()` already rejects userinfo upstream.
 

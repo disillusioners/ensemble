@@ -60,11 +60,11 @@ def redact_secrets(config: dict) -> dict:
     Two surfaces are scrubbed:
 
     1. ``env`` sub-dict (if present and dict-like): keys whose name
-       contains any of ``KEY``, ``TOKEN``, ``SECRET``, or ``PASSWORD``
-       (case-insensitive substring match) have their values replaced
-       with ``"[REDACTED]"``. Non-sensitive env keys such as
-       ``OPENSPACE_MODEL`` and ``OPENSPACE_MCP_TRANSPORT`` are
-       preserved intact.
+       contains any of ``KEY``, ``TOKEN``, ``SECRET``, ``PASSWORD``,
+       ``BASE``, or ``HEADERS`` (case-insensitive substring match)
+       have their values replaced with ``"[REDACTED]"``.
+       Non-sensitive env keys such as ``OPENSPACE_MODEL`` and
+       ``OPENSPACE_MCP_TRANSPORT`` are preserved intact.
 
     2. ``url`` top-level value (if present and a string): any userinfo
        (``user:pass@``) is stripped as a defense-in-depth measure in
@@ -90,7 +90,13 @@ def redact_secrets(config: dict) -> dict:
             if not isinstance(env_key, str):
                 continue
             upper_key = env_key.upper()
-            if any(marker in upper_key for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+            # ``BASE`` covers OpenSpace-style ``*_API_BASE`` (endpoint URL);
+            # ``HEADERS`` covers ``*_EXTRA_HEADERS`` (HTTP headers dict that
+            # typically carries Authorization tokens). Trade-off: ``BASE`` may
+            # over-redact future vars like ``DATABASE_BASE_PATH`` — acceptable
+            # for now since no such env vars exist in any registered builtin
+            # or user-defined MCP server.
+            if any(marker in upper_key for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD", "BASE", "HEADERS")):
                 env[env_key] = "[REDACTED]"
 
     # Defense-in-depth: strip userinfo from ``config["url"]`` if present.

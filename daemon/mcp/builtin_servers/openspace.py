@@ -29,6 +29,21 @@ logger = logging.getLogger(__name__)
 _OPENSPACE_REMOTE_URL_ENV = "ENS_OPENSPACE_REMOTE_URL"
 
 
+# Env vars explicitly injected from ``os.environ`` into the OpenSpace subprocess
+# via ``build_config()``. Required because MCP stdio_client's
+# ``get_default_environment()`` only forwards 6 POSIX vars (HOME, LOGNAME, PATH,
+# SHELL, TERM, USER) — the SDK cannot inject arbitrary env at spawn time, so
+# ``TaskScopedStdioClient`` needs each value present in the config's ``env``
+# dict. ``OPENSPACE_LLM_CONFIG`` is intentionally excluded (deferred for
+# separate handling).
+_INJECTABLE_VARS = (
+    "OPENSPACE_LLM_API_KEY",
+    "OPENSPACE_API_KEY",
+    "OPENSPACE_LLM_API_BASE",
+    "OPENSPACE_LLM_EXTRA_HEADERS",
+)
+
+
 class OpenSpaceServerDefinition(BuiltinServerDefinition):
     """Built-in MCP server definition for OpenSpace."""
 
@@ -148,13 +163,12 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
 
         Delegates to ``super().parse_config()`` unchanged. The override
         exists solely to document a deliberate behavior: injected env
-        vars — credentials (``OPENSPACE_LLM_API_KEY``,
-        ``OPENSPACE_API_KEY``) and the transport pin
-        (``OPENSPACE_MCP_TRANSPORT=stdio``) — are written to ``env`` by
-        ``build_config()`` but are NOT schema fields, so they are NOT
-        recovered by ``parse_config()`` on round-trip. This is
-        intentional: those values come from the runtime environment, not
-        from user form input.
+        vars from ``_INJECTABLE_VARS`` (credentials, base URL, headers)
+        and the transport pin (``OPENSPACE_MCP_TRANSPORT=stdio``) are
+        written to ``env`` by ``build_config()`` but are NOT schema
+        fields, so they are NOT recovered by ``parse_config()`` on
+        round-trip. This is intentional: those values come from the
+        runtime environment, not from user form input.
         """
         return super().parse_config(config)
 
@@ -174,11 +188,13 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
            then layer on OpenSpace-specific environment:
            - ``OPENSPACE_MCP_TRANSPORT=stdio``: prevents OpenSpace's TTY
              auto-detection from picking SSE in subprocess context.
-           - Credential injection (``OPENSPACE_LLM_API_KEY``,
-             ``OPENSPACE_API_KEY``): the MCP SDK's ``stdio_client`` calls
-             ``get_default_environment()`` which only forwards 6 POSIX vars
-             (HOME, LOGNAME, PATH, SHELL, TERM, USER) — NOT full
-             ``os.environ``. We must explicitly inject these credentials.
+           - Env var injection (see ``_INJECTABLE_VARS``): the MCP SDK's
+             ``stdio_client`` calls ``get_default_environment()`` which
+             only forwards 6 POSIX vars (HOME, LOGNAME, PATH, SHELL,
+             TERM, USER) — NOT full ``os.environ``. We must explicitly
+             inject credentials, base URL, and extra headers.
+           - ``OPENSPACE_LLM_API_BASE`` is validated for embedded
+             userinfo (``user:pass@host``) before injection.
 
         Args:
             user_values: User-provided config values from the schema fields.
@@ -216,17 +232,17 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
                     "credentials (user:pass@host)"
                 )
 
-            # Warn if credential env vars are set in HTTP mode — they are
+            # Warn if OpenSpace env vars are set in HTTP mode — they are
             # intentionally ignored because the local subprocess isn't
             # started in this mode. Configure them on the remote OpenSpace
             # instance instead.
-            for cred_env in ("OPENSPACE_LLM_API_KEY", "OPENSPACE_API_KEY"):
-                if os.environ.get(cred_env, "").strip():
+            for env_var in _INJECTABLE_VARS:
+                if os.environ.get(env_var, "").strip():
                     logger.warning(
                         "OpenSpace: %s is set but ignored in HTTP mode "
-                        "(ENS_OPENSPACE_REMOTE_URL); configure credentials "
-                        "on the remote OpenSpace instance instead",
-                        cred_env,
+                        "(ENS_OPENSPACE_REMOTE_URL); configure it on the "
+                        "remote OpenSpace instance instead",
+                        env_var,
                     )
 
             logger.info(
@@ -251,13 +267,27 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
         # would otherwise pick SSE).
         config["env"]["OPENSPACE_MCP_TRANSPORT"] = "stdio"
 
-        # Inject LLM credentials. The MCP stdio_client uses
-        # get_default_environment() which is too restrictive — without
-        # this, OpenSpace subprocess has no API key even when the daemon
-        # process has one set.
-        for cred_env in ("OPENSPACE_LLM_API_KEY", "OPENSPACE_API_KEY"):
-            value = os.environ.get(cred_env, "").strip()
+        # Validate OPENSPACE_LLM_API_BASE before injection — reject embedded
+        # userinfo credentials (user:pass@host) so they never reach the
+        # subprocess env. Same rationale as the ENS_OPENSPACE_REMOTE_URL
+        # check above: db-stored config and API responses surface this
+        # value, so credentials must not be embedded in the URL.
+        llm_api_base = os.environ.get("OPENSPACE_LLM_API_BASE", "").strip()
+        if llm_api_base:
+            parsed = urlparse(llm_api_base)
+            if "@" in parsed.netloc:
+                raise McpConfigValidationError(
+                    "OPENSPACE_LLM_API_BASE must not contain userinfo "
+                    "credentials (user:pass@host)"
+                )
+
+        # Inject OpenSpace env vars from os.environ. The MCP stdio_client
+        # uses get_default_environment() which only forwards 6 POSIX vars
+        # — without explicit injection, the OpenSpace subprocess loses
+        # these settings even when the daemon process has them set.
+        for env_var in _INJECTABLE_VARS:
+            value = os.environ.get(env_var, "").strip()
             if value:
-                config["env"][cred_env] = value
+                config["env"][env_var] = value
 
         return config

@@ -58,16 +58,18 @@ def clean_openspace_env(monkeypatch):
     """Ensure OpenSpace-related env vars don't leak across tests.
 
     Removes ENS_OPENSPACE_REMOTE_URL, OPENSPACE_LLM_API_KEY,
-    OPENSPACE_API_KEY, MCP_DISABLE_BUILT_IN_OPENSPACE,
-    MCP_DISABLE_BUILT_IN_WEBFETCH, and MCP_DISABLE_BUILT_IN_CONTEXT7
-    before every test. Tests that need to set them should do so
-    explicitly via ``monkeypatch.setenv`` (preferred) or a temporary
-    patch.dict.
+    OPENSPACE_API_KEY, OPENSPACE_LLM_API_BASE, OPENSPACE_LLM_EXTRA_HEADERS,
+    MCP_DISABLE_BUILT_IN_OPENSPACE, MCP_DISABLE_BUILT_IN_WEBFETCH, and
+    MCP_DISABLE_BUILT_IN_CONTEXT7 before every test. Tests that need to
+    set them should do so explicitly via ``monkeypatch.setenv`` (preferred)
+    or a temporary patch.dict.
     """
     for var in (
         "ENS_OPENSPACE_REMOTE_URL",
         "OPENSPACE_LLM_API_KEY",
         "OPENSPACE_API_KEY",
+        "OPENSPACE_LLM_API_BASE",
+        "OPENSPACE_LLM_EXTRA_HEADERS",
         "MCP_DISABLE_BUILT_IN_OPENSPACE",
         "MCP_DISABLE_BUILT_IN_WEBFETCH",
         "MCP_DISABLE_BUILT_IN_CONTEXT7",
@@ -808,6 +810,378 @@ class TestOpenSpaceCredentialInjection:
         config = openspace_definition.build_config({})
         assert config["transport"] == "streamable-http"
         assert "env" not in config
+
+
+# =============================================================================
+# Test LLM Config Injection (API_BASE + EXTRA_HEADERS)
+# =============================================================================
+
+
+class TestOpenSpaceLLMConfigInjection:
+    """Tests for ``OPENSPACE_LLM_API_BASE`` and ``OPENSPACE_LLM_EXTRA_HEADERS``
+    injection alongside the existing credentials.
+
+    These two env vars are part of ``_INJECTABLE_VARS`` and are passed
+    through to the OpenSpace subprocess the same way as the credentials.
+    They differ from credentials only in that:
+
+    - ``OPENSPACE_LLM_API_BASE`` is URL-validated: embedded userinfo
+      (``user:pass@host``) is rejected with ``McpConfigValidationError``
+      before injection.
+    - Both honor the same strip-and-skip-empty semantics as the other
+      injectable vars (empty / whitespace-only values are skipped).
+    """
+
+    # ----- OPENSPACE_LLM_API_BASE -----
+
+    def test_llm_api_base_present_in_config_env(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_API_BASE set → injected verbatim into config['env']."""
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_API_BASE", "https://llm.internal/v1"
+        )
+
+        config = openspace_definition.build_config({})
+        assert config["env"]["OPENSPACE_LLM_API_BASE"] == "https://llm.internal/v1"
+
+    def test_llm_api_base_value_is_stripped(
+        self, openspace_definition, monkeypatch
+    ):
+        """Leading/trailing whitespace in OPENSPACE_LLM_API_BASE is stripped
+        before injection — keeps the value clean for the subprocess.
+        """
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_API_BASE", "   https://llm.internal/v1   "
+        )
+
+        config = openspace_definition.build_config({})
+        assert config["env"]["OPENSPACE_LLM_API_BASE"] == "https://llm.internal/v1"
+
+    def test_llm_api_base_absent_not_injected(self, openspace_definition):
+        """OPENSPACE_LLM_API_BASE NOT set → key must not appear in env."""
+        assert "OPENSPACE_LLM_API_BASE" not in os.environ
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_API_BASE" not in config["env"]
+
+    def test_llm_api_base_empty_string_skipped(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_API_BASE='' → not injected (no empty string values)."""
+        monkeypatch.setenv("OPENSPACE_LLM_API_BASE", "")
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_API_BASE" not in config["env"]
+
+    def test_llm_api_base_whitespace_only_skipped(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_API_BASE='   ' → not injected (strip+empty)."""
+        monkeypatch.setenv("OPENSPACE_LLM_API_BASE", "   ")
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_API_BASE" not in config["env"]
+
+    # ----- OPENSPACE_LLM_EXTRA_HEADERS -----
+
+    def test_llm_extra_headers_present_in_config_env(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_EXTRA_HEADERS set → injected verbatim into config['env']."""
+        headers_value = '{"X-Custom": "value", "X-Trace-Id": "abc-123"}'
+        monkeypatch.setenv("OPENSPACE_LLM_EXTRA_HEADERS", headers_value)
+
+        config = openspace_definition.build_config({})
+        assert config["env"]["OPENSPACE_LLM_EXTRA_HEADERS"] == headers_value
+
+    def test_llm_extra_headers_absent_not_injected(self, openspace_definition):
+        """OPENSPACE_LLM_EXTRA_HEADERS NOT set → key must not appear in env."""
+        assert "OPENSPACE_LLM_EXTRA_HEADERS" not in os.environ
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_EXTRA_HEADERS" not in config["env"]
+
+    def test_llm_extra_headers_empty_string_skipped(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_EXTRA_HEADERS='' → not injected."""
+        monkeypatch.setenv("OPENSPACE_LLM_EXTRA_HEADERS", "")
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_EXTRA_HEADERS" not in config["env"]
+
+    def test_llm_extra_headers_whitespace_only_skipped(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_EXTRA_HEADERS='   ' → not injected (strip+empty)."""
+        monkeypatch.setenv("OPENSPACE_LLM_EXTRA_HEADERS", "   ")
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_EXTRA_HEADERS" not in config["env"]
+
+    # ----- Combined injection -----
+
+    def test_both_api_base_and_extra_headers_injected_together(
+        self, openspace_definition, monkeypatch
+    ):
+        """Both vars set → both end up in config['env'] simultaneously."""
+        monkeypatch.setenv("OPENSPACE_LLM_API_BASE", "https://llm.internal/v1")
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_EXTRA_HEADERS", '{"Authorization": "Bearer x"}'
+        )
+
+        config = openspace_definition.build_config({})
+        assert config["env"]["OPENSPACE_LLM_API_BASE"] == "https://llm.internal/v1"
+        assert (
+            config["env"]["OPENSPACE_LLM_EXTRA_HEADERS"]
+            == '{"Authorization": "Bearer x"}'
+        )
+
+
+# =============================================================================
+# Test OPENSPACE_LLM_API_BASE URL validation (userinfo rejection + happy path)
+# =============================================================================
+
+
+class TestOpenSpaceLLMApiBaseValidation:
+    """Tests for ``OPENSPACE_LLM_API_BASE`` URL validation in ``build_config()``.
+
+    The base URL is stored in the DB / surfaces in API responses, so
+    embedded userinfo (``user:pass@host``) is rejected with
+    ``McpConfigValidationError`` before the value reaches the subprocess.
+    Same rationale as the ``ENS_OPENSPACE_REMOTE_URL`` userinfo check —
+    defense in depth across both URL surfaces.
+    """
+
+    def test_api_base_with_userinfo_raises_validation_error(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_API_BASE=http://user:pass@host → McpConfigValidationError."""
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_API_BASE", "http://alice:secret@llm.internal/v1"
+        )
+
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "OPENSPACE_LLM_API_BASE" in str(exc_info.value)
+        assert "userinfo" in str(exc_info.value).lower()
+        # Must still be a ValueError subclass for back-compat with existing tests.
+        assert isinstance(exc_info.value, ValueError)
+
+    def test_api_base_https_with_userinfo_raises_validation_error(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_API_BASE=https://user:pass@host → McpConfigValidationError.
+
+        The check targets ``urlparse(...).netloc`` (the ``user:pass@host``
+        position), so any scheme with userinfo is rejected — not just http.
+        """
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_API_BASE", "https://bob:hunter2@llm.internal/v1"
+        )
+
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "userinfo" in str(exc_info.value).lower()
+
+    def test_api_base_clean_url_succeeds(
+        self, openspace_definition, monkeypatch
+    ):
+        """OPENSPACE_LLM_API_BASE=http://localhost:8080/v1 → no error.
+
+        Regression guard: the userinfo check must NOT reject clean URLs
+        that happen to point at a localhost dev LLM server. Same
+        contract as the ENS_OPENSPACE_REMOTE_URL clean-URL test.
+        """
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_API_BASE", "http://localhost:8080/v1"
+        )
+
+        config = openspace_definition.build_config({})
+        # URL value is preserved (stripped) into the injected env.
+        assert config["env"]["OPENSPACE_LLM_API_BASE"] == "http://localhost:8080/v1"
+
+    def test_api_base_validation_runs_before_injection(
+        self, openspace_definition, monkeypatch
+    ):
+        """On userinfo rejection, the value must NOT reach config['env'].
+
+        The validation block runs before the injection loop, so a bad
+        base URL raises and never gets persisted into the env dict —
+        the subprocess is never even handed a value to fail on.
+        """
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_API_BASE", "http://alice:secret@llm.internal/v1"
+        )
+
+        with pytest.raises(McpConfigValidationError):
+            openspace_definition.build_config({})
+
+        # No partial state: nothing was injected under the bad var.
+        # (We can't introspect the aborted state directly, but if the
+        # exception escaped, the caller's caller never got a config.)
+        # The next test below verifies that a *clean* URL after a bad
+        # one behaves as expected when env is reset.
+
+    def test_api_base_unset_skips_validation(
+        self, openspace_definition
+    ):
+        """OPENSPACE_LLM_API_BASE NOT set → validation block is skipped.
+
+        The check only runs when the env var has a non-empty stripped
+        value. Unset / empty paths must produce no error and no entry
+        in ``config['env']``.
+        """
+        assert "OPENSPACE_LLM_API_BASE" not in os.environ
+
+        config = openspace_definition.build_config({})
+        assert "OPENSPACE_LLM_API_BASE" not in config["env"]
+
+
+# =============================================================================
+# Test LLM config ignored in HTTP mode (warning logged)
+# =============================================================================
+
+
+class TestOpenSpaceLLMConfigHttpModeIgnored:
+    """Tests for ``OPENSPACE_LLM_API_BASE`` / ``OPENSPACE_LLM_EXTRA_HEADERS``
+    being set in HTTP mode.
+
+    Same contract as the credentials: when ``ENS_OPENSPACE_REMOTE_URL``
+    is set, the local subprocess doesn't start, so these vars are
+    intentionally NOT injected. We log a warning per affected var so
+    operators notice they have no effect — values must be configured on
+    the remote OpenSpace instance instead.
+    """
+
+    def test_llm_api_base_set_in_http_mode_logs_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """OPENSPACE_LLM_API_BASE set in HTTP mode → warning is logged."""
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        monkeypatch.setenv("OPENSPACE_LLM_API_BASE", "https://llm.internal/v1")
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"
+        ):
+            config = openspace_definition.build_config({})
+
+        assert config["transport"] == "streamable-http"
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "OPENSPACE_LLM_API_BASE" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        ), (
+            "Expected a warning that OPENSPACE_LLM_API_BASE is ignored in "
+            f"HTTP mode, got: {warning_messages!r}"
+        )
+
+    def test_llm_extra_headers_set_in_http_mode_logs_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """OPENSPACE_LLM_EXTRA_HEADERS set in HTTP mode → warning is logged."""
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        monkeypatch.setenv(
+            "OPENSPACE_LLM_EXTRA_HEADERS", '{"X-Custom": "value"}'
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"
+        ):
+            config = openspace_definition.build_config({})
+
+        assert config["transport"] == "streamable-http"
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "OPENSPACE_LLM_EXTRA_HEADERS" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        ), (
+            "Expected a warning that OPENSPACE_LLM_EXTRA_HEADERS is "
+            f"ignored in HTTP mode, got: {warning_messages!r}"
+        )
+
+    def test_no_llm_config_vars_in_http_mode_no_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """No LLM config vars in HTTP mode → no ignored-LLM warning.
+
+        Guards against a regression where the warning loop would emit
+        blanket messages for every injectable var regardless of whether
+        the operator set them.
+        """
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        assert "OPENSPACE_LLM_API_BASE" not in os.environ
+        assert "OPENSPACE_LLM_EXTRA_HEADERS" not in os.environ
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"
+        ):
+            openspace_definition.build_config({})
+
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        # None of the LLM config vars should appear in any warning.
+        assert not any(
+            "OPENSPACE_LLM_API_BASE" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        )
+        assert not any(
+            "OPENSPACE_LLM_EXTRA_HEADERS" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        )
+
+    def test_empty_llm_config_vars_in_http_mode_no_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """Empty LLM config vars in HTTP mode → no warning.
+
+        Same semantics as credentials: empty / whitespace-only values
+        are treated as "not set" — no warning is emitted for blanks.
+        """
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        monkeypatch.setenv("OPENSPACE_LLM_API_BASE", "")
+        monkeypatch.setenv("OPENSPACE_LLM_EXTRA_HEADERS", "   ")
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"
+        ):
+            openspace_definition.build_config({})
+
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert not any(
+            "OPENSPACE_LLM_API_BASE" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        )
+        assert not any(
+            "OPENSPACE_LLM_EXTRA_HEADERS" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        )
 
 
 # =============================================================================

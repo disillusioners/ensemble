@@ -1082,6 +1082,42 @@ class TestRedactSecretsUtility:
         assert result["env"]["OPENSPACE_API_KEY"] == "[REDACTED]"
         assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
 
+    def test_redacts_open_space_llm_api_base(self):
+        """OPENSPACE_LLM_API_BASE value → '[REDACTED]'.
+
+        The env-key matcher includes ``BASE`` in its marker list, so any
+        ``*_API_BASE`` style endpoint URL is treated as sensitive even
+        though it doesn't itself contain a credential — it can pin to
+        a private internal LLM endpoint that shouldn't leak.
+        """
+        config = {
+            "env": {
+                "OPENSPACE_LLM_API_BASE": "https://llm.internal/v1",
+                "OPENSPACE_MODEL": "gpt-4o",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["OPENSPACE_LLM_API_BASE"] == "[REDACTED]"
+        assert result["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+
+    def test_redacts_open_space_llm_extra_headers(self):
+        """OPENSPACE_LLM_EXTRA_HEADERS value → '[REDACTED]'.
+
+        ``EXTRA_HEADERS`` typically carries an ``Authorization: Bearer …``
+        token, so the marker list treats ``HEADERS`` as sensitive.
+        """
+        config = {
+            "env": {
+                "OPENSPACE_LLM_EXTRA_HEADERS": '{"Authorization": "Bearer sk-xyz"}',
+                "OPENSPACE_MCP_TRANSPORT": "stdio",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["OPENSPACE_LLM_EXTRA_HEADERS"] == "[REDACTED]"
+        assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
+
     def test_preserves_non_sensitive_env_keys(self):
         """Non-sensitive env keys (OPENSPACE_MODEL, OPENSPACE_MCP_TRANSPORT)
         keep their values intact.

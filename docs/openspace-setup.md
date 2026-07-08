@@ -146,6 +146,25 @@ OPENSPACE_LLM_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx
 # Optional: explicit model identifier
 # Default: provider's default model
 OPENSPACE_MODEL=openrouter/anthropic/claude-sonnet-4.5
+
+# Optional: custom LLM endpoint (self-hosted / on-prem gateways, vLLM, LiteLLM-proxy)
+# Default: provider's native endpoint
+OPENSPACE_LLM_API_BASE=https://llm.internal.corp/v1
+
+# Optional: extra HTTP headers for LLM requests (JSON string, e.g. '{"X-Org":"abc"}')
+# Default: empty
+OPENSPACE_LLM_EXTRA_HEADERS=
+```
+
+#### Worked Example: Self-Hosted / On-Prem LLM Gateway
+
+For self-hosted gateways (vLLM, LiteLLM-proxy, internal endpoints), combine `OPENSPACE_LLM_API_KEY` with `OPENSPACE_LLM_API_BASE` and use a LiteLLM provider prefix on the model name:
+
+```bash
+# Self-hosted / on-prem LLM gateway
+OPENSPACE_LLM_API_KEY=sk-xxx
+OPENSPACE_MODEL=openai/gpt-4o          # litellm provider prefix
+OPENSPACE_LLM_API_BASE=https://llm.internal.corp/v1
 ```
 
 #### Why Explicit Injection Is Needed
@@ -195,7 +214,7 @@ Configure credentials **on the remote OpenSpace instance** directly. Ensemble on
 
 Whatever transport you choose, credentials are never exposed over the management API. The `GET /api/mcp-servers` endpoint (and its create / update / configure-builtin / reset-builtin siblings) all route their response through `redact_secrets()` in `daemon/routers/mcp_servers.py`:
 
-- For each `env` sub-dict entry, keys whose name contains `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` (case-insensitive substring match) are replaced with the literal string `"[REDACTED]"`.
+- For each `env` sub-dict entry, keys whose name contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `BASE`, or `HEADERS` (case-insensitive substring match) are replaced with the literal string `"[REDACTED]"`.
 - Non-sensitive env keys (`OPENSPACE_MODEL`, `OPENSPACE_MCP_TRANSPORT`, `OPENSPACE_MAX_ITERATIONS`, `OPENSPACE_BACKEND_SCOPE`) are preserved intact.
 - For HTTP-mode servers, any userinfo (`user:pass@`) in the `url` is stripped as a defense-in-depth measure.
 
