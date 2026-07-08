@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 151 packs
-- Unit: 130 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 152 packs
+- Unit: 131 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -12,6 +12,7 @@
 | openspace_skill_unit_test | tests/unit/test_openspace_skill_loading.py | OpenSpace innate skill: discovery, prompt composition inclusion/exclusion, tool-categories decoupling | 2 min | 2026-07-08 | ✅ PASS (17/17, feature/openspace-mcp-integration, commit 89a9d451) |
 | openspace_builtin_unit_test | tests/unit/mcp/test_openspace_builtin.py | OpenSpace builtin server: dual transport (STDIO/HTTP), SSRF scheme validation, credential injection (LLM/API key), warmup pool transport dispatch + per-server 900s timeout, ENV disable pattern (MCP_DISABLE_BUILT_IN_OPENSPACE), bootstrap disable/enable lifecycle | 2 min | 2026-07-08 | ✅ PASS (65/65, feature/openspace-mcp-integration, commits 491c99f1 c03deaea c7cd5207, 0 failures) |
 | mcp_secret_redaction_unit_test | tests/unit/test_mcp_server_crud.py | MCP server CRUD: models, schemas, repository, router, integration + **secret redaction layer** (redact_secrets utility, [REDACTED] for KEY/TOKEN/SECRET/PASSWORD, deep-copy for subprocess safety, all 6 config-returning endpoints) | 2 min | 2026-07-08 | ✅ PASS (68/68, feature/openspace-mcp-integration, commit c03deaea, 0 failures) |
+| safe_stdout_unit_test | tests/test_safe_stdout.py | _MCPSafeStdout wrapper: text→stderr redirect, binary buffer→stdout, print() redirect, subprocess launcher (python -m daemon.mcp.safe_stdout), exception handling (KeyboardInterrupt re-raise, SystemExit int/string/None), detach/reconfigure AttributeError guard, writelines Iterable type | 2 min | 2026-07-08 | ✅ PASS (43/43, feature/stdio-safety-wrapper, commit 8966b8c6, 0 failures) |
 | opencode_native_tools_unit_test | tests/opencode/ | OpenCode native tools: state derivation, repository CRUD, table creation, HTTP client (_request patching), session manager (state machine + deadlock), registry, dispatch functions, tool factory + 3 ANSWER deadlock tests + 3 engine disposal tests | 2 min | 2026-06-11 | ✅ PASS (465/465, 0 failures, fix/opencode-wait-latency, commit 547035e) |
 | core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-05 | ✅ PASS (665/665, fix/windows-encoding-paths, 0 regressions) |
 | write_pause_guard_unit_test | tests/unit/test_write_pause_guard.py | WritePauseGuard: state machine, drain event, pause/resume, RuntimeError, sync/async interop, WriteGuardSession | 2 min | 2026-06-04 | ✅ PASS (27/27, Phase 3, 0 failures) |
