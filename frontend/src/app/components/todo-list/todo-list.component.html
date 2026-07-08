@@ -1,0 +1,26 @@
+@if (isVisible()) {
+  <div class="todo-list-container">
+    <div class="todo-header" (click)="toggle()">
+      <span class="todo-title">📋 Tasks ({{ doneCount() }}/{{ totalCount() }} completed)</span>
+      <button class="toggle-btn" type="button">
+        <mat-icon>{{ isCollapsed() ? 'expand_more' : 'expand_less' }}</mat-icon>
+      </button>
+    </div>
+    @if (!isCollapsed()) {
+      <div class="todo-items">
+        @for (item of todos(); track item.index) {
+          <div class="todo-item" [class.done]="item.status === 'done'">
+            <span
+              class="status-icon"
+              [class.in-progress]="item.status === 'in_progress'"
+              [class.complete]="item.status === 'done'"
+            >
+              {{ statusIcon(item.status) }}
+            </span>
+            <span class="todo-text">{{ item.text }}</span>
+          </div>
+        }
+      </div>
+    }
+  </div>
+}

@@ -1,0 +1,96 @@
+.todo-list-container {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  margin: 0 16px 8px;
+  overflow: hidden;
+}
+
+.todo-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  background: #1e293b;
+  user-select: none;
+}
+
+.todo-title {
+  color: #e2e8f0;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+// Plain <button> (not mat-button) so the toggle reads as a quiet
+// affordance — no ripple, no Material chrome, just the chevron. Reset
+// every browser default that would otherwise leave a visible box.
+.toggle-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: #e2e8f0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+
+  &:focus-visible {
+    outline: 2px solid #06b6d4;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+.todo-items {
+  padding: 4px 0;
+  animation: fadeIn 0.3s ease;
+}
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 0.85rem;
+  color: #e2e8f0;
+
+  &.done .todo-text {
+    text-decoration: line-through;
+    opacity: 0.6;
+  }
+}
+
+.status-icon {
+  width: 16px;
+  text-align: center;
+  color: #94a3b8;
+  flex-shrink: 0;
+
+  &.in-progress {
+    color: #06b6d4;
+  }
+
+  &.complete {
+    color: #8b5cf6;
+  }
+}
+
+.todo-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -127,6 +127,10 @@
       }
 
       @if (currentInstance() && !instanceNotFound()) {
+        <app-todo-list [instanceId]="currentInstance()!.instance_id" />
+      }
+
+      @if (currentInstance() && !instanceNotFound()) {
         <app-message-input
           (sendMessage)="onSendMessage($event)"
           [disabled]="isSending()"

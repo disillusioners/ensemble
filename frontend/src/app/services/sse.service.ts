@@ -1,6 +1,12 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
 
+export interface TodoItem {
+  index: number;
+  text: string;
+  status: 'pending' | 'in_progress' | 'done';
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -34,6 +40,9 @@ export class SseService {
     percent: number;
     model_name: string;
   } | null>(null);
+
+  // Store todos per instance_id: array of {instance_id, items}
+  todoLists = signal<{ instance_id: string; items: TodoItem[] }[]>([]);
 
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
@@ -298,6 +307,21 @@ export class SseService {
       });
     });
 
+    // Todo update event - replaces the entry for this instance_id
+    eventSource.addEventListener('todo_update', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          this.todoLists.update(lists => {
+            const filtered = lists.filter(l => l.instance_id !== data.instance_id);
+            return [...filtered, { instance_id: data.instance_id, items: data.todos }];
+          });
+        } catch (err) {
+          console.error('[SSE] Failed to parse todo_update:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -363,6 +387,7 @@ export class SseService {
     this.statusChange.set(null);
     this.instanceCreatedQueue.set([]);
     this.contextUsage.set(null);
+    this.todoLists.set([]);
     this.pendingToolOutputs.clear();
   }
 }
