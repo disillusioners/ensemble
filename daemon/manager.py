@@ -1044,7 +1044,20 @@ class InstanceManager:
                 name, self.config.mcp_pool.default_pool_size
             )
             stdio_config = McpStdioConfig(**config_dict)
-            pool.register_server(name, stdio_config, pool_size=pool_size)
+            # Per-server timeout override. Built-in servers that run
+            # long-running tools (e.g. OpenSpace's execute_task) opt in by
+            # overriding ``tool_call_timeout`` on their definition; servers
+            # without an override return ``None`` and fall back to the
+            # pool-wide default. ``getattr`` (not direct attribute access)
+            # keeps this resilient if a third-party definition subclasses
+            # the ABC without re-declaring the property.
+            server_timeout = getattr(definition, "tool_call_timeout", None)
+            pool.register_server(
+                name,
+                stdio_config,
+                pool_size=pool_size,
+                tool_call_timeout=server_timeout,
+            )
 
         # Wire pool into MCP service for use during tool execution
         self._mcp_service.set_warmup_pool(pool)

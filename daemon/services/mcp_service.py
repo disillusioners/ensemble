@@ -475,6 +475,24 @@ class McpService:
                     for s in schemas
                 ]
 
+                # Per-server tool-call timeout override: builtin
+                # definitions (e.g. OpenSpace ``execute_task`` is up to
+                # ~15min) declare their own ``tool_call_timeout``.
+                # STDIO-pooled servers reach create_lazy_mcp_tools via
+                # the warmup pool and never hit the long-running path,
+                # but HTTP/SSE remote-mode servers (and any non-pooled
+                # server) DO land here in the cold-discovery lazy
+                # creation path and need the override applied at wrap
+                # time. ``is not None`` is used so a definition can
+                # explicitly return ``0`` to disable timeout wrapping
+                # entirely (handled by ``tool_adapter``) — never coerce
+                # 0 to the global default.
+                server_timeout = self._get_per_server_timeout(server.name)
+                effective_timeout = (
+                    server_timeout if server_timeout is not None
+                    else tool_call_timeout
+                )
+
                 lazy_tools = create_lazy_mcp_tools(
                     server_name=server.name,
                     schemas=schema_dicts,
@@ -485,7 +503,7 @@ class McpService:
                     shared_session_lock=instance_session_state[
                         server.name
                     ]["lock"],
-                    tool_call_timeout=tool_call_timeout,
+                    tool_call_timeout=effective_timeout,
                 )
                 all_tools.extend(lazy_tools)
 
@@ -540,6 +558,42 @@ class McpService:
         if mcp_pool is not None and hasattr(mcp_pool, "tool_call_timeout"):
             return mcp_pool.tool_call_timeout
         return 120
+
+    def _get_per_server_timeout(self, server_name: str) -> int | None:
+        """Return a builtin server's ``tool_call_timeout`` override, if any.
+
+        Looks up the ``BuiltinServerDefinition`` in the global registry
+        and reads its ``tool_call_timeout`` property. Returns ``None``
+        when the server is not a builtin, or when the builtin's
+        definition returns ``None`` (the base-class default). Callers
+        fall back to ``_get_tool_call_timeout()`` on ``None``.
+
+        The ``0`` sentinel is preserved — a definition that explicitly
+        returns ``0`` is requesting "disable timeout wrapping entirely"
+        (handled by ``create_lazy_mcp_tools`` / ``tool_adapter``), not
+        "use the default". Use ``is not None`` at the call site; do NOT
+        collapse to ``server_timeout or tool_call_timeout``.
+
+        Args:
+            server_name: The MCP server's name (matches
+                ``McpServer.name`` and ``BuiltinServerDefinition.name``).
+
+        Returns:
+            The override in seconds, or ``None`` to use the default.
+        """
+        # Function-local import: keeps the coupling narrow and avoids
+        # loading the builtin registry module if this helper is never
+        # called (e.g. in unit tests that don't touch builtins).
+        from daemon.mcp.builtin_servers import get_registry
+
+        definition = get_registry().get_by_name(server_name)
+        if definition is None:
+            return None
+        # ``tool_call_timeout`` is a property on the abstract base class
+        # (returns None by default) and may be overridden by subclasses
+        # (e.g. OpenSpace returns 900). ``getattr`` is defensive against
+        # future subclasses that might not override the property.
+        return getattr(definition, "tool_call_timeout", None)
 
     def get_mcp_tools(self, instance_id: str) -> list[BaseTool]:
         """Get cached MCP tools for an instance (sync).

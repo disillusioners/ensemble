@@ -68,8 +68,19 @@ class McpWarmupPool:
         self._replenish_tasks: set[asyncio.Task] = set()
         self._replenish_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
         self._tool_call_timeout: int = tool_call_timeout
+        # Per-server timeout overrides. Servers without an entry fall back to
+        # ``self._tool_call_timeout``. A value of ``0`` is meaningful here —
+        # it disables the per-call timeout wrap entirely, so we must use
+        # ``is not None`` checks (not truthiness) when populating / looking up.
+        self._tool_call_timeouts: dict[str, int] = {}
 
-    def register_server(self, server_name: str, config: McpStdioConfig, pool_size: int = DEFAULT_POOL_SIZE) -> None:
+    def register_server(
+        self,
+        server_name: str,
+        config: McpStdioConfig,
+        pool_size: int = DEFAULT_POOL_SIZE,
+        tool_call_timeout: int | None = None,
+    ) -> None:
         """
         Register a built-in STDIO server for pooling.
 
@@ -77,6 +88,12 @@ class McpWarmupPool:
             server_name: Unique name for this server
             config: STDIO configuration for the server
             pool_size: Number of connections to maintain (default: 1)
+            tool_call_timeout: Optional per-server tool call timeout override
+                (seconds). When ``None`` (the default), tools for this server
+                inherit the pool-wide ``self._tool_call_timeout``. When an
+                integer is provided — including ``0``, which disables the
+                per-call timeout wrap entirely — it overrides the pool default
+                for this server only.
         """
         if server_name in self._pools:
             logger.warning(f"Server '{server_name}' already registered, skipping")
@@ -86,6 +103,10 @@ class McpWarmupPool:
         self._locks[server_name] = asyncio.Lock()
         self._configs[server_name] = config
         self._pool_sizes[server_name] = pool_size
+        if tool_call_timeout is not None:
+            # ``is not None`` (not truthiness) — ``0`` must be stored because it
+            # is a valid override that disables the timeout wrap.
+            self._tool_call_timeouts[server_name] = tool_call_timeout
         logger.debug(f"Registered server '{server_name}' with pool_size={pool_size}")
 
     async def warmup(self, pool_size: dict[str, int] | None = None) -> None:
@@ -230,7 +251,14 @@ class McpWarmupPool:
                     tools = self._tool_discovery_cache[server_name]
                 else:
                     tools = await load_mcp_tools(session)
-                    tools = adapt_mcp_tools(server_name, tools, tool_call_timeout=self._tool_call_timeout)
+                    # Resolve effective timeout: per-server override (set via
+                    # register_server) wins over the pool-wide default. ``0`` is
+                    # a valid override (disables the wrap) so we use ``dict.get``
+                    # rather than truthy fallbacks.
+                    timeout = self._tool_call_timeouts.get(
+                        server_name, self._tool_call_timeout
+                    )
+                    tools = adapt_mcp_tools(server_name, tools, tool_call_timeout=timeout)
                     self._tool_discovery_cache[server_name] = tools
 
             return PooledConnection(

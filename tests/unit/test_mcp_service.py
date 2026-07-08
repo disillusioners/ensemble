@@ -278,6 +278,51 @@ class TestPreloadMcpTools:
         assert "tool_call_timeout" in call_kwargs
         assert call_kwargs["tool_call_timeout"] == 120
 
+    @pytest.mark.asyncio
+    async def test_per_server_timeout_overrides_global_default(self, service, manager):
+        """Per-server override (OpenSpace=900) wins over global default (120)."""
+        server = _make_server(name="openspace", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+        service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("execute_task", "openspace")]
+        )
+
+        with patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_tool(name="mcp_openspace_execute_task")],
+        ) as mock_create:
+            await service.preload_mcp_tools("inst-1")
+
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["tool_call_timeout"] == 900
+
+    @pytest.mark.asyncio
+    async def test_zero_sentinel_preserved_through_preload(self, service, manager):
+        """``0`` (disable timeout) is preserved through preload — not coerced to default."""
+        server = _make_server(name="custom-server", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+        service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("t1", "custom-server")]
+        )
+
+        # Patch the builtin registry to return a definition with tool_call_timeout=0
+        sentinel_def = MagicMock()
+        sentinel_def.tool_call_timeout = 0
+        with patch(
+            "daemon.mcp.builtin_servers.get_registry",
+            return_value=MagicMock(get_by_name=MagicMock(return_value=sentinel_def)),
+        ), patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_tool()],
+        ) as mock_create:
+            await service.preload_mcp_tools("inst-1")
+
+        call_kwargs = mock_create.call_args.kwargs
+        # ``0`` is a valid "disable timeout wrap" sentinel — must NOT be replaced
+        # with the global default of 120.
+        assert call_kwargs["tool_call_timeout"] == 0
+        assert call_kwargs["tool_call_timeout"] is not None
+
 
 # ---------------------------------------------------------------------------
 # TestGetMcpTools — sync cache read (unchanged)
@@ -794,3 +839,68 @@ class TestSessionProviderHelpers:
         manager.config = MagicMock(spec=[])  # No mcp_pool attribute
         service = McpService(manager=manager)
         assert service._get_tool_call_timeout() == 120
+
+    # ------------------------------------------------------------------
+    # _get_per_server_timeout — builtin lookup for per-server override
+    # ------------------------------------------------------------------
+
+    def test_get_per_server_timeout_returns_none_for_non_builtin(self, service):
+        """Unknown / non-builtin server names return None (fall back to global)."""
+        assert service._get_per_server_timeout("not-a-builtin") is None
+
+    def test_get_per_server_timeout_openspace_override(self, service):
+        """OpenSpace's 900s override is returned as-is (15min for execute_task)."""
+        # The OpenSpace definition is registered at import time in
+        # daemon/mcp/builtin_servers/__init__.py — no mocking needed.
+        assert service._get_per_server_timeout("openspace") == 900
+
+    def test_get_per_server_timeout_builtin_no_override_returns_none(self, service):
+        """Builtins without a tool_call_timeout override return None.
+
+        webfetch / context7 inherit the base class's ``None`` default,
+        so the caller falls back to the global timeout — same as a
+        non-builtin.
+        """
+        assert service._get_per_server_timeout("webfetch") is None
+        assert service._get_per_server_timeout("context7") is None
+
+    def test_get_per_server_timeout_preserves_zero_sentinel(self, service):
+        """``0`` (disable timeout wrapping) is preserved — NOT coerced to default.
+
+        Simulates a hypothetical builtin definition that explicitly opts
+        out of timeout wrapping. The helper must return ``0`` so the
+        caller passes it through verbatim; ``is not None`` at the call
+        site guarantees this contract holds.
+        """
+        sentinel_definition = MagicMock()
+        sentinel_definition.tool_call_timeout = 0
+
+        # Patch where the symbol is looked up (function-local import),
+        # not where it's called from. ``daemon.services.mcp_service``
+        # has no module-level ``get_registry`` binding.
+        with patch(
+            "daemon.mcp.builtin_servers.get_registry",
+            return_value=MagicMock(get_by_name=MagicMock(return_value=sentinel_definition)),
+        ):
+            result = service._get_per_server_timeout("any-name")
+
+        assert result == 0
+        assert result is not None  # explicit: zero is not "missing"
+
+    def test_get_per_server_timeout_missing_attribute_returns_none(self, service):
+        """If a definition has no ``tool_call_timeout`` attribute, returns None.
+
+        Defensive path: the abstract base provides the property, but a
+        future subclass might skip it. ``getattr`` with a default
+        protects against that without raising AttributeError.
+        """
+        # A MagicMock with spec=[] has no tool_call_timeout attribute.
+        bare_definition = MagicMock(spec=[])
+
+        with patch(
+            "daemon.mcp.builtin_servers.get_registry",
+            return_value=MagicMock(get_by_name=MagicMock(return_value=bare_definition)),
+        ):
+            result = service._get_per_server_timeout("future-builtin")
+
+        assert result is None

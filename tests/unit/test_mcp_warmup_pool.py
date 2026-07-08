@@ -105,6 +105,219 @@ class TestRegisterServer:
         assert len(pool._pools) == 1
 
 
+class TestPerServerTimeout:
+    """Tests for per-server ``tool_call_timeout`` override on McpWarmupPool.
+
+    Phase 2 of the OpenSpace MCP integration lets each built-in server request
+    its own ``tool_call_timeout`` (in seconds) at registration time. OpenSpace
+    sets this to 900s because ``execute_task`` may run long-lived agents; the
+    other builtins (context7, webfetch) inherit the pool-wide default.
+
+    The implementation must:
+    - Store the override in ``_tool_call_timeouts[server_name]`` when the
+      caller passes a non-``None`` value (uses ``is not None`` so ``0`` —
+      the "disable timeout wrap" sentinel — survives).
+    - Resolve the effective timeout in ``_create_pooled_connection`` as
+      ``self._tool_call_timeouts.get(server_name, self._tool_call_timeout)``
+      and pass it to ``adapt_mcp_tools(..., tool_call_timeout=timeout)``.
+    """
+
+    # --- register_server storage tests --------------------------------------
+
+    def test_register_server_stores_per_server_timeout(self, pool):
+        """``register_server(..., tool_call_timeout=900)`` records the override."""
+        pool.register_server("context7", _make_config(), tool_call_timeout=900)
+
+        assert pool._tool_call_timeouts["context7"] == 900
+
+    def test_register_server_without_timeout_not_in_dict(self, pool):
+        """When ``tool_call_timeout`` is ``None`` (default), the key is NOT inserted.
+
+        Guards the ``if tool_call_timeout is not None:`` branch in
+        ``register_server``: callers must be able to detect "no override set"
+        via ``"server" not in pool._tool_call_timeouts``.
+        """
+        pool.register_server("context7", _make_config())
+
+        assert "context7" not in pool._tool_call_timeouts
+
+    def test_register_server_with_zero_timeout_preserved(self, pool):
+        """``tool_call_timeout=0`` (disable-timeout sentinel) must survive storage.
+
+        Uses ``is not None``, not truthiness — a buggy implementation that
+        wrote ``if tool_call_timeout:`` would silently drop the ``0`` and
+        fall back to the pool-wide default. This test catches that.
+        """
+        pool.register_server("context7", _make_config(), tool_call_timeout=0)
+
+        assert "context7" in pool._tool_call_timeouts, (
+            "0 must be stored, not treated as falsy"
+        )
+        assert pool._tool_call_timeouts["context7"] == 0
+
+    # --- builtin server definition wiring -----------------------------------
+
+    def test_register_openspace_uses_900s(self, pool):
+        """End-to-end: ``OpenSpaceServerDefinition.tool_call_timeout`` flows into
+        ``register_server`` and lands at ``_tool_call_timeouts["openspace"] == 900``.
+
+        This proves the property → register_server wiring. If the
+        ``OpenSpaceServerDefinition.tool_call_timeout`` override is removed,
+        the assertion below fails — guarding against accidental regression
+        in either the definition or the pool.
+        """
+        from daemon.mcp.builtin_servers.openspace import OpenSpaceServerDefinition
+
+        defn = OpenSpaceServerDefinition()
+        pool.register_server(
+            "openspace",
+            _make_config(),
+            tool_call_timeout=defn.tool_call_timeout,
+        )
+
+        assert pool._tool_call_timeouts["openspace"] == 900
+
+    def test_webfetch_context7_have_none_timeout(self):
+        """WebFetch and Context7 return ``None`` for ``tool_call_timeout``.
+
+        They inherit the base class default — this is the "Existing servers
+        unaffected" scenario (Phase 2 §4). Documents that only OpenSpace
+        currently overrides the default among the builtins.
+        """
+        from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+        from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+
+        assert WebFetchServerDefinition().tool_call_timeout is None
+        assert Context7ServerDefinition().tool_call_timeout is None
+
+    # --- _create_pooled_connection integration ------------------------------
+    #
+    # These tests prove the per-server override actually reaches the tool
+    # adapter. They follow the mocking pattern from
+    # ``test_create_pooled_connection_cleanup_on_session_failure`` (see
+    # ``daemon.mcp.warmup_pool._create_pooled_connection`` for call sites):
+    #   - patch ``daemon.mcp.stdio_wrapper.mcp.stdio_client``
+    #   - patch ``daemon.mcp.warmup_pool.ManagedClientSession``
+    #   - patch ``daemon.mcp.warmup_pool.load_mcp_tools``
+    #   - patch ``daemon.mcp.warmup_pool.adapt_mcp_tools``  ← new
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_uses_per_server_timeout(self, pool):
+        """Per-server override (900) wins over the pool default (120) and is
+        forwarded verbatim to ``adapt_mcp_tools(..., tool_call_timeout=900)``.
+        """
+        pool.register_server("context7", _make_config(), tool_call_timeout=900)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("context7")
+
+        mock_adapt.assert_called_once()
+        # Per-server override (900) must win over pool default (120)
+        assert mock_adapt.call_args.kwargs.get("tool_call_timeout") == 900, (
+            f"Expected tool_call_timeout=900 (per-server override), "
+            f"got {mock_adapt.call_args.kwargs.get('tool_call_timeout')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_uses_default_when_no_override(self):
+        """With no per-server override, the pool default (120) is forwarded.
+
+        Constructs the pool with ``tool_call_timeout=120`` explicitly so the
+        default is observable (rather than relying on the constructor default).
+        """
+        pool = McpWarmupPool(tool_call_timeout=120)
+        pool.register_server("context7", _make_config())  # no override
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("context7")
+
+        mock_adapt.assert_called_once()
+        assert mock_adapt.call_args.kwargs.get("tool_call_timeout") == 120, (
+            f"Expected tool_call_timeout=120 (pool default), "
+            f"got {mock_adapt.call_args.kwargs.get('tool_call_timeout')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_uses_zero_timeout(self, pool):
+        """``tool_call_timeout=0`` (disable sentinel) survives the full pipeline.
+
+        A buggy implementation that filtered with truthiness would replace
+        ``0`` with the pool default — this test catches that by checking the
+        exact value forwarded to ``adapt_mcp_tools``.
+        """
+        pool.register_server("context7", _make_config(), tool_call_timeout=0)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("context7")
+
+        mock_adapt.assert_called_once()
+        # ``0`` must NOT be replaced with the pool default
+        assert mock_adapt.call_args.kwargs.get("tool_call_timeout") == 0, (
+            f"Expected tool_call_timeout=0 (disable sentinel), "
+            f"got {mock_adapt.call_args.kwargs.get('tool_call_timeout')}"
+        )
+
+
 class TestSingletonFactory:
     """Tests for get_mcp_warmup_pool singleton."""
 

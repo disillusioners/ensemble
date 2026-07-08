@@ -1,6 +1,7 @@
 """MCP Server Management API endpoints."""
 
 import asyncio
+import copy
 import logging
 from typing import Any
 
@@ -52,6 +53,35 @@ def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
         mcp_service.invalidate_schema_cache(server_name)
 
 
+def redact_secrets(config: dict) -> dict:
+    """Return a deep copy of ``config`` with env secret values redacted.
+
+    Only the ``env`` sub-dict (if present and dict-like) is processed.
+    Keys whose name contains any of ``KEY``, ``TOKEN``, ``SECRET``, or
+    ``PASSWORD`` (case-insensitive substring match) have their values
+    replaced with ``"[REDACTED]"``. Non-sensitive env keys such as
+    ``OPENSPACE_MODEL`` and ``OPENSPACE_MCP_TRANSPORT`` are preserved
+    intact. The original input dict is not mutated.
+
+    Args:
+        config: MCP server config dict (typically loaded from the DB).
+
+    Returns:
+        A new dict with sensitive ``env`` values replaced by
+        ``"[REDACTED]"``.
+    """
+    redacted = copy.deepcopy(config)
+    env = redacted.get("env")
+    if isinstance(env, dict):
+        for env_key in list(env.keys()):
+            if not isinstance(env_key, str):
+                continue
+            upper_key = env_key.upper()
+            if any(marker in upper_key for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+                env[env_key] = "[REDACTED]"
+    return redacted
+
+
 def _mcp_server_to_info(mcp_server) -> McpServerInfo:
     """Convert McpServer model to McpServerInfo response model."""
     # Parse config_schema from DB (stored as list[dict]) to list[ConfigSchemaField]
@@ -59,19 +89,34 @@ def _mcp_server_to_info(mcp_server) -> McpServerInfo:
     if mcp_server.config_schema:
         config_schema = [ConfigSchemaField(**field) for field in mcp_server.config_schema]
 
-    # For built-in servers, parse config to get initial_values for form pre-fill
+    # Preserve the original (unredacted) DB config for form pre-fill so that
+    # parse_config() can recover real values before we redact secrets for
+    # the response payload.
+    original_config = mcp_server.config or {}
+
+    # For built-in servers, parse config to get initial_values for form pre-fill.
+    # Note: parse_config only recovers schema-defined fields. Injected env vars
+    # (credentials, OPENSPACE_MCP_TRANSPORT) live in the stored env dict but are
+    # not part of the schema, so they will NOT appear in initial_values on
+    # round-trip — this is intentional, those values are sourced from the
+    # runtime environment rather than user input.
     initial_values: dict | None = None
     if mcp_server.is_builtin:
         registry = get_registry()
         definition = registry.get_by_name(mcp_server.name)
         if definition:
-            initial_values = definition.parse_config(mcp_server.config)
+            initial_values = definition.parse_config(original_config)
+
+    # Redact env secrets before exposing config to the client. This applies to
+    # every API response path (list / get / create / update / configure-builtin
+    # / reset-builtin) so credentials never leak over HTTP.
+    safe_config = redact_secrets(original_config)
 
     return McpServerInfo(
         id=mcp_server.id,
         name=mcp_server.name,
         description=mcp_server.description,
-        config=mcp_server.config,
+        config=safe_config,
         is_active=mcp_server.is_active,
         is_builtin=mcp_server.is_builtin,
         config_schema=config_schema,

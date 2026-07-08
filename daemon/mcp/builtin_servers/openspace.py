@@ -71,13 +71,14 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
     def get_config_schema(self) -> list[dict[str, Any]]:
         """Return the configuration schema for OpenSpace server.
 
-        All three fields are in the ``env`` section so the base class
-        uppercases the key into the env dict. Keys use the ``openspace_``
-        prefix which becomes ``OPENSPACE_*`` env vars passed to the
-        subprocess.
+        All three fields live in the ``env`` section so the base class
+        uppercases the key into the env dict (e.g. ``openspace_model``
+        → ``OPENSPACE_MODEL``).
 
-        Defaults are empty strings (falsy) so the base ``build_config()``
-        skips them — values are sourced from real environment when needed.
+        Defaults are intentionally empty strings (falsy) — the base
+        ``build_config()`` skips them when user_values is empty, letting
+        OpenSpace fall back to its own internal defaults instead of us
+        hardcoding model names here.
         """
         return [
             {
@@ -121,12 +122,31 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
             },
         ]
 
+    def parse_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Reverse-map a stored OpenSpace config back to form values.
+
+        Delegates to ``super().parse_config()`` unchanged. The override
+        exists solely to document a deliberate behavior: injected env
+        vars — credentials (``OPENSPACE_LLM_API_KEY``,
+        ``OPENSPACE_API_KEY``) and the transport pin
+        (``OPENSPACE_MCP_TRANSPORT=stdio``) — are written to ``env`` by
+        ``build_config()`` but are NOT schema fields, so they are NOT
+        recovered by ``parse_config()`` on round-trip. This is
+        intentional: those values come from the runtime environment, not
+        from user form input.
+        """
+        return super().parse_config(config)
+
     def build_config(self, user_values: dict[str, Any]) -> dict[str, Any]:
         """Build config with dual-transport support.
 
         Behavior:
         1. Check ``ENS_OPENSPACE_REMOTE_URL``. If non-empty after strip,
-           return remote HTTP config (no STDIO subprocess).
+           validate the URL scheme is ``http://`` or ``https://`` (else
+           raise ``ValueError``) and return a remote HTTP config (no
+           STDIO subprocess). If credentials env vars are set in this
+           mode, log a warning that they are ignored — they should be
+           configured on the remote OpenSpace instance instead.
         2. Otherwise call ``super().build_config(user_values)`` for STDIO,
            then layer on OpenSpace-specific environment:
            - ``OPENSPACE_MCP_TRANSPORT=stdio``: prevents OpenSpace's TTY
@@ -142,9 +162,34 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
 
         Returns:
             Merged config dict ready for ``McpStdioConfig`` or HTTP transport.
+
+        Raises:
+            ValueError: If ``ENS_OPENSPACE_REMOTE_URL`` is set but does
+                not use the ``http://`` or ``https://`` scheme.
         """
         remote_url = os.environ.get(_OPENSPACE_REMOTE_URL_ENV, "").strip()
         if remote_url:
+            # Reject non-HTTP schemes explicitly (e.g. ftp://, file://, ws://)
+            # — they are not valid transport URLs for streamable-http.
+            if not (remote_url.startswith("http://") or remote_url.startswith("https://")):
+                raise ValueError(
+                    "ENS_OPENSPACE_REMOTE_URL must use http:// or https:// scheme"
+                )
+
+            # Warn if credential env vars are set in HTTP mode — they are
+            # intentionally ignored because the local subprocess isn't
+            # started in this mode. Configure them on the remote OpenSpace
+            # instance instead.
+            for cred_env in ("OPENSPACE_LLM_API_KEY", "OPENSPACE_API_KEY"):
+                if os.environ.get(cred_env, "").strip():
+                    logger.warning(
+                        "OpenSpace: %s is set but ignored in HTTP mode "
+                        "(ENS_OPENSPACE_REMOTE_URL); configure credentials "
+                        "on the remote OpenSpace instance instead",
+                        cred_env,
+                    )
+                    break  # one warning is enough — both convey the same advice
+
             logger.info(
                 "OpenSpace: ENS_OPENSPACE_REMOTE_URL is set, using streamable-http transport"
             )
