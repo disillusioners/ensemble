@@ -1183,6 +1183,43 @@ class TestOpenSpaceLLMConfigHttpModeIgnored:
             for msg in warning_messages
         )
 
+    def test_all_four_injectable_vars_set_in_http_mode_all_warn(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """All 4 injectable vars set in HTTP mode → each emits exactly one warning.
+
+        Regression guard for a break-after-first bug in the warning loop:
+        if logging the first var's warning early-exits, vars 2-4 would be
+        silently skipped. This test sets every injectable var and asserts
+        each one appears in ``caplog`` exactly once — catching any
+        regression where subsequent warnings are dropped after the first.
+        """
+        import logging
+
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp")
+        for var, val in (
+            ("OPENSPACE_LLM_API_KEY", "sk-x"),
+            ("OPENSPACE_API_KEY", "sk-os"),
+            ("OPENSPACE_LLM_API_BASE", "https://llm.internal/v1"),
+            ("OPENSPACE_LLM_EXTRA_HEADERS", '{"X-Foo": "bar"}'),
+        ):
+            monkeypatch.setenv(var, val)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"):
+            openspace_definition.build_config({})
+
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        for var in (
+            "OPENSPACE_LLM_API_KEY",
+            "OPENSPACE_API_KEY",
+            "OPENSPACE_LLM_API_BASE",
+            "OPENSPACE_LLM_EXTRA_HEADERS",
+        ):
+            assert sum(var in m for m in warning_messages) == 1, (
+                f"Expected exactly one warning mentioning {var}, got: "
+                f"{[m for m in warning_messages if var in m]!r}"
+            )
+
 
 # =============================================================================
 # Test Warmup Pool Transport Regression Guard
