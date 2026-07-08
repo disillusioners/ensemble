@@ -2309,9 +2309,18 @@ def test_wave_spawn_with_defer_queue():
             f"{job_status}"
         )
 
-        if job_status == "pending":
+        # The job may already be 'processing' by the time we reach here
+        # (the observer admits the next job the instant the leader
+        # completes, and admission flips the status to 'processing'
+        # before the LLM has a chance to respond). We must wait for a
+        # terminal status in BOTH the 'pending' and 'processing' cases
+        # — otherwise the assertion below fires on the in-flight
+        # 'processing' status and the test never gives the deferred job
+        # a chance to complete.
+        if job_status in ("pending", "processing"):
             logger.info(
-                "[STEP6] job still pending — waiting for it to reach terminal..."
+                f"[STEP6] job still {job_status!r} — waiting for it to "
+                f"reach terminal..."
             )
             # P1 invariant: the defer job MUST actually run and reach a
             # terminal state. 'processing' alone is NOT acceptable — that's
