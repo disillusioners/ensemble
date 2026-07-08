@@ -4,6 +4,7 @@ import asyncio
 import copy
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from mcp.shared.exceptions import McpError
@@ -54,21 +55,33 @@ def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
 
 
 def redact_secrets(config: dict) -> dict:
-    """Return a deep copy of ``config`` with env secret values redacted.
+    """Return a deep copy of ``config`` with secrets redacted.
 
-    Only the ``env`` sub-dict (if present and dict-like) is processed.
-    Keys whose name contains any of ``KEY``, ``TOKEN``, ``SECRET``, or
-    ``PASSWORD`` (case-insensitive substring match) have their values
-    replaced with ``"[REDACTED]"``. Non-sensitive env keys such as
-    ``OPENSPACE_MODEL`` and ``OPENSPACE_MCP_TRANSPORT`` are preserved
-    intact. The original input dict is not mutated.
+    Two surfaces are scrubbed:
+
+    1. ``env`` sub-dict (if present and dict-like): keys whose name
+       contains any of ``KEY``, ``TOKEN``, ``SECRET``, or ``PASSWORD``
+       (case-insensitive substring match) have their values replaced
+       with ``"[REDACTED]"``. Non-sensitive env keys such as
+       ``OPENSPACE_MODEL`` and ``OPENSPACE_MCP_TRANSPORT`` are
+       preserved intact.
+
+    2. ``url`` top-level value (if present and a string): any userinfo
+       (``user:pass@``) is stripped as a defense-in-depth measure in
+       case a builtin server's ``build_config`` ever lets one slip
+       through. Builtin servers (e.g. OpenSpace) already reject
+       userinfo at build time — this layer exists so a malformed
+       legacy/stored config still doesn't leak credentials over the
+       API.
+
+    The original input dict is not mutated.
 
     Args:
         config: MCP server config dict (typically loaded from the DB).
 
     Returns:
         A new dict with sensitive ``env`` values replaced by
-        ``"[REDACTED]"``.
+        ``"[REDACTED]"`` and any URL userinfo stripped.
     """
     redacted = copy.deepcopy(config)
     env = redacted.get("env")
@@ -79,6 +92,17 @@ def redact_secrets(config: dict) -> dict:
             upper_key = env_key.upper()
             if any(marker in upper_key for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
                 env[env_key] = "[REDACTED]"
+
+    # Defense-in-depth: strip userinfo from ``config["url"]`` if present.
+    # Builtin build_config() should reject this upstream; this guards
+    # against legacy/stored configs that pre-date the validation.
+    url = redacted.get("url")
+    if isinstance(url, str) and url:
+        parsed_url = urlparse(url)
+        if "@" in parsed_url.netloc:
+            host_port = parsed_url.netloc.split("@", 1)[-1]
+            redacted["url"] = parsed_url._replace(netloc=host_port).geturl()
+
     return redacted
 
 
@@ -341,8 +365,35 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
             ).model_dump()
         )
 
-    # Build the final config from user values
-    generated_config = definition.build_config(config_request.values)
+    # Build the final config from user values. ``build_config()`` may
+    # raise ``McpConfigValidationError`` (e.g. OpenSpace rejects a
+    # ``ftp://`` URL or embedded userinfo) — translate that into a 422
+    # rather than letting it surface as an opaque 500. ``BuiltinConfigValidationError``
+    # (from ``validate_config_values`` above) is also caught here as a
+    # safety net for any future builtin whose build_config re-validates.
+    try:
+        generated_config = definition.build_config(config_request.values)
+    except BuiltinConfigValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message="Configuration validation failed",
+                details={"errors": e.errors}
+            ).model_dump()
+        )
+    except McpConfigValidationError as e:
+        # McpConfigValidationError is a ValueError subclass — catch it
+        # explicitly so it doesn't bubble up as a 500. Some builtins
+        # raise it from build_config() for env-driven checks (e.g.
+        # ENS_OPENSPACE_REMOTE_URL scheme / userinfo).
+        raise HTTPException(
+            status_code=422,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=str(e)
+            ).model_dump()
+        )
     schema_as_dicts = definition.get_config_schema()
 
     # Check if server already exists

@@ -96,7 +96,10 @@ class McpWarmupPool:
                 for this server only.
         """
         if server_name in self._pools:
-            logger.warning(f"Server '{server_name}' already registered, skipping")
+            logger.warning(
+                f"Server '{server_name}' already registered, skipping "
+                f"(ignored timeout override: pool already using its original tool_call_timeout)"
+            )
             return
 
         self._pools[server_name] = asyncio.Queue()

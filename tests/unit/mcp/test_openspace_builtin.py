@@ -25,6 +25,7 @@ from daemon.mcp.builtin_servers import (
     get_registry,
     is_builtin_disabled,
 )
+from daemon.mcp.config import McpConfigValidationError
 
 
 # =============================================================================
@@ -473,6 +474,126 @@ class TestOpenSpaceBuildConfigUrlSchemeValidation:
             openspace_definition.build_config({})
 
         assert "http://" in str(exc_info.value)
+
+    def test_ftp_scheme_raises_mcp_config_validation_error(
+        self, openspace_definition, monkeypatch
+    ):
+        """Bad scheme raises ``McpConfigValidationError`` (not bare ValueError).
+
+        The router catches ``McpConfigValidationError`` to translate to
+        422 — so this test ensures the right class is used (a 500 would
+        result from a plain ``ValueError``).
+        """
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", "ftp://evil.com/mcp")
+
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "scheme" in str(exc_info.value).lower()
+        # McpConfigValidationError must remain a ValueError subclass so
+        # callers / tests using ``except ValueError`` keep working.
+        assert isinstance(exc_info.value, ValueError)
+
+
+# =============================================================================
+# Test build_config — URL userinfo rejection (W1 security hardening)
+# =============================================================================
+
+
+class TestOpenSpaceBuildConfigUrlUserinfoRejection:
+    """Tests for ``ENS_OPENSPACE_REMOTE_URL`` userinfo credential rejection.
+
+    ``build_config()`` must fail fast on any URL containing userinfo
+    (``user:pass@host``) because the URL is stored in the DB and
+    surfaces in API responses. ``redact_secrets()`` strips env values
+    but does not see top-level URL fields, so any userinfo would leak.
+    Configure auth on the remote OpenSpace instance instead (e.g. via
+    its own Authorization headers).
+    """
+
+    def test_http_userinfo_raises_validation_error(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=http://user:pass@host → McpConfigValidationError."""
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "http://alice:secret@openspace.example.com/mcp"
+        )
+
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "userinfo" in str(exc_info.value).lower()
+        # Must still be a ValueError subclass for back-compat with existing tests.
+        assert isinstance(exc_info.value, ValueError)
+
+    def test_https_userinfo_raises_validation_error(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=https://user:pass@host → McpConfigValidationError.
+
+        The check runs AFTER scheme validation, so https://user:pass@host
+        is not caught by the scheme check (it's a valid scheme) but
+        must be rejected by the userinfo check.
+        """
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://bob:hunter2@openspace.example.com/mcp"
+        )
+
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "userinfo" in str(exc_info.value).lower()
+
+    def test_userinfo_check_runs_after_scheme_check(
+        self, openspace_definition, monkeypatch
+    ):
+        """Non-HTTP scheme with userinfo → scheme error wins (more specific).
+
+        A URL like ``ftp://user:pass@host`` fails the scheme check
+        first; the userinfo check is only reached for valid schemes.
+        Either error message is acceptable here, but the exception
+        class must still be ``McpConfigValidationError``.
+        """
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "ftp://user:pass@evil.com/mcp"
+        )
+
+        with pytest.raises(McpConfigValidationError):
+            openspace_definition.build_config({})
+
+    def test_clean_url_without_userinfo_succeeds(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=https://openspace.example.com → no error.
+
+        Regression guard: the userinfo check must not reject clean URLs
+        that happen to contain ``@`` elsewhere (e.g. in the path).
+        Actually, ``@`` in the path does NOT show up in netloc, so this
+        is the realistic positive case.
+        """
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+
+        config = openspace_definition.build_config({})
+        assert config["transport"] == "streamable-http"
+        assert config["url"] == "https://openspace.example.com/mcp"
+
+    def test_url_with_at_in_path_is_allowed(
+        self, openspace_definition, monkeypatch
+    ):
+        """URL with ``@`` in the path but not in netloc → no error.
+
+        The check is specifically against ``parsed.netloc`` (the
+        ``user:pass@host`` position), so a path containing ``@`` (e.g.
+        an email-like resource id) does NOT trigger the rejection.
+        """
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp@1.0"
+        )
+
+        config = openspace_definition.build_config({})
+        assert config["url"] == "https://openspace.example.com/mcp@1.0"
 
 
 # =============================================================================

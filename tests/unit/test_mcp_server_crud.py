@@ -1237,3 +1237,126 @@ class TestRedactSecretsUtility:
         assert body["config"]["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
         # Non-sensitive env keys are preserved.
         assert body["config"]["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+
+    # =====================================================================
+    # URL userinfo redaction (W1 defense-in-depth)
+    # =====================================================================
+
+    def test_strips_http_userinfo_from_url(self):
+        """Top-level ``url`` with ``user:pass@host`` → userinfo stripped.
+
+        ``build_config()`` for builtin servers already rejects userinfo,
+        but ``redact_secrets`` is a defense-in-depth layer for legacy
+        or user-supplied configs that might bypass that check.
+        """
+        config = {
+            "transport": "streamable-http",
+            "url": "http://alice:secret@openspace.example.com/mcp",
+        }
+        result = redact_secrets(config)
+
+        assert "alice" not in result["url"]
+        assert "secret" not in result["url"]
+        assert "@" not in result["url"]
+        assert result["url"] == "http://openspace.example.com/mcp"
+
+    def test_strips_https_userinfo_from_url(self):
+        """HTTPS variant — same stripping behavior, scheme preserved."""
+        config = {
+            "transport": "streamable-http",
+            "url": "https://bob:hunter2@openspace.example.com/mcp",
+        }
+        result = redact_secrets(config)
+
+        assert result["url"] == "https://openspace.example.com/mcp"
+
+    def test_strips_userinfo_preserves_port(self):
+        """Userinfo stripping preserves the port (host:port stays intact)."""
+        config = {
+            "transport": "streamable-http",
+            "url": "http://alice:secret@openspace.example.com:8443/mcp",
+        }
+        result = redact_secrets(config)
+
+        assert result["url"] == "http://openspace.example.com:8443/mcp"
+
+    def test_url_without_userinfo_unchanged(self):
+        """Clean URL with no ``@`` → returned verbatim."""
+        config = {
+            "transport": "streamable-http",
+            "url": "https://openspace.example.com/mcp",
+        }
+        result = redact_secrets(config)
+
+        assert result["url"] == "https://openspace.example.com/mcp"
+
+    def test_url_at_in_path_is_not_stripped(self):
+        """URL with ``@`` in the path (not in netloc) → not stripped.
+
+        The redaction specifically targets ``parsed.netloc`` (the
+        ``user:pass@host`` position). A path containing ``@`` (e.g.
+        email-like resource id) is not userinfo and must be preserved.
+        """
+        config = {
+            "transport": "streamable-http",
+            "url": "https://openspace.example.com/mcp@1.0",
+        }
+        result = redact_secrets(config)
+
+        assert result["url"] == "https://openspace.example.com/mcp@1.0"
+
+    def test_url_userinfo_redaction_does_not_mutate_original(self):
+        """``redact_secrets`` must not mutate the input URL."""
+        original_url = "http://alice:secret@openspace.example.com/mcp"
+        config = {"transport": "streamable-http", "url": original_url}
+
+        _result = redact_secrets(config)
+
+        # The original must keep its userinfo intact.
+        assert config["url"] == original_url
+        assert "alice:secret@" in config["url"]
+
+    def test_missing_url_key_is_handled(self):
+        """No ``url`` key → no error, no spurious key added."""
+        config = {"transport": "stdio", "command": "python3"}
+        result = redact_secrets(config)
+
+        assert "url" not in result
+        assert result == {"transport": "stdio", "command": "python3"}
+
+    def test_non_string_url_is_handled(self):
+        """Non-string ``url`` value → returned verbatim, no error.
+
+        Defensive: the field is typed as string by the Pydantic config
+        models, but ``redact_secrets`` should not crash on unexpected
+        shapes that might appear in legacy DB rows.
+        """
+        config = {"transport": "streamable-http", "url": 12345}
+        result = redact_secrets(config)
+
+        assert result["url"] == 12345
+
+    def test_empty_url_is_handled(self):
+        """Empty string ``url`` → returned unchanged."""
+        config = {"transport": "streamable-http", "url": ""}
+        result = redact_secrets(config)
+
+        assert result["url"] == ""
+
+    def test_url_redaction_combined_with_env_redaction(self):
+        """URL userinfo + env secret both redacted in the same call."""
+        config = {
+            "transport": "streamable-http",
+            "url": "http://alice:secret@openspace.example.com/mcp",
+            "env": {
+                "OPENSPACE_LLM_API_KEY": "sk-llm-secret",
+                "OPENSPACE_MODEL": "gpt-4o",
+            },
+        }
+        result = redact_secrets(config)
+
+        # URL: userinfo gone
+        assert result["url"] == "http://openspace.example.com/mcp"
+        # env: secret gone, non-secret kept
+        assert result["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
+        assert result["env"]["OPENSPACE_MODEL"] == "gpt-4o"

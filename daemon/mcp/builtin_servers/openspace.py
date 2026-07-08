@@ -14,8 +14,10 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+from daemon.mcp.config import McpConfigValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +145,12 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
         Behavior:
         1. Check ``ENS_OPENSPACE_REMOTE_URL``. If non-empty after strip,
            validate the URL scheme is ``http://`` or ``https://`` (else
-           raise ``ValueError``) and return a remote HTTP config (no
-           STDIO subprocess). If credentials env vars are set in this
-           mode, log a warning that they are ignored — they should be
-           configured on the remote OpenSpace instance instead.
+           raise ``McpConfigValidationError``) and that it does not embed
+           userinfo credentials (``user:pass@host``), then return a remote
+           HTTP config (no STDIO subprocess). If credentials env vars are
+           set in this mode, log a per-var warning that they are ignored —
+           they should be configured on the remote OpenSpace instance
+           instead.
         2. Otherwise call ``super().build_config(user_values)`` for STDIO,
            then layer on OpenSpace-specific environment:
            - ``OPENSPACE_MCP_TRANSPORT=stdio``: prevents OpenSpace's TTY
@@ -164,16 +168,33 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
             Merged config dict ready for ``McpStdioConfig`` or HTTP transport.
 
         Raises:
-            ValueError: If ``ENS_OPENSPACE_REMOTE_URL`` is set but does
-                not use the ``http://`` or ``https://`` scheme.
+            McpConfigValidationError: If ``ENS_OPENSPACE_REMOTE_URL`` is set
+                but does not use the ``http://`` or ``https://`` scheme, or
+                if it embeds userinfo credentials (``user:pass@host``).
+                ``McpConfigValidationError`` is a ``ValueError`` subclass so
+                callers that catch ``ValueError`` still work, but the router
+                translates it into a 422 response instead of a 500.
         """
         remote_url = os.environ.get(_OPENSPACE_REMOTE_URL_ENV, "").strip()
         if remote_url:
             # Reject non-HTTP schemes explicitly (e.g. ftp://, file://, ws://)
             # — they are not valid transport URLs for streamable-http.
             if not (remote_url.startswith("http://") or remote_url.startswith("https://")):
-                raise ValueError(
+                raise McpConfigValidationError(
                     "ENS_OPENSPACE_REMOTE_URL must use http:// or https:// scheme"
+                )
+
+            # Reject embedded credentials in the URL. The remote URL is
+            # stored in the DB and surfaces in API responses (after
+            # redact_secrets, which strips env values but does not see
+            # URLs), so any userinfo here would be exposed to API
+            # clients. Configure auth on the remote OpenSpace instance
+            # instead (e.g. via its own Authorization headers).
+            parsed_remote = urlparse(remote_url)
+            if "@" in parsed_remote.netloc:
+                raise McpConfigValidationError(
+                    "ENS_OPENSPACE_REMOTE_URL must not contain userinfo "
+                    "credentials (user:pass@host)"
                 )
 
             # Warn if credential env vars are set in HTTP mode — they are
@@ -188,7 +209,6 @@ class OpenSpaceServerDefinition(BuiltinServerDefinition):
                         "on the remote OpenSpace instance instead",
                         cred_env,
                     )
-                    break  # one warning is enough — both convey the same advice
 
             logger.info(
                 "OpenSpace: ENS_OPENSPACE_REMOTE_URL is set, using streamable-http transport"

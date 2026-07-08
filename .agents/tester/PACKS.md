@@ -1,14 +1,15 @@
 # Test Packs
 
 ## Summary
-- Total: 148 packs
-- Unit: 127 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 149 packs
+- Unit: 128 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | devops_agent_unit_test | tests/unit/test_devops_agent.py | DevOps agent: auto-discovery, meta.json validity, prompt composition, tool config, leader integration, markdown quality | 2 min | 2026-06-14 | ✅ PASS (62/62, feature/devops-agent, commit 7800338) |
+| openspace_skill_unit_test | tests/unit/test_openspace_skill_loading.py | OpenSpace innate skill: discovery, prompt composition inclusion/exclusion, tool-categories decoupling | 2 min | 2026-07-08 | ✅ PASS (17/17, feature/openspace-mcp-integration, commit 89a9d451) |
 | opencode_native_tools_unit_test | tests/opencode/ | OpenCode native tools: state derivation, repository CRUD, table creation, HTTP client (_request patching), session manager (state machine + deadlock), registry, dispatch functions, tool factory + 3 ANSWER deadlock tests + 3 engine disposal tests | 2 min | 2026-06-11 | ✅ PASS (465/465, 0 failures, fix/opencode-wait-latency, commit 547035e) |
 | core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-05 | ✅ PASS (665/665, fix/windows-encoding-paths, 0 regressions) |
 | write_pause_guard_unit_test | tests/unit/test_write_pause_guard.py | WritePauseGuard: state machine, drain event, pause/resume, RuntimeError, sync/async interop, WriteGuardSession | 2 min | 2026-06-04 | ✅ PASS (27/27, Phase 3, 0 failures) |
