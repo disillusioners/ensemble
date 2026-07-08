@@ -1043,3 +1043,154 @@ class TestOpenSpaceEndToEnd:
             mp.setenv("ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp")
             config = openspace.build_config({})
             assert config["transport"] == "streamable-http"
+
+
+# =============================================================================
+# Test Module Availability Pre-Check
+# =============================================================================
+
+
+class TestOpenSpaceAvailability:
+    """Tests for ``is_available()`` module-dependency pre-check.
+
+    The OpenSpace built-in requires the optional ``openspace-ai``
+    Python package. When the package is missing, ``is_available()``
+    must return False so the bootstrap and warmup pool layers can
+    skip OpenSpace silently. Default-builtins (webfetch, context7)
+    inherit ``True`` from the base class.
+    """
+
+    def test_is_available_returns_true_when_module_found(self, monkeypatch):
+        """``find_spec`` returns a spec → ``is_available() == True``.
+
+        The ClassVar-based refactor calls ``find_spec`` with the value
+        of ``required_package`` (``"openspace-ai"``) rather than the
+        builtin's ``name``. The base class looks up the package by its
+        importable name; the daemon ``name`` is for DB records / env
+        vars and is separate from the Python package name.
+        """
+
+        fake_spec = object()  # any truthy object
+
+        def fake_find_spec(name):
+            assert name == "openspace-ai"
+            return fake_spec
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec", fake_find_spec
+        )
+
+        assert OpenSpaceServerDefinition.is_available() is True
+
+    def test_is_available_returns_false_when_module_not_found(self, monkeypatch):
+        """``find_spec`` raises ModuleNotFoundError → ``is_available() == False``."""
+
+        def fake_find_spec(name):
+            assert name == "openspace-ai"
+            raise ModuleNotFoundError(f"No module named '{name}'")
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec", fake_find_spec
+        )
+
+        assert OpenSpaceServerDefinition.is_available() is False
+
+    def test_is_available_returns_false_on_importerror(self, monkeypatch):
+        """General ``ImportError`` is also caught → False (defense in depth)."""
+
+        def fake_find_spec(name):
+            raise ImportError(f"Cannot import {name}")
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec", fake_find_spec
+        )
+
+        assert OpenSpaceServerDefinition.is_available() is False
+
+    def test_is_available_returns_false_on_valueerror(self, monkeypatch):
+        """``ValueError`` from find_spec is caught → False (rare edge case)."""
+
+        def fake_find_spec(name):
+            raise ValueError("Invalid module name")
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec", fake_find_spec
+        )
+
+        assert OpenSpaceServerDefinition.is_available() is False
+
+    def test_is_available_returns_false_when_find_spec_returns_none(
+        self, monkeypatch
+    ):
+        """``find_spec`` returns None (no spec found, no exception) → False."""
+
+        def fake_find_spec(name):
+            assert name == "openspace-ai"
+            return None
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec", fake_find_spec
+        )
+
+        assert OpenSpaceServerDefinition.is_available() is False
+
+    def test_default_builtins_are_available(self):
+        """WebFetch and Context7 inherit the default ``is_available() == True``.
+
+        These builtins rely only on external CLI binaries (``uvx`` /
+        ``npx``) — they're always considered available because we
+        cannot introspect whether ``uvx`` is on PATH without spawning
+        a subprocess. Failure (if any) surfaces at connection time.
+
+        They also have ``required_package = None``, signaling to the
+        base class that no Python package check is needed.
+        """
+        from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+        from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+
+        assert WebFetchServerDefinition.required_package is None
+        assert Context7ServerDefinition.required_package is None
+        assert WebFetchServerDefinition.is_available() is True
+        assert Context7ServerDefinition.is_available() is True
+
+
+class TestOpenSpaceRequiredPackage:
+    """Tests for the ``required_package`` class attribute.
+
+    The ClassVar-based refactor consolidates the optional-dependency
+    check into the base class. These tests pin the contract so future
+    maintainers don't accidentally drop or rename the attribute.
+    """
+
+    def test_required_package_is_openspace_ai(self):
+        """``OpenSpaceServerDefinition.required_package == 'openspace-ai'``."""
+        assert OpenSpaceServerDefinition.required_package == "openspace-ai"
+
+    def test_required_package_inherited_from_base_default_when_none(self):
+        """When ``required_package`` is None, ``is_available()`` returns True
+        without consulting find_spec."""
+        from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+
+        # WebFetch has no required_package — its is_available() should
+        # be True regardless of any package find_spec behavior. Mock
+        # find_spec to raise; if is_available() called it, the test
+        # would still pass (caught). But verify no import attempted.
+        import importlib
+
+        original = importlib.util.find_spec
+        called = []
+
+        def spy(name, *args, **kwargs):
+            called.append(name)
+            return original(name, *args, **kwargs)
+
+        from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+        import unittest.mock
+
+        with unittest.mock.patch("importlib.util.find_spec", spy):
+            assert WebFetchServerDefinition.is_available() is True
+            assert called == [], (
+                "is_available() must short-circuit when required_package "
+                "is None — it should NOT call find_spec for builtins "
+                "without optional Python dependencies"
+            )

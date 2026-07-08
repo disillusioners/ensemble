@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
 
 class BuiltinServerDefinition(ABC):
     """Abstract base class for built-in MCP server definitions."""
+
+    # Optional Python package required for this built-in to function.
+    # ``None`` (default) means the built-in has no optional Python
+    # dependency — it relies only on external CLI binaries (``uvx``,
+    # ``npx``) that we cannot introspect without spawning subprocesses.
+    # Subclasses override this with the importable package name (e.g.
+    # ``"openspace-ai"``) when they require an optional Python package
+    # that may not be installed. ``is_available()`` consults this
+    # attribute; the bootstrap and warmup pool layers rely on
+    # ``is_available()`` to skip unavailable built-ins cleanly
+    # (no DB record, no connection attempt).
+    required_package: ClassVar[str | None] = None
 
     @property
     @abstractmethod
@@ -46,6 +58,34 @@ class BuiltinServerDefinition(ABC):
         ``McpPoolConfig.tool_call_timeout``.
         """
         return None
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Check if this builtin's external dependencies are installed.
+
+        Subclasses override ``required_package`` (or override this method
+        directly) when they require an optional Python package that may
+        not be installed (e.g. ``openspace-ai`` for the OpenSpace built-in).
+        When this returns ``False``, the bootstrap and warmup pool layers
+        skip the server entirely — no DB record, no connection attempt —
+        rather than failing later with an opaque subprocess error.
+
+        Returns:
+            ``True`` if the built-in can be used safely. Default ``True``
+            covers built-ins whose only dependencies are external CLI
+            binaries (``uvx``, ``npx``) and are therefore always available
+            when the daemon can spawn subprocesses.
+        """
+        if cls.required_package is None:
+            return True
+        import importlib.util
+        try:
+            return importlib.util.find_spec(cls.required_package) is not None
+        except (ImportError, ValueError):
+            # ImportError covers ModuleNotFoundError (missing parent
+            # package). ValueError catches invalid spec formats from
+            # find_spec on relative imports / weird sys.path setups.
+            return False
 
     def get_base_config(self) -> dict[str, Any]:
         """

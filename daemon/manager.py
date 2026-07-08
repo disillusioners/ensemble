@@ -881,24 +881,29 @@ class InstanceManager:
 
         for definition in definitions:
             try:
-                # Check if server is disabled via env var
+                # Check if server is disabled via env var (FIRST)
                 if is_builtin_disabled(definition.name):
                     existing = self._mcp_server_repository.get_mcp_server_by_name(definition.name)
                     if existing is None:
                         logger.info(f"Built-in MCP server '{definition.name}' disabled (MCP_DISABLE_BUILT_IN_{definition.name.upper()}), skipping creation")
                         continue
                     elif existing.is_builtin:
-                        # Deactivate existing record
-                        self._mcp_server_repository.update_mcp_server(
-                            existing.id,
-                            is_active=False,
-                        )
+                        self._mcp_server_repository.update_mcp_server(existing.id, is_active=False)
                         logger.info(f"Built-in MCP server '{definition.name}' disabled (MCP_DISABLE_BUILT_IN_{definition.name.upper()}), deactivated existing record")
                     else:
-                        logger.warning(
-                            f"Skipping built-in MCP server '{definition.name}': "
-                            f"a user-created server with this name already exists"
-                        )
+                        logger.warning(f"Skipping built-in MCP server '{definition.name}': a user-created server with this name already exists")
+                    continue
+
+                # Module availability pre-check — runs AFTER disable so user
+                # intent wins. If a DB record exists for a now-unavailable
+                # builtin, the disable path above already deactivated it; we
+                # just need to NOT create a fresh record.
+                if not definition.is_available():
+                    logger.info(
+                        f"Builtin '{definition.name}' skipped — package "
+                        f"'{definition.required_package}' not installed "
+                        f"(pip install {definition.required_package})"
+                    )
                     continue
 
                 default_config = definition.build_config({})
@@ -1026,6 +1031,18 @@ class InstanceManager:
             if is_builtin_disabled(name):
                 logger.info(
                     f"MCP server '{name}' disabled (env var), "
+                    f"skipping warmup pool registration"
+                )
+                continue
+
+            # Module availability pre-check (DEBUG here, INFO at bootstrap).
+            # Bootstrap is the canonical "user can act on this" event with
+            # actionable install hint; warmup is downstream of bootstrap so the
+            # INFO already fired there — DEBUG here avoids a duplicate notice
+            # in the operator's log.
+            if not definition.is_available():
+                logger.debug(
+                    f"MCP server '{name}' unavailable (module not installed), "
                     f"skipping warmup pool registration"
                 )
                 continue

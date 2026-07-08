@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
@@ -30,6 +30,13 @@ _OPENSPACE_REMOTE_URL_ENV = "ENS_OPENSPACE_REMOTE_URL"
 
 class OpenSpaceServerDefinition(BuiltinServerDefinition):
     """Built-in MCP server definition for OpenSpace."""
+
+    # OpenSpace requires the optional ``openspace-ai`` dependency. When
+    # the package is missing, the base class's ``is_available()`` returns
+    # ``False`` and the bootstrap / warmup pool layers skip OpenSpace
+    # entirely (no DB record, no connection attempt) rather than failing
+    # later with a ``ModuleNotFoundError`` in the subprocess.
+    required_package: ClassVar[str] = "openspace-ai"
 
     @property
     def name(self) -> str:
