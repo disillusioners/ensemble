@@ -1,7 +1,7 @@
 """Unit tests for ``daemon.mcp.safe_stdout`` (STDIO MCP protocol protection).
 
 These tests cover the ``_MCPSafeStdout`` wrapper, the
-``install_safe_stdout()`` helper, and the ``python3 -m
+``install_safe_stdout()`` helper, and the ``python -m
 daemon.mcp.safe_stdout`` bootstrap launcher. The wrapper's contract
 is:
 
@@ -449,6 +449,32 @@ class TestGetattrFallback:
 
         with pytest.raises(AttributeError):
             _ = wrapper.this_attribute_truly_does_not_exist  # type: ignore[attr-defined]
+
+    def test_detach_raises_attribute_error(self):
+        """``detach()`` must NOT fall through to stderr — it would detach
+        the wrong stream. The wrapper must raise ``AttributeError`` with a
+        message that names the method so callers can diagnose the issue."""
+        real_stdout, stderr = _make_pair()
+        wrapper = _MCPSafeStdout(real_stdout, stderr)
+
+        with pytest.raises(AttributeError) as excinfo:
+            wrapper.detach()  # type: ignore[attr-defined]
+
+        # The error message must name the method so the caller knows
+        # which unsupported call to replace.
+        assert "detach" in str(excinfo.value)
+
+    def test_reconfigure_raises_attribute_error(self):
+        """``reconfigure()`` must NOT fall through to stderr — it would
+        reconfigure the wrong stream. The wrapper must raise
+        ``AttributeError`` with a message that names the method."""
+        real_stdout, stderr = _make_pair()
+        wrapper = _MCPSafeStdout(real_stdout, stderr)
+
+        with pytest.raises(AttributeError) as excinfo:
+            wrapper.reconfigure()  # type: ignore[attr-defined]
+
+        assert "reconfigure" in str(excinfo.value)
 
 
 # =============================================================================

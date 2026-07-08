@@ -17,7 +17,12 @@ that:
 A bootstrap launcher (see the ``__main__`` block) lets any stdio MCP
 server opt-in via::
 
-    python3 -m daemon.mcp.safe_stdout daemon.mcp.kb_server [args...]
+    python -m daemon.mcp.safe_stdout daemon.mcp.kb_server [args...]
+
+Note: when the launcher is invoked by other daemon code (for example
+the OpenSpace MCP integration), ``sys.executable`` is used in place of
+``python`` so the wrapper runs under the same interpreter that owns the
+virtualenv. Direct users can invoke ``python -m ...`` as shown above.
 
 The wrapper installs itself **before** importing the target module, so
 the target's top-level ``print()`` calls are redirected from the very
@@ -166,6 +171,12 @@ class _MCPSafeStdout:
         attribute lookup, so ``self._real`` and ``self._stderr`` resolve
         via the instance dict and never trigger this fallback.
         """
+        if name in ("detach", "reconfigure"):
+            raise AttributeError(
+                f"_MCPSafeStdout does not support '{name}()' — "
+                f"it would operate on the wrong stream. "
+                f"Access sys.stdout.buffer directly if needed."
+            )
         return getattr(self._stderr, name)
 
 
@@ -215,7 +226,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         the dotted module name to execute as ``__main__``.
     """
     parser = argparse.ArgumentParser(
-        prog="python3 -m daemon.mcp.safe_stdout",
+        prog="python -m daemon.mcp.safe_stdout",
         description=(
             "Bootstrap launcher that installs _MCPSafeStdout on "
             "sys.stdout, then runs the target module as __main__. "
@@ -234,7 +245,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _main(argv: list[str] | None = None) -> int:
-    """Entry point for the ``python3 -m daemon.mcp.safe_stdout`` launcher.
+    """Entry point for the ``python -m daemon.mcp.safe_stdout`` launcher.
 
     Args:
         argv: Argument vector (defaults to ``sys.argv[1:]``).
