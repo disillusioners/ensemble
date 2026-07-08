@@ -56,15 +56,19 @@ def clean_openspace_env(monkeypatch):
     """Ensure OpenSpace-related env vars don't leak across tests.
 
     Removes ENS_OPENSPACE_REMOTE_URL, OPENSPACE_LLM_API_KEY,
-    OPENSPACE_API_KEY, and MCP_DISABLE_BUILT_IN_OPENSPACE before
-    every test. Tests that need to set them should do so explicitly
-    via ``monkeypatch.setenv`` (preferred) or a temporary patch.dict.
+    OPENSPACE_API_KEY, MCP_DISABLE_BUILT_IN_OPENSPACE,
+    MCP_DISABLE_BUILT_IN_WEBFETCH, and MCP_DISABLE_BUILT_IN_CONTEXT7
+    before every test. Tests that need to set them should do so
+    explicitly via ``monkeypatch.setenv`` (preferred) or a temporary
+    patch.dict.
     """
     for var in (
         "ENS_OPENSPACE_REMOTE_URL",
         "OPENSPACE_LLM_API_KEY",
         "OPENSPACE_API_KEY",
         "MCP_DISABLE_BUILT_IN_OPENSPACE",
+        "MCP_DISABLE_BUILT_IN_WEBFETCH",
+        "MCP_DISABLE_BUILT_IN_CONTEXT7",
     ):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -370,6 +374,219 @@ class TestOpenSpaceBuildConfigHttp:
             assert config["transport"] == "stdio"
         finally:
             os.environ.pop("ENS_OPENSPACE_REMOTE_URL", None)
+
+    def test_http_url_with_https_scheme(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=https://... → streamable-http + url."""
+        url = "https://openspace.example.com/mcp"
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", url)
+
+        config = openspace_definition.build_config({})
+        assert config["transport"] == "streamable-http"
+        assert config["url"] == url
+        assert config["headers"] == {}
+
+    def test_http_url_with_http_scheme(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=http://... → streamable-http + url.
+
+        http:// is explicitly allowed (in addition to https://) for
+        in-cluster / dev deployments without TLS termination on the
+        client side.
+        """
+        url = "http://openspace.internal.svc.cluster.local/mcp"
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", url)
+
+        config = openspace_definition.build_config({})
+        assert config["transport"] == "streamable-http"
+        assert config["url"] == url
+        assert config["headers"] == {}
+
+
+# =============================================================================
+# Test build_config — URL scheme validation (rejects non-HTTP schemes)
+# =============================================================================
+
+
+class TestOpenSpaceBuildConfigUrlSchemeValidation:
+    """Tests for ``ENS_OPENSPACE_REMOTE_URL`` scheme validation.
+
+    Only ``http://`` and ``https://`` are valid transport schemes.
+    Anything else (e.g. ``ftp://``, ``file://``, ``ws://``) must raise
+    ``ValueError`` so misconfigurations are caught at build time
+    rather than surfacing later as opaque transport errors.
+    """
+
+    def test_ftp_scheme_raises_valueerror(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=ftp://... → ValueError with scheme message."""
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", "ftp://evil.com/mcp")
+
+        with pytest.raises(ValueError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "scheme" in str(exc_info.value).lower()
+        assert "http://" in str(exc_info.value)
+        assert "https://" in str(exc_info.value)
+
+    def test_file_scheme_raises_valueerror(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=file://... → ValueError."""
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", "file:///etc/passwd")
+
+        with pytest.raises(ValueError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "http://" in str(exc_info.value)
+
+    def test_ws_scheme_raises_valueerror(
+        self, openspace_definition, monkeypatch
+    ):
+        """ENS_OPENSPACE_REMOTE_URL=ws://... → ValueError.
+
+        WebSocket raw URLs are not valid streamable-http endpoints —
+        only the http(s) transport is implemented.
+        """
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", "ws://openspace.example.com/mcp")
+
+        with pytest.raises(ValueError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "http://" in str(exc_info.value)
+
+    def test_scheme_validation_runs_after_strip(
+        self, openspace_definition, monkeypatch
+    ):
+        """Leading whitespace doesn't bypass scheme validation.
+
+        The URL is stripped first (existing behavior); the remaining
+        value must start with http:// or https:// — surrounding
+        whitespace doesn't turn ``ftp://`` into a valid URL.
+        """
+        monkeypatch.setenv("ENS_OPENSPACE_REMOTE_URL", "   ftp://evil.com/mcp   ")
+
+        with pytest.raises(ValueError) as exc_info:
+            openspace_definition.build_config({})
+
+        assert "http://" in str(exc_info.value)
+
+
+# =============================================================================
+# Test build_config — credentials-in-http-mode warning
+# =============================================================================
+
+
+class TestOpenSpaceBuildConfigHttpModeCredentialWarning:
+    """Tests for credential env vars being set in HTTP mode.
+
+    In HTTP mode (``ENS_OPENSPACE_REMOTE_URL`` is set), the local
+    subprocess never starts, so ``OPENSPACE_LLM_API_KEY`` /
+    ``OPENSPACE_API_KEY`` are intentionally NOT injected into the
+    returned config. If they happen to be present in the daemon
+    process's environment, we warn the operator that they will be
+    ignored — credentials belong on the remote OpenSpace instance.
+    """
+
+    def test_llm_api_key_set_in_http_mode_logs_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """OPENSPACE_LLM_API_KEY set in HTTP mode → warning is logged."""
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        monkeypatch.setenv("OPENSPACE_LLM_API_KEY", "sk-llm-secret")
+
+        with caplog.at_level(logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"):
+            config = openspace_definition.build_config({})
+
+        assert config["transport"] == "streamable-http"
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "OPENSPACE_LLM_API_KEY" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        ), (
+            "Expected a warning that OPENSPACE_LLM_API_KEY is ignored in "
+            f"HTTP mode, got: {warning_messages!r}"
+        )
+
+    def test_api_key_set_in_http_mode_logs_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """OPENSPACE_API_KEY set in HTTP mode → warning is logged."""
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        monkeypatch.setenv("OPENSPACE_API_KEY", "sk-api-secret")
+
+        with caplog.at_level(logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"):
+            config = openspace_definition.build_config({})
+
+        assert config["transport"] == "streamable-http"
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "OPENSPACE_API_KEY" in msg and "ignored" in msg.lower()
+            for msg in warning_messages
+        )
+
+    def test_no_credential_env_vars_in_http_mode_no_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """No credential env vars in HTTP mode → no ignored-credential warning."""
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        # Credentials are NOT set
+        assert "OPENSPACE_LLM_API_KEY" not in os.environ
+        assert "OPENSPACE_API_KEY" not in os.environ
+
+        with caplog.at_level(logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"):
+            openspace_definition.build_config({})
+
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        # The "ignored credentials" warning should NOT appear
+        assert not any(
+            "ignored in HTTP mode" in msg for msg in warning_messages
+        ), (
+            f"Did not expect an ignored-credentials warning when no credentials "
+            f"are set, got: {warning_messages!r}"
+        )
+
+    def test_empty_credential_env_vars_in_http_mode_no_warning(
+        self, openspace_definition, monkeypatch, caplog
+    ):
+        """Empty credential env vars in HTTP mode → no warning.
+
+        Empty values are treated as "not set" — no warning is emitted
+        for blanks, only for actually-set credentials.
+        """
+        import logging
+
+        monkeypatch.setenv(
+            "ENS_OPENSPACE_REMOTE_URL", "https://openspace.example.com/mcp"
+        )
+        monkeypatch.setenv("OPENSPACE_LLM_API_KEY", "")
+
+        with caplog.at_level(logging.WARNING, logger="daemon.mcp.builtin_servers.openspace"):
+            openspace_definition.build_config({})
+
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert not any(
+            "ignored in HTTP mode" in msg for msg in warning_messages
+        )
 
 
 # =============================================================================

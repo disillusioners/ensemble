@@ -1031,3 +1031,209 @@ class TestFullCrudWorkflow:
         # List should have 2
         list_response = client.get("/api/mcp-servers")
         assert len(list_response.json()["mcp_servers"]) == 2
+
+
+# =============================================================================
+# Group 5: redact_secrets() utility — env secret redaction regression tests
+# =============================================================================
+
+
+# Imported directly to keep the test fast (no FastAPI / DB setup needed).
+from daemon.routers.mcp_servers import redact_secrets  # noqa: E402
+
+
+class TestRedactSecretsUtility:
+    """Regression tests for ``daemon.routers.mcp_servers.redact_secrets``.
+
+    Behavior contract:
+    - Returns a deep copy — caller's original dict is not mutated.
+    - Only the ``env`` sub-dict (if dict-like) is processed.
+    - Env keys containing KEY, TOKEN, SECRET, or PASSWORD (case-
+      insensitive substring match) have their values replaced with
+      ``"[REDACTED]"``.
+    - Non-sensitive env keys (e.g. ``OPENSPACE_MODEL``,
+      ``OPENSPACE_MCP_TRANSPORT``) keep their original values.
+    - Top-level keys outside ``env`` are NOT touched.
+    """
+
+    def test_redacts_open_space_llm_api_key(self):
+        """OPENSPACE_LLM_API_KEY value → '[REDACTED]'."""
+        config = {
+            "env": {
+                "OPENSPACE_LLM_API_KEY": "sk-llm-secret-12345",
+                "OPENSPACE_MODEL": "gpt-4o",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
+        assert result["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+
+    def test_redacts_open_space_api_key(self):
+        """OPENSPACE_API_KEY value → '[REDACTED]'."""
+        config = {
+            "env": {
+                "OPENSPACE_API_KEY": "sk-api-secret-67890",
+                "OPENSPACE_MCP_TRANSPORT": "stdio",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["OPENSPACE_API_KEY"] == "[REDACTED]"
+        assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
+
+    def test_preserves_non_sensitive_env_keys(self):
+        """Non-sensitive env keys (OPENSPACE_MODEL, OPENSPACE_MCP_TRANSPORT)
+        keep their values intact.
+        """
+        config = {
+            "env": {
+                "OPENSPACE_MODEL": "claude-3-5-sonnet",
+                "OPENSPACE_MAX_ITERATIONS": "30",
+                "OPENSPACE_BACKEND_SCOPE": "cloud,local",
+                "OPENSPACE_MCP_TRANSPORT": "stdio",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["OPENSPACE_MODEL"] == "claude-3-5-sonnet"
+        assert result["env"]["OPENSPACE_MAX_ITERATIONS"] == "30"
+        assert result["env"]["OPENSPACE_BACKEND_SCOPE"] == "cloud,local"
+        assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
+
+    def test_does_not_mutate_original_config(self):
+        """Calling ``redact_secrets`` must not mutate the original dict."""
+        original = {
+            "env": {
+                "OPENSPACE_LLM_API_KEY": "sk-original-secret",
+                "OPENSPACE_MODEL": "gpt-4o",
+            },
+            "transport": "stdio",
+        }
+        # Snapshot via deep copy for comparison after the call.
+        import copy
+
+        snapshot = copy.deepcopy(original)
+        _result = redact_secrets(original)
+
+        assert original == snapshot, (
+            f"redact_secrets must not mutate input; got {original!r} "
+            f"vs snapshot {snapshot!r}"
+        )
+        # Stronger assertion: the secret value is still the original secret.
+        assert original["env"]["OPENSPACE_LLM_API_KEY"] == "sk-original-secret"
+
+    def test_returns_deep_copy(self):
+        """Result is a deep copy — mutating it doesn't affect the input."""
+        original = {
+            "env": {"OPENSPACE_MODEL": "gpt-4o"},
+            "args": ["-m", "openspace.mcp_server"],
+        }
+        result = redact_secrets(original)
+
+        # Mutating the result must NOT affect the original.
+        result["env"]["NEW_KEY"] = "injected"
+        result["args"].append("--injected")
+
+        assert "NEW_KEY" not in original["env"]
+        assert "--injected" not in original["args"]
+
+    def test_handles_missing_env(self):
+        """Config without 'env' key → returns deep copy unchanged."""
+        config = {"transport": "stdio", "command": "python3"}
+        result = redact_secrets(config)
+
+        assert result == config
+        # Ensure it didn't add an env key.
+        assert "env" not in result
+
+    def test_handles_non_dict_env(self):
+        """If 'env' is not dict-like (e.g. None or list) → returned
+        unchanged and without raising."""
+        # env=None
+        config = {"env": None}
+        result = redact_secrets(config)
+        assert result["env"] is None
+
+        # env=list — unusual but defensive: don't crash.
+        config = {"env": ["not", "a", "dict"]}
+        result = redact_secrets(config)
+        assert result["env"] == ["not", "a", "dict"]
+
+    def test_case_insensitive_marker_matching(self):
+        """KEY / TOKEN / SECRET / PASSWORD match case-insensitively.
+
+        This guards the substring-match case where a substring is
+        present in either upper or lower case.
+        """
+        config = {
+            "env": {
+                "my_api_Key": "sk-secret-uppercase-K",
+                "auth_token": "tkn-1",
+                "client_secret": "sec-1",
+                "DB_PASSWORD": "pw-1",
+                "harmless": "safe-value",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["my_api_Key"] == "[REDACTED]"
+        assert result["env"]["auth_token"] == "[REDACTED]"
+        assert result["env"]["client_secret"] == "[REDACTED]"
+        assert result["env"]["DB_PASSWORD"] == "[REDACTED]"
+        assert result["env"]["harmless"] == "safe-value"
+
+    def test_does_not_touch_keys_outside_env(self):
+        """Top-level keys outside ``env`` are returned verbatim."""
+        config = {
+            "env": {"OPENSPACE_LLM_API_KEY": "sk-x"},
+            "transport": "stdio",
+            "command": "python3",
+            "args": ["-m", "openspace.mcp_server"],
+        }
+        result = redact_secrets(config)
+
+        assert result["transport"] == "stdio"
+        assert result["command"] == "python3"
+        assert result["args"] == ["-m", "openspace.mcp_server"]
+        assert result["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
+
+    def test_empty_dict(self):
+        """Empty config → empty result, no error."""
+        assert redact_secrets({}) == {}
+
+    def test_applied_via_router_response(self, client):
+        """End-to-end: a config containing a secret env key returned
+        over the HTTP API is redacted in the response body.
+
+        Guards against future regressions where someone skips
+        ``redact_secrets`` (e.g. by binding the response model directly
+        to the DB row).
+        """
+        secret = "sk-this-must-be-redacted-9876"
+        payload = {
+            "name": "redact-e2e-server",
+            "config": {
+                "transport": "stdio",
+                "command": "python3",
+                "args": ["-m", "openspace.mcp_server"],
+                "env": {
+                    "OPENSPACE_LLM_API_KEY": secret,
+                    "OPENSPACE_MODEL": "gpt-4o",
+                },
+            },
+        }
+
+        response = client.post("/api/mcp-servers", json=payload)
+        assert response.status_code == 201, response.text
+
+        body = response.json()
+        # Secret value MUST NOT appear anywhere in the response.
+        assert secret not in response.text, (
+            "API response leaked the OPENSPACE_LLM_API_KEY value; "
+            "redact_secrets must be applied in the response path."
+        )
+        # The key is still present, but its value is the redaction marker.
+        assert body["config"]["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
+        # Non-sensitive env keys are preserved.
+        assert body["config"]["env"]["OPENSPACE_MODEL"] == "gpt-4o"
