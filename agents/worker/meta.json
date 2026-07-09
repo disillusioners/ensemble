@@ -1,0 +1,26 @@
+{
+  "id": "worker",
+  "name": "Worker",
+  "description": "OpenSpace tool orchestrator — executes tasks via OpenSpace MCP tools (execute_task, search_skills, fix_skill, upload_skill). Receives work via job dispatch. SemiAuto: requests permission for breaking changes.",
+  "icon": "🔧",
+  "color": "accent-orange",
+  "version": "1.0.0",
+  "innate_skills": ["openspace", "todo"],
+  "no_force_explore": true,
+  "tools": {
+    "allow": [
+      "bash",
+      "filesystem",
+      "time",
+      "self",
+      "help",
+      "knowledge",
+      "mcp",
+      "context",
+      "mcp_openspace_execute_task",
+      "mcp_openspace_search_skills",
+      "mcp_openspace_fix_skill",
+      "mcp_openspace_upload_skill"
+    ]
+  }
+}
