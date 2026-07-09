@@ -13,7 +13,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 ```raw
 1. Receive request
 2. Analyze: Identify target agent
-3. job_create(agent_id=[target], task=[description], watch=True)
+3. job_create(agent_id=[target], message=[description], watch=True)
 4. watch_job(job_id)  # if not using watch=True
 5. Wait for [JOB_EVENT] notification
 6. Parse the body for status, Agent line, and Result/Error
@@ -34,7 +34,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 1. Receive request
 2. Analyze: Identify N independent tasks and their target agents
 3. For each task:
-   job_create(agent_id=[target], task=[description], watch=True)
+   job_create(agent_id=[target], message=[description], watch=True)
    record job_id
 4. watch_jobs([all job_ids])  # ensure all watched
 5. Wait for all [JOB_EVENT] notifications
@@ -54,11 +54,11 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 ```raw
 1. Receive request
 2. Analyze: Break into ordered steps
-3. job_create(agent_id=[target_1], task=[step_1], watch=True)
+3. job_create(agent_id=[target_1], message=[step_1], watch=True)
 4. Wait for [JOB_EVENT] notification
 5. Parse result — if failed, report and stop
 6. On success: Extract context from result
-7. job_create(agent_id=[target_2], task=[step_2_with_context], watch=True)
+7. job_create(agent_id=[target_2], message=[step_2_with_context], watch=True)
 8. Repeat steps 4-7 for each step
 9. Emit your pipeline result as your response
 ```
@@ -73,19 +73,19 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 1. Receive request
 2. Create orchestrator job (my parent does this for me):
    - OR if I'm the parent:
-   job_create(agent_id=[orchestrator], task=[fan_out_description], watch=True)
+   job_create(agent_id=[orchestrator], message=[fan_out_description], watch=True)
 3. Wait for orchestrator job to complete
 4. Emit your summary as your response
 
 # If I AM creating the fan-out:
-1. job_create(agent_id=[parent_or_self], task=[aggregate_instruction], watch=True)
+1. job_create(agent_id=[parent_or_self], message=[aggregate_instruction], watch=True)
 2. For each unit of work:
-   job_create(agent_id=[worker], task=[unit_task], watch=True)
+   job_create(agent_id=[worker], message=[unit_task], watch=True)
    record job_id
 3. watch_jobs([all worker job_ids])
 4. Wait for all [JOB_EVENT] notifications
 5. Collect all results
-6. job_create(agent_id=[aggregator], task=[collect_results], watch=True)
+6. job_create(agent_id=[aggregator], message=[collect_results], watch=True)
 7. Wait for aggregation complete
 8. Emit your summary as your response
 ```
@@ -97,7 +97,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 **Use when:** Task may need multiple attempts due to transient failures.
 
 ```raw
-1. job_create(agent_id=[target], task=[description], watch=True)
+1. job_create(agent_id=[target], message=[description], watch=True)
 2. Wait for [JOB_EVENT] notification
 3. Parse status:
    - COMPLETED → record result, proceed
@@ -118,7 +118,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 **Use when:** Outcome determines next action.
 
 ```raw
-1. job_create(agent_id=[target], task=[description], watch=True)
+1. job_create(agent_id=[target], message=[description], watch=True)
 2. Wait for [JOB_EVENT] notification
 3. Parse status:
    - COMPLETED → action on success (e.g., report success)

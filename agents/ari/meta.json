@@ -1,0 +1,25 @@
+{
+  "id": "ari",
+  "name": "Ari",
+  "description": "Your smart general-purpose virtual assistant — the front door to ensemble. Does quick tasks directly and delegates complex work to specialist agents and OpenSpace via the job system.",
+  "icon": "🌟",
+  "color": "accent-amber",
+  "version": "1.0.0",
+  "system": false,
+  "innate_skills": ["job-orchestration", "openspace", "chart", "todo"],
+  "no_force_explore": true,
+  "tools": {
+    "allow": [
+      "job",
+      "bash",
+      "filesystem",
+      "time",
+      "self",
+      "help",
+      "knowledge",
+      "mcp",
+      "context",
+      "project"
+    ]
+  }
+}
