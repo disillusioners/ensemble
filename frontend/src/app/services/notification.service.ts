@@ -19,7 +19,7 @@ export interface Notification extends InstanceNotification {
 }
 
 // Agents that should NOT trigger notification sounds (visual notifications still shown)
-const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-import', 'experiencer']);
+const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer']);
 
 // KB agent IDs - keep in sync with daemon/repositories/instance/repository.py (KB_AGENT_IDS)
 const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);

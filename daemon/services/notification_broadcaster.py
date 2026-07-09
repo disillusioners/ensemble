@@ -133,6 +133,9 @@ class NotificationBroadcaster:
     ) -> int:
         """Emit a notification for root instance completion.
 
+        KB agent completions (experiencer, kb-importer) are filtered out
+        to avoid unnecessary SSE traffic for background processes.
+
         Args:
             instance_id: The completed instance ID.
             agent_id: The agent ID (e.g., "developer").
@@ -142,6 +145,11 @@ class NotificationBroadcaster:
         Returns:
             Number of clients that received the notification.
         """
+        # Filter out KB agent completions
+        if agent_id in KB_AGENT_IDS:
+            logger.debug(f"Skipping root_completion broadcast for KB agent: {agent_id}")
+            return 0
+
         notification = {
             "instance_id": instance_id,
             "agent_id": agent_id,

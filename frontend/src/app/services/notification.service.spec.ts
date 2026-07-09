@@ -871,7 +871,7 @@ describe('NotificationService Signal Behavior', () => {
 
 describe('NotificationService Sound Exclusion', () => {
   // Sound exclusion set matching the real service logic
-  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-import', 'experiencer']);
+  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer']);
 
   class MockAudio {
     playCallCount = 0;
@@ -917,14 +917,14 @@ describe('NotificationService Sound Exclusion', () => {
     }
   }
 
-  it('should NOT play sound for kb-import agent', () => {
+  it('should NOT play sound for kb-importer agent', () => {
     const mockAudio = new MockAudio();
     const service = new TestableNotificationService(mockAudio);
     service['audioUnlocked'] = true;
 
     service.addNotification({
       instance_id: 'instance-1',
-      agent_id: 'kb-import',
+      agent_id: 'kb-importer',
       name: 'KB Import Notification',
       status: 'COMPLETED' as const,
       timestamp: new Date().toISOString(),
@@ -1018,11 +1018,11 @@ describe('NotificationService Sound Exclusion', () => {
     const service = new TestableNotificationService(mockAudio);
     service['audioUnlocked'] = true;
 
-    // Add notifications for kb-import (excluded), developer (not excluded),
+    // Add notifications for kb-importer (excluded), developer (not excluded),
     // experiencer (excluded), leader (not excluded)
     service.addNotification({
       instance_id: 'instance-1',
-      agent_id: 'kb-import',
+      agent_id: 'kb-importer',
       name: 'KB Import',
       status: 'COMPLETED' as const,
       timestamp: new Date().toISOString(),
