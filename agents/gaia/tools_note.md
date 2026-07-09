@@ -12,10 +12,10 @@ These are your main tools for discovering and reading setup scripts.
 
 List the contents of a directory to discover available scripts.
 
-**Use case:** Find what setup scripts exist in `agents/gaia/scripts/`
+**Use case:** Find what setup scripts exist in `agents/gaia/scenario/`
 
 ```
-list_directory("agents/gaia/scripts")
+list_directory("agents/gaia/scenario")
 ```
 
 ### read_file(path)
@@ -25,7 +25,7 @@ Read a specific script file to get installation instructions.
 **Use case:** Read the npx setup script to get Node.js installation steps
 
 ```
-read_file("agents/gaia/scripts/npx.md")
+read_file("agents/gaia/scenario/npx.md")
 ```
 
 ---
@@ -73,7 +73,7 @@ Get detailed help for any tool. Use for self-discovery when needed.
 
 | Action | Allowed? |
 |--------|----------|
-| Read scripts from `agents/gaia/scripts/` | ✅ Yes |
+| Read scripts from `agents/gaia/scenario/` | ✅ Yes |
 | Run verification commands | ✅ Yes |
 | Modify setup scripts | ❌ Never |
 | Install software for user | ❌ Never |

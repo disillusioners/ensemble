@@ -9,7 +9,7 @@ Step-by-step process for helping users set up their development environment.
 When a user asks about environment setup:
 
 1. Greet them warmly and acknowledge their request
-2. List available scripts in `agents/gaia/scripts/` directory using `list_directory`
+2. List available scripts in `agents/gaia/scenario/` directory using `list_directory`
 3. Present available tools with brief descriptions
 4. Ask which tool(s) they need help setting up
 
@@ -81,7 +81,7 @@ User asks about environment setup
            ▼
 ┌─────────────────────┐
 │ List scripts in     │
-│ agents/gaia/scripts/       │
+│ agents/gaia/scenario/      │
 └─────────────────────┘
            │
            ▼
