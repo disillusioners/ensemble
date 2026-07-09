@@ -22,16 +22,29 @@ from daemon.utils import parse_utc_datetime
 logger = logging.getLogger(__name__)
 
 
+# Maximum allowed length (in characters) for a todo comment. Enforced at
+# both the HTTP boundary (400) and inside ``TodoManager.set_comment``
+# (ValueError) for defense in depth.
+MAX_COMMENT_LENGTH = 1000
+
+
 class TodoCommentRequest(BaseModel):
     """Request body for setting a comment on a todo item.
 
     Attributes:
         comment: The annotation text. Empty string clears the comment.
+            Hard-capped at :data:`MAX_COMMENT_LENGTH` characters; an explicit
+            check in the endpoint raises ``400`` (rather than the default
+            Pydantic ``422``) so clients see a uniform error shape with the
+            rest of the API.
     """
 
     comment: str = Field(
         default="",
-        description="Comment text. Empty string clears the existing comment.",
+        description=(
+            "Comment text. Empty string clears the existing comment. "
+            f"Maximum {MAX_COMMENT_LENGTH} characters."
+        ),
     )
 
 # Create router with /instances prefix
@@ -419,27 +432,52 @@ async def set_todo_comment(
     SSE emission is best-effort: a hub failure does not roll back the
     comment.
 
-    Returns the updated item dict on success.
+    Errors:
+        * ``400`` if the supplied ``comment`` exceeds :data:`MAX_COMMENT_LENGTH`
+          characters. We enforce this explicitly here (rather than relying on
+          Pydantic's auto-422) so the API returns a uniform error shape.
+        * ``404`` if ``index`` does not reference an existing item on the
+          instance's todo list (out of range, negative, or no list yet).
+
+    Returns:
+        The updated item dict on success.
     """
     manager = _get_manager(request)
     await _check_instance_exists(manager, instance_id)
+
+    # Explicit length guard — returns 400 (not Pydantic's default 422) for
+    # uniform error shape with the rest of the API. The same limit is also
+    # enforced inside ``TodoManager.set_comment`` (ValueError) as defense in
+    # depth, but at that layer it would surface as a generic 500-equivalent.
+    if len(body.comment) > MAX_COMMENT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=(
+                    f"Comment exceeds maximum length of "
+                    f"{MAX_COMMENT_LENGTH} characters"
+                ),
+            ).model_dump(),
+        )
 
     try:
         updated = manager._todo_manager.set_comment(
             instance_id, index, body.comment
         )
     except ValueError as e:
-        # Index out of range OR instance has no todo list yet. 400 because
-        # the request is well-formed but the supplied index doesn't
-        # reference a real item — the URL itself is valid, the payload
-        # is what's wrong.
+        # Index out of range OR instance has no todo list yet. We return 404
+        # because the *addressed resource* (the todo item at ``index``) does
+        # not exist — the URL points to a non-existent item, not to an
+        # otherwise-valid endpoint whose payload is malformed. This matches
+        # standard REST semantics: a missing addressed resource is a 404.
         raise HTTPException(
-            status_code=400,
+            status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=str(e),
+                code=ErrorCodes.TODO_NOT_FOUND,
+                message=f"Todo item at index {index} not found",
             ).model_dump(),
-        )
+        ) from e
 
     # Best-effort SSE re-emit so the frontend re-renders. Mirrors the
     # ``_emit_update`` helper pattern in ``daemon.tools.todo_tools`` —

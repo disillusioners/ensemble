@@ -1,4 +1,5 @@
-import { Component, input, signal, computed, inject, effect } from '@angular/core';
+import { Component, input, signal, computed, inject, effect, DestroyRef } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../services/api.service';
@@ -14,6 +15,7 @@ import { SseService, TodoItem } from '../../services/sse.service';
 export class TodoListComponent {
   private readonly sseService = inject(SseService);
   private readonly api = inject(ApiService);
+  private readonly destroyRef = inject(DestroyRef);
 
   instanceId = input.required<string>();
 
@@ -59,7 +61,7 @@ export class TodoListComponent {
       this.instanceId(); // track
       this.isCollapsed.set(false);
       this.cancelEdit();
-    });
+    }, { allowSignalWrites: true });
   }
 
   toggle(): void {
@@ -74,12 +76,19 @@ export class TodoListComponent {
   refresh(event: Event): void {
     event.stopPropagation();
     const instanceId = this.instanceId();
-    this.api.getTodos(instanceId).subscribe({
-      next: (data) => {
-        this.sseService.todos.set(data ?? []);
-      },
-      error: (err) => console.error('Failed to refresh todos:', err),
-    });
+    this.api.getTodos(instanceId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (data) => {
+          // Race guard: discard if instance changed during in-flight request
+          if (this.instanceId() !== instanceId) return;
+          this.sseService.todos.set(data ?? []);
+        },
+        error: (err) => {
+          if (this.instanceId() !== instanceId) return;
+          console.error('Failed to refresh todos:', err);
+        },
+      });
   }
 
   /**
@@ -116,30 +125,43 @@ export class TodoListComponent {
   saveComment(item: TodoItem, event: Event): void {
     event.stopPropagation();
     if (this.isSavingComment()) return;
-    const instanceId = this.instanceId();
-    const comment = this.editingComment();
+    const targetInstanceId = this.instanceId();
+    // Strip whitespace-only comments: the backend treats empty strings as
+    // "clear the comment", so we trim here and send the cleaned value.
+    const comment = this.editingComment().trim();
     this.isSavingComment.set(true);
-    this.api.setTodoComment(instanceId, item.index, comment).subscribe({
-      next: (updated) => {
-        const returnedItem: TodoItem | null =
-          updated && typeof updated === 'object' && 'index' in updated
-            ? (updated as TodoItem)
-            : null;
-        this.sseService.todos.update(list =>
-          list.map(t => {
-            if (t.index !== item.index) return t;
-            if (returnedItem) return { ...t, ...returnedItem };
-            return { ...t, comment };
-          })
-        );
-        this.isSavingComment.set(false);
-        this.cancelEdit();
-      },
-      error: (err) => {
-        console.error('Failed to save todo comment:', err);
-        this.isSavingComment.set(false);
-      },
-    });
+    this.api.setTodoComment(targetInstanceId, item.index, comment)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (updated) => {
+          // Race guard: discard if instance changed during in-flight request
+          if (this.instanceId() !== targetInstanceId) {
+            this.isSavingComment.set(false);
+            return;
+          }
+          const returnedItem: TodoItem | null =
+            updated && typeof updated === 'object' && 'index' in updated
+              ? (updated as TodoItem)
+              : null;
+          this.sseService.todos.update(list =>
+            list.map(t => {
+              if (t.index !== item.index) return t;
+              if (returnedItem) return { ...t, ...returnedItem };
+              return { ...t, comment };
+            })
+          );
+          this.isSavingComment.set(false);
+          this.cancelEdit();
+        },
+        error: (err) => {
+          if (this.instanceId() !== targetInstanceId) {
+            this.isSavingComment.set(false);
+            return;
+          }
+          console.error('Failed to save todo comment:', err);
+          this.isSavingComment.set(false);
+        },
+      });
   }
 
   /**

@@ -244,8 +244,13 @@ class TestSetTodoComment:
         assert resp.status_code == 200
         assert resp.json()["comment"] == ""
 
-    def test_index_too_large_returns_400(self, client_with_manager):
-        """Out-of-bounds index returns 400 with ``INVALID_REQUEST``."""
+    def test_index_too_large_returns_404(self, client_with_manager):
+        """Out-of-bounds index returns 404 with ``TODO_NOT_FOUND``.
+
+        We return ``404`` (not ``400``) because the URL addresses a
+        specific item that doesn't exist — REST resource-not-found
+        semantics rather than payload-malformed semantics.
+        """
         client, state = client_with_manager
         mgr = _make_manager()
         mgr._todo_manager.create("inst-1", ["A"])  # len=1
@@ -256,14 +261,20 @@ class TestSetTodoComment:
             json={"comment": "x"},
         )
 
-        assert resp.status_code == 400
+        assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["code"] == "INVALID_REQUEST"
+        assert body["detail"]["code"] == "TODO_NOT_FOUND"
+        assert "Todo item at index 5 not found" in body["detail"]["message"]
         # State untouched
         assert mgr._todo_manager.get_all("inst-1")[0]["comment"] == ""
 
-    def test_negative_index_returns_400(self, client_with_manager):
-        """Negative index returns 400 (ValueError from ``set_comment``)."""
+    def test_negative_index_returns_404(self, client_with_manager):
+        """Negative index returns 404 with ``TODO_NOT_FOUND``.
+
+        ``ValueError`` from ``set_comment`` (index out of range) is mapped
+        to ``404`` rather than the previous ``400`` — the addressed item
+        does not exist on the instance.
+        """
         client, state = client_with_manager
         mgr = _make_manager()
         mgr._todo_manager.create("inst-1", ["A", "B"])
@@ -274,14 +285,18 @@ class TestSetTodoComment:
             json={"comment": "x"},
         )
 
-        assert resp.status_code == 400
-        assert resp.json()["detail"]["code"] == "INVALID_REQUEST"
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "TODO_NOT_FOUND"
+        assert "index -1" in body["detail"]["message"]
 
-    def test_no_todo_list_yet_returns_400(self, client_with_manager):
-        """Instance exists but has no todo list yet returns 400.
+    def test_no_todo_list_yet_returns_404(self, client_with_manager):
+        """Instance exists but has no todo list yet returns 404.
 
-        The spec maps ValueError to 400/404; we use 400 because the
-        request payload (the index) is the invalid part, not the URL.
+        A ``set_comment`` on an instance that has never had a list
+        addresses a non-existent todo item, so the response is ``404``
+        with ``TODO_NOT_FOUND`` — consistent with the negative-index and
+        out-of-bounds cases above.
         """
         client, state = client_with_manager
         # No create() call — the instance exists but has no todo list.
@@ -292,8 +307,58 @@ class TestSetTodoComment:
             json={"comment": "x"},
         )
 
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["code"] == "TODO_NOT_FOUND"
+
+    def test_comment_too_long_returns_400(self, client_with_manager):
+        """Comment exceeding ``MAX_COMMENT_LENGTH`` returns 400.
+
+        We enforce the 1000-char cap in the handler (not via Pydantic's
+        auto-422) for uniform error shape with the rest of the API. The
+        error code is ``INVALID_REQUEST`` to signal a payload-side issue,
+        and the message surfaces the actual limit so clients can trim.
+        """
+        from daemon.routers.instances import MAX_COMMENT_LENGTH
+
+        client, state = client_with_manager
+        mgr = _make_manager()
+        mgr._todo_manager.create("inst-1", ["A"])
+        state["manager"] = mgr
+
+        over_limit = "a" * (MAX_COMMENT_LENGTH + 1)
+        resp = client.post(
+            "/api/instances/inst-1/todos/0/comment",
+            json={"comment": over_limit},
+        )
+
         assert resp.status_code == 400
-        assert resp.json()["detail"]["code"] == "INVALID_REQUEST"
+        body = resp.json()
+        assert body["detail"]["code"] == "INVALID_REQUEST"
+        assert str(MAX_COMMENT_LENGTH) in body["detail"]["message"]
+        # State untouched — the over-length comment must NOT be persisted.
+        assert mgr._todo_manager.get_all("inst-1")[0]["comment"] == ""
+
+    def test_comment_at_max_length_succeeds(self, client_with_manager):
+        """A comment exactly at ``MAX_COMMENT_LENGTH`` chars is accepted.
+
+        Off-by-one boundary check — the boundary value must succeed;
+        only strict greater-than must fail.
+        """
+        from daemon.routers.instances import MAX_COMMENT_LENGTH
+
+        client, state = client_with_manager
+        mgr = _make_manager()
+        mgr._todo_manager.create("inst-1", ["A"])
+        state["manager"] = mgr
+
+        at_limit = "a" * MAX_COMMENT_LENGTH
+        resp = client.post(
+            "/api/instances/inst-1/todos/0/comment",
+            json={"comment": at_limit},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["comment"] == at_limit
 
     def test_404_when_instance_missing(self, client_with_manager):
         """Unknown instance returns 404 (instance check fires first)."""
@@ -403,7 +468,7 @@ class TestSetTodoCommentIntegrationWithUpdate:
         # is about API → manager → reminder plumbing).
         result = mgr._todo_manager.update("inst-1", 0, "done")
         assert result is not None
-        assert "User commented: Reviewed — looks good" in result["reminder"]
+        assert "User commented:\n---\nReviewed — looks good\n---\n" in result["reminder"]
         # And the next-pending pointer still follows.
         assert "Next:" in result["reminder"]
         assert "Task B" in result["reminder"]

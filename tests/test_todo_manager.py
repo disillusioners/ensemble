@@ -200,7 +200,7 @@ class TestTodoManagerUpdate:
         result = mgr.update("inst-1", 0, "done")
 
         assert result is not None
-        assert "User commented: Looks good!" in result["reminder"]
+        assert "User commented:\n---\nLooks good!\n---\n" in result["reminder"]
         # The base next-pending reminder still follows.
         assert "Next:" in result["reminder"]
         assert "B" in result["reminder"]
@@ -215,7 +215,7 @@ class TestTodoManagerUpdate:
         result = mgr.update("inst-1", 0, "done")
 
         assert result is not None
-        assert "User commented: Approved" in result["reminder"]
+        assert "User commented:\n---\nApproved\n---\n" in result["reminder"]
         assert "All items completed!" in result["reminder"]
         # No next-pending pointer.
         assert "Next:" not in result["reminder"]
@@ -321,6 +321,41 @@ class TestTodoManagerSetComment:
 
         with pytest.raises(ValueError):
             mgr.set_comment("ghost-instance", 0, "x")
+
+    def test_set_comment_exceeds_max_length_raises_value_error(self):
+        """A comment longer than ``MAX_COMMENT_LENGTH`` raises ``ValueError``.
+
+        Defense-in-depth length guard: the HTTP layer returns 400 before
+        reaching here under normal flow, but any non-HTTP caller (tools,
+        scripts, future internal jobs) cannot bypass the limit.
+        """
+        from daemon.services.todo_manager import MAX_COMMENT_LENGTH
+
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A"])
+
+        over_limit = "a" * (MAX_COMMENT_LENGTH + 1)
+        with pytest.raises(ValueError, match="exceeds maximum length"):
+            mgr.set_comment("inst-1", 0, over_limit)
+        # State untouched
+        assert mgr.get_all("inst-1")[0]["comment"] == ""
+
+    def test_set_comment_at_max_length_succeeds(self):
+        """A comment exactly at ``MAX_COMMENT_LENGTH`` chars is accepted.
+
+        Off-by-one boundary check — the boundary value must succeed;
+        only strict greater-than must raise.
+        """
+        from daemon.services.todo_manager import MAX_COMMENT_LENGTH
+
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A"])
+
+        at_limit = "a" * MAX_COMMENT_LENGTH
+        result = mgr.set_comment("inst-1", 0, at_limit)
+
+        assert result["comment"] == at_limit
+        assert mgr.get_all("inst-1")[0]["comment"] == at_limit
 
     def test_set_comment_does_not_change_status_or_text(self):
         """Comment is a side-channel — it must not mutate ``text`` or ``status``."""

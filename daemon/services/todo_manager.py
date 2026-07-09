@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 _VALID_STATUSES = ("pending", "in_progress", "done")
 
+# Hard cap on a single todo comment, in characters. Enforced at the HTTP
+# boundary (``daemon.routers.instances.set_todo_comment``) which maps an
+# over-length comment to a 400. This module re-enforces the same cap inside
+# :meth:`TodoManager.set_comment` as defense in depth so any non-HTTP caller
+# (tools, scripts, future internal jobs) cannot bypass the limit.
+MAX_COMMENT_LENGTH = 1000
+
 # Aliases mapping common variants (including case variants) to canonical
 # statuses. Lookup is performed against the lower-cased input.
 _STATUS_ALIASES: dict[str, str] = {
@@ -123,9 +130,14 @@ class TodoManager:
 
         Reminder shape:
             * When ``status == "done"`` and the completed item carries a
-              non-empty ``comment``: ``"User commented: {comment}\\n{next}"``
+              non-empty ``comment``:
+              ``"User commented:\\n---\\n{comment}\\n---\\n{next}"``
               where ``{next}`` is the original next-pending reminder (or the
-              all-completed message when no item remains).
+              all-completed message when no item remains). The ``---``
+              fences visually separate the untrusted user-supplied comment
+              from the rest of the system-formatted reminder, so prompt
+              injection attempts embedded in the comment are obvious to the
+              agent.
             * Otherwise: ``"⏭️ Next: {text}"`` or ``"All items completed! ✅"``
               — the same wording the tool used to produce inline.
 
@@ -169,7 +181,7 @@ class TodoManager:
             else:
                 base_reminder = "\n\nAll items completed! ✅"
             if normalized == "done" and completed_comment:
-                reminder = f"User commented: {completed_comment}" + base_reminder
+                reminder = f"User commented:\n---\n{completed_comment}\n---\n" + base_reminder
             else:
                 reminder = base_reminder
             return {"todos": snapshot, "reminder": reminder}
@@ -181,16 +193,30 @@ class TodoManager:
             instance_id: Owning instance identifier.
             index: Position of the item to annotate.
             comment: The annotation text. Empty string clears the comment.
+                Must not exceed :data:`MAX_COMMENT_LENGTH` characters; the
+                limit is enforced here as defense in depth (the HTTP layer
+                returns 400 for the same violation).
 
         Returns:
             The updated item as a plain dict.
 
         Raises:
-            ValueError: If the instance has no todo list or the index is
-                out of range. Matches the ``update``-style error contract
-                but raised (not returned) so HTTP callers can map it to a
-                404/400 response.
+            ValueError: If the instance has no todo list, the index is
+                out of range, **or** the supplied ``comment`` exceeds
+                :data:`MAX_COMMENT_LENGTH` characters. HTTP callers map
+                the index errors to ``404`` and the length error surfaces
+                from the HTTP-layer guard so it does not reach here under
+                normal flow.
         """
+        # Defense-in-depth length guard. The HTTP boundary enforces this and
+        # returns 400 before reaching here, but non-HTTP callers (tool layer,
+        # scripts) go straight through and must not bypass the limit.
+        if len(comment) > MAX_COMMENT_LENGTH:
+            raise ValueError(
+                f"comment exceeds maximum length of {MAX_COMMENT_LENGTH} "
+                f"characters (got {len(comment)})"
+            )
+
         with self._lock:
             items = self._instance_todos.get(instance_id)
             if items is None or index < 0 or index >= len(items):
