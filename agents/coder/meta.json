@@ -3,7 +3,7 @@
   "name": "Coder",
   "description": "Direct coding agent — reads, writes, and edits code directly without OpenCode. Works hands-on with files, tests, and build systems.",
   "icon": "⌨️",
-  "color": "blue",
+  "color": "accent-blue",
   "version": "0.1.0",
   "innate_skills": ["todo", "chart"],
   "tools": {
