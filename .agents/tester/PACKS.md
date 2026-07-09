@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 152 packs
-- Unit: 131 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 153 packs
+- Unit: 132 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -10,8 +10,8 @@
 |------|----------|-------|---------|----------|--------|
 | devops_agent_unit_test | tests/unit/test_devops_agent.py | DevOps agent: auto-discovery, meta.json validity, prompt composition, tool config, leader integration, markdown quality | 2 min | 2026-06-14 | ✅ PASS (62/62, feature/devops-agent, commit 7800338) |
 | openspace_skill_unit_test | tests/unit/test_openspace_skill_loading.py | OpenSpace innate skill: discovery, prompt composition inclusion/exclusion, tool-categories decoupling | 2 min | 2026-07-08 | ✅ PASS (17/17, feature/openspace-mcp-integration, commit 89a9d451) |
-| openspace_builtin_unit_test | tests/unit/mcp/test_openspace_builtin.py | OpenSpace builtin server: dual transport (STDIO/HTTP), SSRF scheme validation, credential injection (LLM/API key), warmup pool transport dispatch + per-server 900s timeout, ENV disable pattern (MCP_DISABLE_BUILT_IN_OPENSPACE), bootstrap disable/enable lifecycle | 2 min | 2026-07-08 | ✅ PASS (65/65, feature/openspace-mcp-integration, commits 491c99f1 c03deaea c7cd5207, 0 failures) |
-| mcp_secret_redaction_unit_test | tests/unit/test_mcp_server_crud.py | MCP server CRUD: models, schemas, repository, router, integration + **secret redaction layer** (redact_secrets utility, [REDACTED] for KEY/TOKEN/SECRET/PASSWORD, deep-copy for subprocess safety, all 6 config-returning endpoints) | 2 min | 2026-07-08 | ✅ PASS (68/68, feature/openspace-mcp-integration, commit c03deaea, 0 failures) |
+| openspace_builtin_unit_test | tests/unit/mcp/test_openspace_builtin.py | OpenSpace builtin server: dual transport (STDIO/HTTP), SSRF scheme validation, credential injection (LLM/API/API_BASE/EXTRA_HEADERS key), userinfo validation (rejects @ in netloc), warmup pool transport dispatch + per-server 900s timeout, ENV disable pattern (MCP_DISABLE_BUILT_IN_OPENSPACE), bootstrap disable/enable lifecycle | 2 min | 2026-07-08 | ✅ PASS (98/98, feature/openspace-custom-llm, commit a66982c7, 0 failures) |
+| mcp_secret_redaction_unit_test | tests/unit/test_mcp_server_crud.py | MCP server CRUD: models, schemas, repository, router, integration + **secret redaction layer** (redact_secrets utility, [REDACTED] for KEY/TOKEN/SECRET/PASSWORD/BASE/HEADERS, deep-copy for subprocess safety, all 6 config-returning endpoints) | 2 min | 2026-07-08 | ✅ PASS (80/80, feature/openspace-custom-llm, commit a66982c7, 0 failures) |
 | safe_stdout_unit_test | tests/test_safe_stdout.py | _MCPSafeStdout wrapper: text→stderr redirect, binary buffer→stdout, print() redirect, subprocess launcher (python -m daemon.mcp.safe_stdout), exception handling (KeyboardInterrupt re-raise, SystemExit int/string/None), detach/reconfigure AttributeError guard, writelines Iterable type | 2 min | 2026-07-08 | ✅ PASS (43/43, feature/stdio-safety-wrapper, commit 8966b8c6, 0 failures) |
 | opencode_native_tools_unit_test | tests/opencode/ | OpenCode native tools: state derivation, repository CRUD, table creation, HTTP client (_request patching), session manager (state machine + deadlock), registry, dispatch functions, tool factory + 3 ANSWER deadlock tests + 3 engine disposal tests | 2 min | 2026-06-11 | ✅ PASS (465/465, 0 failures, fix/opencode-wait-latency, commit 547035e) |
 | core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-05 | ✅ PASS (665/665, fix/windows-encoding-paths, 0 regressions) |
@@ -24,6 +24,7 @@
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-05 | ✅ PASS (209 passed, 8 skipped, fix/windows-encoding-paths, 0 regressions) |
+| todo_unit_test | tests/test_todo_manager.py + tests/test_todo_tools.py + tests/test_todo_sse.py | TodoManager CRUD, todo tools (create/update/list/clear), status aliases, indicators, SSE stream_todo_update | 2 min | 2026-07-09 | ✅ PASS (50/50, feature/todo-innate-skill, commit f515a109, 0 failures) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
 | message_job_queue_test | tests/job_queue/test_message_job_queue.py | HTTP API Message → JobQueue: job creation, concurrency gate, orphan recovery, cancellation, termination, backward compat, side effects, status endpoint, error handling, no-project-context | 2 min | 2026-05-25 | ✅ PASS (29/29, feature/message-api-job-queue, 0 failures) |
 | defer_race_condition_test | tests/job_queue/test_select_next_eligible_job.py | Defer job race condition fix: _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration | 2 min | 2026-05-25 | ✅ PASS (16/16, c4f6e17 fix, 0 failures, 1089 suite pass) |
