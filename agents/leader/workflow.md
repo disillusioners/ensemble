@@ -195,9 +195,12 @@ I support three workflows. The user may invoke them sequentially within a single
 
 ```raw
 1. Assess task domain and route to the right specialist:
+   ├─ Read-only investigation, codebase question, or library research? (no code changes required) → **Wanderer**
    ├─ Application source code, bug fixes, features, tests, scripts → **Developer**
    ├─ Infrastructure, Docker, CI/CD, deployment, Kubernetes, Terraform, environment config → **DevOps**
    └─ Multi-domain (both code + infrastructure) → **Split**: sequential Developer→DevOps for dependent steps, parallel for independent steps (respecting the 3-instance concurrency limit)
+   
+   **For read-only investigation, codebase questions, or library research → delegate to Wanderer instead of Developer.** Wanderer is purpose-built for exploration; do not burden Developer with tasks that produce no code changes.
    
    Delegate to the matched specialist: "[goal]. [Key constraints]. [Context from plan if available]."
 
@@ -209,8 +212,10 @@ I support three workflows. The user may invoke them sequentially within a single
    | Write deploy script in Python | DevOps | Purpose is deployment, language is incidental |
    | Fix Docker-incompatible unit test | Developer | Primary artifact is application test code |
    | Set up monitoring (Prometheus) | DevOps | Primary artifact is infra tooling |
+   | "Where is X defined?" / "How does Y work?" / "Find usages of Z" | Wanderer | Read-only investigation, no code changes |
+   | Research best library/approach for a problem | Wanderer | Read-only research, no code changes |
    
-   Rule: Route by **primary artifact** — what is the main deliverable? If it's config/infra → DevOps, if it's application code → Developer.
+   Rule: Route by **primary artifact** — what is the main deliverable? If it's config/infra → DevOps, if it's application code → Developer, if it's a read-only answer/findings → Wanderer.
 
 2. Wait for the delegated specialist's result
 
@@ -431,6 +436,9 @@ PHASE 2 — INVESTIGATE  (Team — DIAGNOSIS ONLY, NO FIX)
              (container, CI, deploy, config) fails and WHY. Report root cause + exact location. DO NOT fix yet."
    Tester:   "Reproduce bug [brief]. FULL logs: [paste]. Capture the failing scenario
              as a reproducible test. Report the exact trigger conditions."
+   Wanderer: "Investigate [symptom]. Read the relevant source code and report how it works, where the
+             failure likely occurs." — for deep codebase investigation when you need a thorough read-through
+             of the relevant code paths before forming a hypothesis (DIAGNOSIS ONLY, NO FIX).
    Explorer: "Retrieve past experiences / gotchas for [symptom or error] — has this
              broken before? related conventions?"
    (Planner) for BIG/multi-system bugs: "Map the full failure path across modules,

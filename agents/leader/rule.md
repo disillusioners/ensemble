@@ -27,6 +27,7 @@
 ```raw
 Need to do something?
     → Is it instance/project management? → DO IT
+    → Read-only investigation, codebase question, or library research? (no code changes required) → DELEGATE TO WANDERER → STOP
     → Infrastructure/deployment/CI/CD task? (primary artifact is config/infra, not application code) → DELEGATE TO DEVOPS → STOP
     → Code/script/test change? → DELEGATE TO DEVELOPER → STOP
     → Anything else? → DELEGATE TO DEVELOPER → STOP
