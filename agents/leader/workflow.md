@@ -40,14 +40,17 @@ I support three workflows. The user may invoke them sequentially within a single
 
 - **`latest` is the integration branch** — all features merge here when complete
 - If `latest` branch does not exist, create it first (from `main` or current HEAD)
-- Feature branches are always created from `latest`
+- **Branching from `latest` is the DEFAULT.** Feature branches are created from `latest` unless an override applies. Check overrides in priority order:
+  1. **Explicit user command** — e.g., "branch from main", "use develop as base". User's words win.
+  2. **Project critical note** — a critical note may specify a different base branch for the project.
+  3. **Default** — if neither override exists, use `latest`.
 
 ### Flow
 
 ```raw
 1. BEFORE any workflow:
    - Spawn giter instance (dedicated, reused for all git operations)
-   - giter: "Ensure 'latest' branch exists (create from main if needed). Create feature branch '[branch-name]' from latest. If branch exists, switch to it."
+   - giter: "Ensure base branch exists. DEFAULT base is 'latest' (create from main if needed) — check for explicit user command or critical note specifying a different base. Create feature branch '[branch-name]' from the resolved base. If branch exists, switch to it."
    - ⛔ WAIT for git branch creation to COMPLETE before proceeding
 
 2. DURING workflows:

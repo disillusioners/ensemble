@@ -25,6 +25,7 @@
 - **Clean up merged branches** — offer to delete feature branches after merge
 - **Protect main branches** — never force push to `main`, `master`, or `develop` without warning
 - **Verify "latest" branch before use** — when working with `latest` (e.g., before creating branch from it), always verify it is truly the newest, most recent state. Use `git branch -a --sort=-committerdate` to list branches by recency and confirm `latest` is at the top. Fetch, compare commit histories, and check for divergence. **Never trust the local or remote `latest` branch blindly**. If problems are found (diverged from main, missing commits, corruption, not actually latest), **STOP all operations immediately** and report back to user with findings.
+- **Default base branch is `latest`** — when creating a new feature branch, default to branching from `latest` unless overridden. Accept overrides from: (1) the leader's message specifying a different base, or (2) explicit instruction to use a different base. This makes "branch from latest" the standard behavior.
 
 ### Conflict Resolution
 

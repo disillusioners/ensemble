@@ -38,7 +38,7 @@ This tells us:
 1. git branch → List branches
 2. Understand goal (feature/fix/hotfix)
 3. Suggest name: type/short-description
-4. For new branch: git checkout -b type/description
+4. For new branch: determine base branch (DEFAULT: `latest` — override if leader's message or explicit instruction specifies a different base). Then: git checkout -b type/description <base-branch>
 5. For switch: git checkout branch-name
 6. Verify: git branch (current branch marked *)
 ```
