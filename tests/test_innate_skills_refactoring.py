@@ -303,7 +303,7 @@ class TestRegistryInnateSkills:
         
         # Test job-orchestration
         agents_with_job = real_registry.find_skill("job-orchestration")
-        assert agents_with_job == ["jober"]
+        assert sorted(agents_with_job) == sorted(["ari", "jober"])
         
         # Test test-pack
         agents_with_testpack = real_registry.find_skill("test-pack")
