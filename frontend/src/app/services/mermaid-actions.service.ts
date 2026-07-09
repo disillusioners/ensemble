@@ -42,11 +42,71 @@ export class MermaidActionsService implements OnDestroy {
   /** Track open overlays so we can dispose them on teardown. */
   private readonly openOverlays = new Set<OverlayRef>();
 
+  /**
+   * Track the currently-open copy-menu overlay (if any). Mermaid
+   * buttons are injected as raw DOM, so there is no Angular component
+   * lifecycle to enforce "only one menu at a time" — without this
+   * tracker, rapid clicks on different chart buttons could stack two
+   * CDK overlays (and their backdrops) on top of each other.
+   *
+   * `activeMenuOnDismiss` is the caller's dismiss callback captured
+   * at open time so we can fire it when a manually-disposed menu
+   * (e.g. replaced by a newer one or torn down by `closeAll`) lets
+   * the caller reset its "menu open" sentinel state.
+   */
+  private activeMenuOverlay: OverlayRef | null = null;
+  private activeMenuOnDismiss: (() => void) | null = null;
+
   ngOnDestroy(): void {
+    this.closeAll();
+  }
+
+  /**
+   * Dispose every open CDK overlay (copy menus) and clear our
+   * tracking sets. Called from the owning component's `ngOnDestroy`
+   * so we tear down menu UI before the host view goes away, and
+   * also defensively callable on demand (e.g. before navigating
+   * between chat instances) to make sure no orphaned backdrop is
+   * left behind.
+   */
+  closeAll(): void {
+    // Dispose the active menu first so its `onDismiss` callback fires
+    // (resetting the chat-interface sentinel) before the bulk teardown.
+    this.disposeActiveMenu(true);
     for (const ref of this.openOverlays) {
       ref.dispose();
     }
     this.openOverlays.clear();
+    this.activeMenuOverlay = null;
+    this.activeMenuOnDismiss = null;
+  }
+
+  /**
+   * Tear down the currently-open menu (if any). When `callDismiss`
+   * is true the caller's `onDismiss` callback is invoked so it can
+   * reset its "menu open" sentinel — this matters when replacing
+   * an open menu with a new one (the sentinel must move to the
+   * new chart) and during `closeAll()`.
+   */
+  private disposeActiveMenu(callDismiss: boolean): void {
+    const existing = this.activeMenuOverlay;
+    const dismiss = this.activeMenuOnDismiss;
+    this.activeMenuOverlay = null;
+    this.activeMenuOnDismiss = null;
+    if (existing) {
+      // `dispose()` triggers the overlay's `detachments()` observable,
+      // which is what removes it from `openOverlays`. Calling dispose
+      // twice is a no-op in CDK, so this is safe even if the
+      // detachment also fires from a `settle()` path.
+      existing.dispose();
+    }
+    if (callDismiss && dismiss) {
+      try {
+        dismiss();
+      } catch {
+        // Swallow: callers' dismiss handlers are best-effort UI resets.
+      }
+    }
   }
 
   /**
@@ -73,6 +133,15 @@ export class MermaidActionsService implements OnDestroy {
     if (!triggerEl) {
       return;
     }
+
+    // If a menu is already open (e.g. user clicked another chart's
+    // copy button before the previous menu dismissed), tear it down
+    // first so we don't end up with stacked overlays and backdrops.
+    // The previous owner's `onDismiss` fires so it can reset its
+    // "open menu" sentinel; the caller's `onResult` is intentionally
+    // NOT invoked because the previous menu was never "settled" on
+    // an action — it was displaced.
+    this.disposeActiveMenu(true);
 
     const overlayRef = this.overlay.create({
       positionStrategy: this.overlay
@@ -120,6 +189,15 @@ export class MermaidActionsService implements OnDestroy {
     subs.push(
       overlayRef.detachments().subscribe(() => {
         this.openOverlays.delete(overlayRef);
+        // Clear the active-menu pointer if this was the active one.
+        // We don't fire `onDismiss` here because a normal settle() has
+        // already done so (or will, on the next settle tick) — this
+        // branch covers external detachments such as a parent overlay
+        // being torn down.
+        if (this.activeMenuOverlay === overlayRef) {
+          this.activeMenuOverlay = null;
+          this.activeMenuOnDismiss = null;
+        }
       }),
     );
 
@@ -128,6 +206,13 @@ export class MermaidActionsService implements OnDestroy {
         return;
       }
       settled = true;
+      // Clear active-menu tracking BEFORE disposing so the detachment
+      // observer above sees an already-null pointer and doesn't try to
+      // double-clear.
+      if (this.activeMenuOverlay === overlayRef) {
+        this.activeMenuOverlay = null;
+        this.activeMenuOnDismiss = null;
+      }
       // Unsubscribe every overlay/dialog observable before tearing the
       // overlay down. Without this the subscriptions keep references to
       // the disposed `OverlayRef` until GC, leaking across many chart
@@ -147,6 +232,12 @@ export class MermaidActionsService implements OnDestroy {
     };
 
     this.openOverlays.add(overlayRef);
+    // Promote this overlay to "active menu" — the single source of
+    // truth for "which chart's menu is currently open". Subsequent
+    // openCopyMenu() calls will dispose this one before creating
+    // the next.
+    this.activeMenuOverlay = overlayRef;
+    this.activeMenuOnDismiss = onDismiss ?? null;
   }
 
   /**
@@ -208,21 +299,19 @@ export class MermaidActionsService implements OnDestroy {
     }
 
     const viewBox = svgEl.getAttribute('viewBox');
-    const widthAttr = parseInt(svgEl.getAttribute('width') ?? '', 10);
-    const heightAttr = parseInt(svgEl.getAttribute('height') ?? '', 10);
-    let width = widthAttr;
-    let height = heightAttr;
-    if ((!width || !height) && viewBox) {
-      const parts = viewBox.split(/\s+/).map(Number);
-      if (parts.length === 4) {
-        width = width || parts[2];
-        height = height || parts[3];
-      }
+    const resolvedWidth = this.resolveDimension(svgEl, viewBox, 'width');
+    const resolvedHeight = this.resolveDimension(svgEl, viewBox, 'height');
+    if (resolvedWidth === null || resolvedHeight === null) {
+      // All three resolution paths failed for at least one axis. Fall
+      // back to a sensible default so the copy still produces a usable
+      // image rather than rendering a 0x0 canvas (which would throw
+      // `toBlob` errors on some browsers).
+      console.warn(
+        'Mermaid copySvgAsPng: could not determine SVG dimensions from attrs, bounding rect, or viewBox; using 800x600',
+      );
     }
-    if (!width || !height) {
-      width = 800;
-      height = 600;
-    }
+    const width = resolvedWidth ?? 800;
+    const height = resolvedHeight ?? 600;
 
     if (!svgEl.getAttribute('xmlns')) {
       svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
@@ -323,5 +412,76 @@ export class MermaidActionsService implements OnDestroy {
       img.onerror = (err) => reject(err instanceof Event ? new Error('image load failed') : err);
       img.src = src;
     });
+  }
+
+  /**
+   * Resolve a usable numeric dimension for a chart's `width` or
+   * `height` axis. The resolution chain is:
+   *
+   *   1. The SVG attribute (`width`/`height`) parsed strictly: we
+   *      accept only an unsigned integer/decimal, optionally followed
+   *      by a `px` suffix. Values like `"100%"`, `"10em"`, `"5vw"`,
+   *      or `"auto"` are REJECTED — `parseInt` would silently coerce
+   *      them to `NaN` or to a meaningless number, which is exactly
+   *      the bug W1 is fixing.
+   *   2. The live `getBoundingClientRect()` of the SVG element.
+   *      This works for SVGs already mounted in the DOM. The SVG
+   *      we receive here is parsed from a serialized string and is
+   *      detached, so the rect will almost always be `{0, 0, 0, 0}` —
+   *      but we still try, because in some flows (e.g. when callers
+   *      pass an already-mounted element via a different code path
+   *      in the future) the rect is the most accurate measurement.
+   *      We guard the call with `typeof === 'function'` because
+   *      `SVGSVGElement.prototype.getBoundingClientRect` is not
+   *      guaranteed on every test/SSR environment.
+   *   3. The `viewBox` attribute, parsed as `x y w h`. Mermaid always
+   *      emits a viewBox so this is the most reliable fallback for
+   *      detached SVGs.
+   *
+   * Returns `null` if every step fails; the caller is responsible
+   * for applying the final 800x600 default and warning.
+   */
+  private resolveDimension(
+    svgEl: Element,
+    viewBox: string | null,
+    axis: 'width' | 'height',
+  ): number | null {
+    // 1. Strict attribute parse: numeric, optional decimals, optional px.
+    const attr = svgEl.getAttribute(axis);
+    if (attr) {
+      const match = /^\d+(\.\d+)?(px)?$/i.exec(attr.trim());
+      if (match) {
+        const num = Number(match[0].replace(/px$/i, ''));
+        if (Number.isFinite(num) && num > 0) {
+          return num;
+        }
+      }
+    }
+
+    // 2. Live bounding rect (best-effort; detached SVGs usually report 0).
+    if (typeof svgEl.getBoundingClientRect === 'function') {
+      try {
+        const rect = svgEl.getBoundingClientRect();
+        const live = axis === 'width' ? rect.width : rect.height;
+        if (Number.isFinite(live) && live > 0) {
+          return live;
+        }
+      } catch {
+        // Some environments throw when measuring detached nodes; ignore.
+      }
+    }
+
+    // 3. viewBox: `<min-x> <min-y> <width> <height>`.
+    if (viewBox) {
+      const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+      if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+        const vbValue = axis === 'width' ? parts[2] : parts[3];
+        if (vbValue > 0) {
+          return vbValue;
+        }
+      }
+    }
+
+    return null;
   }
 }

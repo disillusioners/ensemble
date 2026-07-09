@@ -109,6 +109,25 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
     } else if ((messagesChanged || isLoadingChanged) && !this.userHasScrolled()) {
       this.shouldScroll.set(true);
     }
+
+    // While a stream is in flight the message bubble DOM is mutated
+    // constantly; scanning for `.mermaid` charts during that window
+    // either races the renderer or wastes work. `scanForMermaidCharts`
+    // itself short-circuits when `isLoading` is true (see W3 below),
+    // but we still need a one-shot scan the moment streaming finishes
+    // so the chart overlays are injected as soon as the final SVG
+    // markup is in the DOM. Without this the user would have to wait
+    // for the next MutationObserver tick — which works in practice
+    // for most cases, but breaks if the final chunk arrives in the
+    // same frame as the `isLoading=false` flip and the observer
+    // debounce hasn't fired yet.
+    if (
+      isLoadingChanged &&
+      isLoadingChanged.previousValue === true &&
+      isLoadingChanged.currentValue === false
+    ) {
+      this.scheduleScan();
+    }
   }
 
   ngAfterViewChecked(): void {
@@ -127,6 +146,11 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   }
 
   ngOnDestroy(): void {
+    // Tear down any open CDK overlays (copy menus) first so their
+    // `onDismiss` callbacks fire BEFORE we disconnect the observer
+    // and cancel the pending rAF. This lets the service null out
+    // its `activeMenuOverlay` and any associated state cleanly.
+    this.mermaidActions.closeAll();
     if (this.mutationObserver) {
       this.mutationObserver.disconnect();
       this.mutationObserver = null;
@@ -292,8 +316,20 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   /**
    * Walk the messages container and attach an overlay to every
    * rendered Mermaid chart that doesn't already have one.
+   *
+   * During streaming (`isLoading === true`) the message bubble DOM
+   * is mutated continuously as tokens arrive — each mutation can
+   * trigger a re-render of in-progress Mermaid blocks. Scanning in
+   * that window either races the renderer (injecting an overlay
+   * onto a half-built SVG) or wastes work on charts that will be
+   * replaced in the next chunk. We short-circuit here and rely on
+   * the `isLoading` true→false handler in `ngOnChanges` to schedule
+   * a single post-stream scan.
    */
   private scanForMermaidCharts(): void {
+    if (this.isLoading) {
+      return;
+    }
     const container = this.messagesContainerRef?.nativeElement;
     if (!container) {
       return;
@@ -458,7 +494,15 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       // close itself (backdrop click); nothing else to do here.
       return;
     }
-    this.openMenuChart = ctx.mermaidEl;
+    // NOTE: `openMenuChart` is assigned AFTER `openCopyMenu` returns.
+    // `MermaidActionsService.openCopyMenu` will dispose any active
+    // menu first, and that disposal fires the previous menu's
+    // `onDismiss` callback — which is `resetOpenMenuSentinel()` —
+    // clearing `openMenuChart`. If we set the sentinel here (before
+    // the call) the previous menu's dismiss would clear the value we
+    // just assigned, leaving the sentinel `null` even though a new
+    // menu is now active. Setting it after the call ensures the
+    // sentinel ends up pointing at the NEW chart.
     this.mermaidActions.openCopyMenu(
       button,
       {
@@ -469,6 +513,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       (result) => this.onCopyResult(ctx, result),
       () => this.resetOpenMenuSentinel(),
     );
+    this.openMenuChart = ctx.mermaidEl;
   }
 
   /**

@@ -8,14 +8,15 @@ import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/materia
 /**
  * Data payload for the Mermaid fullscreen dialog.
  *
- * - `svg`: the serialized SVG markup of the rendered chart. Routed
- *   through Angular's built-in `DomSanitizer.sanitize` before being
- *   bound via `[innerHTML]`. Because the upstream Mermaid renderer
- *   uses `securityLevel: 'loose'`, it may emit `<script>`, inline
- *   event handlers (e.g. `onclick="..."`), or `javascript:` hrefs
- *   derived from chart text — `sanitize()` strips those while
- *   preserving the surrounding SVG DOM and valid attributes, so the
- *   result is safe to inject into the template.
+ * - `svg`: the serialized SVG markup of the rendered chart. The
+ *   primary defense against malicious payloads is Mermaid's
+ *   `securityLevel: 'strict'` (configured in `app.config.ts`):
+ *   Mermaid itself strips `<script>` tags, inline `on*` event
+ *   handlers, and `javascript:` URLs from the SVG before emission,
+ *   so by the time the markup reaches this dialog it only contains
+ *   structural SVG (paths, shapes, text, theming `<style>` / `<defs>`).
+ *   See `MermaidActionsService` for the rendering pipeline and
+ *   `safeSvg` below for how the result is bound into the template.
  * - `source`: the original ```mermaid fenced source text. Surfaced as
  *   a read-only `<pre>` block beneath the chart and also used by the
  *   inline "Copy Source" button.
@@ -49,18 +50,18 @@ export class MermaidFullscreenDialogComponent {
    * than the built-in HTML sanitizer. The bypass is intentional and safe
    * because:
    *
-   *   1. The SVG comes from serializing a DOM `<svg>` element that the
-   *      trusted `mermaid` library rendered (see `MermaidActionsService`
-   *      and `app.config.ts`); it is NOT user-controlled HTML.
-   *   2. Mermaid itself is configured with `securityLevel: 'loose'`,
-   *      a known/accepted risk documented in `app.config.ts`. Any
-   *      dangerous payload that might appear in the SVG (script tags,
-   *      on* handlers, javascript: URLs) originates from chart source
-   *      the user already trusts the model to render.
-   *   3. The alternative (`sanitizer.sanitize(SecurityContext.HTML, ...)`)
+   *   1. The primary defense is Mermaid's `securityLevel: 'strict'`
+   *      (configured in `app.config.ts`). Mermaid strips `<script>`,
+   *      inline `on*` handlers, and `javascript:` URLs from the SVG
+   *      before emission, so by the time it reaches this dialog the
+   *      markup contains only structural SVG (paths, shapes, text)
+   *      and theming `<style>` / `<defs>` blocks.
+   *   2. The alternative (`sanitizer.sanitize(SecurityContext.HTML, ...)`)
    *      is designed for HTML, not SVG, and silently strips valid SVG
    *      elements such as `<style>` and `<defs>` that Mermaid emits for
-   *      theming. That strips dark-theme styling and breaks the chart.
+   *      theming. That strips dark-theme styling and breaks the chart,
+   *      so we keep `bypassSecurityTrustHtml` and rely on Mermaid's
+   *      strict-mode scrubbing above.
    *
    * Memoizing into a `signal` instead of a `computed` matters under
    * `ChangeDetectionStrategy.OnPush`: `computed` re-evaluates on every

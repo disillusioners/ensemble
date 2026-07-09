@@ -27,7 +27,7 @@ export const appConfig: ApplicationConfig = {
             tertiaryColor: '#1e293b',
             fontFamily: 'Roboto, "Helvetica Neue", sans-serif',
           },
-          securityLevel: 'loose',
+          securityLevel: 'strict',
         },
       },
     })
