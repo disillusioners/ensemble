@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 156 packs
-- Unit: 135 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 157 packs
+- Unit: 136 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -25,6 +25,7 @@
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-05 | ✅ PASS (209 passed, 8 skipped, fix/windows-encoding-paths, 0 regressions) |
 | todo_unit_test | tests/test_todo_manager.py + tests/test_todo_tools.py + tests/test_todo_sse.py | TodoManager CRUD, todo tools (create/update/list/clear), status aliases, indicators, SSE stream_todo_update | 2 min | 2026-07-09 | ✅ PASS (50/50, feature/todo-innate-skill, commit f515a109, 0 failures) |
+| system_tools_unit_test | tests/unit/tools/test_system_tools.py | system_env (prefix filter, secret masking, nomask), system_config (section filter, recursive nested masking, dynamic Config.model_fields sections), system_health (version/db_type/rag/platform/PID), connection string masking, curated env allowlist, factory pattern wiring | 2 min | 2026-07-09 | ✅ PASS (69/69, feature/system-info-tools-gaia, commit 9f90f78e, 0 failures) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
 | message_job_queue_test | tests/job_queue/test_message_job_queue.py | HTTP API Message → JobQueue: job creation, concurrency gate, orphan recovery, cancellation, termination, backward compat, side effects, status endpoint, error handling, no-project-context | 2 min | 2026-05-25 | ✅ PASS (29/29, feature/message-api-job-queue, 0 failures) |
 | worker_agent_unit_test | tests/unit/test_worker_agent.py | Worker agent: auto-discovery, meta.json validity, OpenSpace MCP tools config, no instance tools, no team_members, SemiAuto autonomy, prompt composition, skill loading | 2 min | 2026-07-09 | ✅ PASS (26/26, feature/ari-worker-agents, Phase 1, 0 failures) |
