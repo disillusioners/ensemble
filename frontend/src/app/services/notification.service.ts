@@ -18,7 +18,9 @@ export interface Notification extends InstanceNotification {
   read: boolean;
 }
 
-// Agents that should NOT trigger notification sounds (visual notifications still shown)
+// Agents that should NOT trigger notification sounds. KB agents are fully
+// suppressed at the backend; experiencer notifications are shown visually
+// but without sound.
 const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer']);
 
 // KB agent IDs - keep in sync with daemon/repositories/instance/repository.py (KB_AGENT_IDS)

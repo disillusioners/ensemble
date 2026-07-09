@@ -415,3 +415,76 @@ class TestInstanceCreatedKBFiltering:
 
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert "timestamp" in received
+
+
+class TestRootCompletionKBFiltering:
+    """Tests for KB agent filtering in emit_root_completion."""
+
+    @pytest.mark.asyncio
+    async def test_emit_root_completion_broadcasts_normal_agents(self):
+        """emit_root_completion broadcasts for non-KB agents."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        delivered = await broadcaster.emit_root_completion(
+            instance_id="test-123",
+            agent_id="developer",
+            agent_name="Developer Agent",
+            status="COMPLETED",
+        )
+
+        assert delivered == 1
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert received["agent_id"] == "developer"
+        assert received["status"] == "COMPLETED"
+        assert "timestamp" in received
+
+    @pytest.mark.asyncio
+    async def test_emit_root_completion_filters_experiencer(self):
+        """emit_root_completion skips 'experiencer' KB agent."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        delivered = await broadcaster.emit_root_completion(
+            instance_id="test-kb-1",
+            agent_id="experiencer",
+            agent_name="Experiencer",
+            status="COMPLETED",
+        )
+
+        assert delivered == 0
+        # Queue should be empty
+        assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_emit_root_completion_filters_kb_importer(self):
+        """emit_root_completion skips 'kb-importer' KB agent."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        delivered = await broadcaster.emit_root_completion(
+            instance_id="test-kb-2",
+            agent_id="kb-importer",
+            agent_name="KB Importer",
+            status="COMPLETED",
+        )
+
+        assert delivered == 0
+        # Queue should be empty
+        assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_emit_root_completion_no_connections_returns_zero(self):
+        """emit_root_completion with no connections returns 0 for KB agents."""
+        broadcaster = NotificationBroadcaster()
+        delivered = await broadcaster.emit_root_completion(
+            instance_id="test-kb-2",
+            agent_id="kb-importer",
+            agent_name="KB Importer",
+            status="COMPLETED",
+        )
+
+        assert delivered == 0
