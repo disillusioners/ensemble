@@ -202,6 +202,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "context": "daemon.tools.context_tools",
     "db": "daemon.tools.db_tools",
     "infra": "daemon.tools.infra",
+    "system": "daemon.tools.system",
 }
 
 

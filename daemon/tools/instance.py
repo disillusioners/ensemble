@@ -114,6 +114,7 @@ from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools
+from .system import create_system_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
@@ -1018,6 +1019,15 @@ Returns:
     # equivalent tools for external agent systems.
     context_tool_list = create_context_tools(manager, current_instance_id)
     tools.extend(context_tool_list)
+
+    # ── System tools (read-only env / config / health snapshots) ──
+    # Always available — internal agents use these for fast triage of
+    # runtime state (which DB backend, which config section is loaded,
+    # what env vars are in scope) without exposing the on-disk paths.
+    # Secrets are masked by default; agents must opt into ``nomask=True``
+    # to see raw values.
+    system_tool_list = create_system_tools(manager, current_instance_id)
+    tools.extend(system_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
