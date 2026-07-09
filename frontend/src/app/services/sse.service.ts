@@ -1,6 +1,12 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
 
+export interface TodoItem {
+  index: number;
+  text: string;
+  status: 'pending' | 'in_progress' | 'done';
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -34,6 +40,10 @@ export class SseService {
     percent: number;
     model_name: string;
   } | null>(null);
+
+  // Single-instance todo list. The frontend only ever displays one chat
+  // at a time, so we keep one signal and overwrite it from todo_update.
+  todos = signal<TodoItem[]>([]);
 
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
@@ -298,6 +308,20 @@ export class SseService {
       });
     });
 
+    // Todo update event - replaces the todo list for the active instance.
+    // Placed inline alongside the other event listeners to keep all SSE
+    // wiring colocated in connectInternal().
+    eventSource.addEventListener('todo_update', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          this.todos.set(data.todos ?? []);
+        } catch (err) {
+          console.error('[SSE] Failed to parse todo_update:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -363,6 +387,7 @@ export class SseService {
     this.statusChange.set(null);
     this.instanceCreatedQueue.set([]);
     this.contextUsage.set(null);
+    this.todos.set([]);
     this.pendingToolOutputs.clear();
   }
 }
