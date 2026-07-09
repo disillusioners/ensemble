@@ -18,9 +18,11 @@ Secret-masking policy
 ---------------------
 
 By default the tools redact values whose key looks like a secret
-(``api_key``, ``password``, ``token``, ``secret``, ``headers``,
-``base``) as well as values in an explicit allow-list of known-secret
-environment variable names. To inspect a real value, pass
+(``api_key``, ``password``, ``token``, ``secret``, ``headers``) as
+well as values in an explicit allow-list of known-secret environment
+variable names. Config keys containing ``base`` are treated as public
+URL-like endpoints: plain URLs stay visible, while embedded URL
+passwords are masked surgically. To inspect a real value, pass
 ``nomask=True``. The full docstrings attached via ``_full_doc_``
 explicitly warn the agent to use that escape hatch only when truly
 needed.
@@ -107,6 +109,9 @@ _SECRET_KEY_SUBSTRINGS: tuple[str, ...] = (
     "secret",
     "headers",
     "base",
+)
+_NON_BASE_SECRET_KEY_SUBSTRINGS: tuple[str, ...] = tuple(
+    sub for sub in _SECRET_KEY_SUBSTRINGS if sub != "base"
 )
 
 # Env var suffix patterns used by ``_mask_env_value`` to mask values
@@ -276,14 +281,15 @@ def _mask_config(obj: Any) -> Any:
     """Recursively mask a config section according to ``_is_secret_key``.
 
     Walks the structure returned by ``Config.model_dump()``. Dict keys
-    that satisfy :func:`_is_secret_key` have their values replaced
-    with :func:`_mask_secret` (which handles nested masking and
-    connection-string redaction independently). Other dict/list
-    values are recursed into. Leaf strings are additionally passed
-    through :func:`_mask_connection_string` so a top-level key like
-    ``postgres_url`` whose name doesn't itself match the secret
-    patterns still has its embedded password scrubbed — defence in
-    depth against credential leakage.
+    that satisfy :func:`_is_secret_key` have their values masked based
+    on the matching pattern: ``base``-matching keys are treated as
+    URL-like endpoints and get only embedded URL passwords redacted;
+    all other secret-looking keys use :func:`_mask_secret` for blanket
+    redaction. Other dict/list values are recursed into. Leaf strings
+    are additionally passed through :func:`_mask_connection_string` so
+    a top-level key like ``postgres_url`` whose name doesn't itself
+    match the secret patterns still has its embedded password scrubbed
+    — defence in depth against credential leakage.
 
     Args:
         obj: The config subtree to mask.
@@ -294,10 +300,18 @@ def _mask_config(obj: Any) -> Any:
     if isinstance(obj, dict):
         out: dict[str, Any] = {}
         for k, v in obj.items():
-            if _is_secret_key(k):
-                out[k] = _mask_secret(v)
-            else:
-                out[k] = _mask_config(v)
+            if isinstance(k, str):
+                lowered = k.lower()
+                if any(sub in lowered for sub in _NON_BASE_SECRET_KEY_SUBSTRINGS):
+                    out[k] = _mask_secret(v)
+                    continue
+                if "base" in lowered:
+                    if isinstance(v, str):
+                        out[k] = _mask_connection_string(v)
+                    else:
+                        out[k] = _mask_config(v)
+                    continue
+            out[k] = _mask_config(v)
         return out
     if isinstance(obj, list):
         return [_mask_config(item) for item in obj]
@@ -327,9 +341,8 @@ def create_system_tools(manager: "InstanceManager", current_instance_id: str) ->
     Args:
         manager: The :class:`InstanceManager` instance. Used to read
             ``manager.config`` and ``manager.ensemble_config``.
-        current_instance_id: The current instance ID. Accepted for
-            parity with other factories; unused by these read-only
-            tools.
+        current_instance_id: The current instance ID, included in
+            ``nomask=True`` audit logs.
 
     Returns:
         A list of three tool functions:
@@ -352,6 +365,8 @@ def create_system_tools(manager: "InstanceManager", current_instance_id: str) ->
                 if prefix and not key.lower().startswith(prefix.lower()):
                     continue
                 result[key] = _mask_env_value(key, value, nomask)
+            if nomask:
+                logger.warning("system_env NOMASK used by instance=%s", current_instance_id)
             return json.dumps(result, indent=2, sort_keys=True)
         except Exception as exc:
             logger.warning("system_env failed: %s", exc)
@@ -441,6 +456,8 @@ to continue, recall the tool with ``nomask=True``.
 
             if not nomask:
                 payload = _mask_config(payload)
+            else:
+                logger.warning("system_config NOMASK used by instance=%s", current_instance_id)
 
             return json.dumps(payload, indent=2, default=str)
         except Exception as exc:
@@ -460,12 +477,13 @@ Args:
     section: Optional section name to return. When empty, ALL sections
         are returned. When non-empty and not in the valid set, an
         ``{"error": ...}`` object is returned listing the valid names.
-    nomask: When True, secret-bearing fields (key matches
-        ``api_key``, ``password``, ``token``, ``secret``, ``headers``,
-        or ``base`` — case-insensitive substring) are returned in the
-        clear. When False (the default), those values are replaced with
-        ``"[REDACTED]"`` and any URL-shaped values inside them have
-        their password component masked.
+    nomask: When True, secret-bearing fields are returned in the
+        clear. When False (the default), values whose key matches
+        ``api_key``, ``password``, ``token``, ``secret``, or
+        ``headers`` (case-insensitive substring) are replaced with
+        ``"[REDACTED]"``. Values whose key matches ``base`` are treated
+        as URL-like endpoints: plain URLs remain visible, and embedded
+        URL passwords are masked surgically.
 
 Returns:
     A JSON object with the requested section(s) of the resolved

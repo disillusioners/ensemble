@@ -307,6 +307,58 @@ class TestSystemConfig:
         assert "sk-supersecret" not in decoded["llm"]["api_key"]
 
     @pytest.mark.asyncio
+    async def test_base_url_visible_by_default(self, tool_by_name, manager_mock):
+        """Plain base_url values are public endpoints and should stay visible."""
+        manager_mock.config.llm.api_key = "sk-still-masked"
+        manager_mock.config.llm.base_url = "https://api.openai.com/v1"
+        config_tool = tool_by_name["system_config"]
+
+        result = await config_tool.ainvoke({})
+        decoded = json.loads(result)
+
+        assert decoded["llm"]["base_url"] == "https://api.openai.com/v1"
+        assert decoded["llm"]["base_url"] != "[REDACTED]"
+        assert decoded["llm"]["api_key"] == "[REDACTED]"
+
+    @pytest.mark.asyncio
+    async def test_base_url_with_credentials_masks_only_password(self, tool_by_name, manager_mock):
+        """base_url with userinfo keeps endpoint details but masks the password."""
+        manager_mock.config.llm.base_url = "https://user:secret-pass@api.example.com/v1"
+        config_tool = tool_by_name["system_config"]
+
+        result = await config_tool.ainvoke({})
+        decoded = json.loads(result)
+
+        masked_base_url = decoded["llm"]["base_url"]
+        assert masked_base_url == "https://user:[REDACTED]@api.example.com/v1"
+        assert "secret-pass" not in masked_base_url
+        assert "api.example.com" in masked_base_url
+
+    @pytest.mark.asyncio
+    async def test_nomask_all_sections_returns_raw_secrets(self, tool_by_name, manager_mock):
+        """nomask=True without a section filter returns all sections unredacted."""
+        api_key = "sk-all-sections-secret"
+        daemon_password = "daemon-password-secret"
+        base_url = "https://api.openai.com/v1"
+        manager_mock.config.llm.api_key = api_key
+        manager_mock.config.llm.base_url = base_url
+
+        full_config = manager_mock.config.model_dump()
+        full_config["daemon"]["password"] = daemon_password
+
+        config_tool = tool_by_name["system_config"]
+        with patch.object(Config, "model_dump", return_value=full_config):
+            result = await config_tool.ainvoke({"nomask": True})
+        decoded = json.loads(result)
+
+        for section in Config.model_fields:
+            assert section in decoded, f"Missing section: {section}"
+        assert decoded["llm"]["api_key"] == api_key
+        assert decoded["daemon"]["password"] == daemon_password
+        assert decoded["llm"]["base_url"] == base_url
+        assert "[REDACTED]" not in json.dumps(decoded)
+
+    @pytest.mark.asyncio
     async def test_nomask_returns_real_values(self, tool_by_name, manager_mock):
         manager_mock.config.llm.api_key = "sk-supersecret-xyz"
         config_tool = tool_by_name["system_config"]
