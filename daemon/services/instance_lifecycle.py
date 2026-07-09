@@ -831,6 +831,14 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"MCP cleanup failed for {instance_id[:8]}: {e}")
 
+        # 2.6. Clear per-instance todo state (best-effort, idempotent).
+        # Pause intentionally retains todos for resume; terminate discards them.
+        if hasattr(self._manager, '_todo_manager') and self._manager._todo_manager:
+            try:
+                self._manager._todo_manager.clear(instance_id)
+            except Exception as e:
+                logger.warning(f"Failed to clear todo state for {instance_id[:8]}...: {e}")
+
         # 3. Remove from in-memory instances dict.
         if instance_id in self._manager.instances:
             del self._manager.instances[instance_id]

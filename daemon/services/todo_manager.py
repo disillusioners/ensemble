@@ -22,12 +22,20 @@ _VALID_STATUSES = ("pending", "in_progress", "done")
 # statuses. Lookup is performed against the lower-cased input.
 _STATUS_ALIASES: dict[str, str] = {
     "completed": "done",
+    "complete": "done",
+    "closed": "done",
+    "resolved": "done",
     "finished": "done",
     "started": "in_progress",
+    "wip": "in_progress",
+    "doing": "in_progress",
+    "active": "in_progress",
     "in progress": "in_progress",
     "in-progress": "in_progress",
     "inprogress": "in_progress",
     "in_progress": "in_progress",
+    "cancelled": "pending",
+    "canceled": "pending",
     "pending": "pending",
     "done": "done",
 }

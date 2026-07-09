@@ -61,13 +61,12 @@ async def _emit_update(
     """Best-effort SSE emission \u2014 never raises."""
     if live_event_hub is None:
         return
+    event_type = "todo_update"
     try:
         await live_event_hub.stream_todo_update(current_instance_id, todos)
     except Exception as e:
         logger.warning(
-            "SSE todo_update emission failed for %s: %s",
-            current_instance_id,
-            e,
+            f"todo SSE emission failed (event_type={event_type}, {len(todos)} items): {e}"
         )
 
 
