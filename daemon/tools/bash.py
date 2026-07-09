@@ -16,6 +16,9 @@ Execute shell commands.
 
 **Rules**:
 - Always set `workdir` to the project directory. Never omit it.
+- If you need to access files outside the project directory, do so by passing
+  explicit absolute paths inside the command (e.g. `/abs/path/to/file`) — the
+  `workdir` setting still applies as the command's `cwd`.
 - Avoid blocking commands (e.g., `tail -f`, `watch`, interactive editors) — except via skills that use CLI.
 - For large output, redirect to file and read with `read_file`:
   ```

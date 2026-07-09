@@ -18,6 +18,8 @@ Read, write, edit, and search files and directories.
   on Unix or `C:\\path\\to\\file` on Windows), `workdir` may be omitted and the path is
   used as-is.
 - When `path` is relative, it is resolved against `workdir` and must stay within it.
+- If you need to access files outside the project directory, pass an absolute path
+  explicitly (e.g. `/abs/path/to/file`).
 
 Example read_file (relative path):
 ```json
