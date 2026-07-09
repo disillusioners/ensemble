@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 153 packs
-- Unit: 132 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 156 packs
+- Unit: 135 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -27,6 +27,9 @@
 | todo_unit_test | tests/test_todo_manager.py + tests/test_todo_tools.py + tests/test_todo_sse.py | TodoManager CRUD, todo tools (create/update/list/clear), status aliases, indicators, SSE stream_todo_update | 2 min | 2026-07-09 | ✅ PASS (50/50, feature/todo-innate-skill, commit f515a109, 0 failures) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
 | message_job_queue_test | tests/job_queue/test_message_job_queue.py | HTTP API Message → JobQueue: job creation, concurrency gate, orphan recovery, cancellation, termination, backward compat, side effects, status endpoint, error handling, no-project-context | 2 min | 2026-05-25 | ✅ PASS (29/29, feature/message-api-job-queue, 0 failures) |
+| worker_agent_unit_test | tests/unit/test_worker_agent.py | Worker agent: auto-discovery, meta.json validity, OpenSpace MCP tools config, no instance tools, no team_members, SemiAuto autonomy, prompt composition, skill loading | 2 min | 2026-07-09 | ✅ PASS (26/26, feature/ari-worker-agents, Phase 1, 0 failures) |
+| ari_agent_unit_test | tests/unit/test_ari_agent.py | Ari agent: auto-discovery, meta.json validity, jober-hybrid tool config, no instance tools, no team_members, TrueAuto autonomy, smart personality, prompt composition, skill loading | 2 min | 2026-07-09 | ✅ PASS (27/27, feature/ari-worker-agents, Phase 2, 0 failures) |
+| ari_worker_integration_test | tests/unit/test_ari_worker_integration.py | Cross-agent integration: coexistence, no team_members, no instance tools, acyclic dispatch graph, prompt composition both agents, autonomy model in prompts | 2 min | 2026-07-09 | ✅ PASS (13/13, feature/ari-worker-agents, commit 46ea9cf6+65b37bbf, Phase 3, 0 failures) |
 | defer_race_condition_test | tests/job_queue/test_select_next_eligible_job.py | Defer job race condition fix: _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration | 2 min | 2026-05-25 | ✅ PASS (16/16, c4f6e17 fix, 0 failures, 1089 suite pass) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-5 + DLQ retry + replay-all + project_id injection + soft delete + 42 tool pack tests | 2 min | 2026-06-01 | ✅ PASS (1178/1179, 19 skipped, 1 pre-existing env failure, feature/job-report-format, 0 regressions) |
 | jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format (5 tests), tool registration, agent definition, crash recovery | 2 min | 2026-06-01 | ✅ PASS (42/42 format tests, feature/job-report-format, 0 regressions) |
