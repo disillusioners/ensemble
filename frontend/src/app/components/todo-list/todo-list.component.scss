@@ -22,6 +22,49 @@
   font-weight: 500;
 }
 
+// Container for the header's icon buttons (refresh + collapse chevron).
+// Kept as a separate flex cluster so the title and action group can sit
+// at opposite ends of the header without wrapping.
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+// Shared style for the quiet icon buttons in the header and per-item
+// actions. Reset browser button defaults so they read as inline icons.
+.icon-btn {
+  background: none;
+  border: none;
+  padding: 2px;
+  margin: 0;
+  cursor: pointer;
+  color: #e2e8f0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  border-radius: 4px;
+
+  &:focus-visible {
+    outline: 2px solid #06b6d4;
+    outline-offset: 2px;
+  }
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.05);
+  }
+}
+
+.refresh-btn {
+  // Slightly muted so the collapse chevron stays the dominant affordance.
+  color: #94a3b8;
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}
+
 // Plain <button> (not mat-button) so the toggle reads as a quiet
 // affordance — no ripple, no Material chrome, just the chevron. Reset
 // every browser default that would otherwise leave a visible box.
@@ -51,7 +94,7 @@
 
 .todo-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 4px 12px;
   font-size: 0.85rem;
@@ -63,11 +106,28 @@
   }
 }
 
+// Wrapper around the text + comment + editor so they can stack
+// vertically while still participating in the .todo-item flex row.
+.todo-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.todo-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .status-icon {
   width: 16px;
   text-align: center;
   color: #94a3b8;
   flex-shrink: 0;
+  margin-top: 1px;
 
   &.in-progress {
     color: #06b6d4;
@@ -81,6 +141,74 @@
 .todo-text {
   min-width: 0;
   word-break: break-word;
+  flex: 1;
+}
+
+.comment-btn {
+  color: #94a3b8;
+  flex-shrink: 0;
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}
+
+.todo-comment {
+  font-size: 0.78rem;
+  color: #94a3b8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.todo-comment-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.comment-input {
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  color: #e2e8f0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  resize: vertical;
+  min-height: 32px;
+
+  &:focus {
+    outline: none;
+    border-color: #06b6d4;
+  }
+}
+
+.editor-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.editor-btn {
+  background: #06b6d4;
+  color: #0f172a;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+
+  &.secondary {
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid #1e293b;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
 }
 
 @keyframes fadeIn {

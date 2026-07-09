@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
 from daemon.models import (
@@ -19,6 +20,19 @@ from daemon.models import (
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
+
+
+class TodoCommentRequest(BaseModel):
+    """Request body for setting a comment on a todo item.
+
+    Attributes:
+        comment: The annotation text. Empty string clears the comment.
+    """
+
+    comment: str = Field(
+        default="",
+        description="Comment text. Empty string clears the existing comment.",
+    )
 
 # Create router with /instances prefix
 router = APIRouter(prefix="/instances", tags=["instances"])
@@ -342,3 +356,106 @@ async def get_messages(
 
     # Get message history from LangGraph checkpoints
     return await manager.get_messages(instance_id)
+
+
+# ---------------------------------------------------------------------------
+# Todo list endpoints (read + comment annotation)
+# ---------------------------------------------------------------------------
+
+
+async def _check_instance_exists(manager: Any, instance_id: str) -> None:
+    """Raise 404 if the instance is unknown to the manager.
+
+    Centralizes the ``KeyError → 404`` mapping that every instance-scoped
+    endpoint performs; the todo endpoints below reuse this helper.
+    """
+    try:
+        await manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}",
+            ).model_dump(),
+        )
+
+
+# 8. GET /instances/{instance_id}/todos - Get the instance's todo list
+@router.get("/{instance_id}/todos")
+async def get_instance_todos(
+    instance_id: str,
+    request: Request,
+) -> list[dict]:
+    """Return the instance's full todo list as a JSON array.
+
+    Each item shape:
+        ``{"index": N, "text": "...", "status": "pending|in_progress|done", "comment": "..."}``
+
+    Returns an empty list ``[]`` if the instance has no todo list (the
+    underlying state is in-memory and ephemeral — a freshly-spawned
+    instance has no list until the agent runs ``todo_create``).
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+    return manager._todo_manager.get_all(instance_id)
+
+
+# 9. POST /instances/{instance_id}/todos/{index}/comment - Annotate a todo item
+@router.post("/{instance_id}/todos/{index}/comment")
+async def set_todo_comment(
+    instance_id: str,
+    index: int,
+    body: TodoCommentRequest,
+    request: Request,
+) -> dict:
+    """Set a comment on a todo item at ``index``.
+
+    Request body: ``{"comment": "user comment text"}``. Empty / missing
+    ``comment`` is treated as an empty string (clears any prior comment).
+
+    The endpoint emits a ``todo_update`` SSE event after the mutation so
+    any connected frontend re-renders the annotated list immediately.
+    SSE emission is best-effort: a hub failure does not roll back the
+    comment.
+
+    Returns the updated item dict on success.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    try:
+        updated = manager._todo_manager.set_comment(
+            instance_id, index, body.comment
+        )
+    except ValueError as e:
+        # Index out of range OR instance has no todo list yet. 400 because
+        # the request is well-formed but the supplied index doesn't
+        # reference a real item — the URL itself is valid, the payload
+        # is what's wrong.
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=str(e),
+            ).model_dump(),
+        )
+
+    # Best-effort SSE re-emit so the frontend re-renders. Mirrors the
+    # ``_emit_update`` helper pattern in ``daemon.tools.todo_tools`` —
+    # any hub failure is logged and swallowed so a transport hiccup
+    # never blocks the write.
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_todo_update(
+                instance_id,
+                manager._todo_manager.get_all(instance_id),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"todo SSE emission failed for comment on "
+                f"instance {instance_id} index {index}: {e}"
+            )
+
+    return updated

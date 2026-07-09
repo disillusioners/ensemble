@@ -124,31 +124,28 @@ Returns:
 
         Args:
             index: Zero-based position of the item to update.
-            status: New status \u2014 one of "pending", "in_progress", "done".
+            status: New status — one of "pending", "in_progress", "done".
 
         Returns:
             Formatted string with the full list plus a reminder of the
-            next pending item (if any).
+            next pending item (if any). When the item is marked done AND
+            carries a non-empty comment, the reminder is prefixed with the
+            user's comment so the LLM sees the human feedback inline.
         """
         try:
-            todos = manager._todo_manager.update(current_instance_id, index, status)
-            if todos is None:
+            result = manager._todo_manager.update(current_instance_id, index, status)
+            if result is None:
                 return (
-                    f"ERROR: Could not update item [{index}] \u2192 {status!r}. "
+                    f"ERROR: Could not update item [{index}] → {status!r}. "
                     "Either the index is out of range or the status is invalid "
                     "(expected one of: pending, in_progress, done)."
                 )
+            todos = result["todos"]
+            reminder = result["reminder"]
             await _emit_update(live_event_hub, current_instance_id, todos)
-            head = f"\U0001f4cb Updated item [{index}] \u2192 {status}."
+            head = f"\U0001f4cb Updated item [{index}] → {status}."
             body = _format_list(todos)
-            next_pending = next(
-                (t for t in todos if t["status"] == "pending"), None
-            )
-            if next_pending is not None:
-                tail = f"\n\n\u23ed\ufe0f Next: {next_pending['text']}"
-            else:
-                tail = "\n\nAll items completed! \u2705"
-            return f"{head}\n\n{body}{tail}"
+            return f"{head}\n\n{body}{reminder}"
         except Exception as e:
             return f"ERROR: Failed to update todo: {e}"
 

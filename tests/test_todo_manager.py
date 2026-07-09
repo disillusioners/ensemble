@@ -108,7 +108,7 @@ class TestTodoManagerUpdate:
         for status in ("pending", "in_progress", "done"):
             result = mgr.update("inst-1", 0, status)
             assert result is not None
-            assert result[0]["status"] == status
+            assert result["todos"][0]["status"] == status
 
     def test_update_invalid_status_returns_none(self):
         """``update`` rejects unknown statuses by returning ``None``.
@@ -146,17 +146,12 @@ class TestTodoManagerUpdate:
         assert mgr.update("inst-1", 2, "done") is None
         assert mgr.update("inst-1", 100, "done") is None
 
-    def test_update_on_nonexistent_instance_returns_none(self):
-        """Updating an instance that has no list returns ``None``."""
-        mgr = TodoManager()
-        assert mgr.update("ghost-instance", 0, "done") is None
+    def test_update_returns_full_list_snapshot_and_reminder(self):
+        """``update`` returns ``{"todos": [...], "reminder": str}``.
 
-    def test_update_returns_full_list_snapshot(self):
-        """``update`` returns the entire list (not just the changed item).
-
-        This matches the tool layer's expectation — the SSE payload is the
-        full ordered list every time, so the frontend can re-render
-        in one shot without diffing against the prior frame.
+        The full ordered list is in ``todos`` so the SSE payload matches the
+        previous single-list return shape. ``reminder`` is a formatted string
+        pointing at the next pending item (or all-completed).
         """
         mgr = TodoManager()
         mgr.create("inst-1", ["A", "B", "C"])
@@ -164,10 +159,180 @@ class TestTodoManagerUpdate:
         result = mgr.update("inst-1", 1, "in_progress")
 
         assert result is not None
-        assert len(result) == 3
-        assert result[0]["status"] == "pending"
-        assert result[1]["status"] == "in_progress"
-        assert result[2]["status"] == "pending"
+        assert set(result.keys()) == {"todos", "reminder"}
+        todos = result["todos"]
+        assert len(todos) == 3
+        assert todos[0]["status"] == "pending"
+        assert todos[1]["status"] == "in_progress"
+        assert todos[2]["status"] == "pending"
+        # Next pending reminder points at A (the first remaining pending item).
+        assert "Next:" in result["reminder"]
+        assert "A" in result["reminder"]
+
+    def test_update_on_nonexistent_instance_returns_none(self):
+        """Updating an instance that has no list returns ``None``."""
+        mgr = TodoManager()
+        assert mgr.update("ghost-instance", 0, "done") is None
+
+    def test_update_to_done_with_no_comment_returns_default_reminder(self):
+        """When marking done and the item has no comment, reminder has no prefix.
+
+        Default reminder is ``"\\n\\n⏭️ Next: ..."`` or ``"\\n\\nAll items completed! ✅"``.
+        No ``"User commented:"`` prefix should appear.
+        """
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A", "B"])
+        result = mgr.update("inst-1", 0, "done")
+
+        assert result is not None
+        assert "User commented:" not in result["reminder"]
+        assert "Next:" in result["reminder"]
+        assert "B" in result["reminder"]
+
+    def test_update_to_done_with_comment_prefixes_reminder(self):
+        """When marking done and the item has a non-empty comment, the reminder
+        is prefixed with ``"User commented: {comment}\\n..."`` followed by the
+        original next-pending reminder.
+        """
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A", "B"])
+        mgr.set_comment("inst-1", 0, "Looks good!")
+        result = mgr.update("inst-1", 0, "done")
+
+        assert result is not None
+        assert "User commented: Looks good!" in result["reminder"]
+        # The base next-pending reminder still follows.
+        assert "Next:" in result["reminder"]
+        assert "B" in result["reminder"]
+
+    def test_update_to_done_with_comment_and_no_remaining_pending(self):
+        """When the last item is done with a comment, the reminder uses the
+        all-completed suffix (``"All items completed!"``) after the comment.
+        """
+        mgr = TodoManager()
+        mgr.create("inst-1", ["Only"])
+        mgr.set_comment("inst-1", 0, "Approved")
+        result = mgr.update("inst-1", 0, "done")
+
+        assert result is not None
+        assert "User commented: Approved" in result["reminder"]
+        assert "All items completed!" in result["reminder"]
+        # No next-pending pointer.
+        assert "Next:" not in result["reminder"]
+
+    def test_update_to_non_done_status_ignores_comment(self):
+        """A non-``done`` status never triggers the comment prefix.
+
+        The comment is a side-channel for *completed* items — the
+        ``in_progress`` and ``pending`` transitions never surface the
+        comment in the reminder.
+        """
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A", "B"])
+        mgr.set_comment("inst-1", 0, "Hidden feedback")
+        result = mgr.update("inst-1", 0, "in_progress")
+
+        assert result is not None
+        assert "User commented:" not in result["reminder"]
+        assert "Next:" in result["reminder"]
+
+    def test_update_with_empty_comment_skips_user_commented_prefix(self):
+        """An empty comment never produces the ``User commented:`` prefix."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A", "B"])
+        mgr.set_comment("inst-1", 0, "")
+        result = mgr.update("inst-1", 0, "done")
+
+        assert result is not None
+        assert "User commented:" not in result["reminder"]
+        assert "Next:" in result["reminder"]
+
+
+# =============================================================================
+# Set Comment
+# =============================================================================
+
+
+class TestTodoManagerSetComment:
+    """``TodoManager.set_comment(instance_id, index, comment)`` — annotate item."""
+
+    def test_set_comment_valid_index_returns_updated_item(self):
+        """Setting a comment returns the updated item dict."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["Task A", "Task B"])
+
+        updated = mgr.set_comment("inst-1", 1, "Please rephrase this")
+
+        assert updated["index"] == 1
+        assert updated["text"] == "Task B"
+        assert updated["comment"] == "Please rephrase this"
+        assert updated["status"] == "pending"
+
+    def test_set_comment_persists_into_state(self):
+        """After ``set_comment``, ``get_all`` reflects the new comment."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A", "B", "C"])
+        mgr.set_comment("inst-1", 2, "follow-up note")
+
+        items = mgr.get_all("inst-1")
+        assert items[0]["comment"] == ""
+        assert items[1]["comment"] == ""
+        assert items[2]["comment"] == "follow-up note"
+
+    def test_set_comment_overwrites_existing(self):
+        """Calling ``set_comment`` twice replaces the prior comment."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A"])
+        mgr.set_comment("inst-1", 0, "first")
+        mgr.set_comment("inst-1", 0, "second")
+
+        assert mgr.get_all("inst-1")[0]["comment"] == "second"
+
+    def test_set_comment_empty_string_clears_comment(self):
+        """Empty string clears any prior comment."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A"])
+        mgr.set_comment("inst-1", 0, "first")
+        mgr.set_comment("inst-1", 0, "")
+
+        assert mgr.get_all("inst-1")[0]["comment"] == ""
+
+    def test_set_comment_negative_index_raises_value_error(self):
+        """Negative index raises ``ValueError`` (matches error-handling style)."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A", "B"])
+
+        with pytest.raises(ValueError):
+            mgr.set_comment("inst-1", -1, "x")
+
+    def test_set_comment_index_too_large_raises_value_error(self):
+        """index >= len(items) raises ``ValueError``."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["A"])
+
+        with pytest.raises(ValueError):
+            mgr.set_comment("inst-1", 5, "x")
+        with pytest.raises(ValueError):
+            mgr.set_comment("inst-1", 1, "x")
+
+    def test_set_comment_on_nonexistent_instance_raises_value_error(self):
+        """Instance without a todo list raises ``ValueError``."""
+        mgr = TodoManager()
+
+        with pytest.raises(ValueError):
+            mgr.set_comment("ghost-instance", 0, "x")
+
+    def test_set_comment_does_not_change_status_or_text(self):
+        """Comment is a side-channel — it must not mutate ``text`` or ``status``."""
+        mgr = TodoManager()
+        mgr.create("inst-1", ["Original text"])
+        mgr.update("inst-1", 0, "in_progress")
+        mgr.set_comment("inst-1", 0, "side note")
+
+        item = mgr.get_all("inst-1")[0]
+        assert item["text"] == "Original text"
+        assert item["status"] == "in_progress"
+        assert item["comment"] == "side note"
 
 
 # =============================================================================
@@ -193,10 +358,11 @@ class TestTodoManagerGetAll:
         assert isinstance(result, list)
         assert len(result) == 1
         item = result[0]
-        assert set(item.keys()) == {"index", "text", "status"}
+        assert set(item.keys()) == {"index", "text", "status", "comment"}
         assert item["index"] == 0
         assert item["text"] == "Only item"
         assert item["status"] == "pending"
+        assert item["comment"] == ""
 
     def test_get_all_reflects_updates(self):
         """``get_all`` after ``update`` returns the latest status."""

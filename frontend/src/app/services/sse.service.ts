@@ -5,6 +5,7 @@ export interface TodoItem {
   index: number;
   text: string;
   status: 'pending' | 'in_progress' | 'done';
+  comment: string;
 }
 
 @Injectable({

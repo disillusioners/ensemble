@@ -280,6 +280,10 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /**
    * Load initial messages via REST API, then connect SSE for real-time updates.
+   * Also kicks off a parallel REST fetch for the persisted todo list, so the
+   * UI has the current state (including any saved comments) ready before or
+   * shortly after SSE connect — the next `todo_update` event will reconcile
+   * any drift either way.
    */
   private loadInstanceMessages(instanceId: string): void {
     this.api.getMessages(instanceId).subscribe({
@@ -296,6 +300,16 @@ export class ChatComponent implements OnInit, OnDestroy {
         // Connect SSE after API messages are loaded
         this.sseService.connect(instanceId);
       }
+    });
+
+    // Initial todo list load — mirrors the messages call above. Errors are
+    // non-fatal: the SSE `todo_update` event will still populate the list
+    // once the agent publishes one.
+    this.api.getTodos(instanceId).subscribe({
+      next: (data) => {
+        this.sseService.todos.set(data ?? []);
+      },
+      error: (err) => console.warn('[Chat] Failed to load todos:', err),
     });
   }
 

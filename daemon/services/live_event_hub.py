@@ -346,7 +346,7 @@ class LiveEventHub:
         Args:
             instance_id: The instance this todo update belongs to.
             todos: List of todo dicts (each with ``index``, ``text``,
-                and ``status``).
+                ``status``, and ``comment``).
         """
         event: dict[str, Any] = {
             "instance_id": instance_id,

@@ -2,9 +2,20 @@
   <div class="todo-list-container">
     <div class="todo-header" (click)="toggle()">
       <span class="todo-title">📋 Tasks ({{ doneCount() }}/{{ totalCount() }} completed)</span>
-      <button class="toggle-btn" type="button">
-        <mat-icon>{{ isCollapsed() ? 'expand_more' : 'expand_less' }}</mat-icon>
-      </button>
+      <div class="header-actions">
+        <button
+          class="icon-btn refresh-btn"
+          type="button"
+          (click)="refresh($event)"
+          aria-label="Refresh tasks"
+          title="Refresh tasks"
+        >
+          <mat-icon>refresh</mat-icon>
+        </button>
+        <button class="toggle-btn" type="button">
+          <mat-icon>{{ isCollapsed() ? 'expand_more' : 'expand_less' }}</mat-icon>
+        </button>
+      </div>
     </div>
     @if (!isCollapsed()) {
       <div class="todo-items">
@@ -17,7 +28,48 @@
             >
               {{ statusIcon(item.status) }}
             </span>
-            <span class="todo-text">{{ item.text }}</span>
+            <div class="todo-body">
+              <div class="todo-row">
+                <span class="todo-text">{{ item.text }}</span>
+                <button
+                  class="icon-btn comment-btn"
+                  type="button"
+                  (click)="startEditComment(item, $event)"
+                  [attr.aria-label]="item.comment ? 'Edit comment' : 'Add comment'"
+                  [title]="item.comment ? 'Edit comment' : 'Add comment'"
+                >
+                  <mat-icon>{{ item.comment ? 'chat_bubble' : 'add_comment' }}</mat-icon>
+                </button>
+              </div>
+              @if (item.comment) {
+                <div class="todo-comment">{{ item.comment }}</div>
+              }
+              @if (editingIndex() === item.index) {
+                <div class="todo-comment-editor" (click)="$event.stopPropagation()">
+                  <textarea
+                    class="comment-input"
+                    rows="2"
+                    placeholder="Add a comment…"
+                    [value]="editingComment()"
+                    (input)="onCommentInput($event)"
+                  ></textarea>
+                  <div class="editor-actions">
+                    <button
+                      class="editor-btn primary"
+                      type="button"
+                      (click)="saveComment(item, $event)"
+                      [disabled]="isSavingComment()"
+                    >Save</button>
+                    <button
+                      class="editor-btn secondary"
+                      type="button"
+                      (click)="cancelEdit($event)"
+                      [disabled]="isSavingComment()"
+                    >Cancel</button>
+                  </div>
+                </div>
+              }
+            </div>
           </div>
         }
       </div>

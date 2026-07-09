@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import type { TodoItem } from './sse.service';
 import type {
   InstanceInfo,
   InstanceListResponse,
@@ -102,6 +103,15 @@ export class ApiService {
 
   getMessages(instanceId: string): Observable<Message[]> {
     return this.http.get<Message[]>(`${this.API_BASE}/instances/${instanceId}/messages`);
+  }
+
+  // Todos
+  getTodos(instanceId: string): Observable<TodoItem[]> {
+    return this.http.get<TodoItem[]>(`${this.API_BASE}/instances/${instanceId}/todos`);
+  }
+
+  setTodoComment(instanceId: string, index: number, comment: string): Observable<TodoItem> {
+    return this.http.post<TodoItem>(`${this.API_BASE}/instances/${instanceId}/todos/${index}/comment`, { comment });
   }
 
   // Sources

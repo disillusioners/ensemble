@@ -63,11 +63,16 @@ class TodoItem:
         index: Position within the instance's todo list (0-based).
         text: Human-readable description of the item.
         status: One of ``pending``, ``in_progress``, ``done``.
+        comment: Optional user-supplied annotation. Separate from ``text``
+            — editing ``text`` is not allowed; ``comment`` is a side-channel
+            for human feedback on a completed item (e.g. corrections,
+            follow-up notes). Defaults to empty string.
     """
 
     index: int
     text: str
     status: str
+    comment: str = ""
 
 
 class TodoManager:
@@ -99,15 +104,30 @@ class TodoManager:
             The newly stored todo list as plain dicts.
         """
         new_items = [
-            TodoItem(index=i, text=text, status="pending")
+            TodoItem(index=i, text=text, status="pending", comment="")
             for i, text in enumerate(items)
         ]
         with self._lock:
             self._instance_todos[instance_id] = new_items
             return [self._to_dict(item) for item in new_items]
 
-    def update(self, instance_id: str, index: int, status: str) -> list[dict] | None:
-        """Update the status of a single item.
+    def update(self, instance_id: str, index: int, status: str) -> dict | None:
+        """Update the status of a single item and return the reminder payload.
+
+        The return value is a dict ``{"todos": [...], "reminder": str}`` so
+        callers (notably the ``todo_update`` tool) get the updated list AND
+        a human-readable reminder string in one round-trip. The reminder
+        points at the next pending item, prefixed with the user's comment
+        (when present) so the agent sees human feedback on the just-completed
+        item in the same breath as the next task to work on.
+
+        Reminder shape:
+            * When ``status == "done"`` and the completed item carries a
+              non-empty ``comment``: ``"User commented: {comment}\\n{next}"``
+              where ``{next}`` is the original next-pending reminder (or the
+              all-completed message when no item remains).
+            * Otherwise: ``"⏭️ Next: {text}"`` or ``"All items completed! ✅"``
+              — the same wording the tool used to produce inline.
 
         Args:
             instance_id: Owning instance identifier.
@@ -116,8 +136,9 @@ class TodoManager:
                 ``done``.
 
         Returns:
-            The full todo list as plain dicts, or ``None`` if the status
-            is invalid or the index does not exist for the instance.
+            Dict with keys ``todos`` (full list snapshot) and ``reminder``
+            (formatted string), or ``None`` if the status is invalid or the
+            index does not exist for the instance.
         """
         normalized = _normalize_status(status)
         if normalized is None:
@@ -132,8 +153,53 @@ class TodoManager:
             items = self._instance_todos.get(instance_id)
             if items is None or index < 0 or index >= len(items):
                 return None
-            items[index].status = normalized
-            return [self._to_dict(item) for item in items]
+            target = items[index]
+            target.status = normalized
+            completed_comment = target.comment
+            # Compute reminder against the now-mutated list snapshot. We
+            # use _to_dict on each item so we don't depend on the dataclass
+            # vs dict asymmetry.
+            snapshot = [self._to_dict(item) for item in items]
+            next_pending = next(
+                (t for t in snapshot if t["status"] == "pending"),
+                None,
+            )
+            if next_pending is not None:
+                base_reminder = f"\n\n⏭️ Next: {next_pending['text']}"
+            else:
+                base_reminder = "\n\nAll items completed! ✅"
+            if normalized == "done" and completed_comment:
+                reminder = f"User commented: {completed_comment}" + base_reminder
+            else:
+                reminder = base_reminder
+            return {"todos": snapshot, "reminder": reminder}
+
+    def set_comment(self, instance_id: str, index: int, comment: str) -> dict:
+        """Set the comment on the item at ``index``.
+
+        Args:
+            instance_id: Owning instance identifier.
+            index: Position of the item to annotate.
+            comment: The annotation text. Empty string clears the comment.
+
+        Returns:
+            The updated item as a plain dict.
+
+        Raises:
+            ValueError: If the instance has no todo list or the index is
+                out of range. Matches the ``update``-style error contract
+                but raised (not returned) so HTTP callers can map it to a
+                404/400 response.
+        """
+        with self._lock:
+            items = self._instance_todos.get(instance_id)
+            if items is None or index < 0 or index >= len(items):
+                raise ValueError(
+                    f"index {index} out of range for instance {instance_id!r} "
+                    f"(list length: {0 if items is None else len(items)})"
+                )
+            items[index].comment = comment
+            return self._to_dict(items[index])
 
     def get_all(self, instance_id: str) -> list[dict]:
         """Return the instance's current todo list.
@@ -160,4 +226,9 @@ class TodoManager:
     @staticmethod
     def _to_dict(item: TodoItem) -> dict:
         """Serialize a :class:`TodoItem` to a plain dict."""
-        return {"index": item.index, "text": item.text, "status": item.status}
+        return {
+            "index": item.index,
+            "text": item.text,
+            "status": item.status,
+            "comment": item.comment,
+        }

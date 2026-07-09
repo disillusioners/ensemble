@@ -284,10 +284,12 @@ class TestSSEPayloadStructure:
     """The ``todos`` argument sent to the hub mirrors the manager's stored state."""
 
     async def test_sse_payload_after_create_contains_serializable_dicts(self):
-        """Each ``todo`` in the payload is a plain ``{index, text, status}`` dict.
+        """Each ``todo`` in the payload is a plain ``{index, text, status, comment}`` dict.
 
         The frontend JSON-serializes the payload directly — anything not
-        a primitive would break its parser.
+        a primitive would break its parser. ``comment`` is always present
+        (default empty string) so the FE doesn't have to handle a
+        missing-key case.
         """
         hub = AsyncMock()
         manager = _make_manager_with_hub()
@@ -299,10 +301,11 @@ class TestSSEPayloadStructure:
         todos_arg = hub.stream_todo_update.call_args.args[1]
         assert len(todos_arg) == 1
         item = todos_arg[0]
-        assert set(item.keys()) == {"index", "text", "status"}
+        assert set(item.keys()) == {"index", "text", "status", "comment"}
         assert item["index"] == 0
         assert item["text"] == "Only one"
         assert item["status"] == "pending"
+        assert item["comment"] == ""
 
     async def test_sse_payload_after_partial_progress_reflects_current_state(self):
         """After marking some items done, the payload reflects the new statuses.
