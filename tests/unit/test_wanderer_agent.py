@@ -2,8 +2,9 @@
 
 Tests Wanderer agent discovery, loading, tool filtering, and prompt composition.
 Wanderer is a read-only investigation agent that explores codebases, answers
-questions, and does library research WITHOUT modifying files. It can spawn
-coder instances for complex multi-file investigations.
+questions, and does library research WITHOUT modifying files. Wanderer is
+self-sufficient — all investigation is done directly with its own tools;
+it does not spawn other agent instances.
 
 All tests run in the unit test environment with langgraph mocks from conftest.py.
 """
@@ -52,10 +53,10 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
-# Expected tool categories in meta.json allow list (the 10 declared categories).
+# Expected tool categories in meta.json allow list (the 9 declared categories).
 EXPECTED_ALLOW_CATEGORIES = [
     "bash", "filesystem", "time", "self", "help",
-    "knowledge", "mcp", "context", "instance", "rag",
+    "knowledge", "mcp", "context", "rag",
 ]
 
 
@@ -167,7 +168,7 @@ class TestWandererMetaJsonValidation:
         assert isinstance(tools_config["allow"], list)
 
     def test_tools_allow_has_all_declared_categories(self) -> None:
-        """Verify all 10 categories listed in meta.json are in the allow list."""
+        """Verify all 9 categories listed in meta.json are in the allow list."""
         meta_path = WANDERER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
@@ -188,24 +189,25 @@ class TestWandererMetaJsonValidation:
         allowed = meta.get("tools", {}).get("allow", [])
         assert "db" not in allowed
 
-    def test_team_members_includes_coder(self) -> None:
-        """Wanderer can spawn coder instances for complex investigations."""
+    def test_tools_allow_does_not_contain_instance(self) -> None:
+        """Wanderer is self-sufficient and does not spawn other agent instances."""
         meta_path = WANDERER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        team_members = meta.get("team_members", [])
-        assert "coder" in team_members, (
-            f"team_members should include 'coder' for spawning investigations. "
-            f"Got: {team_members}"
+        allowed = meta.get("tools", {}).get("allow", [])
+        assert "instance" not in allowed, (
+            f"tools.allow should not include 'instance' — wanderer does its own "
+            f"investigation. Got: {allowed}"
         )
 
-    def test_team_members_does_not_contain_opencode(self) -> None:
+    def test_team_members_field_is_absent(self) -> None:
+        """Wanderer is self-sufficient and has no team_members field."""
         meta_path = WANDERER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        team_members = meta.get("team_members", [])
-        assert "opencode" not in team_members, (
-            f"team_members should not contain 'opencode': {team_members}"
+        assert "team_members" not in meta, (
+            f"meta.json should not define 'team_members' — wanderer does all "
+            f"investigation directly. Got: {meta.get('team_members')}"
         )
 
     def test_tools_config_parsed_by_registry(self) -> None:
@@ -268,8 +270,6 @@ class TestWandererToolFilter:
         # filesystem tools should resolve
         for t in ["read_file", "glob_files", "grep_files", "list_directory"]:
             assert t in allowed_tools
-        # instance tools should resolve
-        assert "spawn_instance" in allowed_tools
         # mcp tools should resolve
         assert "mcp_list_servers" in allowed_tools
         assert "mcp_invoke" in allowed_tools
@@ -280,6 +280,8 @@ class TestWandererToolFilter:
         assert "rag_query" in allowed_tools
         # self tools should resolve
         assert "inner_soul" in allowed_tools
+        # instance tools must NOT resolve (wanderer is self-sufficient)
+        assert "spawn_instance" not in allowed_tools
 
     def test_wanderer_resolve_excludes_db_and_opencode(self) -> None:
         from daemon.tools.instance import resolve_tool_filter
@@ -340,7 +342,6 @@ class TestWandererToolFilter:
         tools = [
             MockTool("read_file"),
             MockTool("glob_files"),
-            MockTool("spawn_instance"),
             MockTool("rag_query"),
             MockTool("db_query"),  # Should be filtered out (db not in allow)
             MockTool("write_file"),  # Available but forbidden by soul policy
@@ -365,7 +366,6 @@ class TestWandererToolFilter:
                 # Allowed tools should be present
                 assert "read_file" in tool_names
                 assert "glob_files" in tool_names
-                assert "spawn_instance" in tool_names
                 assert "rag_query" in tool_names
                 # write_file is technically available (filesystem in allow)
                 # but soul policy forbids it - that's a policy, not a tool-filter test
@@ -373,6 +373,8 @@ class TestWandererToolFilter:
                 assert "db_query" not in tool_names
                 # opencode tools should be filtered out
                 assert "external_opencode_init_session" not in tool_names
+                # instance tools should be filtered out (wanderer is self-sufficient)
+                assert "spawn_instance" not in tool_names
 
 
 # =============================================================================
@@ -411,21 +413,27 @@ class TestWandererSoulContent:
         # Must contain "never" near these references
         assert "never" in content
 
-    def test_soul_forbids_opencode_spawning(self) -> None:
+    def test_soul_declares_self_sufficient_investigation(self) -> None:
+        """Wanderer is self-sufficient — all investigation is done directly."""
         soul_path = WANDERER_AGENT_DIR / "soul.md"
         content = soul_path.read_text(encoding="utf-8").lower()
-        # Should mention opencode as forbidden
-        assert "opencode" in content
-        # And state that wanderer does NOT spawn opencode
-        # (delegates to coder instead)
-        assert "never" in content
+        # Must mention doing investigation directly
+        assert "directly" in content, (
+            "soul.md must state that investigation is done directly"
+        )
+        # Must state that wanderer does not spawn other agents
+        assert "spawn" in content and "does not spawn" in content, (
+            "soul.md must explicitly say wanderer does not spawn other agents"
+        )
 
-    def test_soul_mentions_coder_delegation(self) -> None:
-        """Wanderer spawns coder instances, not opencode, for heavy work."""
+    def test_soul_mentions_future_coder_delegation_note(self) -> None:
+        """Soul documents the future coder→developer alias delegation note."""
         soul_path = WANDERER_AGENT_DIR / "soul.md"
-        content = soul_path.read_text(encoding="utf-8").lower()
-        assert "coder" in content
-        assert "spawn" in content
+        content = soul_path.read_text(encoding="utf-8")
+        assert "coder→developer" in content or "coder->developer" in content, (
+            "soul.md must include the future coder→developer alias note"
+        )
+        assert "future" in content.lower()
 
     def test_soul_mentions_mcp_for_research(self) -> None:
         soul_path = WANDERER_AGENT_DIR / "soul.md"

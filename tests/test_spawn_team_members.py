@@ -412,6 +412,7 @@ class TestTeamMembersRegistryParsing:
             "approver", "tester", "giter", "devops",
             "explorer",  # Added in W1 so leader can authorize explore()'s
                          # internal spawn_instance of the "explorer" agent.
+            "wanderer",  # Added when wanderer agent was introduced.
         ]
         assert set(leader.team_members) == set(expected), (
             f"leader.team_members mismatch: got {leader.team_members}"

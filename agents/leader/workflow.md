@@ -202,6 +202,8 @@ I support three workflows. The user may invoke them sequentially within a single
    
    **For read-only investigation, codebase questions, or library research → delegate to Wanderer instead of Developer.** Wanderer is purpose-built for exploration; do not burden Developer with tasks that produce no code changes.
    
+   *If routed to Wanderer (read-only investigation): wait for findings, report to user, and STOP — skip review/test steps (they apply only to code deliverables, not investigation reports).*
+   
    Delegate to the matched specialist: "[goal]. [Key constraints]. [Context from plan if available]."
 
    **Ambiguous task routing:**
@@ -428,6 +430,8 @@ PHASE 1.5 — CLASSIFY DOMAIN
    Each investigator still receives the FULL Problem Brief.
 
 PHASE 2 — INVESTIGATE  (Team — DIAGNOSIS ONLY, NO FIX)
+   *Note: Wanderer and Explorer are optional cross-cutting investigators. They can be layered on top of the domain-selected investigators for deep codebase analysis.*
+   
    Delegate investigation to the specialists selected in Phase 1.5, EACH receiving the full Problem Brief:
 
    Developer (if application/mixed):    "Investigate bug [brief]. FULL logs: [paste]. Find WHERE the code fails
