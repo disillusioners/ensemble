@@ -54,17 +54,18 @@ class TestInnateSkillsSystemPromptIdentity:
         
         # Test each agent
         # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
+        # Updated for todo innate skill: all agents now have 'todo' appended.
         test_cases = [
-            ("developer", ["opencode", "chart"], "OpenCode-Skill"),
-            ("reviewer", ["opencode", "chart"], "OpenCode-Skill"),
-            ("tester", ["opencode", "chart", "test-pack"], "OpenCode-Skill"),  # tester gets BOTH
-            ("tester", ["opencode", "chart", "test-pack"], "Test Pack Skill"),  # tester gets BOTH
-            ("planner", ["opencode", "chart"], "OpenCode-Skill"),
-            ("tidier", ["opencode", "chart"], "OpenCode-Skill"),
-            ("approver", ["opencode", "chart"], "OpenCode-Skill"),
-            ("leader", ["coordination", "chart"], "Coordination Skill"),
-            ("jober", ["job-orchestration"], "Job Orchestration"),
-            ("giter", [], None),  # giter has NO innate_skills
+            ("developer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+            ("reviewer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+            ("tester", ["opencode", "chart", "test-pack", "todo"], "OpenCode-Skill"),  # tester gets BOTH
+            ("tester", ["opencode", "chart", "test-pack", "todo"], "Test Pack Skill"),  # tester gets BOTH
+            ("planner", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+            ("tidier", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+            ("approver", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+            ("leader", ["coordination", "chart", "todo"], "Coordination Skill"),
+            ("jober", ["job-orchestration", "todo"], "Job Orchestration"),
+            ("giter", ["todo"], "Todo Skill"),  # giter only has todo
         ] 
         
         for agent_id, expected_skills, expected_skill_content in test_cases:
@@ -94,7 +95,7 @@ class TestInnateSkillsSystemPromptIdentity:
         cache = PromptCache()
         tester_meta = real_registry.get("tester")
         assert tester_meta is not None
-        assert tester_meta.innate_skills == ["opencode", "chart", "test-pack"]
+        assert tester_meta.innate_skills == ["opencode", "chart", "test-pack", "todo"]
         
         prompt, _ = load_and_cache_prompt("tester", tester_meta.path, cache)
         
@@ -316,11 +317,11 @@ class TestRegistryInnateSkills:
             assert hasattr(meta, "innate_skills")
             assert isinstance(meta.innate_skills, list)
     
-    def test_giter_has_no_innate_skills(self, real_registry):
-        """giter should have empty innate_skills list."""
+    def test_giter_has_only_todo_innate_skill(self, real_registry):
+        """giter should have only the 'todo' innate skill (added in feature/todo-innate-skill)."""
         giter = real_registry.get("giter")
         assert giter is not None
-        assert giter.innate_skills == []
+        assert giter.innate_skills == ["todo"]
 
 
 class TestInnateSkillsIntegration:
