@@ -87,8 +87,9 @@
 
               <!-- Main message bubble - hide when only tool calls and no meaningful content -->
               @if (hasMeaningfulContent(message) || !message.tool_calls || message.tool_calls.length === 0) {
-                <div 
+                <div
                   class="message-bubble"
+                  [attr.data-message-id]="message.message_id"
                   [style.backgroundColor]="message.role === 'user' ? '#343541' : agentColor + '15'"
                   [style.border]="message.role === 'assistant' ? '1px solid ' + agentColor + '30' : 'none'"
                   [style.borderTopLeftRadius]="message.role === 'assistant' ? '4px' : '12px'"

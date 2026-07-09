@@ -556,6 +556,10 @@ $cyan: #06b6d4;
   justify-content: center;
   overflow-x: auto;
   max-width: 100%;
+  // `position: relative` lets the overlay buttons anchor to the chart
+  // without leaking out into the surrounding bubble. The overlay
+  // itself is injected programmatically after mermaid renders the SVG.
+  position: relative;
 
   svg {
     max-width: 100%;
@@ -575,5 +579,158 @@ $cyan: #06b6d4;
       font-size: 0.85em;
       white-space: pre-wrap;
     }
+  }
+}
+
+// Overlay buttons rendered above each chart. Sits above the SVG (z=5)
+// but below the scroll-to-bottom FAB (z=10) and any modal dialogs.
+.mermaid-overlay {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+  z-index: 5;
+  // Keep idle opacity low so the buttons don't compete with the
+  // chart; the chart is still fully interactive underneath.
+  opacity: 0.7;
+  transition: opacity 0.15s ease;
+
+  &:hover,
+  &:focus-within {
+    opacity: 1;
+  }
+}
+
+.mermaid-overlay-btn {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid #334155;
+  background-color: #1e293b;
+  color: #e2e8f0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  // Re-raise the button above the chart's own hover targets so a click
+  // on the icon does not also fire a click on the chart behind it.
+  pointer-events: auto;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+
+  &:hover,
+  &:focus-visible {
+    background-color: #334155;
+    border-color: #475569;
+    color: #f1f5f9;
+  }
+
+  &:active {
+    transform: scale(0.95);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #10a7f7;
+    outline-offset: 1px;
+  }
+
+  // Force the SVG icon to render at the small button size
+  // consistently across browsers.
+  svg {
+    width: 1rem;
+    height: 1rem;
+    display: block;
+  }
+}
+
+.mermaid-status-pill {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 5;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  pointer-events: none;
+  animation: mermaid-fade-in 0.15s ease-out;
+
+  &.mermaid-status-error {
+    border-color: #f43f5e;
+    color: #fecaca;
+  }
+}
+
+@keyframes mermaid-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+// ─── Mermaid fullscreen dialog + dropdown menu styling ─────────────────
+//
+// The fullscreen dialog is opened via `MatDialog` with two panel
+// classes: `dark-modal-panel` (project-wide dark-mode hook shared
+// with the other Material dialogs in the app) AND
+// `mermaid-fullscreen-panel` (a dedicated class that scopes the
+// fullscreen-only overrides — heavier backdrop blur and a large
+// radius). Putting every override on the dedicated class prevents
+// the rules from leaking onto the 10+ other dialogs that use
+// `dark-modal-panel` (jobs, schedules, source-list, mcp-server-list,
+// agent-selector, queue-list).
+//
+// The copy-menu dropdown is opened via a CDK `Overlay` with the
+// `mermaid-menu-panel-wrapper` panel class and a transparent backdrop
+// (`mermaid-menu-backdrop`) so it sits above the chart without
+// darkening the rest of the chat.
+::ng-deep {
+  .mermaid-fullscreen-panel {
+    .mat-mdc-dialog-container {
+      // `--mdc-dialog-container-color` feeds Material's
+      // `.mdc-dialog__surface { background-color: ... }`, so setting
+      // it here is what turns the wrapper dark. The surface's own
+      // background + text color + border are owned by the dialog
+      // component's `:host` rule, so we don't repeat them here.
+      --mdc-dialog-container-color: #0f172a;
+      --mdc-dialog-container-shape: 12px;
+    }
+
+    .mat-mdc-dialog-surface {
+      // The Material wrapper around the host. It extends a couple of
+      // pixels past the host's own border on each side, so we add a
+      // matching outline here to keep the panel edge continuous.
+      border: 1px solid #334155;
+    }
+
+    .cdk-overlay-backdrop {
+      // Heavier blur than the project-wide default — the fullscreen
+      // dialog is large enough that a tint without blur looks flat.
+      background-color: rgba(2, 6, 23, 0.75);
+      backdrop-filter: blur(4px);
+    }
+  }
+
+  .mermaid-menu-backdrop {
+    background: transparent;
+  }
+
+  .mermaid-menu-panel-wrapper {
+    // The CDK overlay positions the panel for us; just make sure the
+    // host element doesn't introduce its own width/height constraints.
+    pointer-events: auto;
   }
 }

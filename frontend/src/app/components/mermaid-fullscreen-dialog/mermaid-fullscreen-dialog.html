@@ -1,0 +1,40 @@
+<div class="fullscreen-shell">
+  <header class="fullscreen-header">
+    <h2 class="fullscreen-title">{{ title() }}</h2>
+    <div class="fullscreen-actions">
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn"
+        (click)="onCopySource()"
+        [attr.aria-label]="'Copy Mermaid source'">
+        <mat-icon>content_copy</mat-icon>
+        <span>Copy Source</span>
+      </button>
+      <button
+        type="button"
+        mat-icon-button
+        class="close-btn"
+        (click)="onClose()"
+        aria-label="Close fullscreen diagram"
+        title="Close (Esc)">
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+  </header>
+
+  @if (statusMessage()) {
+    <div class="status-banner" role="status" aria-live="polite">
+      {{ statusMessage() }}
+    </div>
+  }
+
+  <div class="fullscreen-body">
+    <div class="chart-stage" [innerHTML]="safeSvg()"></div>
+  </div>
+
+  <details class="source-block">
+    <summary>View Mermaid source</summary>
+    <pre class="source-pre"><code>{{ data.source }}</code></pre>
+  </details>
+</div>
