@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 157 packs
-- Unit: 136 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 158 packs
+- Unit: 137 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -25,6 +25,7 @@
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-05 | ✅ PASS (209 passed, 8 skipped, fix/windows-encoding-paths, 0 regressions) |
 | todo_unit_test | tests/test_todo_manager.py + tests/test_todo_tools.py + tests/test_todo_sse.py + tests/unit/routers/test_todo_api.py + tests/test_todo_comment_edge_cases.py | TodoManager CRUD, set_comment, update() reminder, todo tools (create/update/list/clear), status aliases, indicators, SSE stream_todo_update, API GET/POST, concurrent access, special chars (unicode/emoji/XSS), API error paths (400/404) | 2 min | 2026-07-09 | ✅ PASS (101/101, feature/todo-comment-refresh, commit c43f821c, 0 failures) |
+| wanderer_agent_unit_test | tests/unit/test_wanderer_agent.py | Wanderer agent: auto-discovery, meta.json validation (fields/types/innate_skills/tools config), tool filter (deny=None, no write tools, no db/instance/opencode, todo/chart expansion), soul content (readonly discipline, forbidden-modify, MCP, explore/experience, required sections, prompt loader) | 2 min | 2026-07-09 | ✅ PASS (36/36, feature/wanderer-agent, 0 failures) |
 | system_tools_unit_test | tests/unit/tools/test_system_tools.py | system_env (prefix filter, secret masking, nomask), system_config (section filter, recursive nested masking, dynamic Config.model_fields sections), system_health (version/db_type/rag/platform/PID), connection string masking, curated env allowlist, factory pattern wiring | 2 min | 2026-07-09 | ✅ PASS (69/69, feature/system-info-tools-gaia, commit 9f90f78e, 0 failures) |
 | coder_agent_unit_test | tests/unit/test_coder_agent.py | Coder agent: auto-discovery, meta.json validity (required fields, types, innate_skills, tools.allow), prompt composition (soul only, no opencode injection), tool configuration (bash/filesystem/time/self present, no instance/opencode/db), no opencode contamination | 2 min | 2026-07-09 | ✅ PASS (39/39, feature/coder-agent, commit 19e72ec3, 0 failures) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
