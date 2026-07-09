@@ -116,6 +116,14 @@ $accent-rose: #f43f5e;
 }
 
 .chart-stage {
+  // The body is a flex row container; without `flex: 1` and
+  // `min-width/min-height: 0` the chart-stage collapses to 0×0 because
+  // it has no intrinsic size (the mermaid SVG only carries `width: 100%`
+  // and cannot size its own parent). Stretching it inside the body
+  // gives the SVG a definite box to fill.
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -550,8 +550,18 @@ $cyan: #06b6d4;
   }
 }
 
-// Mermaid diagram styling for dark theme
-.mermaid {
+// Mermaid diagram styling for dark theme.
+// Note: `.mermaid` and the overlay buttons below are injected into the
+// DOM via `innerHTML` by the mermaid library / `MermaidActionsService`,
+// so they do NOT carry Angular's `_ngcontent-xxx` attribute. Plain
+// `.mermaid { … }` rules in this component-scoped stylesheet would be
+// rewritten as `.mermaid[_ngcontent-xxx]` and fail to match — which is
+// exactly the W5 bug we are fixing. `::ng-deep` pierces the view
+// encapsulation so the rules actually reach the dynamically injected
+// chart and overlay markup. The selectors below remain class-prefixed
+// so they still only target mermaid-related nodes (not unrelated
+// `.mermaid-overlay` etc. that some future component might add).
+::ng-deep .mermaid {
   display: flex;
   justify-content: center;
   overflow-x: auto;
@@ -567,24 +577,22 @@ $cyan: #06b6d4;
   }
 }
 
-.message-bubble {
-  .mermaid {
-    background: transparent;
-    border: none;
-    padding: 8px 0;
+::ng-deep .message-bubble .mermaid {
+  background: transparent;
+  border: none;
+  padding: 8px 0;
 
-    &[data-mermaid-error] {
-      color: #f43f5e;
-      font-family: 'Courier New', monospace;
-      font-size: 0.85em;
-      white-space: pre-wrap;
-    }
+  &[data-mermaid-error] {
+    color: #f43f5e;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85em;
+    white-space: pre-wrap;
   }
 }
 
 // Overlay buttons rendered above each chart. Sits above the SVG (z=5)
 // but below the scroll-to-bottom FAB (z=10) and any modal dialogs.
-.mermaid-overlay {
+::ng-deep .mermaid-overlay {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
@@ -602,7 +610,7 @@ $cyan: #06b6d4;
   }
 }
 
-.mermaid-overlay-btn {
+::ng-deep .mermaid-overlay-btn {
   width: 1.75rem;
   height: 1.75rem;
   border-radius: 0.375rem;
@@ -649,7 +657,7 @@ $cyan: #06b6d4;
   }
 }
 
-.mermaid-status-pill {
+::ng-deep .mermaid-status-pill {
   position: absolute;
   top: 0.5rem;
   left: 0.5rem;
