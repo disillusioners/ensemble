@@ -67,6 +67,7 @@ class MockJob:
     def __init__(self, job_id: str = "test-job-123", message_id: str = "test-msg-456"):
         # Post-D13 ``Task`` attributes.
         self.id = job_id
+        self.work_id = job_id  # Stable UUID4 string used by ``resume_processing_job``
         self.task_type = "process_message"
         self.instance_id = "test-instance"
         self.message_id = message_id
