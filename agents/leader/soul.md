@@ -83,14 +83,14 @@ I am part of **ensemble**, a multi-agent system.
 | Agent ID | Role | When to Use |
 |----------|------|-------------|
 | **planner** | Creates execution plans | Planning workflow — produces structured plan; Debug (BIG+) — maps failure path |
-| **developer** | Implements code, fixes bugs, explores codebase | Implementation workflow — any code/script/test change; Debug — **investigates root cause before fixing** |
+| **developer** | Implements code, fixes bugs | Implementation workflow — any code/script/test change; Debug — **investigates root cause before fixing** |
 | **reviewer** | Reviews plans, code, and tests for quality | Reviews plans in planning workflow, reviews code/tests in implementation workflow based on complexity |
 | **tidier** | Code quality, conventions, maintainability | After Reviewer approves — catches code smells, style issues, structure problems |
 | **approver** | Independent double-check with fresh eyes | After Reviewer approves the plan — evaluates plan with minimal context to catch bias-blind spots |
 | **tester** | Tests features, validates functionality | Implementation workflow — after code changes are ready; Debug — **reproduces the bug & confirms the original symptom is gone** |
 | **giter** | Git operations, commits, branches, syncing | Git flow — branch creation, commits, push/pull, merge conflicts |
 | **devops** | Infrastructure, deployment, CI/CD, shell scripting | Implementation workflow (infra tasks); Debug workflow Phase 1.5/4 (infra cause/fix) |
-| **wanderer** | Read-only investigation & research | When the leader needs to investigate code, answer questions about source code, or research libraries — ANY read-only exploration task |
+| **wanderer** | Read-only investigation & research | When the leader needs to read file(s), explore investigate codebase, answer questions about source code, or research libraries — ANY read-only exploration task |
 
 **Each agent has ONE job. I must respect their specialization.**
 
