@@ -280,117 +280,11 @@
   white-space: nowrap;
 }
 
-// Graph-mode comment popup. A small panel anchored next to the clicked
-// node. Positioned in container coordinates by openCommentPopup; the
-// .placement-* class only drives the arrow-notch direction.
-.graph-popup {
-  position: absolute;
-  z-index: 10;
-  width: 240px;
-  background: #0b1220;
-  border: 1px solid #1e293b;
-  border-radius: 6px;
-  padding: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  animation: popupIn 0.15s ease-out;
-  // Slightly soften the entrance so the popup feels anchored to the node
-  // rather than dropped in.
-  transform-origin: top left;
-  // Smooth width/height transition when toggling the expanded state.
-  transition: width 0.15s ease;
-
-  // Expanded state — toggled by the expand button in the popup toolbar /
-  // sub-task header. Grows wider (and the inner textarea / list grow
-  // taller via the rules below) so long comments and big checklists have
-  // room. The component re-runs the edge-flip math with this width so the
-  // larger panel stays on-screen.
-  &.expanded {
-    width: 560px;
-  }
-}
-
-// Top-aligned toolbar row holding the expand toggle (comment popup only;
-// the sub-task popup puts its expand button inside the header row).
-.popup-toolbar {
-  display: flex;
-  justify-content: flex-end;
-}
-
-// Quiet expand/collapse icon button shared by both popups.
-.popup-expand-btn {
-  color: #64748b;
-  flex-shrink: 0;
-  padding: 0;
-
-  mat-icon {
-    font-size: 16px;
-    width: 16px;
-    height: 16px;
-  }
-
-  &:hover {
-    color: #e2e8f0;
-  }
-}
-
-// When expanded, give the comment textarea vertical room to write a long
-// note (the default rows="2" + resize stays; this just raises the floor).
-.graph-popup.expanded .comment-input {
-  min-height: 150px;
-}
-
-// Arrow notch — a CSS triangle on the side of the popup facing the node.
-// The colored border forms a triangle that points toward the node.
-.graph-popup::before {
-  content: '';
-  position: absolute;
-  width: 0;
-  height: 0;
-  border-style: solid;
-}
-
-// Right placement: popup is to the right of the node → arrow on the left
-// edge of the popup, pointing left (toward the node).
-.graph-popup.placement-right::before {
-  left: -7px;
-  top: 50%;
-  transform: translateY(-50%);
-  border-width: 6px 7px 6px 0;
-  border-color: transparent #1e293b transparent transparent;
-}
-
-// Left placement: arrow on the right edge, pointing right.
-.graph-popup.placement-left::before {
-  right: -7px;
-  top: 50%;
-  transform: translateY(-50%);
-  border-width: 6px 0 6px 7px;
-  border-color: transparent transparent transparent #1e293b;
-}
-
-// Below placement: arrow on the top edge, pointing up.
-.graph-popup.placement-below::before {
-  top: -7px;
-  left: 50%;
-  transform: translateX(-50%);
-  border-width: 0 6px 7px 6px;
-  border-color: transparent transparent #1e293b transparent;
-}
-
-// Above placement: arrow on the bottom edge, pointing down.
-.graph-popup.placement-above::before {
-  bottom: -7px;
-  left: 50%;
-  transform: translateX(-50%);
-  border-width: 7px 6px 0 6px;
-  border-color: #1e293b transparent transparent transparent;
-}
-
-// Character count under the textarea. Stays muted at low counts, turns
-// amber as it approaches the limit, and red once it goes over.
+// Character count under the comment textarea. Stays muted at low counts,
+// turns amber as it approaches the limit, and red once it goes over.
+// (The graph-popup shell + arrow notch now live in
+// todo-graph-popup.component.scss — it's a CDK overlay, so it's no longer
+// clipped by this component's overflow:hidden.)
 .char-count {
   font-size: 0.7rem;
   color: #64748b;
@@ -406,32 +300,6 @@
     color: #ef4444;
     font-weight: 500;
   }
-}
-
-@keyframes popupIn {
-  from {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-// Side-placement popups anchor their entrance from the side closest to the
-// node, so the animation feels like it grows out of the node rather than
-// appearing in the middle of the panel.
-.graph-popup.placement-left {
-  transform-origin: top right;
-}
-
-.graph-popup.placement-above {
-  transform-origin: bottom left;
-}
-
-.graph-popup.placement-below {
-  transform-origin: top left;
 }
 
 // =====================================================================
@@ -618,13 +486,9 @@
   font-variant-numeric: tabular-nums;
 }
 
-// Sub-task popup (graph mode). Extends the shared .graph-popup base
-// (positioning, arrow notch, dark surface) so the visual treatment
-// matches the comment popup exactly.
-.subtask-popup {
-  gap: 6px;
-}
-
+// Sub-task popup header + title (the popup body is stamped into the CDK
+// overlay shell from this component's template, so these styles still
+// apply to the body elements).
 .subtask-popup-header {
   display: flex;
   align-items: center;
@@ -645,16 +509,10 @@
 
 // Inside the popup we drop the left indentation used in linear mode and
 // cap the height so a long checklist scrolls instead of pushing the
-// "Add" input off-screen.
-.subtask-popup .subtask-list {
+// "Add" input off-screen. Uses a modifier class (not the .subtask-popup
+// ancestor) because the popup shell now lives in a separate component.
+.subtask-list--popup {
   padding-left: 0;
-  max-height: 200px;
+  max-height: 300px;
   overflow-y: auto;
-}
-
-// Expanded sub-task popup: raise the checklist cap so more items are
-// visible before scrolling. Specificity (.graph-popup.expanded ...) beats
-// the .subtask-popup .subtask-list rule above.
-.graph-popup.expanded .subtask-list {
-  max-height: 400px;
 }

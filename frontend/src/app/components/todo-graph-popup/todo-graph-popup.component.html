@@ -1,0 +1,19 @@
+<ng-template
+  cdkConnectedOverlay
+  [cdkConnectedOverlayOrigin]="origin()!"
+  [cdkConnectedOverlayOpen]="open() && !!origin()"
+  [cdkConnectedOverlayPositions]="positions"
+  [cdkConnectedOverlayScrollStrategy]="scrollStrategy"
+  [cdkConnectedOverlayViewportMargin]="8"
+  (cdkConnectedOverlayPositionChange)="onPositionChange($event)"
+  (detach)="onDetach()"
+>
+  <div
+    class="graph-popup"
+    [ngClass]="'placement-' + placement()"
+    (click)="$event.stopPropagation()"
+    role="dialog"
+  >
+    <ng-container *ngTemplateOutlet="content()" />
+  </div>
+</ng-template>

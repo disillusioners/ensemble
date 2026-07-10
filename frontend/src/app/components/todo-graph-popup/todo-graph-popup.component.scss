@@ -1,0 +1,90 @@
+// Shell for a graph-mode popup rendered via CDK connected overlay. The CDK
+// overlay pane handles absolute positioning + viewport flipping, so this
+// element only needs its visual surface + the arrow notch (position:relative
+// anchors the ::before arrow to the shell). Body markup comes from the
+// caller's template (ngTemplateOutlet) and is styled by the caller.
+
+.graph-popup {
+  position: relative;
+  width: 480px;
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: popupIn 0.15s ease-out;
+  transform-origin: top left;
+}
+
+// Arrow notch — a CSS triangle on the side of the popup facing the node.
+.graph-popup::before {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+
+// Right placement: popup is to the right of the node → arrow on the left
+// edge of the popup, pointing left (toward the node).
+.graph-popup.placement-right::before {
+  left: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px 7px 6px 0;
+  border-color: transparent #1e293b transparent transparent;
+}
+
+// Left placement: arrow on the right edge, pointing right.
+.graph-popup.placement-left::before {
+  right: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px 0 6px 7px;
+  border-color: transparent transparent transparent #1e293b;
+}
+
+// Below placement: arrow on the top edge, pointing up.
+.graph-popup.placement-below::before {
+  top: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 0 6px 7px 6px;
+  border-color: transparent transparent #1e293b transparent;
+}
+
+// Above placement: arrow on the bottom edge, pointing down.
+.graph-popup.placement-above::before {
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 7px 6px 0 6px;
+  border-color: #1e293b transparent transparent transparent;
+}
+
+@keyframes popupIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+// Side placements anchor their entrance from the side closest to the node.
+.graph-popup.placement-left {
+  transform-origin: top right;
+}
+
+.graph-popup.placement-above {
+  transform-origin: bottom left;
+}
+
+.graph-popup.placement-below {
+  transform-origin: top left;
+}

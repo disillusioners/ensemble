@@ -201,8 +201,10 @@
                     >{{ item.text }}</span>
                     <button
                       class="icon-btn comment-btn"
+                      cdkOverlayOrigin
+                      #commentOrigin="cdkOverlayOrigin"
                       type="button"
-                      (click)="openCommentPopup(item, $event)"
+                      (click)="openCommentPopup(item, $event, commentOrigin)"
                       [attr.aria-label]="item.comment ? 'Edit comment' : 'Add comment'"
                       [title]="item.comment ? 'Edit comment' : 'Add comment'"
                     >
@@ -214,8 +216,10 @@
                          sub-tasks exist, a "+" icon when empty. -->
                     <button
                       class="icon-btn subtask-badge-btn"
+                      cdkOverlayOrigin
+                      #subtaskOrigin="cdkOverlayOrigin"
                       type="button"
-                      (click)="openSubtaskPopup(item, $event)"
+                      (click)="openSubtaskPopup(item, $event, subtaskOrigin)"
                       [title]="item.subtasks && item.subtasks.length ? 'Sub-tasks' : 'Add sub-task'"
                     >
                       @if (item.subtasks && item.subtasks.length > 0) {
@@ -229,143 +233,108 @@
               }
             }
           </svg>
-          <!-- Graph-mode comment popup. Rendered as a sibling of the SVG so the
-               foreignObject contents stay clean. Positioned in container coords
-               by openCommentPopup; placement class drives the arrow direction. -->
-          @if (commentPopupItem(); as popupItem) {
-            @if (commentPopupPosition(); as popupPos) {
+          <!-- Graph-mode popups are real CDK overlays (app-todo-graph-popup):
+               they anchor to the clicked node button and float in the global
+               overlay pane, so they are NOT clipped by the todo container's
+               overflow:hidden. The bodies are <ng-template>s stamped into the
+               overlay shell via ngTemplateOutlet (declared here so they keep
+               this component's context). -->
+          <app-todo-graph-popup
+            [origin]="commentOrigin()"
+            [open]="commentPopupNodeId() !== null"
+            [content]="commentBodyTpl() ?? null"
+            (closed)="closeAllPopups()"
+          />
+          <app-todo-graph-popup
+            [origin]="subtaskOrigin()"
+            [open]="subtaskPopupNodeId() !== null"
+            [content]="subtaskBodyTpl() ?? null"
+            (closed)="closeAllPopups()"
+          />
+
+          <ng-template #commentBody>
+            @if (commentPopupItem(); as popupItem) {
+              <textarea
+                class="comment-input"
+                rows="3"
+                placeholder="Add a comment…"
+                [value]="editingComment()"
+                (input)="onCommentInput($event)"
+              ></textarea>
               <div
-                class="graph-popup"
-                [class.expanded]="popupExpanded()"
-                [class.placement-right]="popupPos.placement === 'right'"
-                [class.placement-left]="popupPos.placement === 'left'"
-                [class.placement-above]="popupPos.placement === 'above'"
-                [class.placement-below]="popupPos.placement === 'below'"
-                [style.left.px]="popupPos.x"
-                [style.top.px]="popupPos.y"
-                (click)="$event.stopPropagation()"
-                role="dialog"
-                aria-label="Edit comment"
-              >
-                <div class="popup-toolbar">
-                  <button
-                    class="icon-btn popup-expand-btn"
-                    type="button"
-                    (click)="togglePopupExpand($event)"
-                    [attr.aria-label]="popupExpanded() ? 'Collapse' : 'Expand'"
-                    [title]="popupExpanded() ? 'Collapse' : 'Expand'"
-                  >
-                    <mat-icon>{{ popupExpanded() ? 'close_fullscreen' : 'open_in_full' }}</mat-icon>
-                  </button>
-                </div>
-                <textarea
-                  class="comment-input"
-                  rows="2"
-                  placeholder="Add a comment…"
-                  [value]="editingComment()"
-                  (input)="onCommentInput($event)"
-                ></textarea>
-                <div
-                  class="char-count"
-                  [class.warning]="commentCharWarning() && !commentCharExceeded()"
-                  [class.exceeded]="commentCharExceeded()"
-                >{{ commentCharCount() }} / 1000</div>
-                <div class="editor-actions">
-                  <button
-                    class="editor-btn primary"
-                    type="button"
-                    (click)="saveComment(popupItem, $event)"
-                    [disabled]="isSavingComment() || commentCharExceeded()"
-                  >Save</button>
-                  <button
-                    class="editor-btn secondary"
-                    type="button"
-                    (click)="cancelEdit($event)"
-                    [disabled]="isSavingComment()"
-                  >Cancel</button>
-                </div>
+                class="char-count"
+                [class.warning]="commentCharWarning() && !commentCharExceeded()"
+                [class.exceeded]="commentCharExceeded()"
+              >{{ commentCharCount() }} / 1000</div>
+              <div class="editor-actions">
+                <button
+                  class="editor-btn primary"
+                  type="button"
+                  (click)="saveComment(popupItem, $event)"
+                  [disabled]="isSavingComment() || commentCharExceeded()"
+                >Save</button>
+                <button
+                  class="editor-btn secondary"
+                  type="button"
+                  (click)="cancelEdit($event)"
+                  [disabled]="isSavingComment()"
+                >Cancel</button>
               </div>
             }
-          }
-          <!-- Graph-mode sub-task popup. Sibling of the comment popup;
-               mutually exclusive (opening one closes the other). The
-               header shows the parent task text + a done/total badge,
-               followed by the checklist and an inline add input. -->
-          @if (subtaskPopupItem(); as subPopupItem) {
-            @if (subtaskPopupPosition(); as subPopupPos) {
-              <div
-                class="graph-popup subtask-popup"
-                [class.expanded]="popupExpanded()"
-                [class.placement-right]="subPopupPos.placement === 'right'"
-                [class.placement-left]="subPopupPos.placement === 'left'"
-                [class.placement-above]="subPopupPos.placement === 'above'"
-                [class.placement-below]="subPopupPos.placement === 'below'"
-                [style.left.px]="subPopupPos.x"
-                [style.top.px]="subPopupPos.y"
-                (click)="$event.stopPropagation()"
-                role="dialog"
-                aria-label="Sub-tasks"
-              >
-                <div class="subtask-popup-header">
-                  <span class="subtask-popup-title" [title]="subPopupItem.text">{{ subPopupItem.text }}</span>
-                  <span class="subtask-count-badge">{{ subtaskCount(subPopupItem).done }}/{{ subtaskCount(subPopupItem).total }}</span>
-                  <button
-                    class="icon-btn popup-expand-btn"
-                    type="button"
-                    (click)="togglePopupExpand($event)"
-                    [attr.aria-label]="popupExpanded() ? 'Collapse' : 'Expand'"
-                    [title]="popupExpanded() ? 'Collapse' : 'Expand'"
-                  >
-                    <mat-icon>{{ popupExpanded() ? 'close_fullscreen' : 'open_in_full' }}</mat-icon>
-                  </button>
-                </div>
-                <div class="subtask-list">
-                  @for (sub of subPopupItem.subtasks; track sub.id) {
-                    <div class="subtask-item" [class.done]="sub.status === 'done'">
-                      <button
-                        class="subtask-checkbox"
-                        type="button"
-                        (click)="toggleSubtask(subPopupItem, sub, $event)"
-                      >
-                        <mat-icon>{{ sub.status === 'done' ? 'check_box' : 'check_box_outline_blank' }}</mat-icon>
-                      </button>
-                      <span class="subtask-text">{{ sub.text }}</span>
-                      <button
-                        class="icon-btn subtask-remove"
-                        type="button"
-                        (click)="removeSubtask(subPopupItem, sub, $event)"
-                        aria-label="Remove sub-task"
-                        title="Remove sub-task"
-                      >
-                        <mat-icon>close</mat-icon>
-                      </button>
-                    </div>
-                  }
-                </div>
-                <div class="subtask-add">
-                  <input
-                    class="subtask-input"
-                    type="text"
-                    placeholder="Add a sub-task…"
-                    maxlength="500"
-                    [value]="newSubtaskText()"
-                    [disabled]="isAddingSubtask()"
-                    (input)="onSubtaskTextInput($event)"
-                    (keydown.enter)="addSubtask(subPopupItem)"
-                  />
-                  <button
-                    class="editor-btn primary"
-                    type="button"
-                    (click)="addSubtask(subPopupItem)"
-                    [disabled]="isAddingSubtask()"
-                  >Add</button>
-                </div>
-                @if (subtaskError()) {
-                  <div class="subtask-error">{{ subtaskError() }}</div>
+          </ng-template>
+
+          <ng-template #subtaskBody>
+            @if (subtaskPopupItem(); as subPopupItem) {
+              <div class="subtask-popup-header">
+                <span class="subtask-popup-title" [title]="subPopupItem.text">{{ subPopupItem.text }}</span>
+                <span class="subtask-count-badge">{{ subtaskCount(subPopupItem).done }}/{{ subtaskCount(subPopupItem).total }}</span>
+              </div>
+              <div class="subtask-list subtask-list--popup">
+                @for (sub of subPopupItem.subtasks; track sub.id) {
+                  <div class="subtask-item" [class.done]="sub.status === 'done'">
+                    <button
+                      class="subtask-checkbox"
+                      type="button"
+                      (click)="toggleSubtask(subPopupItem, sub, $event)"
+                    >
+                      <mat-icon>{{ sub.status === 'done' ? 'check_box' : 'check_box_outline_blank' }}</mat-icon>
+                    </button>
+                    <span class="subtask-text">{{ sub.text }}</span>
+                    <button
+                      class="icon-btn subtask-remove"
+                      type="button"
+                      (click)="removeSubtask(subPopupItem, sub, $event)"
+                      aria-label="Remove sub-task"
+                      title="Remove sub-task"
+                    >
+                      <mat-icon>close</mat-icon>
+                    </button>
+                  </div>
                 }
               </div>
+              <div class="subtask-add">
+                <input
+                  class="subtask-input"
+                  type="text"
+                  placeholder="Add a sub-task…"
+                  maxlength="500"
+                  [value]="newSubtaskText()"
+                  [disabled]="isAddingSubtask()"
+                  (input)="onSubtaskTextInput($event)"
+                  (keydown.enter)="addSubtask(subPopupItem)"
+                />
+                <button
+                  class="editor-btn primary"
+                  type="button"
+                  (click)="addSubtask(subPopupItem)"
+                  [disabled]="isAddingSubtask()"
+                >Add</button>
+              </div>
+              @if (subtaskError()) {
+                <div class="subtask-error">{{ subtaskError() }}</div>
+              }
             }
-          }
+          </ng-template>
         </div>
       }
     }

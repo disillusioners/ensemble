@@ -1,9 +1,11 @@
-import { Component, input, signal, computed, inject, effect, DestroyRef, ViewChild, ElementRef, HostListener } from '@angular/core';
+import { Component, input, signal, computed, inject, effect, DestroyRef, ViewChild, ElementRef, HostListener, viewChild, TemplateRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
+import { OverlayModule, CdkOverlayOrigin } from '@angular/cdk/overlay';
 import { ApiService } from '../../services/api.service';
 import { SseService, TodoNode, TodoItem, SubTask } from '../../services/sse.service';
+import { TodoGraphPopupComponent } from '../todo-graph-popup/todo-graph-popup.component';
 
 // Module-level helpers (no closure over component state)
 
@@ -27,18 +29,8 @@ const NODE_GAP_Y = 12;
 const LAYER_GAP_X = 80;
 const NODE_CENTER_Y_OFFSET = NODE_HEIGHT / 2;
 
-// Graph-mode popup sizing. The popup is a small absolutely-positioned
-// panel anchored next to the clicked node; these values drive the
-// right/left/above/below edge-flip math. The popup starts small and can
-// be expanded (togglePopupExpand) for more room — the expanded sizes are
-// used to re-run the flip math so the larger panel stays on-screen.
-const POPUP_WIDTH = 240;
-const POPUP_HEIGHT = 110;
-const POPUP_WIDTH_EXPANDED = 560;
-const COMMENT_POPUP_HEIGHT_EXPANDED = 220;
-const SUBTASK_POPUP_HEIGHT = 220;
-const SUBTASK_POPUP_HEIGHT_EXPANDED = 460;
-const POPUP_GAP = 8;
+// `.todo-graph` inner padding: the SVG is offset by this much inside the
+// container, used by computeLayout / positionFor to map SVG coords.
 const GRAPH_CONTAINER_PADDING = 12;
 const MAX_COMMENT_LENGTH = 1000;
 const COMMENT_WARN_THRESHOLD = 800;
@@ -102,7 +94,7 @@ interface Edge {
 @Component({
   selector: 'app-todo-list',
   standalone: true,
-  imports: [CommonModule, MatIconModule],
+  imports: [CommonModule, MatIconModule, OverlayModule, TodoGraphPopupComponent],
   templateUrl: './todo-list.component.html',
   styleUrl: './todo-list.component.scss'
 })
@@ -136,31 +128,35 @@ export class TodoListComponent {
   // Graph-mode comment popup state. Linear mode ignores these and uses the
   // existing inline editor below each todo item.
   commentPopupNodeId = signal<string | null>(null);
-  commentPopupPosition = signal<{ x: number; y: number; placement: 'right' | 'left' | 'above' | 'below' } | null>(null);
 
   // Graph-mode sub-task popup state. Rendered as a sibling panel — mutually
   // exclusive with the comment popup (see openCommentPopup / openSubtaskPopup
   // which both call closeAllPopups first).
   subtaskPopupNodeId = signal<string | null>(null);
-  subtaskPopupPosition = signal<{ x: number; y: number; placement: 'right' | 'left' | 'above' | 'below' } | null>(null);
+
+  // The CDK overlay origin for the currently open graph popup — the
+  // comment / sub-task button the user clicked. The popup (app-todo-graph-
+  // popup) anchors to this element. Set on open, cleared on close.
+  commentOrigin = signal<CdkOverlayOrigin | null>(null);
+  subtaskOrigin = signal<CdkOverlayOrigin | null>(null);
 
   // Linear-mode expansion: which todo row's sub-task checklist is open.
   expandedSubtaskNodeId = signal<string | null>(null);
-
-  // Graph-mode popup expand state. Popups open small; the user can toggle
-  // this to grow the panel (wider + taller) for long comments or big
-  // checklists. Shared because the comment + sub-task popups are mutually
-  // exclusive. Reset on open / close.
-  popupExpanded = signal(false);
 
   // Buffer for the inline "Add a sub-task…" input. Shared between linear and
   // graph popups so the user doesn't lose what they typed when switching
   // context.
   newSubtaskText = signal<string>('');
 
-  // Reference to the .todo-graph container — used by openCommentPopup to read
-  // scroll position and client size for edge-flip math.
+  // Reference to the .todo-graph container — used by positionFor to map SVG
+  // coords, and (no longer) for popup placement (CDK handles that now).
   @ViewChild('graphContainer') graphContainer?: ElementRef<HTMLDivElement>;
+
+  // The popup bodies, declared as <ng-template> in the template and stamped
+  // into the CDK overlay by app-todo-graph-popup. Resolved via signal query
+  // so they're available to bind to the popup component's `content` input.
+  readonly commentBodyTpl = viewChild<TemplateRef<unknown>>('commentBody');
+  readonly subtaskBodyTpl = viewChild<TemplateRef<unknown>>('subtaskBody');
 
   todos = computed<TodoNode[]>(() => this.sseService.todos());
 
@@ -282,128 +278,25 @@ export class TodoListComponent {
   }
 
   /**
-   * Graph-mode entry point. Opens (or re-positions) a small popup anchored to
-   * the clicked node. Called from the node's comment button in the SVG —
-   * separate from `startEditComment` which linear mode uses for its inline
-   * editor below each item.
+   * Graph-mode entry point. Opens the comment popup as a CDK overlay
+   * anchored to the clicked node's comment button (`origin`). Positioning
+   * is handled by app-todo-graph-popup (flexible connected overlay) — no
+   * manual placement math here. Called from the node's comment button in
+   * the SVG; separate from `startEditComment` which linear mode uses for
+   * its inline editor below each item.
    */
-  openCommentPopup(item: TodoItem, event: MouseEvent): void {
+  openCommentPopup(item: TodoItem, event: MouseEvent, origin: CdkOverlayOrigin): void {
     event.stopPropagation();
     // Mutually exclusive with the sub-task popup: tear down any other popup
-    // (and clear the inline editor state) before computing placement.
+    // (and clear the inline editor state) first.
     this.closeAllPopups();
 
-    const placement = this.computePopupPlacement(item.id, POPUP_WIDTH, POPUP_HEIGHT);
-    if (!placement) return;
-
-    // Set shared editor state (used by Save / Cancel) and popup state.
+    // Set shared editor state (used by Save / Cancel) + the overlay origin
+    // + open flag. The popup component reads these to attach the overlay.
     this.editingNodeId.set(item.id);
     this.editingComment.set(item.comment);
+    this.commentOrigin.set(origin);
     this.commentPopupNodeId.set(item.id);
-    this.commentPopupPosition.set(placement);
-  }
-
-  /**
-   * Shared edge-flip placement for graph-mode popups. Computes an
-   * {x, y, placement} anchor for a popup of the given width/height next
-   * to the node, preferring right of the node, flipping to left, then
-   * falling back to centered below (and above if no vertical room).
-   *
-   * Used both when opening a popup (small default size) and when the
-   * user toggles expand — re-running with the expanded size keeps the
-   * larger panel on-screen instead of overflowing the container.
-   */
-  private computePopupPlacement(
-    nodeId: string,
-    popupWidth: number,
-    popupHeight: number,
-  ): { x: number; y: number; placement: 'right' | 'left' | 'above' | 'below' } | null {
-    const pos = this.positionFor(nodeId);
-    const container = this.graphContainer?.nativeElement;
-    if (!pos || !container) return null;
-
-    // Node edges in container coordinates. The SVG is at (12, 12) inside
-    // `.todo-graph` because of its 12px padding, so SVG coords map to
-    // container coords by adding the padding offset.
-    const nodeLeft = pos.x + GRAPH_CONTAINER_PADDING;
-    const nodeRight = nodeLeft + NODE_WIDTH;
-    const nodeTop = pos.y + GRAPH_CONTAINER_PADDING;
-    const nodeCenterY = pos.y + GRAPH_CONTAINER_PADDING + NODE_CENTER_Y_OFFSET;
-
-    const visibleLeft = container.scrollLeft;
-    const visibleRight = visibleLeft + container.clientWidth;
-    const visibleBottom = container.clientHeight;
-
-    // Pick horizontal placement: prefer right of the node, flip to left if
-    // the popup would overflow the visible right edge, otherwise place
-    // centered below as a last resort.
-    const fitsRight = nodeRight + POPUP_GAP + popupWidth <= visibleRight;
-    const fitsLeft = nodeLeft - POPUP_GAP - popupWidth >= visibleLeft;
-
-    let placement: 'right' | 'left' | 'above' | 'below';
-    let x: number;
-    if (fitsRight) {
-      placement = 'right';
-      x = nodeRight + POPUP_GAP;
-    } else if (fitsLeft) {
-      placement = 'left';
-      x = nodeLeft - POPUP_GAP - popupWidth;
-    } else {
-      placement = 'below';
-      x = nodeLeft + (NODE_WIDTH - popupWidth) / 2;
-      // Clamp horizontally into the visible area.
-      x = Math.max(visibleLeft + 4, Math.min(x, visibleRight - popupWidth - 4));
-    }
-
-    // Pick vertical position. For side placements, center on the node and
-    // flip above if it overflows the bottom. For the below fallback, place
-    // under the node and flip above if there's no room.
-    let y: number;
-    if (placement === 'right' || placement === 'left') {
-      y = nodeCenterY - popupHeight / 2;
-      if (y + popupHeight > visibleBottom) {
-        y = nodeTop - POPUP_GAP - popupHeight;
-        if (y < 0) y = Math.max(4, visibleBottom - popupHeight - 4);
-      } else if (y < 0) {
-        y = 4;
-      }
-    } else {
-      y = nodeTop + NODE_HEIGHT + POPUP_GAP;
-      if (y + popupHeight > visibleBottom) {
-        y = nodeTop - POPUP_GAP - popupHeight;
-        placement = 'above';
-        if (y < 0) y = 4;
-      }
-    }
-
-    return { x, y, placement };
-  }
-
-  /**
-   * Toggle the graph-mode popup between its small default size and a
-   * larger expanded size (wider + taller). Re-runs the edge-flip math
-   * with the expanded dimensions so the bigger panel stays on-screen
-   * rather than overflowing the container. Stop propagation so the
-   * outside-click handler doesn't dismiss the popup on the toggle click.
-   */
-  togglePopupExpand(event: Event): void {
-    event.stopPropagation();
-    this.popupExpanded.update(v => !v);
-
-    const expanded = this.popupExpanded();
-    const isComment = this.commentPopupNodeId() !== null;
-    const nodeId = this.commentPopupNodeId() ?? this.subtaskPopupNodeId();
-    if (!nodeId) return;
-
-    const width = expanded ? POPUP_WIDTH_EXPANDED : POPUP_WIDTH;
-    const height = expanded
-      ? (isComment ? COMMENT_POPUP_HEIGHT_EXPANDED : SUBTASK_POPUP_HEIGHT_EXPANDED)
-      : (isComment ? POPUP_HEIGHT : SUBTASK_POPUP_HEIGHT);
-
-    const placement = this.computePopupPlacement(nodeId, width, height);
-    if (!placement) return;
-    if (isComment) this.commentPopupPosition.set(placement);
-    else this.subtaskPopupPosition.set(placement);
   }
 
   /**
@@ -426,17 +319,15 @@ export class TodoListComponent {
    */
   closeAllPopups(): void {
     this.commentPopupNodeId.set(null);
-    this.commentPopupPosition.set(null);
     this.subtaskPopupNodeId.set(null);
-    this.subtaskPopupPosition.set(null);
+    this.commentOrigin.set(null);
+    this.subtaskOrigin.set(null);
     this.editingNodeId.set(null);
     this.editingComment.set('');
     // Reset the shared sub-task input buffer + linear-mode expansion
     // selection so closing any popup leaves the UI in a clean state.
     this.newSubtaskText.set('');
     this.expandedSubtaskNodeId.set(null);
-    // Collapse any expanded graph popup so the next one opens small.
-    this.popupExpanded.set(false);
     // Clear any stale sub-task error from the previous interaction.
     this.subtaskError.set(null);
   }
@@ -650,19 +541,14 @@ export class TodoListComponent {
   /**
    * Graph-mode entry point for the sub-task popup. Mirrors openCommentPopup
    * — closes any other popup first (mutual exclusion), then anchors the
-   * panel to the clicked node via the shared edge-flip helper. The sub-task
-   * popup may be taller than the comment popup (it has a checklist + input),
-   * so it uses a larger height estimate for the flip math; the actual
-   * rendered height is auto.
+   * overlay to the clicked node's sub-task button (`origin`). CDK handles
+   * positioning; the rendered height is auto (checklist + input).
    */
-  openSubtaskPopup(node: TodoNode, event: MouseEvent): void {
+  openSubtaskPopup(node: TodoNode, event: MouseEvent, origin: CdkOverlayOrigin): void {
     event.stopPropagation();
     this.closeAllPopups();
 
-    const placement = this.computePopupPlacement(node.id, POPUP_WIDTH, SUBTASK_POPUP_HEIGHT);
-    if (!placement) return;
-
+    this.subtaskOrigin.set(origin);
     this.subtaskPopupNodeId.set(node.id);
-    this.subtaskPopupPosition.set(placement);
   }
 }
