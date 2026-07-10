@@ -221,3 +221,65 @@
     transform: translateY(0);
   }
 }
+
+// =====================================================================
+// DAG / graph-mode styles. Applied only when isLinear() === false.
+// Colors mirror the existing dark theme: #0f172a, #1e293b, #334155,
+// #475569, #e2e8f0.
+// =====================================================================
+
+.todo-graph {
+  padding: 12px;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.graph-svg {
+  display: block;
+}
+
+.graph-edge {
+  stroke: #475569;
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.graph-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #e2e8f0;
+  height: 100%;
+  box-sizing: border-box;
+  width: 100%;
+
+  &.in-progress {
+    border-color: #06b6d4;
+  }
+
+  &.done .node-text {
+    text-decoration: line-through;
+    opacity: 0.6;
+  }
+}
+
+.node-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-editor {
+  margin-top: 8px;
+  padding: 8px;
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+}

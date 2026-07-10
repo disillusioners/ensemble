@@ -1,12 +1,16 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
 
-export interface TodoItem {
-  index: number;
+export interface TodoNode {
+  id: string;
+  index: number;  // PRESERVED for backward compat — always present in SSE payload
   text: string;
   status: 'pending' | 'in_progress' | 'done';
   comment: string;
+  next_ids: string[];
 }
+
+export type TodoItem = TodoNode;
 
 @Injectable({
   providedIn: 'root'
@@ -44,7 +48,7 @@ export class SseService {
 
   // Single-instance todo list. The frontend only ever displays one chat
   // at a time, so we keep one signal and overwrite it from todo_update.
-  todos = signal<TodoItem[]>([]);
+  todos = signal<TodoNode[]>([]);
 
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that

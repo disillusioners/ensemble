@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import type { TodoItem } from './sse.service';
+import type { TodoItem, TodoNode } from './sse.service';
 import type {
   InstanceInfo,
   InstanceListResponse,
@@ -106,12 +106,27 @@ export class ApiService {
   }
 
   // Todos
-  getTodos(instanceId: string): Observable<TodoItem[]> {
-    return this.http.get<TodoItem[]>(`${this.API_BASE}/instances/${instanceId}/todos`);
+  getTodos(instanceId: string): Observable<TodoNode[]> {
+    return this.http.get<TodoNode[]>(`${this.API_BASE}/instances/${instanceId}/todos`);
   }
 
-  setTodoComment(instanceId: string, index: number, comment: string): Observable<TodoItem> {
-    return this.http.post<TodoItem>(`${this.API_BASE}/instances/${instanceId}/todos/${index}/comment`, { comment });
+  setTodoComment(instanceId: string, nodeId: string, comment: string): Observable<TodoNode> {
+    return this.http.post<TodoNode>(`${this.API_BASE}/instances/${instanceId}/todos/${nodeId}/comment`, { comment });
+  }
+
+  addTodoEdge(instanceId: string, fromId: string, toId: string): Observable<any> {
+    return this.http.post(
+      `${this.API_BASE}/instances/${instanceId}/todos/edges`,
+      { from_id: fromId, to_id: toId }
+    );
+  }
+
+  removeTodoEdge(instanceId: string, fromId: string, toId: string): Observable<any> {
+    return this.http.request(
+      'DELETE',
+      `${this.API_BASE}/instances/${instanceId}/todos/edges`,
+      { body: { from_id: fromId, to_id: toId } }
+    );
   }
 
   // Sources

@@ -18,34 +18,143 @@
       </div>
     </div>
     @if (!isCollapsed()) {
-      <div class="todo-items">
-        @for (item of todos(); track item.index) {
-          <div class="todo-item" [class.done]="item.status === 'done'">
-            <span
-              class="status-icon"
-              [class.in-progress]="item.status === 'in_progress'"
-              [class.complete]="item.status === 'done'"
-            >
-              {{ statusIcon(item.status) }}
-            </span>
-            <div class="todo-body">
-              <div class="todo-row">
-                <span class="todo-text">{{ item.text }}</span>
-                <button
-                  class="icon-btn comment-btn"
-                  type="button"
-                  (click)="startEditComment(item, $event)"
-                  [attr.aria-label]="item.comment ? 'Edit comment' : 'Add comment'"
-                  [title]="item.comment ? 'Edit comment' : 'Add comment'"
-                >
-                  <mat-icon>{{ item.comment ? 'chat_bubble' : 'add_comment' }}</mat-icon>
-                </button>
+      @if (isLinear()) {
+        <!-- ============== LINEAR / LIST MODE ============== -->
+        <div class="todo-items">
+          @for (item of todos(); track item.id) {
+            <div class="todo-item" [class.done]="item.status === 'done'">
+              <span
+                class="status-icon"
+                [class.in-progress]="item.status === 'in_progress'"
+                [class.complete]="item.status === 'done'"
+              >
+                {{ statusIcon(item.status) }}
+              </span>
+              <div class="todo-body">
+                <div class="todo-row">
+                  <span class="todo-text">{{ item.text }}</span>
+                  <button
+                    class="icon-btn comment-btn"
+                    type="button"
+                    (click)="startEditComment(item, $event)"
+                    [attr.aria-label]="item.comment ? 'Edit comment' : 'Add comment'"
+                    [title]="item.comment ? 'Edit comment' : 'Add comment'"
+                  >
+                    <mat-icon>{{ item.comment ? 'chat_bubble' : 'add_comment' }}</mat-icon>
+                  </button>
+                </div>
+                @if (item.comment) {
+                  <div class="todo-comment">{{ item.comment }}</div>
+                }
+                @if (editingNodeId() === item.id) {
+                  <div class="todo-comment-editor" (click)="$event.stopPropagation()">
+                    <textarea
+                      class="comment-input"
+                      rows="2"
+                      placeholder="Add a comment…"
+                      [value]="editingComment()"
+                      (input)="onCommentInput($event)"
+                    ></textarea>
+                    <div class="editor-actions">
+                      <button
+                        class="editor-btn primary"
+                        type="button"
+                        (click)="saveComment(item, $event)"
+                        [disabled]="isSavingComment()"
+                      >Save</button>
+                      <button
+                        class="editor-btn secondary"
+                        type="button"
+                        (click)="cancelEdit($event)"
+                        [disabled]="isSavingComment()"
+                      >Cancel</button>
+                    </div>
+                  </div>
+                }
               </div>
-              @if (item.comment) {
-                <div class="todo-comment">{{ item.comment }}</div>
+            </div>
+          }
+        </div>
+      } @else {
+        <!-- ============== GRAPH / DAG MODE ============== -->
+        <div class="todo-graph">
+          <svg
+            class="graph-svg"
+            [attr.width]="graphWidth()"
+            [attr.height]="graphHeight()"
+            [attr.viewBox]="'0 0 ' + graphWidth() + ' ' + graphHeight()"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <defs>
+              <marker
+                id="arrowhead"
+                markerWidth="8"
+                markerHeight="8"
+                refX="7"
+                refY="4"
+                orient="auto"
+                markerUnits="strokeWidth"
+              >
+                <path d="M0,0 L0,8 L8,4 z" fill="#475569" />
+              </marker>
+            </defs>
+            <!-- Edges — right-center of source node to left-center of target node. -->
+            @for (edge of edges(); track $index) {
+              <line
+                class="graph-edge"
+                [attr.x1]="edge.fromPos.x + NODE_WIDTH"
+                [attr.y1]="edge.fromPos.y + NODE_CENTER_Y_OFFSET"
+                [attr.x2]="edge.toPos.x"
+                [attr.y2]="edge.toPos.y + NODE_CENTER_Y_OFFSET"
+                marker-end="url(#arrowhead)"
+              />
+            }
+            <!-- Nodes via foreignObject so we can use real HTML/Angular markup. -->
+            @for (item of todos(); track item.id) {
+              @if (positionFor(item.id); as pos) {
+                <foreignObject
+                  [attr.x]="pos.x"
+                  [attr.y]="pos.y"
+                  [attr.width]="NODE_WIDTH"
+                  [attr.height]="NODE_HEIGHT"
+                >
+                  <div
+                    xmlns="http://www.w3.org/1999/xhtml"
+                    class="graph-node"
+                    [class.done]="item.status === 'done'"
+                    [class.in-progress]="item.status === 'in_progress'"
+                  >
+                    <span
+                      class="status-icon"
+                      [class.in-progress]="item.status === 'in_progress'"
+                      [class.complete]="item.status === 'done'"
+                    >
+                      {{ statusIcon(item.status) }}
+                    </span>
+                    <span
+                      class="node-text"
+                      [title]="item.text"
+                    >{{ item.text }}</span>
+                    <button
+                      class="icon-btn comment-btn"
+                      type="button"
+                      (click)="startEditComment(item, $event)"
+                      [attr.aria-label]="item.comment ? 'Edit comment' : 'Add comment'"
+                      [title]="item.comment ? 'Edit comment' : 'Add comment'"
+                    >
+                      <mat-icon>{{ item.comment ? 'chat_bubble' : 'add_comment' }}</mat-icon>
+                    </button>
+                  </div>
+                </foreignObject>
               }
-              @if (editingIndex() === item.index) {
-                <div class="todo-comment-editor" (click)="$event.stopPropagation()">
+            }
+          </svg>
+          <!-- Comment editor rendered as a sibling panel below the SVG when active,
+               so the foreignObject contents stay clean. -->
+          @for (item of todos(); track 'editor-' + item.id) {
+            @if (editingNodeId() === item.id) {
+              <div class="graph-editor" (click)="$event.stopPropagation()">
+                <div class="todo-comment-editor">
                   <textarea
                     class="comment-input"
                     rows="2"
@@ -68,11 +177,11 @@
                     >Cancel</button>
                   </div>
                 </div>
-              }
-            </div>
-          </div>
-        }
-      </div>
+              </div>
+            }
+          }
+        </div>
+      }
     }
   </div>
 }
