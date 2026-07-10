@@ -1,10 +1,12 @@
 """Skill evolution tools for the skill-keeper agent.
 
 Internal tools that wrap :class:`SkillEvolutionService` methods. The
-service itself is implemented in Phase 5 — these stubs attempt to
-call ``manager._skill_evolution_service`` if available and otherwise
-return a "not yet connected" message. Reserved for the skill-keeper
-agent; NOT for regular agents.
+service is implemented in ``daemon/services/skill_evolution_service.py``;
+when it is attached to the manager as ``_skill_evolution_service`` the
+tools dispatch straight through. If the service is absent the tools
+return a "not yet connected" stub message — the skill-keeper agent
+sees a tool response (not a stack trace) and can keep planning. These
+tools are reserved for the skill-keeper agent; NOT for regular agents.
 
 Architecture
 ------------
@@ -18,21 +20,26 @@ Architecture
   ``async def`` and ``await`` :func:`_invoke_service`. The
   helper handles both sync and async service methods uniformly
   via ``hasattr(result, "__await__")`` detection, so a single
-  set of stubs covers both Phase 5 service shapes.
-* **Soft-fail stubs** — until the real service lands, calling
-  these tools returns a stub message ("⏳ Skill evolution service
-  not yet initialized…") rather than raising. The skill-keeper
-  agent therefore sees a tool response (not a stack trace) and can
-  continue planning during the Phase 2 / Phase 5 interregnum.
+  set of tools covers any future service shape.
+* **Soft-fail** — when the manager has no
+  ``_skill_evolution_service`` attribute (e.g. during early
+  Phase 2 init or in tests that disable the service) the tools
+  return a "⏳ not yet connected" stub message rather than
+  raising. Once the service lands the tools dispatch transparently.
 
 Tools produced
 --------------
 
-* ``skill_analyze`` — Tier 2 static analysis wrapper stub.
-* ``skill_evolve`` — Tier 3 evolution wrapper stub.
-* ``skill_resolve_ab`` — A/B test resolution wrapper stub.
-* ``skill_get_metrics`` — metrics retrieval wrapper stub.
-* ``skill_execute_capture`` — CAPTURED flow wrapper stub.
+* ``skill_analyze`` — Tier 2 static analysis wrapper
+  (``SkillEvolutionService.analyze_skill``).
+* ``skill_evolve`` — Tier 3 evolution wrapper
+  (``SkillEvolutionService.evolve_skill``).
+* ``skill_resolve_ab`` — A/B test resolution wrapper
+  (``SkillEvolutionService.check_ab_test_resolution``).
+* ``skill_get_metrics`` — metrics retrieval wrapper
+  (``SkillEvolutionService.get_skill_metrics``).
+* ``skill_execute_capture`` — CAPTURED flow wrapper
+  (``SkillEvolutionService.capture_skill``).
 """
 
 import json
@@ -53,21 +60,23 @@ CATEGORY_DOC = """\
 Internal tools for the skill-keeper agent to analyze, evolve, and
 manage skill A/B tests. These tools are NOT for regular agents.
 
-- skill_analyze — Tier 2 static analysis wrapper stub.
-- skill_evolve — Tier 3 evolution wrapper stub.
-- skill_resolve_ab — A/B test resolution wrapper stub.
-- skill_get_metrics — Metrics retrieval wrapper stub.
-- skill_execute_capture — CAPTURED flow wrapper stub.
+- skill_analyze — Tier 2 static analysis wrapper.
+- skill_evolve — Tier 3 evolution wrapper.
+- skill_resolve_ab — A/B test resolution wrapper.
+- skill_get_metrics — Metrics retrieval wrapper.
+- skill_execute_capture — CAPTURED flow wrapper.
 """
 
 
-async def _invoke_service(manager, service_name, method_name, *args):
-    """Try to call a method on a manager-attached service.
+async def _invoke_service(manager, service_name, method_name, *args, **kwargs):
+    """Call a method on a manager-attached service.
 
-    This helper is the Phase 2 stub behavior. In Phase 5 the real
-    :class:`SkillEvolutionService` will be attached to the manager as
-    ``_skill_evolution_service`` and these stubs will dispatch
-    straight through.
+    Looks up ``manager.<service_name>``; if absent, returns a
+    "not yet connected" stub message. If the service exists but
+    lacks the requested method, returns a "method not found"
+    message. On any exception during the call, returns an
+    ``ERROR: ...`` string. Never raises — the skill-keeper agent
+    loop must always see a tool response.
 
     Args:
         manager: The :class:`InstanceManager` instance. May expose
@@ -76,8 +85,9 @@ async def _invoke_service(manager, service_name, method_name, *args):
         service_name: Name of the manager attribute holding the
             service, e.g. ``"_skill_evolution_service"``.
         method_name: Name of the service method to invoke, e.g.
-            ``"analyze"`` or ``"evolve"``.
+            ``"analyze_skill"`` or ``"evolve_skill"``.
         *args: Positional arguments forwarded to the service method.
+        **kwargs: Keyword arguments forwarded to the service method.
 
     Returns:
         - The JSON-serialized result string on success.
@@ -101,17 +111,16 @@ async def _invoke_service(manager, service_name, method_name, *args):
         if hint:
             return (
                 f"\u23f3 {service_name} not yet initialized. "
-                f"Queued for Phase 5. (hint: {hint})"
+                f"(hint: {hint})"
             )
         return (
-            f"\u23f3 {service_name} not yet initialized. "
-            "Queued for Phase 5."
+            f"\u23f3 {service_name} not yet initialized."
         )
     method = getattr(service, method_name, None)
     if method is None:
         return f"\u26a0\ufe0f {service_name}.{method_name} not found."
     try:
-        result = method(*args)
+        result = method(*args, **kwargs)
         if hasattr(result, "__await__"):
             result = await result
         return json.dumps(result, default=str, indent=2)
@@ -125,13 +134,14 @@ def create_skill_evolution_tools(
     """Create skill evolution tools for the skill-keeper agent.
 
     These are internal tools that wrap :class:`SkillEvolutionService`
-    methods. The service itself is implemented in Phase 5 — these
-    stubs will be connected to the actual service in Phase 5.
+    methods. The service is wired to the manager as
+    ``_skill_evolution_service``; when absent the tools return a
+    "not yet connected" stub message.
 
     Args:
         manager: The :class:`InstanceManager` instance. May expose
             ``_skill_evolution_service`` (Phase 5) — if absent the
-            stubs return a "not yet connected" message.
+            tools return a "not yet connected" message.
         current_instance_id: The ID of the calling instance. Captured
             in the closure for context logging; the tools themselves
             do not mutate state.
@@ -145,159 +155,268 @@ def create_skill_evolution_tools(
     @register_tool_category("skill-evolution")
     @tool
     async def skill_analyze(skill_id: str) -> str:
-        """[Phase 5 stub] Run Tier 2 static analysis on a skill."""
+        """Run Tier 2 static analysis on a skill.
+
+        Delegates to ``SkillEvolutionService.analyze_skill(skill_id,
+        reason="", stats=None)``. Tier 2 analysis inspects a skill's
+        static shape (frontmatter schema, required vs optional fields,
+        example block structure, references section, etc.) and the
+        runtime stats (completion_rate, consecutive_failures, recent
+        feedback) to decide whether the skill should evolve, and if so
+        in what direction.
+        """
         return await _invoke_service(
-            manager, "_skill_evolution_service", "analyze", skill_id
+            manager,
+            "_skill_evolution_service",
+            "analyze_skill",
+            skill_id,
+            reason="",
+            stats=None,
         )
 
     skill_analyze._full_doc_ = """\
-[Phase 5 stub] Run Tier 2 static analysis on a skill.
+Run Tier 2 static analysis on a skill.
 
-Tier 2 analysis inspects a skill's static shape (frontmatter schema,
-required vs optional fields, example block structure, references
-section, etc.) and returns a structured report of compliance,
-warnings, and improvement hints. In Phase 5 this delegates to
-``SkillEvolutionService.analyze(skill_id)``.
+Delegates to ``SkillEvolutionService.analyze_skill(skill_id,
+reason="", stats=None)``. Tier 2 analysis inspects a skill's
+static shape (frontmatter schema, required vs optional fields,
+example block structure, references section, etc.) and the
+runtime stats (completion_rate, consecutive_failures, recent
+feedback) and asks the cheap LLM to classify the skill as
+``FIX`` / ``DERIVED`` / ``CAPTURED`` / ``NONE`` with a one-line
+``direction``.
 
 Args:
     skill_id: Stable skill identifier (e.g. ``"skill-keeper"`` or
         the frontmatter ``id`` of an ``agents/<id>/skill.md`` file).
 
-Stub behavior:
-    While the underlying :class:`SkillEvolutionService` is not yet
-    wired up (Phase 5), this tool returns the
-    ``"⏳ Skill evolution service not yet initialized…"``
-    stub message instead of raising. The actual service connection
-    happens in Phase 5; no migration is required on the agent side.
+Returns:
+    JSON document with ``should_evolve`` (bool), ``evolution_type``
+    (``FIX`` | ``DERIVED`` | ``CAPTURED`` | ``NONE``), ``direction``
+    (str), ``analysis_summary`` (str).
+
+While the underlying :class:`SkillEvolutionService` is not yet
+wired up, this tool returns the
+``"⏳ Skill evolution service not yet initialized…"``
+stub message instead of raising.
 """
 
     @register_tool_category("skill-evolution")
     @tool
-    async def skill_evolve(skill_id: str, evolution_type: str, direction: str) -> str:
-        """[Phase 5 stub] Run a Tier 3 evolution pass on a skill."""
+    async def skill_evolve(
+        skill_id: str, evolution_type: str, direction: str
+    ) -> str:
+        """Run a Tier 3 evolution pass on a skill.
+
+        Delegates to ``SkillEvolutionService.evolve_skill(skill_id,
+        evolution_type, direction)``. Dispatches on ``evolution_type``:
+        ``FIX`` creates a tweaked copy and starts an A/B test vs the
+        original; ``DERIVED`` creates a specialized sibling; ``CAPTURED``
+        wraps ``direction`` + the skill into a task-details dict and
+        runs the capture flow.
+        """
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
-            "evolve",
+            "evolve_skill",
             skill_id,
             evolution_type,
             direction,
         )
 
     skill_evolve._full_doc_ = """\
-[Phase 5 stub] Run a Tier 3 evolution pass on a skill.
+Run a Tier 3 evolution pass on a skill.
 
-Tier 3 evolution drafts a concrete change to a skill's frontmatter,
-prompt body, or examples based on accumulated Tier 2 analyses and
-runtime metrics. In Phase 5 this delegates to
-``SkillEvolutionService.evolve(skill_id, evolution_type, direction)``.
+Delegates to ``SkillEvolutionService.evolve_skill(skill_id,
+evolution_type, direction)``. Dispatches on ``evolution_type``:
+
+* ``FIX`` — create a tweaked copy and start an A/B test vs the
+  original (guarded against nested A/B tests).
+* ``DERIVED`` — create a specialized sibling (new name,
+  generation 0, lineage to the original).
+* ``CAPTURED`` — wrap ``direction`` and the skill into a
+  task-details dict and run the capture flow.
 
 Args:
     skill_id: Stable skill identifier targeted for evolution.
-    evolution_type: Kind of evolution to perform, e.g.
-        ``"prompt_rewrite"``, ``"example_add"``,
-        ``"schema_tighten"``, ``"split_skill"``.
+    evolution_type: One of ``"FIX"`` / ``"DERIVED"`` /
+        ``"CAPTURED"``.
     direction: Free-form human-readable direction the evolution
         should respect — e.g. ``"add explicit error-handling
         guidance"`` or ``"favor concise bullet lists over prose"``.
 
-Stub behavior:
-    While the underlying service is not yet wired up (Phase 5), this
-    tool returns the stub message containing ``"⏳"`` and
-    ``"Phase 5"``. The actual service connection happens in Phase 5;
-    once connected, the returned payload is a JSON document
-    describing the proposed diff.
+Returns:
+    JSON document describing the proposed change. ``FIX`` returns
+    ``new_skill_id`` / ``old_skill_id`` / ``ab_test_group`` /
+    ``skipped``; ``DERIVED`` returns ``new_skill_id`` /
+    ``parent_ids`` / ``skipped``; ``CAPTURED`` returns
+    ``new_skill_id`` / ``skipped``.
+
+While the underlying service is not yet wired up, this tool
+returns the stub message containing ``"⏳"``. Once connected,
+the returned payload is a JSON document describing the
+proposed diff.
 """
 
     @register_tool_category("skill-evolution")
     @tool
     async def skill_resolve_ab(ab_test_group: str) -> str:
-        """[Phase 5 stub] Resolve an in-flight skill A/B test group."""
+        """Resolve an in-flight skill A/B test group.
+
+        Delegates to ``SkillEvolutionService.check_ab_test_resolution(
+        ab_test_group)``. Inspects the persisted test row + per-variant
+        stats and decides whether to resolve, extend, or wait for more
+        data.
+        """
         return await _invoke_service(
-            manager, "_skill_evolution_service", "resolve_ab", ab_test_group
+            manager,
+            "_skill_evolution_service",
+            "check_ab_test_resolution",
+            ab_test_group,
         )
 
     skill_resolve_ab._full_doc_ = """\
-[Phase 5 stub] Resolve an in-flight skill A/B test group.
+Resolve an in-flight skill A/B test group.
 
-Closes out an A/B test, computes a winner (or declares a tie),
-persists the decision, and returns a structured summary. In Phase 5
-this delegates to ``SkillEvolutionService.resolve_ab(ab_test_group)``.
+Delegates to ``SkillEvolutionService.check_ab_test_resolution(
+ab_test_group)``. Closes out an A/B test, computes a winner (or
+declares a tie), persists the decision, and returns a structured
+summary. Decision tree:
+
+1. **Not enough data** (``comparisons < ab_sample_size``) →
+   keep collecting. ``reason='needs_more_data'``.
+2. **Threshold met** (``difference >= ab_min_difference``) →
+   resolve by raw completion rate. ``reason='threshold_met'``.
+3. **Threshold missed + ``extension_count >= max_extensions``** →
+   force-resolve by raw completion rate.
+   ``reason='force_resolved_max_extensions'``.
+4. **Threshold missed + extensions remaining** → bump
+   ``extension_count`` via the repo. ``reason='extended'``.
 
 Args:
     ab_test_group: Stable identifier of the A/B test group to
         resolve — typically a slug like ``"prompt-style-2026-07"``
         or a UUID assigned when the test was created.
 
-Stub behavior:
-    While the underlying service is not yet wired up (Phase 5), this
-    tool returns the stub message containing ``"⏳"`` and
-    ``"Phase 5"``. The actual service connection happens in Phase 5;
-    once connected, the returned payload is the resolution record
-    (winner, metrics snapshot, decision timestamp).
+Returns:
+    JSON document with ``resolved`` (bool), ``winner_id`` /
+    ``loser_id`` (str | None), ``reason`` (str),
+    ``extension_count`` (int).
+
+While the underlying service is not yet wired up, this tool
+returns the stub message containing ``"⏳"``. Once connected,
+the returned payload is the resolution record (winner,
+metrics snapshot, decision timestamp).
 """
 
     @register_tool_category("skill-evolution")
     @tool
     async def skill_get_metrics(skill_id: str) -> str:
-        """[Phase 5 stub] Fetch runtime metrics for a skill."""
+        """Fetch runtime metrics for a skill.
+
+        Delegates to ``SkillEvolutionService.get_skill_metrics(
+        skill_id)``. Returns the skill row, usage stats, recent usage
+        count, and any open A/B test cohort — a single convenience
+        round-trip for the metrics / admin UI.
+        """
         return await _invoke_service(
-            manager, "_skill_evolution_service", "get_metrics", skill_id
+            manager,
+            "_skill_evolution_service",
+            "get_skill_metrics",
+            skill_id,
         )
 
     skill_get_metrics._full_doc_ = """\
-[Phase 5 stub] Fetch runtime metrics for a skill.
+Fetch runtime metrics for a skill.
 
+Delegates to ``SkillEvolutionService.get_skill_metrics(skill_id)``.
 Returns the aggregated runtime metrics for ``skill_id`` —
 invocation counts, success / failure rates, latency percentiles,
-and any open A/B test cohorts. In Phase 5 this delegates to
-``SkillEvolutionService.get_metrics(skill_id)``.
+and any open A/B test cohorts — bundled into a single document
+(skill row via ``Skill.to_dict()``, stats from
+``SkillMetricsService.get_skill_stats``, usage record count, and
+the persisted A/B test row when present).
 
 Args:
     skill_id: Stable skill identifier whose metrics should be
         fetched.
 
-Stub behavior:
-    While the underlying service is not yet wired up (Phase 5), this
-    tool returns the stub message containing ``"⏳"`` and
-    ``"Phase 5"``. The actual service connection happens in Phase 5;
-    once connected, the returned payload is a JSON metrics document.
+Returns:
+    JSON document with ``skill_id``, ``found`` (bool), and —
+    when found — ``skill`` (via ``Skill.to_dict()``), ``stats``,
+    ``usage_recent_count``, and ``ab_test``.
+
+While the underlying service is not yet wired up, this tool
+returns the stub message containing ``"⏳"``. Once connected,
+the returned payload is a JSON metrics document.
 """
 
     @register_tool_category("skill-evolution")
     @tool
-    async def skill_execute_capture(instance_id: str, task_details: str) -> str:
-        """[Phase 5 stub] Execute the CAPTURED flow for a task."""
+    async def skill_execute_capture(
+        instance_id: str,
+        task_message: str,
+        iterations: int,
+        duration_seconds: int,
+    ) -> str:
+        """Execute the CAPTURED flow for a task.
+
+        Constructs a ``task_details`` dict from the tool arguments and
+        delegates to ``SkillEvolutionService.capture_skill(
+        current_instance_id, task_details)``. The capture flow
+        validates that the task succeeded with sufficient complexity,
+        then asks the LLM to distill it into a reusable skill body
+        with ``lineage_origin='captured'``.
+        """
+        # ``current_instance_id`` is captured in the closure; the
+        # caller-supplied ``instance_id`` is forwarded into the
+        # task_details dict for lineage/audit purposes.
+        task_details = {
+            "instance_id": instance_id,
+            "task_message": task_message,
+            "iterations": iterations,
+            "duration_seconds": duration_seconds,
+        }
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
-            "execute_capture",
-            instance_id,
+            "capture_skill",
+            current_instance_id,
             task_details,
         )
 
     skill_execute_capture._full_doc_ = """\
-[Phase 5 stub] Execute the CAPTURED flow for a task.
+Execute the CAPTURED flow for a task.
 
-The CAPTURED flow wraps an arbitrary ``task_details`` payload into a
-runnable skill-cap unit: it identifies the responsible skill,
-captures the runtime trace, and persists the record for later
-analysis. In Phase 5 this delegates to
-``SkillEvolutionService.execute_capture(instance_id, task_details)``.
+Constructs a ``task_details`` dict from the tool arguments and
+delegates to ``SkillEvolutionService.capture_skill(
+current_instance_id, task_details)``. The capture flow wraps
+the task into a runnable skill-cap unit: it identifies the
+responsible skill, captures the runtime trace, and persists
+the record for later analysis.
 
 Args:
-    instance_id: The originating instance ID (typically the current
-        instance captured in the closure).
-    task_details: Free-form description of the task to capture —
-        natural-language intent plus any structured context the
-        service needs.
+    instance_id: The originating instance ID (the agent that ran
+        the task). Forwarded into the task_details dict for
+        lineage/audit purposes; the closure-supplied
+        ``current_instance_id`` is what is passed as the first
+        argument to ``capture_skill``.
+    task_message: Free-form description of the task to capture —
+        natural-language intent that the LLM will distill into a
+        reusable skill body.
+    iterations: Loop iterations the agent took on this task.
+        Used to filter out trivial successes before invoking the
+        LLM.
+    duration_seconds: Wall-clock runtime in seconds. Also used
+        to filter out trivial successes before invoking the LLM.
 
-Stub behavior:
-    While the underlying service is not yet wired up (Phase 5), this
-    tool returns the stub message containing ``"⏳"`` and
-    ``"Phase 5"``. The actual service connection happens in Phase 5;
-    once connected, the returned payload is the captured record id
-    and a brief summary.
+Returns:
+    JSON document with ``new_skill_id`` and ``skipped``.
+
+While the underlying service is not yet wired up, this tool
+returns the stub message containing ``"⏳"``. Once connected,
+the returned payload is the captured record id and a brief
+summary.
 """
 
     return [

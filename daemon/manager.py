@@ -78,6 +78,8 @@ from .services.skill_store_service import SkillStoreService
 from .services.skill_search_service import SkillSearchService
 from .services.skill_injection_service import SkillInjectionService
 from .services.skill_metrics_service import SkillMetricsService
+from .services.skill_evolution_service import SkillEvolutionService
+from .services.skill_job_dispatcher import SkillJobDispatcher
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
@@ -773,6 +775,13 @@ class InstanceManager:
         self._job_queue_service: Any = None
         self._job_queue_mgmt_service: Any = None
         self._dead_letter_service: Any = None
+        # Phase 5: SkillJobDispatcher — constructed by
+        # ``set_job_queue_service`` once the JobQueueService and its
+        # ``_queue_repo`` are reachable. Initialized to None so
+        # ``getattr(manager, '_skill_job_dispatcher', None)`` calls
+        # succeed during the window between ``__init__`` and
+        # ``set_job_queue_service``.
+        self._skill_job_dispatcher: Any = None
 
         # NEW: Optional notification broadcaster (set via set_notification_broadcaster)
         self._notification_broadcaster: Any = None
@@ -918,6 +927,22 @@ class InstanceManager:
         # The metrics service also needs ``_instance_repository`` so
         # it can read/clear the ``last_injected_skill_ids`` metadata
         # key the Phase 3 injection service stamps onto instances.
+        #
+        # The CAPTURED-flow eligibility check (Phase 5) needs the
+        # evolution service and a resolver that maps ``agent_id`` to
+        # ``AgentMetadata`` (for the ``skill_injection`` gate). The
+        # evolution service depends on the metrics service (for
+        # ``get_ab_comparison_stats``) and the metrics service
+        # depends on the evolution service (for ``check_and_capture``)
+        # — a constructor-level cycle. We break it by:
+        #
+        #   1. Constructing the metrics service with
+        #      ``evolution_service=None`` and the registry-backed
+        #      ``agent_id_resolver``.
+        #   2. Constructing the evolution service with
+        #      ``metrics_service=self._skill_metrics_service``.
+        #   3. Wiring the back-reference via
+        #      ``set_evolution_service``.
         if self.config.skill_evolution is not None:
             self._skill_usage_repo = create_skill_usage_repository(
                 engine=self._engine, create_tables=False
@@ -928,6 +953,15 @@ class InstanceManager:
             self._skill_ab_test_repo = create_skill_ab_test_repository(
                 engine=self._engine, create_tables=False
             )
+
+            # Registry-backed resolver. Returns ``AgentMetadata | None``
+            # for the given ``agent_id``. Used by the CAPTURED check
+            # to gate on ``skill_injection``. Wrapped in a closure so
+            # the metrics service stays decoupled from the registry
+            # module (and trivially mockable in tests).
+            def _resolve_agent_meta(agent_id: str) -> Any:
+                return get_registry().get_resolved(agent_id)
+
             self._skill_metrics_service = SkillMetricsService(
                 usage_repo=self._skill_usage_repo,
                 skill_repo=self._skill_repo,
@@ -935,6 +969,8 @@ class InstanceManager:
                 ab_test_repo=self._skill_ab_test_repo,
                 config=self.config.skill_evolution,
                 instance_repo=self._instance_repository,
+                evolution_service=None,  # back-ref set below
+                agent_id_resolver=_resolve_agent_meta,
             )
             self._skill_trigger_engine = SkillTriggerEngine(
                 trigger_repo=self._skill_trigger_repo,
@@ -953,6 +989,27 @@ class InstanceManager:
                 ab_test_repo=self._skill_ab_test_repo,
                 skill_repo=self._skill_repo,
             )
+
+            # Skill Evolution Phase 5: evolution service (Tier 2/3
+            # analysis, evolution, CAPTURED gate, A/B resolution).
+            # Constructed AFTER the metrics service so it can hold a
+            # back-reference; the metrics service then receives the
+            # evolution service via ``set_evolution_service`` to close
+            # the loop. ``llm_config`` reuses the same dict pattern as
+            # the Phase 2 services above.
+            self._skill_evolution_service = SkillEvolutionService(
+                skill_repo=self._skill_repo,
+                lineage_repo=self._skill_lineage_repo,
+                usage_repo=self._skill_usage_repo,
+                embedding_service=self._skill_embedding_service,
+                metrics_service=self._skill_metrics_service,
+                ab_test_repo=self._skill_ab_test_repo,
+                config=self.config.skill_evolution,
+                llm_config=skill_llm_config,
+            )
+            self._skill_metrics_service.set_evolution_service(
+                self._skill_evolution_service
+            )
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
@@ -960,6 +1017,13 @@ class InstanceManager:
             self._skill_metrics_service = None
             self._skill_trigger_engine = None
             self._skill_injection_service = None
+            self._skill_evolution_service = None
+            # ``_skill_job_dispatcher`` is initialized in
+            # ``set_job_queue_service`` — guard against the rare
+            # case where that setter is never called so attribute
+            # lookups (``getattr(manager, '_skill_job_dispatcher',
+            # None)``) still see ``None`` rather than ``AttributeError``.
+            self._skill_job_dispatcher = None
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
@@ -1782,25 +1846,70 @@ class InstanceManager:
                         # Unknown action — surface as analysis so the
                         # downstream pipeline can decide.
                         job_type = "skill_analysis"
-                    message = (
-                        f"[skill_metric_scan] {action} "
-                        f"skill={skill_id} reason={payload['reason']}"
+
+                    # Prefer the SkillJobDispatcher (Phase 5) — it's
+                    # the single front-door for skill-evolution jobs
+                    # and enforces the parallel-queue routing rule.
+                    # Fall back to direct ``job_repo.create`` when the
+                    # dispatcher hasn't been wired yet (tests, early
+                    # boot) — the legacy code path is preserved here
+                    # so the existing Phase 4 tests keep working.
+                    dispatcher = getattr(
+                        self, "_skill_job_dispatcher", None
                     )
-                    await asyncio.to_thread(
-                        job_repo.create,
-                        agent_id="skill-evolution",
-                        agent_dir="agents/skill_evolution",
-                        message=message,
-                        source="skill_metric_scan",
-                        project_id=project_id,
-                        priority=4,  # Below user-initiated (5), above retry (1)
-                        job_metadata=payload,
-                        queue_id=parallel_queue.queue_id,
-                        idempotency_key=None,
-                        job_type=job_type,
-                        instance_id=None,
-                        max_retries=2,
-                    )
+                    if dispatcher is not None:
+                        if action == "analyze":
+                            await dispatcher.enqueue_analysis(
+                                project_id=project_id,
+                                skill_id=skill_id,
+                                reason=payload.get("reason", ""),
+                                stats=payload.get("stats", {}),
+                            )
+                        elif action == "evolve_fix":
+                            await dispatcher.enqueue_evolution(
+                                project_id=project_id,
+                                skill_id=skill_id,
+                                evolution_type="FIX",
+                                direction=payload.get("reason", ""),
+                            )
+                        else:
+                            # Unknown action — surface as analysis so
+                            # the downstream pipeline can decide.
+                            await dispatcher.enqueue_analysis(
+                                project_id=project_id,
+                                skill_id=skill_id,
+                                reason=f"unknown action: {action}",
+                                stats=payload.get("stats", {}),
+                            )
+                    else:
+                        # Fallback: create the JobItem directly. Used
+                        # when the dispatcher isn't wired (e.g. during
+                        # tests or before ``set_job_queue_service``
+                        # runs).
+                        logger.warning(
+                            "_run_skill_metric_scan: dispatcher "
+                            "unavailable, falling back to direct "
+                            "job_repo.create"
+                        )
+                        message = (
+                            f"[skill_metric_scan] {action} "
+                            f"skill={skill_id} reason={payload['reason']}"
+                        )
+                        await asyncio.to_thread(
+                            job_repo.create,
+                            agent_id="skill-keeper",
+                            agent_dir="agents/skill-keeper",
+                            message=message,
+                            source="skill_metric_scan",
+                            project_id=project_id,
+                            priority=4,
+                            job_metadata=payload,
+                            queue_id=parallel_queue.queue_id,
+                            idempotency_key=None,
+                            job_type=job_type,
+                            instance_id=None,
+                            max_retries=2,
+                        )
                 except Exception as exc:
                     logger.warning(
                         f"_run_skill_metric_scan: enqueue failed for "
@@ -1892,6 +2001,13 @@ class InstanceManager:
         the SourceRegistry so that SchedulerAdapter can route jobs through the
         job queue when project_id is configured.
 
+        Phase 5 also constructs the :class:`SkillJobDispatcher` here —
+        it requires both ``job_service`` (for ``enqueue()``) and the
+        ``JobQueueRepository`` (for ``system_parallel_queue``
+        resolution), and the repository is only reachable via the
+        JobQueueService. ``_job_queue_service`` is ``None`` during
+        ``__init__`` so we cannot construct the dispatcher there.
+
         Args:
             service: The JobQueueService instance to use for lock management.
         """
@@ -1900,6 +2016,35 @@ class InstanceManager:
         if hasattr(self, 'source_registry') and self.source_registry:
             self.source_registry._job_queue_service = service
             logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
+
+        # Wire SkillJobDispatcher (Phase 5) — the single front-door
+        # for skill-evolution JobItems. Defensive: a missing
+        # ``_queue_repo`` attribute on the service (shouldn't
+        # happen in production, but defensive against test doubles)
+        # leaves the dispatcher unset so callers fall back to the
+        # "not yet initialized" soft-fail path.
+        queue_repo = getattr(service, "_queue_repo", None) if service is not None else None
+        if queue_repo is None:
+            logger.warning(
+                "SkillJobDispatcher not wired: JobQueueService has no "
+                "_queue_repo attribute"
+            )
+            self._skill_job_dispatcher = None
+        else:
+            self._skill_job_dispatcher = SkillJobDispatcher(
+                job_service=service,
+                queue_repo=queue_repo,
+            )
+            logger.info("SkillJobDispatcher wired to manager")
+
+        # Wire the metrics service's job dispatcher handle so the
+        # CAPTURED flow (Phase 5) can actually enqueue capture jobs
+        # instead of just computing eligibility. The metrics service
+        # is only present when ``skill_evolution`` is configured, so
+        # guard with getattr.
+        metrics = getattr(self, "_skill_metrics_service", None)
+        if metrics is not None and self._skill_job_dispatcher is not None:
+            metrics.set_job_dispatcher(self._skill_job_dispatcher)
         logger.info("JobQueueService connected to SessionManager")
 
     def set_job_feedback_observer(self, observer: Any) -> None:

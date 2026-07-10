@@ -275,7 +275,7 @@ class TestSkillMetricScanEnqueue:
         assert job.job_type == "skill_analysis"
         assert job.queue_id == parallel_queue_id
         assert job.source == "skill_metric_scan"
-        assert job.agent_id == "skill-evolution"
+        assert job.agent_id == "skill-keeper"
         assert job.job_metadata["skill_id"] == "skill-analyze-1"
         assert job.job_metadata["trigger_name"] == "low_completion_rate"
         assert "evolution_type" not in job.job_metadata

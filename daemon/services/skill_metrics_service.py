@@ -139,6 +139,20 @@ class SkillMetricsService:
         instance_repo: Optional sync instance repository used
             to read ``last_injected_skill_ids`` from instance
             metadata and clear it after recording.
+        evolution_service: Optional :class:`SkillEvolutionService`
+            (Phase 5). When set, ``record_task_completion``
+            runs the CAPTURED-flow eligibility check after
+            recording metrics — a successful task that didn't
+            apply any skill (per ``feedback_applied``) and hit
+            the complexity thresholds is enqueued for skill
+            capture.
+        agent_id_resolver: Optional callable
+            ``(agent_id: str) -> AgentMetadata | None``. The
+            CAPTURED check only fires when the resolved
+            metadata has ``skill_injection=True``. Accepting a
+            callable (instead of a registry reference) keeps
+            the service decoupled from the registry module
+            and makes it trivially mockable in tests.
     """
 
     def __init__(
@@ -149,8 +163,10 @@ class SkillMetricsService:
         ab_test_repo: Any,
         config: Any,
         instance_repo: Any = None,
+        evolution_service: Any = None,
+        agent_id_resolver: Any = None,
     ) -> None:
-        """Store repositories and config.
+        """Store repositories, config, and optional Phase 5 collaborators.
 
         Args:
             usage_repo: :class:`SkillUsageRepository`.
@@ -159,11 +175,25 @@ class SkillMetricsService:
             ab_test_repo: :class:`SkillABTestRepository`.
             config: :class:`~daemon.config.SkillEvolutionConfig`
                 (provides ``ab_sample_size`` / ``ab_min_difference``
-                / ``max_extensions``).
+                / ``max_extensions`` /
+                ``capture_min_iterations`` /
+                ``capture_min_duration_seconds``).
             instance_repo: Optional instance repository. When
                 ``None``, ``record_task_completion`` cannot read
                 injected-skill metadata and silently no-ops for
                 that step; all other methods work normally.
+            evolution_service: Optional
+                :class:`~daemon.services.skill_evolution_service.SkillEvolutionService`
+                (Phase 5). When provided, the CAPTURED-flow
+                eligibility check fires at the end of
+                :meth:`record_task_completion`. ``None`` disables
+                capture entirely — the rest of the metrics path
+                is unaffected.
+            agent_id_resolver: Optional callable ``(agent_id) ->
+                AgentMetadata | None``. Used to gate the CAPTURED
+                check on ``skill_injection``. When ``None``, the
+                CAPTURED check is skipped (treated as
+                ``skill_injection=False`` for every agent).
         """
         self.usage_repo = usage_repo
         self.skill_repo = skill_repo
@@ -171,6 +201,55 @@ class SkillMetricsService:
         self.ab_test_repo = ab_test_repo
         self.config = config
         self.instance_repo = instance_repo
+        self.evolution_service = evolution_service
+        self.agent_id_resolver = agent_id_resolver
+
+    def set_evolution_service(self, evolution_service: Any) -> None:
+        """Attach a Phase 5 :class:`SkillEvolutionService` after construction.
+
+        Breaks the construction-time cycle between this service and
+        the evolution service: the evolution service depends on the
+        metrics service (for ``get_ab_comparison_stats``) and the
+        metrics service depends on the evolution service (for
+        ``check_and_capture``). The manager builds both in sequence
+        and closes the loop with this setter.
+
+        Re-assigning replaces the previous handle. Pass ``None`` to
+        disable the CAPTURED check without re-instantiating the
+        service.
+
+        Args:
+            evolution_service: The Phase 5 evolution service to wire
+                in, or ``None`` to clear.
+        """
+        self.evolution_service = evolution_service
+
+    def set_job_dispatcher(self, dispatcher: Any) -> None:
+        """Attach the Phase 5 :class:`SkillJobDispatcher` after construction.
+
+        The metrics service uses the dispatcher to actually enqueue
+        CAPTURED jobs once :meth:`SkillEvolutionService.check_and_capture`
+        decides a task is eligible for capture. Without the dispatcher
+        wired in, the eligibility check still runs (so the
+        evolution-service stats stay consistent) but the resulting
+        ``task_details`` dict is silently dropped — there is nowhere
+        to send the job.
+
+        The dispatcher is constructed in
+        :meth:`InstanceManager.set_job_queue_service`, which is called
+        AFTER :meth:`InstanceManager.__init__` (the dispatcher needs
+        ``JobQueueService._queue_repo`` which only exists post-init).
+        This setter bridges that gap — the manager wires it
+        immediately after building the dispatcher so subsequent
+        completion-hook invocations can enqueue captures.
+
+        Args:
+            dispatcher: The Phase 5 :class:`SkillJobDispatcher` to
+                wire in, or ``None`` to clear. When ``None``, the
+                CAPTURED path remains eligibility-checked but no
+                capture jobs are enqueued (soft-disabled).
+        """
+        self._skill_job_dispatcher = dispatcher
 
     # --------------------------------------------------------
     # Recording — task completion
@@ -184,6 +263,7 @@ class SkillMetricsService:
         task_succeeded: bool,
         iterations: int,
         duration_seconds: int,
+        task_message: str = "",
     ) -> int:
         """Record skill usage after a task completes.
 
@@ -219,6 +299,17 @@ class SkillMetricsService:
 
         3. Clear the ``last_injected_skill_ids`` metadata key
            on the instance (so the next task starts clean).
+        4. **CAPTURED-flow eligibility check** (only when an
+           ``evolution_service`` was wired in). For successful
+           tasks where the agent has ``skill_injection=True``
+           and no skill was actually *applied* (per
+           ``feedback_applied`` records — injection is NOT
+           the same as application), delegate to
+           :meth:`SkillEvolutionService.check_and_capture`
+           which decides whether to enqueue a skill-capture
+           job. Wrapped in soft-fail try/except — capture
+           errors NEVER block metrics recording or job
+           completion.
 
         All sync repo calls are wrapped in
         ``asyncio.to_thread``. Exceptions are logged and
@@ -238,6 +329,10 @@ class SkillMetricsService:
                 consumed.
             duration_seconds: Wall-clock seconds the task
                 spent.
+            task_message: The user input for the task. Optional
+                — empty string when the caller doesn't have it.
+                Forwarded to the CAPTURED eligibility check so
+                the captured-skill prompt has full context.
 
         Returns:
             Number of usage records inserted. ``0`` when no
@@ -317,7 +412,201 @@ class SkillMetricsService:
                 f"{exc}"
             )
 
+        # CAPTURED-flow eligibility check. Runs AFTER metrics
+        # recording so even if capture fails (or is skipped)
+        # the denormalized counters are already up to date.
+        # Soft-fail: any exception here is logged but never
+        # propagates — the job-completion hook must always
+        # return cleanly.
+        try:
+            await self._check_capture_eligibility(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                task_message=task_message,
+                task_succeeded=task_succeeded,
+                iterations=iterations,
+                duration_seconds=duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"SkillMetricsService: CAPTURED eligibility check "
+                f"failed for instance {instance_id}: {exc}"
+            )
+
         return inserted
+
+    async def _check_capture_eligibility(
+        self,
+        instance_id: str,
+        agent_id: str,
+        project_id: Optional[str],
+        task_message: str,
+        task_succeeded: bool,
+        iterations: int,
+        duration_seconds: int,
+    ) -> Optional[dict]:
+        """Run the CAPTURED-flow eligibility gate after metrics recording.
+
+        The CAPTURED flow auto-extracts a reusable skill from a
+        successful task that did NOT use any existing skill.
+        "Did not use" means no usage record for this instance
+        has ``feedback_applied=True`` — checking injection
+        records alone is not enough, because a skill may have
+        been *injected* into the prompt but the agent decided
+        not to apply it.
+
+        The check is gated on:
+
+        1. ``evolution_service`` is wired in — otherwise capture
+           is a no-op for this service.
+        2. ``task_succeeded`` — only successful tasks are
+           eligible for capture.
+        3. The agent has ``skill_injection=True`` (resolved via
+           ``agent_id_resolver``) — capture is a feature of the
+           injection subsystem; non-injection agents shouldn't
+           spawn captures.
+        4. No skill was *applied* on this instance —
+           ``SkillUsageRepository.has_applied_for_instance``
+           returns False. This is the expensive part; it's
+           gated behind steps 1-3 so we don't hit the DB when
+           the answer is already "no".
+        5. Complexity threshold — at least one of
+           ``iterations > capture_min_iterations`` or
+           ``duration_seconds > capture_min_duration_seconds``
+           must hold. Trivial / instant successes are ignored.
+
+        The :meth:`SkillEvolutionService.check_and_capture`
+        method does the final gatekeeping (re-checks
+        ``has_applied_for_instance`` to close the race window
+        between this read and the LLM call) and enqueues a
+        ``skill_capture`` job via the dispatcher.
+
+        Args:
+            instance_id: The instance that just completed.
+            agent_id: The agent that processed the task.
+            project_id: Project scope (``None`` is tolerated).
+            task_message: User input — passed through to the
+                capture prompt.
+            task_succeeded: Whether the task ended in success.
+            iterations: LLM iterations the task took.
+            duration_seconds: Wall-clock duration.
+
+        Returns:
+            The ``task_details`` dict returned by
+            ``check_and_capture`` if it enqueued a capture,
+            else ``None``. Returned for tests / observability;
+            the metrics service itself does not act on the
+            return value.
+        """
+        # Gate 1: evolution service must be wired. This is the
+        # most common no-op path during Phase 4 (capture is
+        # Phase 5+).
+        if self.evolution_service is None:
+            return None
+
+        # Gate 2: capture only applies to successful tasks —
+        # extracting a skill from a failure would propagate
+        # the failure pattern.
+        if not task_succeeded:
+            return None
+
+        # Gate 3: agent must have skill_injection enabled.
+        # ``agent_id_resolver`` is a callable the manager wires
+        # up against the registry. When ``None`` or it returns
+        # ``None``, we treat the agent as non-injection (skip).
+        skill_injection_enabled = False
+        if self.agent_id_resolver is not None:
+            try:
+                agent_meta = self.agent_id_resolver(agent_id)
+                skill_injection_enabled = bool(
+                    getattr(agent_meta, "skill_injection", False)
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"SkillMetricsService: agent_id_resolver "
+                    f"failed for agent_id={agent_id}: {exc}"
+                )
+                skill_injection_enabled = False
+        if not skill_injection_enabled:
+            return None
+
+        # Gate 4: no skill must have been applied to this
+        # instance. Using ``feedback_applied`` (not injection
+        # records) is the spec — a skill may have been offered
+        # to the agent without being consumed.
+        try:
+            applied = await asyncio.to_thread(
+                self.usage_repo.has_applied_for_instance,
+                instance_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"SkillMetricsService: has_applied_for_instance "
+                f"failed for instance {instance_id}: {exc}"
+            )
+            # Fail closed: if we can't tell, don't capture.
+            return None
+        if applied:
+            # A skill was already applied — the success is
+            # already attributed to that skill. Don't spawn
+            # a sibling capture.
+            return None
+
+        # Gate 5: complexity threshold. The evolution service
+        # also enforces this; we duplicate the check here so
+        # the capture-path log line makes the threshold
+        # explicit AND we don't pay the cost of an LLM-bound
+        # enqueue path for trivial successes.
+        min_iter = (
+            getattr(self.config, "capture_min_iterations", 5) or 5
+        )
+        min_dur = (
+            getattr(self.config, "capture_min_duration_seconds", 60)
+            or 60
+        )
+        if iterations <= min_iter and duration_seconds <= min_dur:
+            return None
+
+        # All gates passed — delegate to the evolution service.
+        # ``check_and_capture`` re-checks ``has_applied_for_instance``
+        # to close the TOCTOU window between our read and the
+        # eventual LLM call.
+        try:
+            task_details = await self.evolution_service.check_and_capture(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                task_message=task_message,
+                task_succeeded=task_succeeded,
+                iterations=iterations,
+                duration_seconds=duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"SkillMetricsService: check_and_capture failed "
+                f"for instance {instance_id}: {exc}"
+            )
+            return None
+
+        # If the evolution service returned task_details (eligible
+        # for capture), enqueue the actual CAPTURED job via the
+        # dispatcher. The dispatcher may not be wired yet (early-boot
+        # race) — soft-fail in that case: the metrics path must
+        # never block on dispatch failures.
+        if task_details is not None and self._skill_job_dispatcher is not None:
+            try:
+                await self._skill_job_dispatcher.enqueue_capture(
+                    task_details.get("project_id"),
+                    task_details,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"SkillMetricsService: enqueue_capture failed for "
+                    f"instance {instance_id}: {exc}"
+                )
+
+        return task_details
 
     async def _record_one(
         self,
