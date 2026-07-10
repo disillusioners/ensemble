@@ -244,6 +244,12 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Set current instance ID - currentInstance computed will derive from instances list
     this.currentInstanceId.set(instanceId);
 
+    // Synchronous clear of the stale todo list from the previous instance
+    // before any async work begins. Without this, a late getTodos response
+    // for the previous instance (or a stray todo_update from its still-open
+    // SSE channel) can leak into the new instance's UI.
+    this.sseService.todos.set([]);
+
     // Find instance in existing list or load it
     const instance = this.instanceService.instances().find(i => i.instance_id === instanceId);
     console.log('[Chat] Instance found in list:', !!instance, 'instances count:', this.instanceService.instances().length);
@@ -307,9 +313,18 @@ export class ChatComponent implements OnInit, OnDestroy {
     // once the agent publishes one.
     this.api.getTodos(instanceId).subscribe({
       next: (data) => {
+        // Staleness guard: if the user has switched instances since this
+        // request was issued, drop the response so it doesn't overwrite the
+        // newer instance's todos.
+        if (this.currentInstanceId() !== instanceId) return;
         this.sseService.todos.set(data ?? []);
       },
-      error: (err) => console.warn('[Chat] Failed to load todos:', err),
+      error: (err) => {
+        console.warn('[Chat] Failed to load todos:', err);
+        // Clear stale todos on REST failure so the previous instance's data
+        // doesn't linger indefinitely.
+        this.sseService.todos.set([]);
+      },
     });
   }
 

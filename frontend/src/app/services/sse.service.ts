@@ -384,6 +384,14 @@ export class SseService {
 
   /**
    * Clears all event-related state.
+   *
+   * Note: ``todos`` is intentionally NOT cleared here. The todos signal is
+   * managed independently by the chat component (REST ``getTodos`` on
+   * instance load) and by the SSE ``todo_update`` handler (live mutations).
+   * Wiping it as part of the SSE connect lifecycle causes a race where
+   * freshly-loaded todos get erased by ``connect() -> clearEvents()`` right
+   * after ``loadInstanceMessages`` populates them. The next todo mutation
+   * (or a re-fetch) repopulates the signal as needed.
    */
   clearEvents(): void {
     this.events.set([]);
@@ -392,7 +400,6 @@ export class SseService {
     this.statusChange.set(null);
     this.instanceCreatedQueue.set([]);
     this.contextUsage.set(null);
-    this.todos.set([]);
     this.pendingToolOutputs.clear();
   }
 }
