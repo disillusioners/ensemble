@@ -531,6 +531,17 @@
   }
 }
 
+// Inline error message rendered below the sub-task input. Uses the same
+// red accent as `.subtask-remove:hover` and `.char-count.exceeded` so a
+// failure reads visually consistent with the other "something went wrong"
+// affordances in this component.
+.subtask-error {
+  color: #ef5350;
+  font-size: 0.75rem;
+  margin-top: 4px;
+  padding: 2px 0;
+}
+
 // Graph-mode badge on the foreignObject node card. Slim pill so it doesn't
 // crowd the status icon and node text alongside the comment button.
 .subtask-badge-btn {

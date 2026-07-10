@@ -119,6 +119,14 @@ export class TodoListComponent {
   editingComment = signal<string>('');
   isSavingComment = signal(false);
 
+  // Guards the sub-task Add button + input so a fast double-click cannot
+  // submit two identical sub-tasks before the first POST resolves.
+  isAddingSubtask = signal(false);
+
+  // Shared error message surfaced near the sub-task input sections
+  // (linear mode + graph popup). Reset on success or when any popup closes.
+  subtaskError = signal<string | null>(null);
+
   // Graph-mode comment popup state. Linear mode ignores these and uses the
   // existing inline editor below each todo item.
   commentPopupNodeId = signal<string | null>(null);
@@ -363,6 +371,12 @@ export class TodoListComponent {
     this.subtaskPopupPosition.set(null);
     this.editingNodeId.set(null);
     this.editingComment.set('');
+    // Reset the shared sub-task input buffer + linear-mode expansion
+    // selection so closing any popup leaves the UI in a clean state.
+    this.newSubtaskText.set('');
+    this.expandedSubtaskNodeId.set(null);
+    // Clear any stale sub-task error from the previous interaction.
+    this.subtaskError.set(null);
   }
 
   // Outside-click detection for the graph-mode popups. Safe to leave
@@ -497,10 +511,14 @@ export class TodoListComponent {
         next: (res) => {
           if (this.instanceId() !== targetInstanceId) return;
           this.sseService.todos.set(this.normalizeTodos(res.todos));
+          this.subtaskError.set(null);
         },
         error: (err) => {
           if (this.instanceId() !== targetInstanceId) return;
           console.error('Failed to toggle subtask:', err);
+          this.subtaskError.set(
+            'Failed to toggle sub-task: ' + (err.error?.message || err.message || 'Unknown error')
+          );
         },
       });
   }
@@ -511,20 +529,34 @@ export class TodoListComponent {
    * the response so ordering and any server-side defaults stick.
    */
   addSubtask(node: TodoNode): void {
+    if (this.isAddingSubtask()) return;
     const text = this.newSubtaskText().trim();
     if (!text) return;
     const targetInstanceId = this.instanceId();
+    this.isAddingSubtask.set(true);
     this.api.addSubtask(targetInstanceId, node.id, text)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          if (this.instanceId() !== targetInstanceId) return;
+          if (this.instanceId() !== targetInstanceId) {
+            this.isAddingSubtask.set(false);
+            return;
+          }
           this.sseService.todos.set(this.normalizeTodos(res.todos));
           this.newSubtaskText.set('');
+          this.subtaskError.set(null);
+          this.isAddingSubtask.set(false);
         },
         error: (err) => {
-          if (this.instanceId() !== targetInstanceId) return;
+          if (this.instanceId() !== targetInstanceId) {
+            this.isAddingSubtask.set(false);
+            return;
+          }
           console.error('Failed to add subtask:', err);
+          this.subtaskError.set(
+            'Failed to add sub-task: ' + (err.error?.message || err.message || 'Unknown error')
+          );
+          this.isAddingSubtask.set(false);
         },
       });
   }
@@ -541,10 +573,14 @@ export class TodoListComponent {
         next: (res) => {
           if (this.instanceId() !== targetInstanceId) return;
           this.sseService.todos.set(this.normalizeTodos(res.todos));
+          this.subtaskError.set(null);
         },
         error: (err) => {
           if (this.instanceId() !== targetInstanceId) return;
           console.error('Failed to remove subtask:', err);
+          this.subtaskError.set(
+            'Failed to remove sub-task: ' + (err.error?.message || err.message || 'Unknown error')
+          );
         },
       });
   }

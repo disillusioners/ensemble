@@ -111,7 +111,9 @@
                           class="subtask-input"
                           type="text"
                           placeholder="Add a sub-task…"
+                          maxlength="500"
                           [value]="newSubtaskText()"
+                          [disabled]="isAddingSubtask()"
                           (input)="onSubtaskTextInput($event)"
                           (keydown.enter)="addSubtask(item)"
                         />
@@ -119,8 +121,12 @@
                           class="editor-btn primary"
                           type="button"
                           (click)="addSubtask(item)"
+                          [disabled]="isAddingSubtask()"
                         >Add</button>
                       </div>
+                      @if (subtaskError()) {
+                        <div class="subtask-error">{{ subtaskError() }}</div>
+                      }
                     </div>
                   }
                 </div>
@@ -314,7 +320,9 @@
                     class="subtask-input"
                     type="text"
                     placeholder="Add a sub-task…"
+                    maxlength="500"
                     [value]="newSubtaskText()"
+                    [disabled]="isAddingSubtask()"
                     (input)="onSubtaskTextInput($event)"
                     (keydown.enter)="addSubtask(subPopupItem)"
                   />
@@ -322,8 +330,12 @@
                     class="editor-btn primary"
                     type="button"
                     (click)="addSubtask(subPopupItem)"
+                    [disabled]="isAddingSubtask()"
                   >Add</button>
                 </div>
+                @if (subtaskError()) {
+                  <div class="subtask-error">{{ subtaskError() }}</div>
+                }
               </div>
             }
           }
