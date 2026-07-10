@@ -70,6 +70,55 @@ class TodoEdgeRequest(BaseModel):
         description="ID of the successor node (edge target).",
     )
 
+
+class TodoSubtaskCreateRequest(BaseModel):
+    """Request body for adding a sub-task to a todo node.
+
+    Attributes:
+        text: Sub-task description. Non-empty (Pydantic min_length=1) and
+            hard-capped at 500 characters via ``max_length=500``. Empty
+            / over-length inputs are rejected by Pydantic's auto-422
+            before reaching the endpoint — no extra handler needed.
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Sub-task text. 1-500 characters.",
+    )
+
+
+class TodoSubtaskUpdateRequest(BaseModel):
+    """Request body for updating a sub-task's status.
+
+    Attributes:
+        status: New status. Normalized by the endpoint (lowercased,
+            stripped) to either ``"pending"`` or ``"done"``. Sub-task
+            statuses are STRICTLY BINARY — ``"in_progress"`` and its
+            aliases are rejected with ``400``. The endpoint rejects any
+            value that doesn't normalize cleanly to the binary set.
+        auto_complete: When ``True`` AND every sub-task on the parent
+            node is ``"done"`` AND the parent's own status is not
+            already ``"done"``, the parent is auto-completed. Defaults
+            to ``False``. See
+            :meth:`TodoGraphManager.update_subtask` for the full
+            vacuous-truth policy.
+    """
+
+    status: str = Field(
+        ...,
+        description="New sub-task status; normalizes to 'pending' or 'done'.",
+    )
+    auto_complete: bool = Field(
+        default=False,
+        description=(
+            "If True, auto-complete the parent node when all its "
+            "sub-tasks are done."
+        ),
+    )
+
+
 # Create router with /instances prefix
 router = APIRouter(prefix="/instances", tags=["instances"])
 
@@ -460,7 +509,11 @@ async def get_instance_todo_graph(
 
     Edges are derived from per-node ``next_ids`` adjacency lists and
     returned as ``{"from": str, "to": str}`` dicts — the same shape
-    accepted by ``create_graph`` inputs.
+    accepted by ``create_graph`` inputs. Each node dict conforms to the
+    **frozen seven-key schema** (``id``, ``index``, ``text``, ``status``,
+    ``comment``, ``next_ids``, ``subtasks``); the ``subtasks`` field is
+    the per-node checklist of ``{id, text, status}`` dicts (``[]`` when
+    no sub-tasks).
 
     Prefer this endpoint over ``GET /todos`` when the consumer needs
     explicit edge enumeration (e.g., graph rendering); for plain list
@@ -589,6 +642,224 @@ async def remove_todo_edge(
             logger.warning(
                 f"todo SSE emission failed for remove_edge on "
                 f"instance {instance_id} ({body.from_id} -> {body.to_id}): {e}"
+            )
+
+    return result
+
+
+# 8d. POST /instances/{instance_id}/todos/{node_id}/subtasks - Add a sub-task
+#
+# Declared BEFORE the ``/todos/{node_id}/comment`` catch-all so FastAPI's
+# order-sensitive matcher prefers this literal ``subtasks`` segment.
+@router.post("/{instance_id}/todos/{node_id}/subtasks")
+async def add_todo_subtask(
+    instance_id: str,
+    node_id: str,
+    body: TodoSubtaskCreateRequest,
+    request: Request,
+) -> dict:
+    """Append a sub-task to the checklist of ``node_id``.
+
+    Request body: ``{"text": "..."}``. ``text`` is required, non-empty,
+    and capped at 500 characters (enforced by Pydantic). The sub-task ID
+    is auto-generated (``s-`` + 8 hex chars) — clients do not supply it.
+    New sub-tasks always start in ``"pending"`` state.
+
+    Returns ``{"todos": [...], "reminder": str}`` on success (pass-through
+    from the manager) and emits a ``todo_update`` SSE event so the
+    frontend re-renders the checklist.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``404`` if ``node_id`` does not reference an existing node.
+        * ``422`` (auto from Pydantic) if ``text`` is empty or
+          exceeds 500 characters.
+        * ``400`` if the parent node already has
+          :data:`MAX_SUBTASKS_PER_NODE` sub-tasks
+          (i.e. the per-node cap is exceeded).
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    try:
+        result = manager._todo_manager.add_subtask(
+            instance_id, node_id, body.text
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=str(e),
+            ).model_dump(),
+        )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.TODO_NOT_FOUND,
+                message=f"Todo node {node_id!r} not found",
+            ).model_dump(),
+        )
+
+    # Best-effort SSE re-emit (same pattern as add_todo_edge above).
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_todo_update(
+                instance_id,
+                manager._todo_manager.get_all(instance_id),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"todo SSE emission failed for add_subtask on "
+                f"instance {instance_id} node {node_id}: {e}"
+            )
+
+    return result
+
+
+# 8e. PATCH /instances/{instance_id}/todos/{node_id}/subtasks/{subtask_id} - Update sub-task
+#
+# Declared BEFORE the ``/todos/{node_id}/comment`` catch-all so FastAPI's
+# order-sensitive matcher treats ``subtasks`` as a literal segment, not
+# a ``node_id`` value.
+@router.patch("/{instance_id}/todos/{node_id}/subtasks/{subtask_id}")
+async def update_todo_subtask(
+    instance_id: str,
+    node_id: str,
+    subtask_id: str,
+    body: TodoSubtaskUpdateRequest,
+    request: Request,
+) -> dict:
+    """Update a sub-task's status, with optional parent auto-completion.
+
+    Request body: ``{"status": "...", "auto_complete": bool}``. ``status``
+    is normalized (lowercase + stripped); valid values normalize to
+    ``"pending"`` or ``"done"`` only — ``"in_progress"`` and its aliases
+    are rejected with ``400`` because sub-tasks are a strictly binary
+    checklist.
+
+    When ``auto_complete=True`` and all sub-tasks on the parent node
+    are ``"done"`` AND the parent is not already ``"done"``, the parent
+    is auto-completed (the response's ``auto_completed`` flag is set to
+    ``True``). A node with zero sub-tasks is never auto-completed on
+    this path (vacuous-truth guard — see manager).
+
+    Returns ``{"todos": [...], "reminder": str, "auto_completed": bool}``
+    on success (pass-through from the manager) and emits a ``todo_update``
+    SSE event.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``404`` if ``node_id`` or ``subtask_id`` does not exist.
+        * ``400`` if ``status`` does not normalize to ``"pending"`` or
+          ``"done"``.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    # Normalize status: lowercase + strip. Reject anything that doesn't
+    # normalize cleanly to the binary set.
+    normalized = body.status.strip().lower()
+    if normalized not in ("pending", "done"):
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=(
+                    f"Invalid sub-task status {body.status!r}: must be "
+                    f"'pending' or 'done' (in_progress is not allowed for "
+                    f"sub-tasks)"
+                ),
+            ).model_dump(),
+        )
+
+    result = manager._todo_manager.update_subtask(
+        instance_id, node_id, subtask_id, normalized, body.auto_complete
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.TODO_NOT_FOUND,
+                message=(
+                    f"Sub-task {subtask_id!r} not found for node "
+                    f"{node_id!r} on instance {instance_id}"
+                ),
+            ).model_dump(),
+        )
+
+    # Best-effort SSE re-emit (same pattern as add_todo_edge above).
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_todo_update(
+                instance_id,
+                manager._todo_manager.get_all(instance_id),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"todo SSE emission failed for update_subtask on "
+                f"instance {instance_id} node {node_id} subtask "
+                f"{subtask_id}: {e}"
+            )
+
+    return result
+
+
+# 8f. DELETE /instances/{instance_id}/todos/{node_id}/subtasks/{subtask_id} - Remove sub-task
+#
+# Declared BEFORE the ``/todos/{node_id}/comment`` catch-all so FastAPI's
+# order-sensitive matcher treats ``subtasks`` as a literal segment.
+@router.delete("/{instance_id}/todos/{node_id}/subtasks/{subtask_id}")
+async def remove_todo_subtask(
+    instance_id: str,
+    node_id: str,
+    subtask_id: str,
+    request: Request,
+) -> dict:
+    """Remove a sub-task from a node's checklist.
+
+    Returns ``{"todos": [...], "reminder": str}`` on success (pass-
+    through from the manager) and emits a ``todo_update`` SSE event so
+    the frontend re-renders the checklist without the removed item.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``404`` if ``node_id`` or ``subtask_id`` does not exist.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    result = manager._todo_manager.remove_subtask(
+        instance_id, node_id, subtask_id
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.TODO_NOT_FOUND,
+                message=(
+                    f"Sub-task {subtask_id!r} not found for node "
+                    f"{node_id!r} on instance {instance_id}"
+                ),
+            ).model_dump(),
+        )
+
+    # Best-effort SSE re-emit (same pattern as add_todo_edge above).
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_todo_update(
+                instance_id,
+                manager._todo_manager.get_all(instance_id),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"todo SSE emission failed for remove_subtask on "
+                f"instance {instance_id} node {node_id} subtask "
+                f"{subtask_id}: {e}"
             )
 
     return result
