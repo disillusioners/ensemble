@@ -299,6 +299,47 @@
   // Slightly soften the entrance so the popup feels anchored to the node
   // rather than dropped in.
   transform-origin: top left;
+  // Smooth width/height transition when toggling the expanded state.
+  transition: width 0.15s ease;
+
+  // Expanded state — toggled by the expand button in the popup toolbar /
+  // sub-task header. Grows wider (and the inner textarea / list grow
+  // taller via the rules below) so long comments and big checklists have
+  // room. The component re-runs the edge-flip math with this width so the
+  // larger panel stays on-screen.
+  &.expanded {
+    width: 560px;
+  }
+}
+
+// Top-aligned toolbar row holding the expand toggle (comment popup only;
+// the sub-task popup puts its expand button inside the header row).
+.popup-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+// Quiet expand/collapse icon button shared by both popups.
+.popup-expand-btn {
+  color: #64748b;
+  flex-shrink: 0;
+  padding: 0;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}
+
+// When expanded, give the comment textarea vertical room to write a long
+// note (the default rows="2" + resize stays; this just raises the floor).
+.graph-popup.expanded .comment-input {
+  min-height: 150px;
 }
 
 // Arrow notch — a CSS triangle on the side of the popup facing the node.
@@ -609,4 +650,11 @@
   padding-left: 0;
   max-height: 200px;
   overflow-y: auto;
+}
+
+// Expanded sub-task popup: raise the checklist cap so more items are
+// visible before scrolling. Specificity (.graph-popup.expanded ...) beats
+// the .subtask-popup .subtask-list rule above.
+.graph-popup.expanded .subtask-list {
+  max-height: 400px;
 }

@@ -236,6 +236,7 @@
             @if (commentPopupPosition(); as popupPos) {
               <div
                 class="graph-popup"
+                [class.expanded]="popupExpanded()"
                 [class.placement-right]="popupPos.placement === 'right'"
                 [class.placement-left]="popupPos.placement === 'left'"
                 [class.placement-above]="popupPos.placement === 'above'"
@@ -246,6 +247,17 @@
                 role="dialog"
                 aria-label="Edit comment"
               >
+                <div class="popup-toolbar">
+                  <button
+                    class="icon-btn popup-expand-btn"
+                    type="button"
+                    (click)="togglePopupExpand($event)"
+                    [attr.aria-label]="popupExpanded() ? 'Collapse' : 'Expand'"
+                    [title]="popupExpanded() ? 'Collapse' : 'Expand'"
+                  >
+                    <mat-icon>{{ popupExpanded() ? 'close_fullscreen' : 'open_in_full' }}</mat-icon>
+                  </button>
+                </div>
                 <textarea
                   class="comment-input"
                   rows="2"
@@ -283,6 +295,7 @@
             @if (subtaskPopupPosition(); as subPopupPos) {
               <div
                 class="graph-popup subtask-popup"
+                [class.expanded]="popupExpanded()"
                 [class.placement-right]="subPopupPos.placement === 'right'"
                 [class.placement-left]="subPopupPos.placement === 'left'"
                 [class.placement-above]="subPopupPos.placement === 'above'"
@@ -296,6 +309,15 @@
                 <div class="subtask-popup-header">
                   <span class="subtask-popup-title" [title]="subPopupItem.text">{{ subPopupItem.text }}</span>
                   <span class="subtask-count-badge">{{ subtaskCount(subPopupItem).done }}/{{ subtaskCount(subPopupItem).total }}</span>
+                  <button
+                    class="icon-btn popup-expand-btn"
+                    type="button"
+                    (click)="togglePopupExpand($event)"
+                    [attr.aria-label]="popupExpanded() ? 'Collapse' : 'Expand'"
+                    [title]="popupExpanded() ? 'Collapse' : 'Expand'"
+                  >
+                    <mat-icon>{{ popupExpanded() ? 'close_fullscreen' : 'open_in_full' }}</mat-icon>
+                  </button>
                 </div>
                 <div class="subtask-list">
                   @for (sub of subPopupItem.subtasks; track sub.id) {
