@@ -19,6 +19,14 @@ from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
 from .db_connection.repository import DbConnectionRepository
 from .infra.repository import SQLModelInfraRepository
+from .skill.repository import (
+    SkillABTestRepository,
+    SkillEmbeddingRepository,
+    SkillLineageRepository,
+    SkillRepository,
+    SkillTriggerRepository,
+    SkillUsageRepository,
+)
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -605,6 +613,230 @@ def create_infra_repository(
     return SQLModelInfraRepository(engine)
 
 
+def create_skill_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillRepository:
+    """Create a SkillRepository from configuration or shared engine.
+
+    Persistence layer for the Skill Evolution System (Phase 1).
+    Six tables are created on first use (via
+    ``SQLModel.metadata.create_all``):
+
+    * ``skills`` — skill document + counter columns.
+    * ``skill_lineage`` — parent/child evolution DAG.
+    * ``skill_usage_records`` — per-task usage events.
+    * ``skill_triggers`` — declarative condition → action rules.
+    * ``skill_embeddings`` — cached per-skill vector embeddings
+      (JSON array of floats, cross-driver via ``JSONBType``).
+    * ``skill_ab_tests`` — A/B test buckets grouping old + new
+      variants.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillRepository(engine)
+
+
+def create_skill_lineage_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillLineageRepository:
+    """Create a SkillLineageRepository from configuration or shared engine.
+
+    Persistence layer for the ``skill_lineage`` table (Phase 1
+    of the Skill Evolution System). The table is created on
+    first use via ``SQLModel.metadata.create_all``.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillLineageRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillLineageRepository(engine)
+
+
+def create_skill_usage_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillUsageRepository:
+    """Create a SkillUsageRepository from configuration or shared engine.
+
+    Persistence layer for the ``skill_usage_records`` table
+    (Phase 1 of the Skill Evolution System). The table is
+    created on first use via ``SQLModel.metadata.create_all``.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillUsageRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillUsageRepository(engine)
+
+
+def create_skill_trigger_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillTriggerRepository:
+    """Create a SkillTriggerRepository from configuration or shared engine.
+
+    Persistence layer for the ``skill_triggers`` table (Phase 1
+    of the Skill Evolution System). The table is created on
+    first use via ``SQLModel.metadata.create_all``. The
+    ``condition_json`` column is typed via
+    :class:`~daemon.repositories.infra.types.JSONBType` so the
+    same schema works on both SQLite and PostgreSQL.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillTriggerRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillTriggerRepository(engine)
+
+
+def create_skill_embedding_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillEmbeddingRepository:
+    """Create a SkillEmbeddingRepository from configuration or shared engine.
+
+    Persistence layer for the ``skill_embeddings`` table
+    (Phase 1 of the Skill Evolution System). The table is
+    created on first use via ``SQLModel.metadata.create_all``.
+    The ``embedding`` column stores a JSON array of floats via
+    :class:`~daemon.repositories.infra.types.JSONBType` — NOT
+    BYTEA, NOT pickle — so the same schema works on both SQLite
+    and PostgreSQL.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillEmbeddingRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillEmbeddingRepository(engine)
+
+
+def create_skill_ab_test_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillABTestRepository:
+    """Create a SkillABTestRepository from configuration or shared engine.
+
+    Persistence layer for the ``skill_ab_tests`` table (Phase 1
+    of the Skill Evolution System). The table is created on
+    first use via ``SQLModel.metadata.create_all``. Counter
+    columns (``comparisons``, ``extension_count``) are bumped
+    atomically via raw-SQL UPDATE in the repository methods to
+    avoid the read-modify-write race under concurrent feedback
+    ingestion.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillABTestRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillABTestRepository(engine)
+
+
 # Backward compatibility alias
 create_task_repository = create_job_repository
 
@@ -621,5 +853,11 @@ __all__ = [
     "create_job_queue_repository",
     "create_mcp_server_repository",
     "create_infra_repository",
+    "create_skill_repository",
+    "create_skill_lineage_repository",
+    "create_skill_usage_repository",
+    "create_skill_trigger_repository",
+    "create_skill_embedding_repository",
+    "create_skill_ab_test_repository",
     "run_migrations",
 ]

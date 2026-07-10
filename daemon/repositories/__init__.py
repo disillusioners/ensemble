@@ -42,6 +42,24 @@ from .infra.repository import SQLModelInfraRepository, BootstrapResult
 from .infra.models import InfraAsset, InfraAssetType, InfraAssetHistory, InfraChangeType
 from .infra.types import JSONBType, InfraTypeDefinition, INFRA_TYPE_DEFINITIONS
 
+# Skill repository (Phase 1 of the Skill Evolution System)
+from .skill.repository import (
+    SkillABTestRepository,
+    SkillEmbeddingRepository,
+    SkillLineageRepository,
+    SkillRepository,
+    SkillTriggerRepository,
+    SkillUsageRepository,
+)
+from .skill.models import (
+    Skill,
+    SkillABTest,
+    SkillEmbedding,
+    SkillLineage,
+    SkillTrigger,
+    SkillUsageRecord,
+)
+
 # Dependency Bus repository.
 # Imported here so ``SQLModel.metadata.create_all()`` (called from
 # ``daemon/manager.py``) registers the ``dependency_watchers`` table
@@ -65,6 +83,12 @@ from .factory import (
     create_mcp_server_repository,
     create_db_connection_repository,
     create_infra_repository,
+    create_skill_repository,
+    create_skill_lineage_repository,
+    create_skill_usage_repository,
+    create_skill_trigger_repository,
+    create_skill_embedding_repository,
+    create_skill_ab_test_repository,
     run_migrations,
 )
 
@@ -121,6 +145,19 @@ __all__ = [
     "JSONBType",
     "InfraTypeDefinition",
     "INFRA_TYPE_DEFINITIONS",
+    # Skill (Phase 1 of the Skill Evolution System)
+    "SkillRepository",
+    "SkillLineageRepository",
+    "SkillUsageRepository",
+    "SkillTriggerRepository",
+    "SkillEmbeddingRepository",
+    "SkillABTestRepository",
+    "Skill",
+    "SkillLineage",
+    "SkillUsageRecord",
+    "SkillTrigger",
+    "SkillEmbedding",
+    "SkillABTest",
     # Dependency Bus
     "DependencyWatcher",
     "DependencyWatcherState",
@@ -137,5 +174,11 @@ __all__ = [
     "create_mcp_server_repository",
     "create_db_connection_repository",
     "create_infra_repository",
+    "create_skill_repository",
+    "create_skill_lineage_repository",
+    "create_skill_usage_repository",
+    "create_skill_trigger_repository",
+    "create_skill_embedding_repository",
+    "create_skill_ab_test_repository",
     "run_migrations",
 ]

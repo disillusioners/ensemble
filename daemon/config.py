@@ -470,6 +470,42 @@ class McpPoolConfig(BaseSettings):
     )
 
 
+class SkillEvolutionConfig(BaseSettings):
+    """Configuration for the skill evolution system."""
+
+    model_config = SettingsConfigDict(env_prefix="SKILL_EVOLUTION_")
+
+    # Embedding
+    embedding_model: str = Field(default="text-embedding-3-small")
+    embedding_dimensions: int = Field(default=1536)
+    embedding_base_url: str | None = Field(default=None)  # Falls back to LLMConfig.base_url
+    embedding_api_key: str | None = Field(default=None)  # Falls back to LLMConfig.api_key
+
+    # Evolution models
+    evolution_model: str | None = Field(default=None)  # Falls back to main model
+    analysis_model: str | None = Field(default=None)  # Cheap model for Tier 2
+
+    # Injection
+    max_inject_skills: int = Field(default=2)
+    min_score_full_inject: float = Field(default=0.7)
+    min_score_low_match: float = Field(default=0.3)
+    bm25_top_k: int = Field(default=10)
+    llm_select_top_k: int = Field(default=5)
+
+    # Triggers
+    default_task_count_threshold: int = Field(default=20)
+    default_daily_scan_hour: int = Field(default=3)  # 3 AM
+
+    # A/B testing
+    ab_sample_size: int = Field(default=10)
+    ab_min_difference: float = Field(default=0.15)  # Loser must be at least 15% worse
+    max_extensions: int = Field(default=3)
+
+    # Capture
+    capture_min_iterations: int = Field(default=5)
+    capture_min_duration_seconds: int = Field(default=60)
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -485,6 +521,7 @@ class Config(BaseSettings):
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
+    skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
 
 
 def load_config(config_path: str | None = None) -> Config:
@@ -575,6 +612,8 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["job_system"] = processed_config["job_system"]
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
+    if "skill_evolution" in processed_config:
+        config_dict["skill_evolution"] = processed_config["skill_evolution"]
 
     # Create and validate config
     return Config(**config_dict)

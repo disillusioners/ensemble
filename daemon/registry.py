@@ -95,6 +95,10 @@ class AgentMetadata(BaseModel):
             "canonical ids via the registry."
         ),
     )
+    skill_injection: bool = Field(
+        default=False,
+        description="Whether this agent should have dynamic skills injected into conversations.",
+    )
 
     model_config = ConfigDict(
         extra="ignore",
@@ -207,6 +211,7 @@ class AgentRegistry:
                     innate_skills=meta.get("innate_skills", []),
                     llm_model=meta.get("llm_model"),
                     team_members=meta.get("team_members", []) or [],
+                    skill_injection=meta.get("skill_injection", False),
                 )
                 self._agents[agent_id] = agent_meta
             except Exception as e:

@@ -2183,6 +2183,124 @@ class InstanceManager:
             "DROP TRIGGER IF EXISTS trg_job_locks_active_guard ON job_locks",
             "CREATE CONSTRAINT TRIGGER trg_job_queue_items_active_lock_guard AFTER INSERT OR UPDATE OF admission_state ON job_queue_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION job_queue_items_active_lock_guard()",
             "CREATE CONSTRAINT TRIGGER trg_job_locks_active_guard AFTER INSERT OR UPDATE ON job_locks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION job_locks_active_guard()",
+            # ── Skill Evolution System tables (Phase 1, 2026-07-10) ─────
+            # 6 new tables backing the SkillSearchService / SkillInjectionService
+            # / SkillLifecycleService architecture. SQLite counterpart lives in
+            # ``daemon/migrations/versions/20260710_000001_create_skill_tables.sql``;
+            # the .sql runner is a NO-OP on PG (runner.py lines 446-448), so we
+            # create the tables here for parity with fresh databases where
+            # ``SQLModel.metadata.create_all()`` picks them up from
+            # ``daemon/repositories/skill/models.py``. Fresh PG databases also
+            # get the indexes automatically from the model ``__table_args__``.
+            #
+            # Type differences from SQLite: BOOLEAN (vs INTEGER 0/1),
+            # TIMESTAMPTZ DEFAULT NOW() (vs TEXT ISO-8601), JSONB for JSON
+            # columns (vs SQLite JSON). Embeddings are stored as JSONB arrays
+            # of floats — NOT BYTEA / pickle / numpy — so they can be indexed
+            # and queried with pgvector-style operators if needed later.
+            #
+            # PRIMARY KEY columns are TEXT (NOT UUID type) per the dual-driver
+            # convention; models generate UUID4 strings via uuid.uuid4().
+            # skills table
+            (
+                "CREATE TABLE IF NOT EXISTS skills ("
+                "id TEXT PRIMARY KEY, "
+                "project_id TEXT, "
+                "name TEXT NOT NULL, "
+                "description TEXT NOT NULL DEFAULT '', "
+                "content TEXT NOT NULL, "
+                "category TEXT NOT NULL DEFAULT 'workflow', "
+                "is_active BOOLEAN NOT NULL DEFAULT TRUE, "
+                "status TEXT NOT NULL DEFAULT 'active', "
+                "lineage_origin TEXT NOT NULL DEFAULT 'imported', "
+                "generation INTEGER NOT NULL DEFAULT 0, "
+                "ab_test_group TEXT, "
+                "total_selections INTEGER NOT NULL DEFAULT 0, "
+                "total_applied INTEGER NOT NULL DEFAULT 0, "
+                "total_completions INTEGER NOT NULL DEFAULT 0, "
+                "total_fallbacks INTEGER NOT NULL DEFAULT 0, "
+                "consecutive_failures INTEGER NOT NULL DEFAULT 0, "
+                "created_at TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL, "
+                "last_used_at TEXT"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_skills_project ON skills(project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_skills_active ON skills(is_active)",
+            "CREATE INDEX IF NOT EXISTS idx_skills_ab_group ON skills(ab_test_group)",
+            # skill_lineage table
+            (
+                "CREATE TABLE IF NOT EXISTS skill_lineage ("
+                "skill_id TEXT NOT NULL, "
+                "parent_skill_id TEXT NOT NULL, "
+                "change_summary TEXT NOT NULL DEFAULT '', "
+                "content_diff TEXT NOT NULL DEFAULT '', "
+                "created_at TEXT NOT NULL, "
+                "PRIMARY KEY (skill_id, parent_skill_id)"
+                ")"
+            ),
+            # skill_usage_records table
+            (
+                "CREATE TABLE IF NOT EXISTS skill_usage_records ("
+                "id TEXT PRIMARY KEY, "
+                "skill_id TEXT NOT NULL, "
+                "project_id TEXT NOT NULL, "
+                "instance_id TEXT NOT NULL, "
+                "agent_id TEXT NOT NULL, "
+                "task_message TEXT, "
+                "selected BOOLEAN NOT NULL DEFAULT FALSE, "
+                "applied BOOLEAN NOT NULL DEFAULT FALSE, "
+                "task_succeeded BOOLEAN NOT NULL DEFAULT FALSE, "
+                "iterations INTEGER NOT NULL DEFAULT 0, "
+                "duration_seconds INTEGER NOT NULL DEFAULT 0, "
+                "fallback BOOLEAN NOT NULL DEFAULT FALSE, "
+                "feedback_applied BOOLEAN, "
+                "feedback_note TEXT, "
+                "created_at TEXT NOT NULL"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_skill_usage_skill ON skill_usage_records(skill_id)",
+            "CREATE INDEX IF NOT EXISTS idx_skill_usage_instance ON skill_usage_records(instance_id)",
+            "CREATE INDEX IF NOT EXISTS idx_skill_usage_applied ON skill_usage_records(instance_id, feedback_applied)",
+            # skill_triggers table
+            (
+                "CREATE TABLE IF NOT EXISTS skill_triggers ("
+                "id TEXT PRIMARY KEY, "
+                "project_id TEXT, "
+                "name TEXT NOT NULL, "
+                "condition_type TEXT NOT NULL, "
+                "condition_json JSONB NOT NULL DEFAULT '{}', "
+                "action TEXT NOT NULL, "
+                "is_enabled BOOLEAN NOT NULL DEFAULT TRUE, "
+                "created_at TEXT NOT NULL"
+                ")"
+            ),
+            # skill_embeddings table
+            (
+                "CREATE TABLE IF NOT EXISTS skill_embeddings ("
+                "id TEXT PRIMARY KEY, "
+                "skill_id TEXT NOT NULL, "
+                "trigger_query TEXT NOT NULL, "
+                "embedding JSONB NOT NULL, "
+                "created_at TEXT NOT NULL"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_skill_embeddings_skill ON skill_embeddings(skill_id)",
+            # skill_ab_tests table
+            (
+                "CREATE TABLE IF NOT EXISTS skill_ab_tests ("
+                "id TEXT PRIMARY KEY, "
+                "ab_test_group TEXT NOT NULL, "
+                "skill_id_old TEXT NOT NULL, "
+                "skill_id_new TEXT NOT NULL, "
+                "extension_count INTEGER NOT NULL DEFAULT 0, "
+                "comparisons INTEGER NOT NULL DEFAULT 0, "
+                "created_at TEXT NOT NULL, "
+                "resolved_at TEXT, "
+                "winner_skill_id TEXT"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_skill_ab_tests_group ON skill_ab_tests(ab_test_group)",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
