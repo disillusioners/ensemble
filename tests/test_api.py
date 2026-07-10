@@ -59,11 +59,17 @@ async def mock_manager():
         "processing_count": 0,
         "oldest_message_age_seconds": None
     })
-    # Mock async enqueue_message (job queue path - used by router)
+    # Mock async enqueue_message_job (Phase 5 cutover: router uses job path)
     manager.enqueue_message = AsyncMock(return_value=Mock(
         message_id="test-message-id",
         instance_id="test-instance-id",
         status="queued"
+    ))
+    manager.enqueue_message_job = AsyncMock(return_value=Mock(
+        message_id="test-message-id",
+        instance_id="test-instance-id",
+        status="queued",
+        job_id="test-job-id",
     ))
     # Mock get_messages for message history (now async)
     manager.get_messages = AsyncMock(return_value=[])
@@ -214,12 +220,11 @@ async def test_create_instance_success(client, mock_manager):
     assert data["instance_id"] == "test-instance-id"
     # Response echoes the mock manager's get_instance_info() payload, which
     # is hardcoded with agent_id="developer" in the test fixture (mock data,
-    # unaffected by the validator alias).
+    # unaffected by how the request body is dispatched).
     assert data["agent_id"] == "developer"
-    # InstanceCreate validator normalizes the request agent_id "coder" ->
-    # "developer" via the AGENT_ID_ALIASES alias before dispatch.
+    # InstanceCreate keeps agent_id as-is (no normalization): "coder" stays "coder".
     mock_manager.spawn_instance_with_mcp.assert_called_once_with(
-        agent_id="developer",
+        agent_id="coder",
         instance_id="550e8400-e29b-41d4-a716-446655440000",
         project_id=None,
     )
@@ -241,7 +246,7 @@ async def test_create_instance_with_project_id(client, mock_manager):
     assert data["instance_id"] == "test-instance-id"
     # Verify call: router generates instance_id when none provided
     call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
-    assert call_kwargs["agent_id"] == "developer"
+    assert call_kwargs["agent_id"] == "coder"
     assert call_kwargs["project_id"] == "test-project-123"
     assert call_kwargs["instance_id"] is not None  # Router generates UUID
 
@@ -808,7 +813,7 @@ async def test_send_message_success(client, mock_manager):
     assert "message_id" in data
     assert data["role"] == "assistant"
     assert data["content"] == ""  # Response comes async via SSE
-    mock_manager.enqueue_message.assert_called_once_with(
+    mock_manager.enqueue_message_job.assert_called_once_with(
         instance_id="test-instance-id",
         message="Hello, agent!",
         source="api",
@@ -848,9 +853,9 @@ async def test_get_messages(client, mock_manager):
 @pytest.mark.asyncio
 async def test_global_exception_handler(client, mock_manager):
     """Test that exceptions return proper error response."""
-    # Make enqueue_message raise an unexpected exception
+    # Make enqueue_message_job raise an unexpected exception (Phase 5: router uses job path)
     mock_manager.get_instance.return_value = AsyncMock()
-    mock_manager.enqueue_message.side_effect = RuntimeError("Unexpected error")
+    mock_manager.enqueue_message_job.side_effect = RuntimeError("Unexpected error")
     
     response = await client.post(
         "/instances/test-instance-id/messages",
