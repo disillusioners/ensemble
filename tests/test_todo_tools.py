@@ -2,10 +2,9 @@
 
 Mirrors the structure of ``tests/test_chart_tools.py``:
 
-  1. **Factory** — returns 9 tools with the documented names
-     (Phase 2 added ``todo_add_edge`` and ``todo_remove_edge``;
-      sub-tasks Phase 1 added ``todo_add_subtask``,
-      ``todo_update_subtask``, and ``todo_remove_subtask``).
+  1. **Factory** — returns 11 tools with the documented names, split into
+     two sets: ``todo_list_*`` (flat, index-based), ``todo_graph_*`` (DAG,
+     node_id-based), plus shared ``todo_view`` / ``todo_clear``.
   2. **Registration** — each tool is tagged with ``_tool_category == "todo"``
      and NEVER ``"instance"`` (security counterpart of
      ``INNATE_SKILL_TOOL_CATEGORIES``).
@@ -45,11 +44,13 @@ def _make_manager() -> MagicMock:
 
 
 def _build_tools(manager: MagicMock | None = None, live_event_hub=None):
-    """Build the 9 todo tools with default instance_id.
+    """Build the 11 todo tools with default instance_id.
 
-    Returns the list ``[todo_create, todo_update, todo_list, todo_clear,
-    todo_add_edge, todo_remove_edge, todo_add_subtask,
-    todo_update_subtask, todo_remove_subtask]``.
+    Returns the list ``[todo_list_create, todo_list_update,
+    todo_graph_create, todo_graph_update, todo_graph_add_edge,
+    todo_graph_remove_edge, todo_graph_add_subtask,
+    todo_graph_update_subtask, todo_graph_remove_subtask, todo_view,
+    todo_clear]``.
     """
     from daemon.tools.todo_tools import create_todo_tools
 
@@ -70,39 +71,37 @@ def _build_tools(manager: MagicMock | None = None, live_event_hub=None):
 class TestCreateTodoToolsFactory:
     """Factory shape for ``create_todo_tools``."""
 
-    def test_factory_returns_list_of_nine_tools(self):
-        """Factory produces exactly the 9 documented tools.
+    def test_factory_returns_list_of_eleven_tools(self):
+        """Factory produces exactly the 11 documented tools.
 
-        Phase 2 of the todo graph transformation took the tool count
-        from 4 to 6 (added ``todo_add_edge`` and ``todo_remove_edge``).
-        Phase 2 of the todo sub-tasks feature extended it to 9 by
-        appending ``todo_add_subtask``, ``todo_update_subtask``, and
-        ``todo_remove_subtask`` to the existing list.
+        The todo surface is split into two sets by planning shape —
+        ``todo_list_*`` (flat, index-based) and ``todo_graph_*`` (DAG,
+        node_id-based) — plus two shared tools (``todo_view``,
+        ``todo_clear``).
         """
         tools = _build_tools()
 
         assert isinstance(tools, list)
-        assert len(tools) == 9
+        assert len(tools) == 11
 
     def test_factory_returns_documented_tool_names(self):
-        """The 9 tools are named ``todo_create``, ``todo_update``,
-        ``todo_list``, ``todo_clear``, ``todo_add_edge``,
-        ``todo_remove_edge``, ``todo_add_subtask``,
-        ``todo_update_subtask``, ``todo_remove_subtask`` — no more,
-        no less."""
+        """The 11 tools are named in canonical order: list-set, graph-set,
+        then shared."""
         tools = _build_tools()
         names = [t.name for t in tools]
 
         assert names == [
-            "todo_create",
-            "todo_update",
-            "todo_list",
+            "todo_list_create",
+            "todo_list_update",
+            "todo_graph_create",
+            "todo_graph_update",
+            "todo_graph_add_edge",
+            "todo_graph_remove_edge",
+            "todo_graph_add_subtask",
+            "todo_graph_update_subtask",
+            "todo_graph_remove_subtask",
+            "todo_view",
             "todo_clear",
-            "todo_add_edge",
-            "todo_remove_edge",
-            "todo_add_subtask",
-            "todo_update_subtask",
-            "todo_remove_subtask",
         ]
 
     def test_factory_creates_independent_closures_per_call(self):
@@ -136,8 +135,8 @@ class TestCreateTodoToolsFactory:
 class TestTodoToolRegistration:
     """Every tool must be tagged ``_tool_category == "todo"``."""
 
-    def test_all_nine_tools_registered_under_todo_category(self):
-        """The decorator ``@register_tool_category(\"todo\")`` tags every tool."""
+    def test_all_tools_registered_under_todo_category(self):
+        """The decorator ``@register_tool_category(\"todo")`` tags every tool."""
         tools = _build_tools()
 
         for tool in tools:
@@ -161,12 +160,12 @@ class TestTodoToolRegistration:
 
 
 # =============================================================================
-# todo_create
+# todo_list_create
 # =============================================================================
 
 
-class TestTodoCreate:
-    """``todo_create(items)`` — replace the list with all-pending items."""
+class TestTodoListCreate:
+    """``todo_list_create(items)`` — replace the list with all-pending items."""
 
     async def test_todo_create_returns_formatted_list(self):
         """Output includes the count, header, and per-item index/text/status."""
@@ -206,7 +205,7 @@ class TestTodoCreate:
         assert "[" not in result
 
     async def test_todo_create_persists_into_manager(self):
-        """After ``todo_create``, ``manager._todo_manager.get_all`` sees the items."""
+        """After ``todo_list_create``, ``manager._todo_manager.get_all`` sees the items."""
         manager = _make_manager()
         tools = _build_tools(manager=manager)
         create_tool = tools[0]
@@ -221,12 +220,12 @@ class TestTodoCreate:
 
 
 # =============================================================================
-# todo_update
+# todo_list_update
 # =============================================================================
 
 
-class TestTodoUpdate:
-    """``todo_update(index, status)`` — mutate one item, return full list + reminder."""
+class TestTodoListUpdate:
+    """``todo_list_update(index, status)`` — mutate one item, return full list + reminder."""
 
     async def test_todo_update_returns_confirmation_and_reminder(self):
         """Updating an item returns the formatted list and the next pending reminder."""
@@ -291,7 +290,7 @@ class TestTodoUpdate:
         assert manager._todo_manager.get_all("test-instance-id")[0]["status"] == "pending"
 
     async def test_todo_update_persists_status_change(self):
-        """After ``todo_update``, the stored item reflects the new status."""
+        """After ``todo_list_update``, the stored item reflects the new status."""
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A", "B"])
         tools = _build_tools(manager=manager)
@@ -305,12 +304,12 @@ class TestTodoUpdate:
 
 
 # =============================================================================
-# todo_list
+# todo_view
 # =============================================================================
 
 
-class TestTodoList:
-    """``todo_list()`` — read-only display of current todos."""
+class TestTodoView:
+    """``todo_view()`` — read-only display of current todos."""
 
     async def test_todo_list_shows_all_items_with_icons(self):
         """All items appear in the output with their index and text."""
@@ -324,7 +323,7 @@ class TestTodoList:
             "test-instance-id", 1, "in_progress"
         )
         tools = _build_tools(manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         result = await list_tool.coroutine()
 
@@ -339,7 +338,7 @@ class TestTodoList:
     async def test_todo_list_empty_reports_no_items(self):
         """Empty list → documented ``No todo items.`` message."""
         tools = _build_tools()
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         result = await list_tool.coroutine()
 
@@ -350,7 +349,7 @@ class TestTodoList:
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A"])
         tools = _build_tools(manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         result = await list_tool.coroutine()
 
@@ -370,7 +369,7 @@ class TestTodoClear:
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A", "B"])
         tools = _build_tools(manager=manager)
-        clear_tool = tools[3]
+        clear_tool = tools[10]
 
         result = await clear_tool.coroutine()
 
@@ -383,7 +382,7 @@ class TestTodoClear:
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A", "B", "C"])
         tools = _build_tools(manager=manager)
-        clear_tool = tools[3]
+        clear_tool = tools[10]
 
         await clear_tool.coroutine()
 
@@ -394,7 +393,7 @@ class TestTodoClear:
         manager = _make_manager()
         # No items created at all.
         tools = _build_tools(manager=manager)
-        clear_tool = tools[3]
+        clear_tool = tools[10]
 
         result = await clear_tool.coroutine()
 
@@ -402,12 +401,12 @@ class TestTodoClear:
 
 
 # =============================================================================
-# todo_create — graph mode (Phase 2)
+# todo_graph_create
 # =============================================================================
 
 
-class TestTodoCreateGraphMode:
-    """``todo_create(nodes, edges)`` — explicit graph input."""
+class TestTodoGraphCreate:
+    """``todo_graph_create(nodes, edges)`` — explicit graph input."""
 
     async def test_todo_create_nodes_only_builds_independent_nodes(self):
         """Passing ``nodes`` without ``edges`` creates isolated nodes
@@ -415,7 +414,7 @@ class TestTodoCreateGraphMode:
         """
         manager = _make_manager()
         tools = _build_tools(manager=manager)
-        create_tool = tools[0]
+        create_tool = tools[2]
 
         result = await create_tool.coroutine(
             nodes=[
@@ -440,7 +439,7 @@ class TestTodoCreateGraphMode:
         """
         manager = _make_manager()
         tools = _build_tools(manager=manager)
-        create_tool = tools[0]
+        create_tool = tools[2]
 
         result = await create_tool.coroutine(
             nodes=[
@@ -468,45 +467,26 @@ class TestTodoCreateGraphMode:
         assert "Merge sink" in result
 
     async def test_todo_create_with_neither_returns_error(self):
-        """Calling ``todo_create()`` with no ``items`` and no ``nodes``
+        """Calling ``todo_graph_create()`` with no ``nodes``
         returns ``ERROR:`` and does not mutate state.
         """
         manager = _make_manager()
         tools = _build_tools(manager=manager)
-        create_tool = tools[0]
+        create_tool = tools[2]
 
         result = await create_tool.coroutine()
 
         assert result.startswith("ERROR:")
         assert manager._todo_manager.get_all("test-instance-id") == []
 
-    async def test_todo_create_items_takes_precedence_over_nodes(self):
-        """When both ``items`` and ``nodes`` are provided, ``items`` wins
-        (backward-compat path is taken).
-        """
-        manager = _make_manager()
-        tools = _build_tools(manager=manager)
-        create_tool = tools[0]
-
-        result = await create_tool.coroutine(
-            items=["Flat A", "Flat B"],
-            nodes=[{"id": "ignored", "text": "should not appear"}],
-        )
-
-        # Header reflects flat-list path
-        assert "Todo list created" in result
-        assert "Flat A" in result
-        assert "Flat B" in result
-        assert "should not appear" not in result
-
 
 # =============================================================================
-# todo_update — node_id path (Phase 2)
+# todo_graph_update — node_id path
 # =============================================================================
 
 
-class TestTodoUpdateNodeId:
-    """``todo_update(node_id=..., status=...)`` — graph-aware lookup."""
+class TestTodoGraphUpdate:
+    """``todo_graph_update(node_id=..., status=...)`` — graph-aware lookup."""
 
     async def test_todo_update_by_node_id_returns_confirmation(self):
         """Updating by ``node_id`` succeeds and the lookup description
@@ -515,7 +495,7 @@ class TestTodoUpdateNodeId:
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A", "B"])
         tools = _build_tools(manager=manager)
-        update_tool = tools[1]
+        update_tool = tools[3]
 
         # Fetch a node_id from the manager
         stored = manager._todo_manager.get_all("test-instance-id")
@@ -526,54 +506,16 @@ class TestTodoUpdateNodeId:
         assert f"Updated node_id={target_id!r}" in result
         assert "done" in result
 
-    async def test_todo_update_node_id_takes_precedence_over_index(self):
-        """When both ``node_id`` and ``index`` are provided, ``node_id``
-        wins (documented precedence rule).
-        """
-        manager = _make_manager()
-        manager._todo_manager.create("test-instance-id", ["A", "B"])
-        tools = _build_tools(manager=manager)
-        update_tool = tools[1]
-
-        stored = manager._todo_manager.get_all("test-instance-id")
-        target_id = stored[1]["id"]  # update the SECOND node
-
-        # Pass index=0 (would update "A") AND node_id=<B's id> → should update B
-        result = await update_tool.coroutine(
-            index=0, status="done", node_id=target_id
-        )
-
-        # Lookup description should reflect node_id path
-        assert f"node_id={target_id!r}" in result
-        # State should reflect B (index=1) being done, not A (index=0)
-        post = manager._todo_manager.get_all("test-instance-id")
-        assert post[0]["status"] == "pending"
-        assert post[1]["status"] == "done"
-
-    async def test_todo_update_with_neither_index_nor_node_id_returns_error(self):
-        """Calling ``todo_update(status='done')`` with no identifier
-        returns ``ERROR:`` without mutation.
-        """
-        manager = _make_manager()
-        manager._todo_manager.create("test-instance-id", ["A"])
-        tools = _build_tools(manager=manager)
-        update_tool = tools[1]
-
-        result = await update_tool.coroutine(status="done")
-
-        assert result.startswith("ERROR:")
-        assert "Provide either index or node_id" in result
-
 
 # =============================================================================
-# todo_add_edge (Phase 2)
+# todo_graph_add_edge
 # =============================================================================
 
 
 class TestTodoAddEdge:
-    """``todo_add_edge(from_id, to_id)`` — incremental edge insertion."""
+    """``todo_graph_add_edge(from_id, to_id)`` — incremental edge insertion."""
 
-    async def test_todo_add_edge_returns_confirmation_and_graph(self):
+    async def test_todo_graph_add_edge_returns_confirmation_and_graph(self):
         """Adding a valid edge returns ``Edge added:`` and the updated graph."""
         manager = _make_manager()
         manager._todo_manager.create_graph(
@@ -610,7 +552,7 @@ class TestTodoAddEdge:
         edges = {(e["from"], e["to"]) for e in graph["edges"]}
         assert ("a", "c") in edges
 
-    async def test_todo_add_edge_cycle_returns_error(self):
+    async def test_todo_graph_add_edge_cycle_returns_error(self):
         """Adding an edge that would create a cycle is rejected and
         returns ``ERROR:``. State is not mutated.
         """
@@ -634,7 +576,7 @@ class TestTodoAddEdge:
         edges = {(e["from"], e["to"]) for e in graph["edges"]}
         assert ("b", "a") not in edges
 
-    async def test_todo_add_edge_unknown_node_returns_error(self):
+    async def test_todo_graph_add_edge_unknown_node_returns_error(self):
         """Adding an edge referencing a missing node returns ``ERROR:``."""
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A"])
@@ -647,14 +589,14 @@ class TestTodoAddEdge:
 
 
 # =============================================================================
-# todo_remove_edge (Phase 2)
+# todo_graph_remove_edge (Phase 2)
 # =============================================================================
 
 
 class TestTodoRemoveEdge:
-    """``todo_remove_edge(from_id, to_id)`` — incremental edge removal."""
+    """``todo_graph_remove_edge(from_id, to_id)`` — incremental edge removal."""
 
-    async def test_todo_remove_edge_returns_confirmation(self):
+    async def test_todo_graph_remove_edge_returns_confirmation(self):
         """Removing an existing edge returns ``Edge removed:`` and the
         updated graph (without that edge).
         """
@@ -679,7 +621,7 @@ class TestTodoRemoveEdge:
         edges = {(e["from"], e["to"]) for e in graph["edges"]}
         assert ("a", "b") not in edges
 
-    async def test_todo_remove_edge_missing_returns_error(self):
+    async def test_todo_graph_remove_edge_missing_returns_error(self):
         """Removing a non-existent edge returns ``ERROR:`` without mutation."""
         manager = _make_manager()
         manager._todo_manager.create_graph(
@@ -698,7 +640,7 @@ class TestTodoRemoveEdge:
 
         assert result.startswith("ERROR:")
 
-    async def test_todo_remove_edge_unknown_node_returns_error(self):
+    async def test_todo_graph_remove_edge_unknown_node_returns_error(self):
         """Removing with an unknown node returns ``ERROR:``."""
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A"])
@@ -713,14 +655,14 @@ class TestTodoRemoveEdge:
 
 
 # =============================================================================
-# todo_add_subtask (Sub-Task Phase 1)
+# todo_graph_add_subtask (Sub-Task Phase 1)
 # =============================================================================
 
 
 class TestTodoAddSubtask:
-    """``todo_add_subtask(node_id, text)`` — append a binary checklist item."""
+    """``todo_graph_add_subtask(node_id, text)`` — append a binary checklist item."""
 
-    async def test_todo_add_subtask_returns_confirmation_with_subtask_id(self):
+    async def test_todo_graph_add_subtask_returns_confirmation_with_subtask_id(self):
         """Adding a sub-task returns a confirmation line containing the
         auto-generated ``s-``-prefixed sub-task id, plus the formatted
         graph with the new item visible (``\u2610`` icon for pending).
@@ -752,7 +694,7 @@ class TestTodoAddSubtask:
         assert stored[0]["subtasks"][0]["text"] == "Write unit tests"
         assert stored[0]["subtasks"][0]["status"] == "pending"
 
-    async def test_todo_add_subtask_node_not_found_returns_error(self):
+    async def test_todo_graph_add_subtask_node_not_found_returns_error(self):
         """``node_id`` that does not exist returns ``ERROR:`` without
         creating any sub-task state.
         """
@@ -767,9 +709,9 @@ class TestTodoAddSubtask:
         assert result.startswith("ERROR:")
         assert "n-missing" in result
 
-    async def test_todo_add_subtask_max_exceeded_returns_error(self):
+    async def test_todo_graph_add_subtask_max_exceeded_returns_error(self):
         """When the node already has ``MAX_SUBTASKS_PER_NODE`` (20) sub-tasks,
-        an additional ``todo_add_subtask`` call returns ``ERROR:`` without
+        an additional ``todo_graph_add_subtask`` call returns ``ERROR:`` without
         mutating state.
         """
         from daemon.services.todo_manager import MAX_SUBTASKS_PER_NODE
@@ -807,12 +749,12 @@ class TestTodoAddSubtask:
 
 
 # =============================================================================
-# todo_add_subtask — batch (list[str]) mode
+# todo_graph_add_subtask — batch (list[str]) mode
 # =============================================================================
 
 
 class TestTodoAddSubtaskBatch:
-    """``todo_add_subtask(node_id, text)`` accepts a ``list[str]`` for
+    """``todo_graph_add_subtask(node_id, text)`` accepts a ``list[str]`` for
     atomic batched insertion.
     """
 
@@ -950,14 +892,14 @@ class TestTodoAddSubtaskBatch:
 
 
 # =============================================================================
-# todo_update_subtask (Sub-Task Phase 1)
+# todo_graph_update_subtask (Sub-Task Phase 1)
 # =============================================================================
 
 
 class TestTodoUpdateSubtask:
-    """``todo_update_subtask(node_id, subtask_id, status, auto_complete)``."""
+    """``todo_graph_update_subtask(node_id, subtask_id, status, auto_complete)``."""
 
-    async def test_todo_update_subtask_pending_to_done_returns_confirmation(self):
+    async def test_todo_graph_update_subtask_pending_to_done_returns_confirmation(self):
         """Flipping a pending sub-task to ``done`` returns a confirmation
         line naming the sub-task id, and the rendered graph now shows the
         ``\u2611`` done icon.
@@ -992,7 +934,7 @@ class TestTodoUpdateSubtask:
         stored = manager._todo_manager.get_all("test-instance-id")
         assert stored[0]["subtasks"][0]["status"] == "done"
 
-    async def test_todo_update_subtask_auto_complete_all_done_flips_parent(self):
+    async def test_todo_graph_update_subtask_auto_complete_all_done_flips_parent(self):
         """When ``auto_complete=True`` and ALL sub-tasks are done, the
         parent's status flips to ``done`` and the response includes the
         ``"Parent node ... auto-completed"`` confirmation line.
@@ -1025,7 +967,7 @@ class TestTodoUpdateSubtask:
         stored = manager._todo_manager.get_all("test-instance-id")
         assert stored[0]["status"] == "done"
 
-    async def test_todo_update_subtask_auto_complete_remaining_pending(self):
+    async def test_todo_graph_update_subtask_auto_complete_remaining_pending(self):
         """When ``auto_complete=True`` but NOT all sub-tasks are done,
         the parent is NOT auto-completed and the response includes the
         ``"N sub-task(s) remain pending"`` note.
@@ -1060,7 +1002,7 @@ class TestTodoUpdateSubtask:
         stored = manager._todo_manager.get_all("test-instance-id")
         assert stored[0]["status"] == "pending"
 
-    async def test_todo_update_subtask_auto_complete_false_no_propagation(self):
+    async def test_todo_graph_update_subtask_auto_complete_false_no_propagation(self):
         """Default ``auto_complete=False`` (omitted) means the parent's
         status is NEVER touched by sub-task updates, even when every
         sub-task is done.
@@ -1093,7 +1035,7 @@ class TestTodoUpdateSubtask:
         stored = manager._todo_manager.get_all("test-instance-id")
         assert stored[0]["status"] == "pending"
 
-    async def test_todo_update_subtask_invalid_status_returns_error(self):
+    async def test_todo_graph_update_subtask_invalid_status_returns_error(self):
         """Sub-task statuses are STRICTLY BINARY -- passing
         ``"in_progress"`` (and its aliases) returns ``ERROR:`` without
         mutating state.
@@ -1122,7 +1064,7 @@ class TestTodoUpdateSubtask:
         stored = manager._todo_manager.get_all("test-instance-id")
         assert stored[0]["subtasks"][0]["status"] == "pending"
 
-    async def test_todo_update_subtask_not_found_returns_error(self):
+    async def test_todo_graph_update_subtask_not_found_returns_error(self):
         """Unknown ``node_id`` OR unknown ``subtask_id`` returns
         ``ERROR:`` without mutating state.
         """
@@ -1141,7 +1083,7 @@ class TestTodoUpdateSubtask:
         assert "n-missing" in result
         assert "s-missing" in result
 
-    async def test_todo_update_subtask_auto_complete_parent_already_done(self):
+    async def test_todo_graph_update_subtask_auto_complete_parent_already_done(self):
         """When ``auto_complete=True`` and ALL sub-tasks are done but the
         parent node's status is ALREADY ``"done"``, the tool reports the
         parent-already-done case explicitly — not the misleading
@@ -1163,7 +1105,7 @@ class TestTodoUpdateSubtask:
             ids.append(add_result["todos"][0]["subtasks"][-1]["id"])
         tools = _build_tools(manager=manager)
         update_subtask_tool = tools[7]
-        update_tool = tools[1]
+        update_tool = tools[3]
 
         # Mark both sub-tasks done WITHOUT auto_complete (default
         # False), so the parent stays ``pending``.
@@ -1173,7 +1115,7 @@ class TestTodoUpdateSubtask:
                 subtask_id=sid,
                 status="done",
             )
-        # Now set the parent node to ``"done"`` via todo_update.
+        # Now set the parent node to ``"done"`` via todo_graph_update.
         await update_tool.coroutine(node_id="alpha", status="done")
 
         # Sanity check: parent is done and all sub-tasks are done.
@@ -1181,7 +1123,7 @@ class TestTodoUpdateSubtask:
         assert stored[0]["status"] == "done"
         assert all(st["status"] == "done" for st in stored[0]["subtasks"])
 
-        # Call todo_update_subtask with auto_complete=True on one
+        # Call todo_graph_update_subtask with auto_complete=True on one
         # already-done sub-task. The manager will NOT re-flip the
         # parent (it's already done) and returns auto_completed=False,
         # so the tool's ``else`` branch fires with pending_count == 0
@@ -1204,14 +1146,14 @@ class TestTodoUpdateSubtask:
 
 
 # =============================================================================
-# todo_remove_subtask (Sub-Task Phase 1)
+# todo_graph_remove_subtask (Sub-Task Phase 1)
 # =============================================================================
 
 
 class TestTodoRemoveSubtask:
-    """``todo_remove_subtask(node_id, subtask_id)`` -- delete a sub-task."""
+    """``todo_graph_remove_subtask(node_id, subtask_id)`` -- delete a sub-task."""
 
-    async def test_todo_remove_subtask_returns_confirmation(self):
+    async def test_todo_graph_remove_subtask_returns_confirmation(self):
         """Removing an existing sub-task returns a confirmation line and
         shrinks the parent's checklist.
         """
@@ -1246,7 +1188,7 @@ class TestTodoRemoveSubtask:
         assert remaining[0]["id"] == ids[0]
         assert remaining[0]["text"] == "keep"
 
-    async def test_todo_remove_subtask_not_found_returns_error(self):
+    async def test_todo_graph_remove_subtask_not_found_returns_error(self):
         """Unknown ``node_id`` OR unknown ``subtask_id`` returns
         ``ERROR:`` without mutating state.
         """
@@ -1267,13 +1209,11 @@ class TestTodoRemoveSubtask:
 
 
 class TestFactoryFullDocSubtask:
-    """All 9 tools (including the 3 new sub-task tools) carry a
-    ``_full_doc_`` string used by the agent's tool-discovery layer.
-    Sub-tasks Phase 1 added 3 tools; each must advertise its full doc
-    alongside the existing 6.
+    """All 11 tools carry a ``_full_doc_`` string used by the agent's
+    tool-discovery layer. Each tool must advertise its full doc.
     """
 
-    def test_all_nine_tools_carry_full_doc_attribute(self):
+    def test_all_tools_carry_full_doc_attribute(self):
         """Every tool in the factory has ``_full_doc_`` set to a non-empty
         string. Guards against a missing string assignment silently breaking
         the tool-description endpoint.
@@ -1287,19 +1227,18 @@ class TestFactoryFullDocSubtask:
             )
             assert doc, f"Tool {tool.name} has empty _full_doc_ string"
 
-    def test_three_new_subtask_tools_carry_full_doc_attribute(self):
-        """``todo_add_subtask``, ``todo_update_subtask``,
-        ``todo_remove_subtask`` — the three Sub-Task Phase 1 tools —
-        each carry a ``_full_doc_`` string. This is the explicit check
-        the task spec requires for the new tools.
+    def test_three_subtask_tools_carry_full_doc_attribute(self):
+        """``todo_graph_add_subtask``, ``todo_graph_update_subtask``,
+        ``todo_graph_remove_subtask`` — the three graph sub-task tools —
+        each carry a ``_full_doc_`` string.
         """
         tools = _build_tools()
         by_name = {t.name: t for t in tools}
 
         new_tools = [
-            "todo_add_subtask",
-            "todo_update_subtask",
-            "todo_remove_subtask",
+            "todo_graph_add_subtask",
+            "todo_graph_update_subtask",
+            "todo_graph_remove_subtask",
         ]
         for name in new_tools:
             assert name in by_name, f"Factory missing {name!r}"
@@ -1341,7 +1280,7 @@ class TestFormatGraphSubtasks:
             edges=[],
         )
         tools = _build_tools(manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         result = await list_tool.coroutine()
 
@@ -1372,7 +1311,7 @@ class TestFormatGraphSubtasks:
             edges=[],
         )
         tools = _build_tools(manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         # Default (verbose=False) -- truncate at 5
         compact = await list_tool.coroutine()
@@ -1428,7 +1367,7 @@ class TestFormatGraphSubtasks:
             ],
         )
         tools = _build_tools(manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         result = await list_tool.coroutine()
 
@@ -1473,7 +1412,7 @@ class TestFormatGraphSubtasks:
             ],
         )
         tools = _build_tools(manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         result = await list_tool.coroutine()
 

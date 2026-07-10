@@ -3,38 +3,42 @@
 Mirrors the closure-injection pattern of daemon.tools.chart_tools:
 create_todo_tools(manager, current_instance_id, live_event_hub=None) is
 invoked from create_instance_tools to assemble the per-instance tool list.
-The 9 tools delegate to manager._todo_manager for state mutations and
+The 11 tools delegate to manager._todo_manager for state mutations and
 emit a todo_update SSE event on every successful change so the frontend
 sees real-time updates.
 
-Phase 2 of the todo graph transformation introduced:
+The tools are organized into two workflow sets plus two shared
+read/reset tools — each set targets a distinct planning shape so an
+agent picks the prefix that matches its intent instead of one overloaded
+call:
 
-  * DAG-aware ``todo_create`` — accepts either a flat list (backward
-    compatible, auto-chained) or explicit ``nodes`` + ``edges`` for
-    branching graphs.
-  * Node-id lookup in ``todo_update`` — ``node_id`` takes precedence
-    over the legacy positional ``index`` parameter.
-  * Two edge tools: ``todo_add_edge`` and ``todo_remove_edge`` for
-    incremental graph edits.
-  * ``_format_graph`` renderer that displays branching structure with
-    ``└→`` arrows, depth-based indentation, and ``(merged)`` annotations
-    on re-encountered nodes. Linear chains fall back to the simple
-    ``[idx] <icon> text`` format.
+**Flat list set** (``todo_list_*``) — strictly sequential work
+(``A → B → C`` auto-chained), identified by insertion-order ``index``:
 
-Phase 2 of the todo sub-tasks feature adds three checklist tools:
+  * ``todo_list_create(items)`` — replace the todo with a linear chain.
+  * ``todo_list_update(index, status)`` — mutate one item by position.
 
-  * ``todo_add_subtask`` — append one or more binary checklist items to a
-    node (accepts a single ``text`` string or a ``list[str]`` for batched,
-    atomic insertion).
-  * ``todo_update_subtask`` — toggle a sub-task's status, optionally
-    auto-completing the parent when all sub-tasks are done.
-  * ``todo_remove_subtask`` — delete a sub-task by id.
+**Graph set** (``todo_graph_*``) — branching / parallel / fan-in DAGs,
+identified by stable ``node_id``:
+
+  * ``todo_graph_create(nodes, edges)`` — replace the todo with an
+    explicit DAG (optionally pre-seeded with sub-task checklists).
+  * ``todo_graph_update(node_id, status)`` — mutate one node by id.
+  * ``todo_graph_add_edge`` / ``todo_graph_remove_edge`` — incremental
+    dependency edits.
+  * ``todo_graph_add_subtask`` / ``todo_graph_update_subtask`` /
+    ``todo_graph_remove_subtask`` — per-node binary checklists.
+
+**Shared (unprefixed):**
+
+  * ``todo_view(verbose=False)`` — read-only render of the current graph.
+  * ``todo_clear()`` — drop the entire graph.
 
 Sub-tasks are STRICTLY BINARY (``pending`` or ``done``) — they model
 fine-grained acceptance criteria under a parent node, not a multi-state
 workflow. The ``_format_graph`` renderer prints them as an indented
 checklist (``☐`` / ``☑``) under each node, with a ``+N more`` truncation
-marker at 5 items by default; pass ``verbose=True`` to ``todo_list`` to
+marker at 5 items by default; pass ``verbose=True`` to ``todo_view`` to
 see them all.
 
 Status aliasing (``completed`` → ``done``, ``wip`` → ``in_progress``, ...)
@@ -58,7 +62,8 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "Todo Management"
 CATEGORY_DOC = """\
-Todo list and DAG management tools for tracking per-instance work items.
+Todo management tools for tracking per-instance work items, organized
+into two workflow sets plus shared read/reset tools.
 
 The todo graph is a DAG — every node has a stable string ``id`` and a list
 of successor ``next_ids``; edges are stored as adjacency lists on each
@@ -66,14 +71,19 @@ node. Sub-tasks (checklist items) are nested per-node as a strictly
 binary ``pending`` / ``done`` list and do not participate in the graph
 structure.
 
-The 9 tools are split into three groups:
+The 11 tools are split into three groups:
 
-**Node / graph mutations (6):**
-``todo_create``, ``todo_update``, ``todo_list``, ``todo_clear``,
-``todo_add_edge``, ``todo_remove_edge``.
+**Flat list set (``todo_list_*``) — sequential, index-based (2):**
+``todo_list_create``, ``todo_list_update``.
 
-**Sub-task mutations (3):**
-``todo_add_subtask``, ``todo_update_subtask``, ``todo_remove_subtask``.
+**Graph set (``todo_graph_*``) — DAG, node_id-based (7):**
+``todo_graph_create``, ``todo_graph_update``,
+``todo_graph_add_edge``, ``todo_graph_remove_edge``,
+``todo_graph_add_subtask``, ``todo_graph_update_subtask``,
+``todo_graph_remove_subtask``.
+
+**Shared, unprefixed (2):**
+``todo_view`` (read-only render), ``todo_clear`` (reset).
 
 All tools mutate a per-instance graph via ``manager._todo_manager`` and
 emit a ``todo_update`` SSE event so the frontend re-renders without
@@ -91,24 +101,25 @@ Branching graph example::
 Linear chains render as a flat ``[idx] <icon> text`` list, with sub-tasks
 indented four spaces below the parent node.
 
-Node identity precedence: ``node_id`` (e.g. ``n-a1b2c3d4``) is preferred
-over insertion-order ``index`` for graph workflows; ``index`` is kept
-as the first positional argument of ``todo_update`` for backward
-compatibility with agents that call ``todo_update(0, "done")``.
+Identity model: the flat-list set addresses nodes by insertion-order
+``index`` (``todo_list_update(index, status)``); the graph set addresses
+nodes by stable ``node_id`` (e.g. ``n-a1b2c3d4``) via
+``todo_graph_update(node_id, status)``. Pick the set that matches the
+planning shape — sequential vs. branching — rather than mixing the two.
 
 Sub-task usage example::
 
     # Add a single sub-task to a node
-    todo_add_subtask("n-a1b2c3d4", "Write integration tests")
+    todo_graph_add_subtask("n-a1b2c3d4", "Write integration tests")
 
     # Add several sub-tasks at once (atomic batch — all or nothing)
-    todo_add_subtask("n-a1b2c3d4", ["Create schema", "Run migration", "Seed data"])
+    todo_graph_add_subtask("n-a1b2c3d4", ["Create schema", "Run migration", "Seed data"])
 
     # Mark it done; auto-complete the parent when all sub-tasks are done
-    todo_update_subtask("n-a1b2c3d4", "s-e5f6g7h8", "done", auto_complete=True)
+    todo_graph_update_subtask("n-a1b2c3d4", "s-e5f6g7h8", "done", auto_complete=True)
 
     # Render the graph with all sub-tasks visible (default caps at 5/note)
-    todo_list(verbose=True)
+    todo_view(verbose=True)
 """
 
 
@@ -315,44 +326,83 @@ def create_todo_tools(
             mutations still succeed but no event is emitted.
 
     Returns:
-        List of 9 tool functions:
-        ``[todo_create, todo_update, todo_list, todo_clear,
-        todo_add_edge, todo_remove_edge, todo_add_subtask,
-        todo_update_subtask, todo_remove_subtask]``.
+        List of 11 tool functions, ordered list-set → graph-set → shared:
+        ``[todo_list_create, todo_list_update, todo_graph_create,
+        todo_graph_update, todo_graph_add_edge, todo_graph_remove_edge,
+        todo_graph_add_subtask, todo_graph_update_subtask,
+        todo_graph_remove_subtask, todo_view, todo_clear]``.
     """
 
     @register_tool_category("todo")
     @tool
-    async def todo_create(
-        items: list[str] | None = None,
-        nodes: list[dict] | None = None,
-        edges: list[dict] | None = None,
-    ) -> str:
-        """Create or replace the instance's todo graph.
+    async def todo_list_create(items: list[str] | None = None) -> str:
+        """Create or replace the instance's todo as a flat sequential list.
 
-        Two modes:
-
-        1. **Flat list** (backward compatible): pass ``items`` \u2014 a linear
-           chain is auto-built (``A \u2192 B \u2192 C``).
-        2. **Explicit graph**: pass ``nodes`` (each ``{"id": str, "text":
-           str, "next_ids"?: list[str], "subtasks"?: list[{"text": str}]}``)
-           and optional ``edges`` (each ``{"from": str, "to": str}``).
-           Use this for branching plans, optionally pre-seeded with
-           sub-task checklists per node.
-
-        If ``items`` is provided, ``nodes`` and ``edges`` are ignored. If
-        neither is provided, the call returns an error.
+        Auto-builds a linear chain (``A \u2192 B \u2192 C``). Use this for
+        simple, strictly sequential work with no branching or
+        aggregation. For branching / parallel / fan-in plans, use
+        ``todo_graph_create`` instead.
 
         Args:
             items: Ordered list of todo text entries. Builds a linear
-                chain DAG. Replaces any existing graph.
-            nodes: List of node specs for an explicit graph. Each spec
-                must have ``id`` (non-empty, non-numeric) and ``text``;
-                ``next_ids`` and ``subtasks`` are optional. The
-                ``subtasks`` key, when present, is a list of
-                ``{"text": str}`` dicts that seed a binary
-                ``pending``/``done`` checklist under that node (max 20
-                items, each ≤ 500 chars).
+                chain and replaces any existing graph.
+
+        Returns:
+            Formatted list representation, or an ``ERROR:`` string.
+        """
+        try:
+            if items is None:
+                return "ERROR: Provide items (a flat list of strings)."
+            todos = manager._todo_manager.create(
+                current_instance_id, items
+            )
+            await _emit_update(live_event_hub, current_instance_id, todos)
+            return (
+                f"\u2705 Todo list created with {len(todos)} items:\n"
+                f"{_format_graph(todos)}"
+            )
+        except Exception as e:
+            return f"ERROR: Failed to create todo list: {e}"
+
+    todo_list_create._full_doc_ = """\
+Create or replace the instance's todo as a flat sequential list (linear
+chain ``A \u2192 B \u2192 C``). Replaces any existing graph.
+
+::
+
+    todo_list_create(items=["Setup", "Build", "Test"])
+
+Args:
+    items: Ordered list of todo text entries. Mutually exclusive with
+        the graph tools \u2014 pass ``items`` for a flat list, or use
+        ``todo_graph_create(nodes=..., edges=...)`` for branching plans.
+
+Returns:
+    Formatted list representation on success, or an ``ERROR:`` string
+    on validation failure (count > 200).
+
+A 200-node cap is enforced.
+"""
+
+    @register_tool_category("todo")
+    @tool
+    async def todo_graph_create(
+        nodes: list[dict] | None = None,
+        edges: list[dict] | None = None,
+    ) -> str:
+        """Create or replace the instance's todo as an explicit graph (DAG).
+
+        Pass ``nodes`` (each ``{"id": str, "text": str, "next_ids"?:
+        list[str], "subtasks"?: list[{"text": str}]}``) and optional
+        ``edges`` (each ``{"from": str, "to": str}``). Use this for
+        branching, parallel, or aggregating plans, optionally pre-seeded
+        with sub-task checklists per node. For a simple linear list, use
+        ``todo_list_create``.
+
+        Args:
+            nodes: List of node specs. Each must have ``id``
+                (non-empty, non-numeric) and ``text``; ``next_ids`` and
+                ``subtasks`` are optional.
             edges: Optional list of ``{"from": ..., "to": ...}`` edges.
                 Layered on top of any per-node ``next_ids``.
 
@@ -360,43 +410,25 @@ def create_todo_tools(
             Formatted graph representation, or an ``ERROR:`` string.
         """
         try:
-            if items is not None:
-                todos = manager._todo_manager.create(
-                    current_instance_id, items
-                )
-            elif nodes is not None:
-                todos = manager._todo_manager.create_graph(
-                    current_instance_id, nodes, edges or []
-                )
-            else:
-                return (
-                    "ERROR: Provide either items (flat list) or nodes "
-                    "(explicit graph)."
-                )
-            await _emit_update(live_event_hub, current_instance_id, todos)
-            header = (
-                f"\u2705 Todo graph created with {len(todos)} nodes:"
-                if nodes is not None and items is None
-                else f"\u2705 Todo list created with {len(todos)} items:"
+            if nodes is None:
+                return "ERROR: Provide nodes (an explicit graph spec)."
+            todos = manager._todo_manager.create_graph(
+                current_instance_id, nodes, edges or []
             )
-            return f"{header}\n{_format_graph(todos)}"
+            await _emit_update(live_event_hub, current_instance_id, todos)
+            return (
+                f"\u2705 Todo graph created with {len(todos)} nodes:\n"
+                f"{_format_graph(todos)}"
+            )
         except Exception as e:
             return f"ERROR: Failed to create todo graph: {e}"
 
-    todo_create._full_doc_ = """\
-Create or replace the instance's todo graph (DAG).
+    todo_graph_create._full_doc_ = """\
+Create or replace the instance's todo as an explicit graph (DAG).
 
-Two modes:
+::
 
-1. Flat list (backward compatible)::
-
-    todo_create(items=["Setup", "Build", "Test"])
-
-   Auto-builds a linear chain ``Setup \u2192 Build \u2192 Test``.
-
-2. Explicit graph (branching)::
-
-    todo_create(
+    todo_graph_create(
         nodes=[
             {"id": "setup", "text": "Setup DB",
              "subtasks": [{"text": "Create schema"}, {"text": "Run migration"}]},
@@ -413,17 +445,14 @@ Two modes:
     )
 
 Args:
-    items: Ordered list of todo text entries. Replaces the entire graph
-        with a linear chain. Mutually exclusive with ``nodes``.
     nodes: List of node specs for an explicit graph. Each spec must
         contain ``id`` (non-empty, non-numeric string) and ``text``;
         ``next_ids`` and ``subtasks`` are optional and are merged with
         any ``edges``. The ``subtasks`` key, when present, is a list of
         ``{"text": str}`` dicts that seed a binary ``pending``/``done``
-        checklist under that node (max 20 items, each ≤ 500 chars).
+        checklist under that node (max 20 items, each \u2264 500 chars).
     edges: Optional list of ``{"from": str, "to": str}`` edges. Layered
-        on top of any per-node ``next_ids``. Ignored when ``items`` is
-        provided.
+        on top of any per-node ``next_ids``.
 
 Returns:
     Formatted graph (linear fallback or branching tree) on success, or
@@ -437,52 +466,27 @@ is rejected with a clear error message. A 200-node cap is enforced.
 
     @register_tool_category("todo")
     @tool
-    async def todo_update(
-        index: int | None = None,
-        status: str = "",
-        node_id: str | None = None,
-    ) -> str:
-        """Update the status of a single todo node.
+    async def todo_list_update(index: int, status: str) -> str:
+        """Update a todo node's status by its insertion-order index.
 
-        Identify the node by either:
-
-        * ``index`` \u2014 zero-based insertion-order position (first
-          parameter, preserved for backward compat with agents that
-          call ``todo_update(0, "done")`` positionally).
-        * ``node_id`` \u2014 the node's stable string ID (preferred for
-          graph workflows; takes precedence when both are provided).
-
-        If neither is provided, returns an error. Status accepts canonical
-        values (``pending``, ``in_progress``, ``done``) plus 16
-        case-insensitive aliases (``completed``, ``wip``, ``started``,
-        ``cancelled``, ...) normalized by the manager.
+        Identify the node by its zero-based position in the list. For
+        graph workflows, prefer ``todo_graph_update`` with a stable
+        ``node_id``.
 
         Args:
-            index: Zero-based insertion-order position. Kept as the
-                first positional argument for backward compatibility.
-            status: New status (canonical or alias).
-            node_id: Node ID (e.g. ``n-a1b2c3d4``). Takes precedence
-                over ``index`` when both are supplied.
+            index: Zero-based insertion-order position.
+            status: New status (``pending``, ``in_progress``, ``done``,
+                or a case-insensitive alias).
 
         Returns:
             Formatted graph plus a graph-aware reminder pointing to the
-            next ready items (pending nodes whose predecessors are all
-            ``done``), or an ``ERROR:`` string.
+            next ready items, or an ``ERROR:`` string.
         """
         try:
-            if node_id is not None:
-                result = manager._todo_manager.update(
-                    current_instance_id, node_id, status
-                )
-                lookup_desc = f"node_id={node_id!r}"
-            elif index is not None:
-                result = manager._todo_manager.update_by_index(
-                    current_instance_id, index, status
-                )
-                lookup_desc = f"index={index}"
-            else:
-                return "ERROR: Provide either index or node_id."
-
+            result = manager._todo_manager.update_by_index(
+                current_instance_id, index, status
+            )
+            lookup_desc = f"index={index}"
             if result is None:
                 return (
                     f"ERROR: Could not update {lookup_desc} \u2192 {status!r}. "
@@ -500,18 +504,14 @@ is rejected with a clear error message. A 200-node cap is enforced.
         except Exception as e:
             return f"ERROR: Failed to update todo: {e}"
 
-    todo_update._full_doc_ = """\
-Update the status of a single todo node.
+    todo_list_update._full_doc_ = """\
+Update the status of a single todo node by insertion-order index.
 
 Args:
-    index: Zero-based insertion-order position of the node. Kept as
-        the FIRST positional argument so agents can call
-        ``todo_update(0, "done")`` without keyword arguments.
+    index: Zero-based insertion-order position of the node.
     status: New status \u2014 ``pending``, ``in_progress``, or ``done``
         (plus 16 case-insensitive aliases like ``completed``,
         ``started``, ``wip``, ``cancelled``).
-    node_id: Stable node ID (e.g. ``n-a1b2c3d4``). Takes precedence
-        over ``index`` when both are supplied.
 
 Returns:
     Formatted graph plus a graph-aware reminder:
@@ -525,14 +525,79 @@ Returns:
       items (``"\u23f3 Waiting: N blocked items"``), or confirms
       completion (``"All items completed! \u2705"``).
 
-On error (missing node, invalid status, neither ``index`` nor
-``node_id`` provided) returns ``ERROR: ...`` \u2014 no mutation occurs.
+On error (missing index, invalid status) returns ``ERROR: ...`` \u2014 no
+mutation occurs. For node-id-based updates, use ``todo_graph_update``.
 """
 
     @register_tool_category("todo")
     @tool
-    async def todo_list(verbose: bool = False) -> str:
-        """List the instance's current todo graph.
+    async def todo_graph_update(node_id: str, status: str) -> str:
+        """Update a todo node's status by its stable ID.
+
+        Preferred for graph workflows (the stable ``node_id`` is robust
+        to reordering). For a flat list, ``todo_list_update`` accepts a
+        positional ``index`` instead.
+
+        Args:
+            node_id: The node's stable string ID (e.g. ``n-a1b2c3d4``).
+            status: New status (canonical or alias).
+
+        Returns:
+            Formatted graph plus a graph-aware reminder pointing to the
+            next ready items, or an ``ERROR:`` string.
+        """
+        try:
+            result = manager._todo_manager.update(
+                current_instance_id, node_id, status
+            )
+            lookup_desc = f"node_id={node_id!r}"
+            if result is None:
+                return (
+                    f"ERROR: Could not update {lookup_desc} \u2192 {status!r}. "
+                    "Either the node does not exist or the status is "
+                    "invalid (expected pending, in_progress, done or an "
+                    "alias)."
+                )
+
+            todos = result["todos"]
+            reminder = result["reminder"]
+            await _emit_update(live_event_hub, current_instance_id, todos)
+            head = f"\U0001f4cb Updated {lookup_desc} \u2192 {status}."
+            body = _format_graph(todos)
+            return f"{head}\n\n{body}{reminder}"
+        except Exception as e:
+            return f"ERROR: Failed to update todo: {e}"
+
+    todo_graph_update._full_doc_ = """\
+Update the status of a single todo node by its stable string ID.
+
+Args:
+    node_id: Stable node ID (e.g. ``n-a1b2c3d4``).
+    status: New status \u2014 ``pending``, ``in_progress``, or ``done``
+        (plus 16 case-insensitive aliases like ``completed``,
+        ``started``, ``wip``, ``cancelled``).
+
+Returns:
+    Formatted graph plus a graph-aware reminder:
+
+    * If ``status == "done"`` AND the completed node carries a non-empty
+      ``comment``, the reminder is prefixed with
+      ``"User commented:\\n---\\n{comment}\\n---\\n"`` (the fences guard
+      against prompt injection).
+    * Otherwise the reminder lists pending nodes whose predecessors are
+      all done (``"\u23ed\ufe0f Next: A, B, ..."``), reports blocked
+      items (``"\u23f3 Waiting: N blocked items"``), or confirms
+      completion (``"All items completed! \u2705"``).
+
+On error (missing node, invalid status) returns ``ERROR: ...`` \u2014 no
+mutation occurs. For index-based updates on a flat list, use
+``todo_list_update``.
+"""
+
+    @register_tool_category("todo")
+    @tool
+    async def todo_view(verbose: bool = False) -> str:
+        """View the instance's current todo graph.
 
         Args:
             verbose: When ``True``, render every sub-task under every
@@ -554,8 +619,8 @@ On error (missing node, invalid status, neither ``index`` nor
         except Exception as e:
             return f"ERROR: Failed to read todo graph: {e}"
 
-    todo_list._full_doc_ = """\
-List the instance's current todo graph.
+    todo_view._full_doc_ = """\
+View the instance's current todo graph.
 
 Linear chains render as ``[idx] <icon> text``. Branching graphs render
 as a depth-indented tree with ``\u2514\u2192`` arrows and ``(merged)``
@@ -593,15 +658,15 @@ Returns:
     todo_clear._full_doc_ = """\
 Clear the entire todo graph for this instance.
 
-After calling this, ``todo_list()`` will report ``"No todo items."``
-until a new graph is created via ``todo_create()``. Any pending edge
-mutations on a cleared graph return ``ERROR:`` because the nodes no
-longer exist.
+After calling this, ``todo_view()`` will report ``"No todo items."``
+until a new graph is created via ``todo_list_create()`` /
+``todo_graph_create()``. Any pending edge mutations on a cleared graph
+return ``ERROR:`` because the nodes no longer exist.
 """
 
     @register_tool_category("todo")
     @tool
-    async def todo_add_edge(from_id: str, to_id: str) -> str:
+    async def todo_graph_add_edge(from_id: str, to_id: str) -> str:
         """Add a directed edge between two todo nodes.
 
         Creates a dependency: ``to_id`` becomes a successor of
@@ -633,7 +698,7 @@ longer exist.
         except Exception as e:
             return f"ERROR: Failed to add edge: {e}"
 
-    todo_add_edge._full_doc_ = """\
+    todo_graph_add_edge._full_doc_ = """\
 Add a directed edge between two existing todo nodes.
 
 Args:
@@ -657,7 +722,7 @@ Returns:
 
     @register_tool_category("todo")
     @tool
-    async def todo_remove_edge(from_id: str, to_id: str) -> str:
+    async def todo_graph_remove_edge(from_id: str, to_id: str) -> str:
         """Remove a directed edge between two todo nodes.
 
         Args:
@@ -686,7 +751,7 @@ Returns:
         except Exception as e:
             return f"ERROR: Failed to remove edge: {e}"
 
-    todo_remove_edge._full_doc_ = """\
+    todo_graph_remove_edge._full_doc_ = """\
 Remove a directed edge between two todo nodes.
 
 Args:
@@ -711,7 +776,7 @@ Returns:
 
     @register_tool_category("todo")
     @tool
-    async def todo_add_subtask(
+    async def todo_graph_add_subtask(
         node_id: str, text: str | list[str]
     ) -> str:
         """Add one or more sub-tasks (checklist items) to a todo node.
@@ -770,7 +835,7 @@ Returns:
         except Exception as e:
             return f"ERROR: Failed to add sub-task: {e}"
 
-    todo_add_subtask._full_doc_ = """\
+    todo_graph_add_subtask._full_doc_ = """\
 Add one or more sub-tasks (checklist items) to a todo node.
 
 Sub-tasks are STRICTLY BINARY — each item is either ``"pending"`` or
@@ -789,7 +854,7 @@ checklist items at once instead of issuing one call per item.
 
 The new sub-tasks' ids are auto-generated (``s-`` + 8 hex chars) and
 returned in the confirmation line so subsequent
-``todo_update_subtask`` / ``todo_remove_subtask`` calls can target
+``todo_graph_update_subtask`` / ``todo_graph_remove_subtask`` calls can target
 them without re-listing the graph.
 
 Args:
@@ -818,7 +883,7 @@ Returns:
 
     @register_tool_category("todo")
     @tool
-    async def todo_update_subtask(
+    async def todo_graph_update_subtask(
         node_id: str,
         subtask_id: str,
         status: str,
@@ -913,7 +978,7 @@ Returns:
         except Exception as e:
             return f"ERROR: Failed to update sub-task: {e}"
 
-    todo_update_subtask._full_doc_ = """\
+    todo_graph_update_subtask._full_doc_ = """\
 Update a sub-task's status (pending or done).
 
 Sub-task statuses are STRICTLY BINARY — ``"pending"`` or ``"done"``
@@ -959,7 +1024,7 @@ Returns:
 
     @register_tool_category("todo")
     @tool
-    async def todo_remove_subtask(node_id: str, subtask_id: str) -> str:
+    async def todo_graph_remove_subtask(node_id: str, subtask_id: str) -> str:
         """Remove a sub-task from a todo node.
 
         Args:
@@ -987,7 +1052,7 @@ Returns:
         except Exception as e:
             return f"ERROR: Failed to remove sub-task: {e}"
 
-    todo_remove_subtask._full_doc_ = """\
+    todo_graph_remove_subtask._full_doc_ = """\
 Remove a sub-task from a todo node.
 
 Treats missing instance, missing parent node, and missing sub-task
@@ -1004,13 +1069,15 @@ Returns:
 """
 
     return [
-        todo_create,
-        todo_update,
-        todo_list,
+        todo_list_create,
+        todo_list_update,
+        todo_graph_create,
+        todo_graph_update,
+        todo_graph_add_edge,
+        todo_graph_remove_edge,
+        todo_graph_add_subtask,
+        todo_graph_update_subtask,
+        todo_graph_remove_subtask,
+        todo_view,
         todo_clear,
-        todo_add_edge,
-        todo_remove_edge,
-        todo_add_subtask,
-        todo_update_subtask,
-        todo_remove_subtask,
     ]

@@ -1,8 +1,10 @@
 """Tests for the SSE integration layer of the todo tools.
 
-Six tools (``todo_create``, ``todo_update``, ``todo_list``, ``todo_clear``,
-``todo_add_edge``, ``todo_remove_edge``) emit a ``todo_update`` SSE event
-on every successful mutation. The events are delivered through
+The mutation tools (``todo_list_create``, ``todo_list_update``,
+``todo_graph_create``, ``todo_graph_update``, ``todo_graph_add_edge``,
+``todo_graph_remove_edge``, the three ``todo_graph_*_subtask`` tools, and
+``todo_clear``) emit a ``todo_update`` SSE event on every successful
+mutation. The events are delivered through
 ``LiveEventHub.stream_todo_update(instance_id, todos)`` which uses an
 ``asyncio.Queue``-based fanout (no DB persistence — see
 ``LiveEventHub._stream_to_connections``).
@@ -58,7 +60,7 @@ def _make_manager_with_hub() -> MagicMock:
 
 
 def _build_tools(hub: AsyncMock | None = None, manager: MagicMock | None = None):
-    """Build the 6 todo tools with the supplied hub (or no hub).
+    """Build the 11 todo tools with the supplied hub (or no hub).
 
     ``manager`` is shared by both the caller and the tools so that tests
     can pre-populate state via ``manager._todo_manager.create(...)`` and
@@ -68,8 +70,10 @@ def _build_tools(hub: AsyncMock | None = None, manager: MagicMock | None = None)
 
     Returns the tools in canonical order::
 
-        [todo_create, todo_update, todo_list, todo_clear,
-         todo_add_edge, todo_remove_edge]
+        [todo_list_create, todo_list_update, todo_graph_create,
+         todo_graph_update, todo_graph_add_edge, todo_graph_remove_edge,
+         todo_graph_add_subtask, todo_graph_update_subtask,
+         todo_graph_remove_subtask, todo_view, todo_clear]
     """
     from daemon.tools.todo_tools import create_todo_tools
 
@@ -88,10 +92,10 @@ def _build_tools(hub: AsyncMock | None = None, manager: MagicMock | None = None)
 
 
 class TestTodoCreateSSE:
-    """``todo_create`` must emit one ``stream_todo_update`` per call."""
+    """``todo_list_create`` must emit one ``stream_todo_update`` per call."""
 
     async def test_sse_emit_on_create(self):
-        """After ``todo_create``, ``stream_todo_update`` is awaited exactly once."""
+        """After ``todo_list_create``, ``stream_todo_update`` is awaited exactly once."""
         hub = AsyncMock()
         tools = _build_tools(hub=hub)
         create_tool = tools[0]
@@ -114,7 +118,7 @@ class TestTodoCreateSSE:
 
 
 class TestTodoUpdateSSE:
-    """``todo_update`` must emit one ``stream_todo_update`` per successful update."""
+    """``todo_list_update`` must emit one ``stream_todo_update`` per successful update."""
 
     async def test_sse_emit_on_update(self):
         """Updating an item triggers an SSE emit with the new full list."""
@@ -168,7 +172,7 @@ class TestTodoClearSSE:
         manager = _make_manager_with_hub()
         manager._todo_manager.create("sse-test-instance", ["X", "Y", "Z"])
         tools = _build_tools(hub=hub, manager=manager)
-        clear_tool = tools[3]
+        clear_tool = tools[10]
 
         await clear_tool.coroutine()
 
@@ -238,7 +242,7 @@ class TestSSEFailureResilience:
         manager = _make_manager_with_hub()
         manager._todo_manager.create("sse-test-instance", ["X", "Y"])
         tools = _build_tools(hub=hub, manager=manager)
-        clear_tool = tools[3]
+        clear_tool = tools[10]
 
         result = await clear_tool.coroutine()
 
@@ -261,7 +265,7 @@ class TestNoSSEHubConfigured:
         tools = _build_tools(hub=None)
         create_tool = tools[0]
         update_tool = tools[1]
-        clear_tool = tools[3]
+        clear_tool = tools[10]
 
         # Each mutation: runs cleanly without a hub.
         create_result = await create_tool.coroutine(items=["A", "B"])
@@ -273,8 +277,8 @@ class TestNoSSEHubConfigured:
         clear_result = await clear_tool.coroutine()
         assert "cleared" in clear_result.lower()
 
-    async def test_todo_list_does_not_emit_sse_at_all(self):
-        """Read-only ``todo_list`` must never invoke the SSE hub.
+    async def test_todo_view_does_not_emit_sse_at_all(self):
+        """Read-only ``todo_view`` must never invoke the SSE hub.
 
         Even with a hub configured, the read path doesn't mutate state,
         so no event is warranted — the frontend already has the data.
@@ -283,7 +287,7 @@ class TestNoSSEHubConfigured:
         manager = _make_manager_with_hub()
         manager._todo_manager.create("sse-test-instance", ["A"])
         tools = _build_tools(hub=hub, manager=manager)
-        list_tool = tools[2]
+        list_tool = tools[9]
 
         await list_tool.coroutine()
 
@@ -366,12 +370,12 @@ class TestSSEPayloadStructure:
         assert [t["status"] for t in todos_arg] == ["pending", "pending", "pending"]
 
     async def test_sse_payload_after_update_contains_seven_keys(self):
-        """After ``todo_update``, the SSE payload still carries 7-key dicts.
+        """After ``todo_list_update``, the SSE payload still carries 7-key dicts.
 
         The 7-key schema is the cross-phase contract — the FE
         reconstructs graph state from the SSE stream alone and never
         needs to hit the API. A successful update must therefore emit
-        the same shape as ``todo_create`` (same seven keys), not a
+        the same shape as ``todo_list_create`` (same seven keys), not a
         trimmed-down variant.
         """
         hub = AsyncMock()
@@ -406,10 +410,10 @@ class TestSSEPayloadStructure:
         assert todos_arg[0]["id"] != todos_arg[1]["id"]
 
     async def test_sse_payload_after_add_edge_emits_with_updated_next_ids(self):
-        """``todo_add_edge`` emits an SSE event whose ``next_ids`` reflect the new edge.
+        """``todo_graph_add_edge`` emits an SSE event whose ``next_ids`` reflect the new edge.
 
         Node IDs are looked up from the manager (not positional
-        indexes) — ``todo_add_edge`` is keyed by stable ``n-``-prefixed
+        indexes) — ``todo_graph_add_edge`` is keyed by stable ``n-``-prefixed
         IDs. The emission contains the full 7-key node list (not a
         diff), because the FE re-renders from the snapshot.
         """
@@ -456,7 +460,7 @@ class TestSSEPayloadStructure:
         assert c_node["next_ids"] == []
 
     async def test_sse_payload_after_remove_edge_emits_with_updated_next_ids(self):
-        """``todo_remove_edge`` emits an SSE event whose ``next_ids`` reflect the removal.
+        """``todo_graph_remove_edge`` emits an SSE event whose ``next_ids`` reflect the removal.
 
         The first emission in the auto-built chain (A → B) is removed,
         so A's ``next_ids`` becomes empty in the payload. As with
@@ -508,8 +512,8 @@ class TestSSEPayloadStructure:
 
 
 class TestSubtaskSSEPayload:
-    """The three Sub-Task Phase 1 tools (``todo_add_subtask``,
-    ``todo_update_subtask``, ``todo_remove_subtask``) emit SSE events
+    """The three Sub-Task Phase 1 tools (``todo_graph_add_subtask``,
+    ``todo_graph_update_subtask``, ``todo_graph_remove_subtask``) emit SSE events
     whose payload conforms to the frozen 7-key schema AND whose
     ``subtasks`` field carries the populated checklist (list of
     ``{id, text, status}`` dicts) when present, or an empty list when
@@ -517,7 +521,7 @@ class TestSubtaskSSEPayload:
     """
 
     async def test_sse_payload_after_add_subtask_has_seven_keys(self):
-        """``todo_add_subtask`` emits with the 7-key schema including the
+        """``todo_graph_add_subtask`` emits with the 7-key schema including the
         ``subtasks`` key, and the parent's ``subtasks`` list now contains
         a dict with the new item's id, text, and pending status.
         """
@@ -556,7 +560,7 @@ class TestSubtaskSSEPayload:
         assert isinstance(subs[0]["id"], str) and subs[0]["id"].startswith("s-")
 
     async def test_sse_payload_after_batch_add_subtask_emits_once(self):
-        """A batched ``todo_add_subtask`` (``list[str]``) emits exactly ONE
+        """A batched ``todo_graph_add_subtask`` (``list[str]``) emits exactly ONE
         ``todo_update`` SSE event — not one per item — and the payload's
         ``subtasks`` list carries every appended item in insertion order.
         """
@@ -589,7 +593,7 @@ class TestSubtaskSSEPayload:
         assert all(s["id"].startswith("s-") for s in subs)
 
     async def test_sse_payload_after_update_subtask_has_seven_keys(self):
-        """``todo_update_subtask`` emits with the 7-key schema and the
+        """``todo_graph_update_subtask`` emits with the 7-key schema and the
         ``subtasks`` field reflects the status flip on the targeted item.
         """
         hub = AsyncMock()
@@ -630,7 +634,7 @@ class TestSubtaskSSEPayload:
         assert subs[0]["status"] == "done"
 
     async def test_sse_payload_after_remove_subtask_has_seven_keys(self):
-        """``todo_remove_subtask`` emits with the 7-key schema and the
+        """``todo_graph_remove_subtask`` emits with the 7-key schema and the
         ``subtasks`` field reflects the removal (empty list afterwards).
         """
         hub = AsyncMock()
@@ -696,9 +700,9 @@ class TestSubtaskSSEPayload:
             edges=[],
         )
         tools = _build_tools(hub=hub, manager=manager)
-        update_tool = tools[1]
+        update_tool = tools[3]
 
-        # Trigger an emission via todo_update on the parent — produces
+        # Trigger an emission via todo_graph_update on the parent — produces
         # an SSE with the full node list, including its subtasks.
         await update_tool.coroutine(node_id="alpha", status="in_progress")
 
@@ -728,7 +732,7 @@ class TestSubtaskSSEPayload:
             edges=[],
         )
         tools = _build_tools(hub=hub, manager=manager)
-        update_tool = tools[1]
+        update_tool = tools[3]
 
         await update_tool.coroutine(node_id="alpha", status="in_progress")
 
