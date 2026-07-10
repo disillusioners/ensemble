@@ -315,25 +315,19 @@ export class TodoListComponent {
     this.commentPopupPosition.set(null);
   }
 
-  /**
-   * Close the graph-mode popup without touching the shared editor signals.
-   * Kept for symmetry with cancelEdit; currently unused but available if a
-   * future change needs to dismiss only the popup.
-   */
-  closeCommentPopup(): void {
-    this.commentPopupNodeId.set(null);
-    this.commentPopupPosition.set(null);
-  }
-
   // Outside-click detection for the graph-mode popup. Safe to leave
   // unconditional: when no popup is open, this is a no-op. The popup's
   // own div calls stopPropagation on click, and openCommentPopup also
   // stops propagation on the comment-button click — so this handler
   // only fires for clicks that genuinely landed outside the popup.
+  // Uses cancelEdit (not just closeCommentPopup) so all 4 editor
+  // signals are reset, preventing a stale editingNodeId from leaking
+  // into the linear-mode inline editor if an SSE update flips the
+  // mode while the popup is open.
   @HostListener('document:click', ['$event'])
   onDocumentClick(_event: MouseEvent): void {
     if (this.commentPopupNodeId()) {
-      this.closeCommentPopup();
+      this.cancelEdit();
     }
   }
 

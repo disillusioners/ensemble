@@ -183,7 +183,7 @@
                     class="editor-btn primary"
                     type="button"
                     (click)="saveComment(popupItem, $event)"
-                    [disabled]="isSavingComment()"
+                    [disabled]="isSavingComment() || commentCharExceeded()"
                   >Save</button>
                   <button
                     class="editor-btn secondary"
