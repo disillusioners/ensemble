@@ -34,6 +34,19 @@
                 <div class="todo-row">
                   <span class="todo-text">{{ item.text }}</span>
                   <button
+                    class="icon-btn subtask-badge-btn"
+                    type="button"
+                    (click)="toggleSubtaskExpand(item, $event)"
+                    [attr.aria-label]="item.subtasks && item.subtasks.length ? 'Sub-tasks' : 'Add sub-task'"
+                    [title]="item.subtasks && item.subtasks.length ? 'Sub-tasks' : 'Add sub-task'"
+                  >
+                    @if (item.subtasks && item.subtasks.length > 0) {
+                      <span class="subtask-badge">{{ subtaskCount(item).done }}/{{ subtaskCount(item).total }}</span>
+                    } @else {
+                      <mat-icon>add_task</mat-icon>
+                    }
+                  </button>
+                  <button
                     class="icon-btn comment-btn"
                     type="button"
                     (click)="startEditComment(item, $event)"
@@ -71,19 +84,11 @@
                     </div>
                   </div>
                 }
-                <!-- Sub-tasks section (linear mode). Toggle + add entry point
-                     are always rendered so users can create the first sub-task
-                     from the UI even when the list is empty. -->
-                <div class="subtask-section">
-                  <button
-                    class="subtask-toggle"
-                    type="button"
-                    (click)="toggleSubtaskExpand(item, $event)"
-                  >
-                    <mat-icon>{{ expandedSubtaskNodeId() === item.id ? 'expand_less' : 'expand_more' }}</mat-icon>
-                    <span class="subtask-count-badge">{{ subtaskCount(item).done }}/{{ subtaskCount(item).total }}</span>
-                  </button>
-                  @if (expandedSubtaskNodeId() === item.id) {
+                <!-- Sub-tasks section (linear mode). Rendered only when
+                     expanded — the entry point is the sub-task button in the
+                     row above, so empty nodes take no extra vertical space. -->
+                @if (expandedSubtaskNodeId() === item.id) {
+                  <div class="subtask-section">
                     <div class="subtask-list">
                       @for (sub of item.subtasks; track sub.id) {
                         <div class="subtask-item" [class.done]="sub.status === 'done'">
@@ -128,8 +133,8 @@
                         <div class="subtask-error">{{ subtaskError() }}</div>
                       }
                     </div>
-                  }
-                </div>
+                  </div>
+                }
               </div>
             </div>
           }

@@ -543,11 +543,19 @@
 }
 
 // Graph-mode badge on the foreignObject node card. Slim pill so it doesn't
-// crowd the status icon and node text alongside the comment button.
+// crowd the status icon and node text alongside the comment button. Also
+// reused in linear mode as the per-row sub-task entry point (count badge
+// when sub-tasks exist, an add_task "+" icon when empty).
 .subtask-badge-btn {
   color: #94a3b8;
   flex-shrink: 0;
   padding: 0 2px;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
 
   &:hover {
     color: #e2e8f0;
