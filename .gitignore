@@ -63,3 +63,4 @@ test_*.db
 .inspiration-projects/*
 data_dev/*
 opencode_sessions.db
+test-screenshots/*
