@@ -3,23 +3,37 @@
 Mirrors the closure-injection pattern of daemon.tools.chart_tools:
 create_todo_tools(manager, current_instance_id, live_event_hub=None) is
 invoked from create_instance_tools to assemble the per-instance tool list.
-The 6 tools delegate to manager._todo_manager for state mutations and
+The 9 tools delegate to manager._todo_manager for state mutations and
 emit a todo_update SSE event on every successful change so the frontend
 sees real-time updates.
 
-Phase 2 of the todo graph transformation introduces:
+Phase 2 of the todo graph transformation introduced:
 
   * DAG-aware ``todo_create`` — accepts either a flat list (backward
     compatible, auto-chained) or explicit ``nodes`` + ``edges`` for
     branching graphs.
   * Node-id lookup in ``todo_update`` — ``node_id`` takes precedence
     over the legacy positional ``index`` parameter.
-  * Two new edge tools: ``todo_add_edge`` and ``todo_remove_edge`` for
+  * Two edge tools: ``todo_add_edge`` and ``todo_remove_edge`` for
     incremental graph edits.
   * ``_format_graph`` renderer that displays branching structure with
     ``└→`` arrows, depth-based indentation, and ``(merged)`` annotations
     on re-encountered nodes. Linear chains fall back to the simple
     ``[idx] <icon> text`` format.
+
+Phase 2 of the todo sub-tasks feature adds three checklist tools:
+
+  * ``todo_add_subtask`` — append a binary checklist item to a node.
+  * ``todo_update_subtask`` — toggle a sub-task's status, optionally
+    auto-completing the parent when all sub-tasks are done.
+  * ``todo_remove_subtask`` — delete a sub-task by id.
+
+Sub-tasks are STRICTLY BINARY (``pending`` or ``done``) — they model
+fine-grained acceptance criteria under a parent node, not a multi-state
+workflow. The ``_format_graph`` renderer prints them as an indented
+checklist (``☐`` / ``☑``) under each node, with a ``+N more`` truncation
+marker at 5 items by default; pass ``verbose=True`` to ``todo_list`` to
+see them all.
 
 Status aliasing (``completed`` → ``done``, ``wip`` → ``in_progress``, ...)
 is owned by ``TodoGraphManager._normalize_status`` — tools pass status
@@ -32,6 +46,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.services.todo_manager import _normalize_subtask_status
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -43,30 +58,52 @@ CATEGORY_NAME = "Todo Management"
 CATEGORY_DOC = """\
 Todo list and DAG management tools for tracking per-instance work items.
 
-Phase 2 introduces 6 tools (was 4). The todo graph is a DAG — every node
-has a stable string ``id`` and a list of successor ``next_ids``; edges
-are stored as adjacency lists on each node.
+The todo graph is a DAG — every node has a stable string ``id`` and a list
+of successor ``next_ids``; edges are stored as adjacency lists on each
+node. Sub-tasks (checklist items) are nested per-node as a strictly
+binary ``pending`` / ``done`` list and do not participate in the graph
+structure.
 
-The 6 tools (todo_create, todo_update, todo_list, todo_clear,
-todo_add_edge, todo_remove_edge) mutate a per-instance graph via
-manager._todo_manager and emit a todo_update SSE event so the frontend
-re-renders without polling. Status indicators: \u25cb pending,
-\u25d0 in_progress, \u25cf done.
+The 9 tools are split into three groups:
+
+**Node / graph mutations (6):**
+``todo_create``, ``todo_update``, ``todo_list``, ``todo_clear``,
+``todo_add_edge``, ``todo_remove_edge``.
+
+**Sub-task mutations (3):**
+``todo_add_subtask``, ``todo_update_subtask``, ``todo_remove_subtask``.
+
+All tools mutate a per-instance graph via ``manager._todo_manager`` and
+emit a ``todo_update`` SSE event so the frontend re-renders without
+polling. Status indicators: ○ pending, ◐ in_progress, ● done for nodes;
+☐ pending, ☑ done for sub-tasks.
 
 Branching graph example::
 
-    [0] \u25cb Setup DB
-      \u2514\u2192 [1] \u25d0 Build API
-           \u2514\u2192 [2] \u25cf Write tests
-           \u2514\u2192 [3] \u25cb Write docs
-      \u2514\u2192 [4] \u25cb Deploy
+    [0] ○ Setup DB
+        ☐ Create schema
+        ☑ Run migration
+      └→ [1] ◐ Build API
+      └→ [3] ○ Deploy
 
-Linear chains render as a flat ``[idx] <icon> text`` list.
+Linear chains render as a flat ``[idx] <icon> text`` list, with sub-tasks
+indented four spaces below the parent node.
 
 Node identity precedence: ``node_id`` (e.g. ``n-a1b2c3d4``) is preferred
 over insertion-order ``index`` for graph workflows; ``index`` is kept
 as the first positional argument of ``todo_update`` for backward
 compatibility with agents that call ``todo_update(0, "done")``.
+
+Sub-task usage example::
+
+    # Add a sub-task to a node
+    todo_add_subtask("n-a1b2c3d4", "Write integration tests")
+
+    # Mark it done; auto-complete the parent when all sub-tasks are done
+    todo_update_subtask("n-a1b2c3d4", "s-e5f6g7h8", "done", auto_complete=True)
+
+    # Render the graph with all sub-tasks visible (default caps at 5/note)
+    todo_list(verbose=True)
 """
 
 
@@ -76,40 +113,102 @@ _STATUS_ICONS = {
     "done": "\u25cf",
 }
 
+# Sub-task checklist icons. STRICTLY BINARY: sub-tasks are either
+# ``pending`` or ``done`` — there is no ``in_progress`` state. Distinct
+# from the node-level ``_STATUS_ICONS`` (``○◐●``) so the two layers are
+# visually unambiguous in the rendered graph.
+_SUBTASK_ICONS = {"pending": "\u2610", "done": "\u2611"}
 
-def _format_graph(todos: list[dict]) -> str:
-    """Format todo nodes as a text-based graph.
+# Maximum sub-tasks rendered per node when ``verbose=False``. Sub-tasks
+# beyond this count are collapsed into a single ``+N more`` marker.
+_SUBTASK_VERBOSE_LIMIT = 5
+
+
+def _format_graph(todos: list[dict], verbose: bool = False) -> str:
+    """Format todo nodes as a text-based graph with sub-task checklists.
 
     Two rendering modes:
 
-    1. **Linear fallback** — when every node has \u22641 successor AND
-       \u22641 predecessor (pure chain or isolated nodes), render a simple
+    1. **Linear fallback** — when every node has ≤1 successor AND
+       ≤1 predecessor (pure chain or isolated nodes), render a simple
        ``[idx] <icon> text`` list. This preserves the visual contract of
        the legacy ``_format_list`` for the common case.
 
     2. **Branching tree** — when at least one node has multiple
        successors (branch) or multiple predecessors (merge), perform a
        DFS from each root (no predecessors), indenting 2 spaces per
-       depth and prefixing children with ``\u2514\u2192 ``. Already-visited
+       depth and prefixing children with ``└→ ``. Already-visited
        nodes render as ``[idx] (merged)`` to avoid re-walking their
        subtree.
 
+    Sub-task rendering: in BOTH modes, every node that carries a
+    non-empty ``subtasks`` list gets an indented checklist rendered
+    immediately below it. The sub-task indent is the node's own
+    leading-space prefix plus 4 more spaces, so a depth-0 node's
+    sub-tasks sit at 4 spaces and a depth-1 node's sub-tasks sit at
+    6 spaces. Sub-tasks use ``☐`` / ``☑`` icons (distinct from the
+    node-level ``○◐●``) so the two layers read unambiguously.
+
+    Verbosity: when ``verbose=False`` (default) each node shows at most
+    :data:`_SUBTASK_VERBOSE_LIMIT` sub-tasks; any overflow is collapsed
+    into a single ``+N more`` marker. ``verbose=True`` shows every
+    sub-task.
+
     Edge cases:
 
-    * Empty input \u2192 ``"No todo items."``
-    * Cyclic graph (defensive \u2014 the manager rejects cycles at write
-      time) \u2192 degrades gracefully, re-encountered nodes render as
-      ``(merged)``.
+    * Empty input → ``"No todo items."``
+    * Cyclic graph (defensive — the manager rejects cycles at write
+      time) → degrades gracefully, re-encountered nodes render as
+      ``(merged)`` and their sub-tasks are NOT re-rendered (the
+      first visit already covered them).
+    * Nodes missing the ``subtasks`` key are tolerated — the helper
+      falls back to ``[]`` and renders no checklist under them.
 
     Args:
-        todos: List of node dicts (frozen Phase 1 schema: ``id``,
-            ``index``, ``text``, ``status``, ``comment``, ``next_ids``).
+        todos: List of node dicts (frozen v2 schema: ``id``, ``index``,
+            ``text``, ``status``, ``comment``, ``next_ids``,
+            ``subtasks``).
+        verbose: When ``True``, render every sub-task under every node
+            with no truncation. When ``False`` (default), cap each
+            node's sub-task list at :data:`_SUBTASK_VERBOSE_LIMIT`
+            entries and append a ``+N more`` line if more exist.
 
     Returns:
         Newline-separated graph representation.
     """
     if not todos:
         return "No todo items."
+
+    def render_subtasks(node: dict, node_indent: str) -> list[str]:
+        """Render sub-task lines under a node, indented below it.
+
+        Args:
+            node: The node dict (may or may not carry ``subtasks``).
+            node_indent: Leading-space prefix of the node's own line
+                (e.g. ``""`` for a depth-0 node, ``"  "`` for depth 1).
+                Sub-tasks are offset by 4 more spaces.
+
+        Returns:
+            A list of formatted sub-task lines (empty if the node has
+            no sub-tasks). When ``verbose=False`` and the node has
+            more than :data:`_SUBTASK_VERBOSE_LIMIT` sub-tasks, the
+            overflow is represented by a single ``+N more`` line.
+        """
+        subtasks = node.get("subtasks", [])
+        if not subtasks:
+            return []
+        sub_indent = node_indent + "    "
+        lines: list[str] = []
+        limit = len(subtasks) if verbose else _SUBTASK_VERBOSE_LIMIT
+        for i, sub in enumerate(subtasks):
+            if i >= limit:
+                remaining = len(subtasks) - limit
+                lines.append(f"{sub_indent}+{remaining} more")
+                break
+            icon = _SUBTASK_ICONS.get(sub.get("status", "pending"), "?")
+            text = sub.get("text", "")
+            lines.append(f"{sub_indent}{icon} {text}")
+        return lines
 
     # Adjacency (successors) and predecessor maps keyed by node id.
     next_ids_map: dict[str, list[str]] = {
@@ -136,6 +235,7 @@ def _format_graph(todos: list[dict]) -> str:
             status = item["status"]
             icon = _STATUS_ICONS.get(status, "?")
             lines.append(f"[{idx}] {icon} {text}")
+            lines.extend(render_subtasks(item, ""))
         return "\n".join(lines)
 
     # Branching graph \u2014 DFS from each root (no predecessors).
@@ -148,8 +248,10 @@ def _format_graph(todos: list[dict]) -> str:
         """Recursively render ``node`` and its descendants."""
         indent = "  " * depth
         if node["id"] in visited:
-            # Merge node \u2014 already rendered via another branch.
-            lines.append(f"{indent}\u2514\u2192 [{node['index']}] (merged)")
+            # Merge node — already rendered via another branch.
+            # Sub-tasks are NOT re-emitted on merge lines; the first
+            # visit covered them and re-printing would clutter.
+            lines.append(f"{indent}└→ [{node['index']}] (merged)")
             return
         visited.add(node["id"])
         idx = node["index"]
@@ -157,9 +259,16 @@ def _format_graph(todos: list[dict]) -> str:
         status = node["status"]
         icon = _STATUS_ICONS.get(status, "?")
         if depth == 0:
+            # Root nodes render without an arrow prefix; the leading
+            # indent is empty so the sub-task offset is just 4 spaces.
             lines.append(f"[{idx}] {icon} {text}")
+            lines.extend(render_subtasks(node, ""))
         else:
-            lines.append(f"{indent}\u2514\u2192 [{idx}] {icon} {text}")
+            # Non-root nodes carry the ``└→ `` branch arrow; the
+            # node's "indent" is the spaces BEFORE the arrow, and
+            # sub-tasks are offset 4 more spaces from that.
+            lines.append(f"{indent}└→ [{idx}] {icon} {text}")
+            lines.extend(render_subtasks(node, indent))
         for successor_id in node["next_ids"]:
             if successor_id in by_id:
                 render(by_id[successor_id], depth + 1)
@@ -201,9 +310,10 @@ def create_todo_tools(
             mutations still succeed but no event is emitted.
 
     Returns:
-        List of 6 tool functions:
+        List of 9 tool functions:
         ``[todo_create, todo_update, todo_list, todo_clear,
-        todo_add_edge, todo_remove_edge]``.
+        todo_add_edge, todo_remove_edge, todo_add_subtask,
+        todo_update_subtask, todo_remove_subtask]``.
     """
 
     @register_tool_category("todo")
@@ -220,8 +330,10 @@ def create_todo_tools(
         1. **Flat list** (backward compatible): pass ``items`` \u2014 a linear
            chain is auto-built (``A \u2192 B \u2192 C``).
         2. **Explicit graph**: pass ``nodes`` (each ``{"id": str, "text":
-           str, "next_ids"?: list[str]}``) and optional ``edges`` (each
-           ``{"from": str, "to": str}``). Use this for branching plans.
+           str, "next_ids"?: list[str], "subtasks"?: list[{"text": str}]}``)
+           and optional ``edges`` (each ``{"from": str, "to": str}``).
+           Use this for branching plans, optionally pre-seeded with
+           sub-task checklists per node.
 
         If ``items`` is provided, ``nodes`` and ``edges`` are ignored. If
         neither is provided, the call returns an error.
@@ -231,7 +343,11 @@ def create_todo_tools(
                 chain DAG. Replaces any existing graph.
             nodes: List of node specs for an explicit graph. Each spec
                 must have ``id`` (non-empty, non-numeric) and ``text``;
-                ``next_ids`` is optional.
+                ``next_ids`` and ``subtasks`` are optional. The
+                ``subtasks`` key, when present, is a list of
+                ``{"text": str}`` dicts that seed a binary
+                ``pending``/``done`` checklist under that node (max 20
+                items, each ≤ 500 chars).
             edges: Optional list of ``{"from": ..., "to": ...}`` edges.
                 Layered on top of any per-node ``next_ids``.
 
@@ -277,7 +393,8 @@ Two modes:
 
     todo_create(
         nodes=[
-            {"id": "setup", "text": "Setup DB"},
+            {"id": "setup", "text": "Setup DB",
+             "subtasks": [{"text": "Create schema"}, {"text": "Run migration"}]},
             {"id": "api", "text": "Build API"},
             {"id": "ui", "text": "Build UI"},
             {"id": "test", "text": "Run tests"},
@@ -295,7 +412,10 @@ Args:
         with a linear chain. Mutually exclusive with ``nodes``.
     nodes: List of node specs for an explicit graph. Each spec must
         contain ``id`` (non-empty, non-numeric string) and ``text``;
-        ``next_ids`` is optional and is merged with any ``edges``.
+        ``next_ids`` and ``subtasks`` are optional and are merged with
+        any ``edges``. The ``subtasks`` key, when present, is a list of
+        ``{"text": str}`` dicts that seed a binary ``pending``/``done``
+        checklist under that node (max 20 items, each ≤ 500 chars).
     edges: Optional list of ``{"from": str, "to": str}`` edges. Layered
         on top of any per-node ``next_ids``. Ignored when ``items`` is
         provided.
@@ -406,8 +526,15 @@ On error (missing node, invalid status, neither ``index`` nor
 
     @register_tool_category("todo")
     @tool
-    async def todo_list() -> str:
+    async def todo_list(verbose: bool = False) -> str:
         """List the instance's current todo graph.
+
+        Args:
+            verbose: When ``True``, render every sub-task under every
+                node with no truncation. When ``False`` (default), cap
+                each node's sub-task list at
+                :data:`_SUBTASK_VERBOSE_LIMIT` entries and append a
+                ``+N more`` line if more exist.
 
         Returns:
             Formatted graph representation (linear fallback or
@@ -415,7 +542,10 @@ On error (missing node, invalid status, neither ``index`` nor
         """
         try:
             todos = manager._todo_manager.get_all(current_instance_id)
-            return f"\U0001f4cb Current todo graph:\n{_format_graph(todos)}"
+            return (
+                f"\U0001f4cb Current todo graph:\n"
+                f"{_format_graph(todos, verbose=verbose)}"
+            )
         except Exception as e:
             return f"ERROR: Failed to read todo graph: {e}"
 
@@ -426,6 +556,15 @@ Linear chains render as ``[idx] <icon> text``. Branching graphs render
 as a depth-indented tree with ``\u2514\u2192`` arrows and ``(merged)``
 annotations on re-encountered nodes. Empty graph returns
 ``"No todo items."``.
+
+Sub-tasks render as an indented checklist (4-space offset from the
+parent node) using ``\u2610`` / ``\u2611`` icons. By default, each
+node shows at most 5 sub-tasks; nodes with more append a
+``+N more`` marker. Pass ``verbose=True`` to render every sub-task.
+
+Args:
+    verbose: When ``True``, render every sub-task under every node with
+        no truncation. Default is ``False`` (cap of 5 per node).
 
 Returns:
     Formatted graph representation, or ``"No todo items."`` if empty.
@@ -565,6 +704,272 @@ Returns:
     does not exist.
 """
 
+    @register_tool_category("todo")
+    @tool
+    async def todo_add_subtask(node_id: str, text: str) -> str:
+        """Add a sub-task (checklist item) to a todo node.
+
+        Sub-tasks are binary (pending/done) checklist items nested within
+        a graph node. They don't participate in the graph structure — they
+        are detail items for breaking down a node's work.
+
+        Args:
+            node_id: The parent node's stable ID (e.g. "n-a1b2c3d4").
+            text: The sub-task description (max 500 chars).
+
+        Returns:
+            Formatted graph with the new sub-task visible, or ERROR: string.
+        """
+        try:
+            result = manager._todo_manager.add_subtask(
+                current_instance_id, node_id, text
+            )
+            if result is None:
+                return (
+                    f"ERROR: Node '{node_id}' not found or max sub-tasks "
+                    f"exceeded"
+                )
+            todos = result["todos"]
+            # The new sub-task is appended to the end of the parent's
+            # ``subtasks`` list, so its id is the last entry's id.
+            parent = next(
+                (n for n in todos if n["id"] == node_id), None
+            )
+            await _emit_update(live_event_hub, current_instance_id, todos)
+            body = _format_graph(todos, verbose=False)
+            if parent is not None and parent.get("subtasks"):
+                subtask_id = parent["subtasks"][-1]["id"]
+                return (
+                    f"Added sub-task '{subtask_id}' to node '{node_id}'.\n\n"
+                    f"{body}"
+                )
+            # Defensive fallback: the manager already accepted the
+            # mutation (otherwise we would have returned the ERROR
+            # branch above), but the returned snapshot didn't include
+            # the parent node — likely a transient state mismatch.
+            # Don't fabricate an id; just confirm the success and
+            # render the graph.
+            return (
+                f"Added sub-task to node '{node_id}'.\n\n"
+                f"{body}"
+            )
+        except Exception as e:
+            return f"ERROR: Failed to add sub-task: {e}"
+
+    todo_add_subtask._full_doc_ = """\
+Add a sub-task (checklist item) to a todo node.
+
+Sub-tasks are STRICTLY BINARY — each item is either ``"pending"`` or
+``"done"``. They do not participate in the graph structure (no
+``next_ids``) and exist purely to track fine-grained acceptance
+criteria under a parent node. The ``text`` field is required and
+capped at :data:`MAX_SUBTASK_TEXT_LENGTH` (500 chars); the per-node
+checklist is capped at :data:`MAX_SUBTASKS_PER_NODE` (20 items).
+
+The new sub-task's id is auto-generated (``s-`` + 8 hex chars) and
+returned in the confirmation line so subsequent
+``todo_update_subtask`` / ``todo_remove_subtask`` calls can target it
+without re-listing the graph.
+
+Args:
+    node_id: The parent node's stable ID (e.g. ``"n-a1b2c3d4"``).
+    text: The sub-task description (max 500 chars).
+
+Behavior:
+
+* Calls ``manager._todo_manager.add_subtask`` which:
+  - returns ``None`` when the instance or ``node_id`` is unknown;
+  - raises :class:`ValueError` for empty/too-long ``text`` or when
+    the node already has the maximum number of sub-tasks.
+* Emits a ``todo_update`` SSE event on success.
+* Renders the resulting graph with ``verbose=False`` (sub-tasks
+  truncated at 5 per node with a ``+N more`` marker).
+
+Returns:
+    A confirmation line followed by the formatted graph on success.
+    Returns ``ERROR: ...`` when the parent node is missing, the
+    text is empty/too long, or the per-node sub-task cap is reached.
+"""
+
+    @register_tool_category("todo")
+    @tool
+    async def todo_update_subtask(
+        node_id: str,
+        subtask_id: str,
+        status: str,
+        auto_complete: bool = False,
+    ) -> str:
+        """Update a sub-task's status (pending or done).
+
+        When auto_complete=True and all sub-tasks on the node are done,
+        the parent node's status is automatically set to "done".
+
+        Args:
+            node_id: The parent node's stable ID.
+            subtask_id: The sub-task's ID (e.g. "s-a1b2c3d4").
+            status: "pending" or "done" (aliases: "completed" → "done").
+            auto_complete: If True, auto-mark parent done when all sub-tasks done.
+
+        Returns:
+            Formatted graph + reminder, or ERROR: string. When auto_complete=True
+            but not all sub-tasks are done, the return includes a note:
+            "auto_complete requested but N sub-task(s) remain pending."
+        """
+        try:
+            # Validate the sub-task status BEFORE delegating to the
+            # manager. Sub-task statuses are strictly binary
+            # (``pending`` / ``done``); without this gate the manager
+            # rejects with the unhelpful "Node or sub-task not found"
+            # error, which misleads the agent into thinking the
+            # sub-task id is wrong when the real problem is the
+            # status value.
+            if _normalize_subtask_status(status) is None:
+                return (
+                    f"ERROR: Invalid sub-task status '{status}'. "
+                    f"Use 'pending' or 'done'."
+                )
+            result = manager._todo_manager.update_subtask(
+                current_instance_id, node_id, subtask_id, status, auto_complete
+            )
+            if result is None:
+                # Covers all rejection paths uniformly: missing instance,
+                # missing parent node, missing sub-task, OR invalid status
+                # (sub-task statuses are strictly binary — ``in_progress``
+                # and its aliases are rejected by the manager).
+                return (
+                    f"ERROR: Node '{node_id}' or sub-task '{subtask_id}' "
+                    f"not found"
+                )
+            todos = result["todos"]
+            reminder = result.get("reminder", "")
+            await _emit_update(live_event_hub, current_instance_id, todos)
+            head = (
+                f"Updated sub-task '{subtask_id}' status to '{status}'."
+            )
+            extra = ""
+            if auto_complete:
+                if result.get("auto_completed"):
+                    extra = (
+                        f"\nParent node '{node_id}' auto-completed "
+                        f"(all sub-tasks done)."
+                    )
+                else:
+                    # Count sub-tasks still pending on the parent. The
+                    # vacuous-truth guard in the manager means this
+                    # branch is also reached when the node has zero
+                    # sub-tasks (0 pending → "0 sub-task(s) remain
+                    # pending") — that wording is faithful to the state.
+                    parent = next(
+                        (n for n in todos if n["id"] == node_id), None
+                    )
+                    pending_count = 0
+                    if parent is not None:
+                        pending_count = sum(
+                            1
+                            for st in parent.get("subtasks", [])
+                            if st.get("status") != "done"
+                        )
+                    extra = (
+                        f"\nauto_complete requested but {pending_count} "
+                        f"sub-task(s) remain pending."
+                    )
+            return (
+                f"{head}{extra}{reminder}\n\n"
+                f"{_format_graph(todos, verbose=False)}"
+            )
+        except Exception as e:
+            return f"ERROR: Failed to update sub-task: {e}"
+
+    todo_update_subtask._full_doc_ = """\
+Update a sub-task's status (pending or done).
+
+Sub-task statuses are STRICTLY BINARY — ``"pending"`` or ``"done"``
+(plus their case-insensitive aliases like ``"completed"``). The
+``"in_progress"`` state used on parent nodes is NOT supported on
+sub-tasks; passing it (or any unrecognized value) is treated as
+"not found" and returns ``ERROR:``.
+
+Auto-completion policy:
+
+* When ``auto_complete=True`` AND every sub-task on the parent node
+  is ``"done"`` AND the parent's own status is not already ``"done"``,
+  the parent node's status flips to ``"done"`` and the response
+  includes a confirmation line.
+* When ``auto_complete=True`` but the above conditions are not met
+  (e.g. other sub-tasks are still pending, or the node has no
+  sub-tasks at all), the response includes a pending-count note
+  instead — the parent status is left untouched.
+* The vacuous-truth guard in
+  :meth:`TodoGraphManager.update_subtask` ensures a node with zero
+  sub-tasks never auto-completes on this path.
+
+Args:
+    node_id: The parent node's stable ID (e.g. ``"n-a1b2c3d4"``).
+    subtask_id: The sub-task's ID (e.g. ``"s-a1b2c3d4"``).
+    status: New status. Must normalize to ``"pending"`` or
+        ``"done"`` (case-insensitive aliases accepted). Any other
+        value, including ``"in_progress"`` and its aliases, is
+        rejected as ``ERROR:``.
+    auto_complete: If ``True``, attempt to propagate completion to
+        the parent node when all sub-tasks are done. Defaults to
+        ``False``.
+
+Returns:
+    Formatted graph (with ``verbose=False``) plus the standard
+    reminder string. On ``auto_complete=True``:
+    * If the parent was auto-completed, an extra confirmation line
+      reports the flip.
+    * Otherwise, an extra note reports the remaining pending count.
+    Returns ``ERROR: ...`` when the parent node, the sub-task, or the
+    status value cannot be resolved.
+"""
+
+    @register_tool_category("todo")
+    @tool
+    async def todo_remove_subtask(node_id: str, subtask_id: str) -> str:
+        """Remove a sub-task from a todo node.
+
+        Args:
+            node_id: The parent node's stable ID.
+            subtask_id: The sub-task's ID to remove.
+
+        Returns:
+            Formatted graph, or ERROR: string.
+        """
+        try:
+            result = manager._todo_manager.remove_subtask(
+                current_instance_id, node_id, subtask_id
+            )
+            if result is None:
+                return (
+                    f"ERROR: Node '{node_id}' or sub-task '{subtask_id}' "
+                    f"not found"
+                )
+            todos = result["todos"]
+            await _emit_update(live_event_hub, current_instance_id, todos)
+            return (
+                f"Removed sub-task '{subtask_id}' from node '{node_id}'.\n\n"
+                f"{_format_graph(todos, verbose=False)}"
+            )
+        except Exception as e:
+            return f"ERROR: Failed to remove sub-task: {e}"
+
+    todo_remove_subtask._full_doc_ = """\
+Remove a sub-task from a todo node.
+
+Treats missing instance, missing parent node, and missing sub-task
+uniformly — any of those returns ``ERROR:`` with no mutation.
+
+Args:
+    node_id: The parent node's stable ID (e.g. ``"n-a1b2c3d4"``).
+    subtask_id: The sub-task's ID to remove (e.g. ``"s-a1b2c3d4"``).
+
+Returns:
+    A confirmation line followed by the formatted graph (with
+    ``verbose=False``) on success. Returns ``ERROR: ...`` when the
+    parent node or sub-task cannot be resolved.
+"""
+
     return [
         todo_create,
         todo_update,
@@ -572,4 +977,7 @@ Returns:
         todo_clear,
         todo_add_edge,
         todo_remove_edge,
+        todo_add_subtask,
+        todo_update_subtask,
+        todo_remove_subtask,
     ]

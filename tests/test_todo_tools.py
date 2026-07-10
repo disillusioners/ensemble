@@ -2,8 +2,10 @@
 
 Mirrors the structure of ``tests/test_chart_tools.py``:
 
-  1. **Factory** — returns 6 tools with the documented names
-     (Phase 2 added ``todo_add_edge`` and ``todo_remove_edge``).
+  1. **Factory** — returns 9 tools with the documented names
+     (Phase 2 added ``todo_add_edge`` and ``todo_remove_edge``;
+      sub-tasks Phase 1 added ``todo_add_subtask``,
+      ``todo_update_subtask``, and ``todo_remove_subtask``).
   2. **Registration** — each tool is tagged with ``_tool_category == "todo"``
      and NEVER ``"instance"`` (security counterpart of
      ``INNATE_SKILL_TOOL_CATEGORIES``).
@@ -43,10 +45,11 @@ def _make_manager() -> MagicMock:
 
 
 def _build_tools(manager: MagicMock | None = None, live_event_hub=None):
-    """Build the 6 todo tools with default instance_id.
+    """Build the 9 todo tools with default instance_id.
 
     Returns the list ``[todo_create, todo_update, todo_list, todo_clear,
-    todo_add_edge, todo_remove_edge]``.
+    todo_add_edge, todo_remove_edge, todo_add_subtask,
+    todo_update_subtask, todo_remove_subtask]``.
     """
     from daemon.tools.todo_tools import create_todo_tools
 
@@ -67,17 +70,26 @@ def _build_tools(manager: MagicMock | None = None, live_event_hub=None):
 class TestCreateTodoToolsFactory:
     """Factory shape for ``create_todo_tools``."""
 
-    def test_factory_returns_list_of_six_tools(self):
-        """Factory produces exactly the 6 documented tools (Phase 2: was 4)."""
+    def test_factory_returns_list_of_nine_tools(self):
+        """Factory produces exactly the 9 documented tools.
+
+        Phase 2 of the todo graph transformation took the tool count
+        from 4 to 6 (added ``todo_add_edge`` and ``todo_remove_edge``).
+        Phase 2 of the todo sub-tasks feature extended it to 9 by
+        appending ``todo_add_subtask``, ``todo_update_subtask``, and
+        ``todo_remove_subtask`` to the existing list.
+        """
         tools = _build_tools()
 
         assert isinstance(tools, list)
-        assert len(tools) == 6
+        assert len(tools) == 9
 
     def test_factory_returns_documented_tool_names(self):
-        """The 6 tools are named ``todo_create``, ``todo_update``,
+        """The 9 tools are named ``todo_create``, ``todo_update``,
         ``todo_list``, ``todo_clear``, ``todo_add_edge``,
-        ``todo_remove_edge`` — no more, no less."""
+        ``todo_remove_edge``, ``todo_add_subtask``,
+        ``todo_update_subtask``, ``todo_remove_subtask`` — no more,
+        no less."""
         tools = _build_tools()
         names = [t.name for t in tools]
 
@@ -88,6 +100,9 @@ class TestCreateTodoToolsFactory:
             "todo_clear",
             "todo_add_edge",
             "todo_remove_edge",
+            "todo_add_subtask",
+            "todo_update_subtask",
+            "todo_remove_subtask",
         ]
 
     def test_factory_creates_independent_closures_per_call(self):
@@ -121,7 +136,7 @@ class TestCreateTodoToolsFactory:
 class TestTodoToolRegistration:
     """Every tool must be tagged ``_tool_category == "todo"``."""
 
-    def test_all_six_tools_registered_under_todo_category(self):
+    def test_all_nine_tools_registered_under_todo_category(self):
         """The decorator ``@register_tool_category(\"todo\")`` tags every tool."""
         tools = _build_tools()
 
@@ -695,3 +710,523 @@ class TestTodoRemoveEdge:
         )
 
         assert result.startswith("ERROR:")
+
+
+# =============================================================================
+# todo_add_subtask (Sub-Task Phase 1)
+# =============================================================================
+
+
+class TestTodoAddSubtask:
+    """``todo_add_subtask(node_id, text)`` — append a binary checklist item."""
+
+    async def test_todo_add_subtask_returns_confirmation_with_subtask_id(self):
+        """Adding a sub-task returns a confirmation line containing the
+        auto-generated ``s-``-prefixed sub-task id, plus the formatted
+        graph with the new item visible (``\u2610`` icon for pending).
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", text="Write unit tests"
+        )
+
+        # Confirmation line includes node_id and a generated sub-task id
+        assert "Added sub-task" in result
+        assert "alpha" in result
+        assert "s-" in result
+        # Pending sub-task icon appears in the rendered graph
+        assert "\u2610" in result
+        assert "Write unit tests" in result
+
+        # State mutated: parent node now has 1 pending sub-task
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 1
+        assert stored[0]["subtasks"][0]["text"] == "Write unit tests"
+        assert stored[0]["subtasks"][0]["status"] == "pending"
+
+    async def test_todo_add_subtask_node_not_found_returns_error(self):
+        """``node_id`` that does not exist returns ``ERROR:`` without
+        creating any sub-task state.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="n-missing", text="orphan"
+        )
+
+        assert result.startswith("ERROR:")
+        assert "n-missing" in result
+
+    async def test_todo_add_subtask_max_exceeded_returns_error(self):
+        """When the node already has ``MAX_SUBTASKS_PER_NODE`` (20) sub-tasks,
+        an additional ``todo_add_subtask`` call returns ``ERROR:`` without
+        mutating state.
+        """
+        from daemon.services.todo_manager import MAX_SUBTASKS_PER_NODE
+
+        manager = _make_manager()
+        # Seed with 20 sub-tasks via the manager directly (bypassing the
+        # tool so we exercise only the cap-detection path).
+        seed_result = manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {
+                    "id": "alpha",
+                    "text": "Alpha",
+                    "subtasks": [
+                        {"text": f"item {i}"}
+                        for i in range(MAX_SUBTASKS_PER_NODE)
+                    ],
+                }
+            ],
+            edges=[],
+        )
+        assert len(seed_result[0]["subtasks"]) == MAX_SUBTASKS_PER_NODE
+
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", text="overflow"
+        )
+
+        assert result.startswith("ERROR:")
+        # State unchanged — still exactly MAX sub-tasks.
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == MAX_SUBTASKS_PER_NODE
+
+
+# =============================================================================
+# todo_update_subtask (Sub-Task Phase 1)
+# =============================================================================
+
+
+class TestTodoUpdateSubtask:
+    """``todo_update_subtask(node_id, subtask_id, status, auto_complete)``."""
+
+    async def test_todo_update_subtask_pending_to_done_returns_confirmation(self):
+        """Flipping a pending sub-task to ``done`` returns a confirmation
+        line naming the sub-task id, and the rendered graph now shows the
+        ``\u2611`` done icon.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        add_result = manager._todo_manager.add_subtask(
+            "test-instance-id", "alpha", "Write tests"
+        )
+        subtask_id = add_result["todos"][0]["subtasks"][0]["id"]
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+
+        result = await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=subtask_id,
+            status="done",
+        )
+
+        # Header advertises the update
+        assert "Updated sub-task" in result
+        assert subtask_id in result
+        assert "done" in result
+        # Done icon appears in the rendered graph
+        assert "\u2611" in result
+
+        # State mutated: subtask is now done
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["subtasks"][0]["status"] == "done"
+
+    async def test_todo_update_subtask_auto_complete_all_done_flips_parent(self):
+        """When ``auto_complete=True`` and ALL sub-tasks are done, the
+        parent's status flips to ``done`` and the response includes the
+        ``"Parent node ... auto-completed"`` confirmation line.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        # Seed with one sub-task so the vacuous-truth guard is satisfied.
+        add_result = manager._todo_manager.add_subtask(
+            "test-instance-id", "alpha", "Single subtask"
+        )
+        subtask_id = add_result["todos"][0]["subtasks"][0]["id"]
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+
+        result = await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=subtask_id,
+            status="done",
+            auto_complete=True,
+        )
+
+        assert "auto-completed" in result
+        assert "alpha" in result
+
+        # State mutated: parent node status is now "done"
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["status"] == "done"
+
+    async def test_todo_update_subtask_auto_complete_remaining_pending(self):
+        """When ``auto_complete=True`` but NOT all sub-tasks are done,
+        the parent is NOT auto-completed and the response includes the
+        ``"N sub-task(s) remain pending"`` note.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        # Seed two pending sub-tasks.
+        ids: list[str] = []
+        for text in ("first", "second"):
+            add_result = manager._todo_manager.add_subtask(
+                "test-instance-id", "alpha", text
+            )
+            ids.append(add_result["todos"][0]["subtasks"][-1]["id"])
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+
+        # Mark only the FIRST one done with auto_complete=True. The
+        # second is still pending -> parent must NOT auto-complete.
+        result = await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=ids[0],
+            status="done",
+            auto_complete=True,
+        )
+
+        assert "1 sub-task(s) remain pending" in result
+        # Parent stays pending
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["status"] == "pending"
+
+    async def test_todo_update_subtask_auto_complete_false_no_propagation(self):
+        """Default ``auto_complete=False`` (omitted) means the parent's
+        status is NEVER touched by sub-task updates, even when every
+        sub-task is done.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        add_result = manager._todo_manager.add_subtask(
+            "test-instance-id", "alpha", "single"
+        )
+        subtask_id = add_result["todos"][0]["subtasks"][0]["id"]
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+
+        # auto_complete NOT passed -> defaults to False.
+        result = await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=subtask_id,
+            status="done",
+        )
+
+        # No auto-completion note in the response
+        assert "auto-completed" not in result
+        assert "remain pending" not in result
+
+        # Parent status unchanged (still pending)
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["status"] == "pending"
+
+    async def test_todo_update_subtask_invalid_status_returns_error(self):
+        """Sub-task statuses are STRICTLY BINARY -- passing
+        ``"in_progress"`` (and its aliases) returns ``ERROR:`` without
+        mutating state.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        add_result = manager._todo_manager.add_subtask(
+            "test-instance-id", "alpha", "x"
+        )
+        subtask_id = add_result["todos"][0]["subtasks"][0]["id"]
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+
+        result = await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=subtask_id,
+            status="in_progress",  # rejected for sub-tasks
+        )
+
+        assert result.startswith("ERROR:")
+        # Sub-task status unchanged
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["subtasks"][0]["status"] == "pending"
+
+    async def test_todo_update_subtask_not_found_returns_error(self):
+        """Unknown ``node_id`` OR unknown ``subtask_id`` returns
+        ``ERROR:`` without mutating state.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+
+        # No instance exists -- both lookups miss.
+        result = await update_subtask_tool.coroutine(
+            node_id="n-missing",
+            subtask_id="s-missing",
+            status="done",
+        )
+
+        assert result.startswith("ERROR:")
+        assert "n-missing" in result
+        assert "s-missing" in result
+
+
+# =============================================================================
+# todo_remove_subtask (Sub-Task Phase 1)
+# =============================================================================
+
+
+class TestTodoRemoveSubtask:
+    """``todo_remove_subtask(node_id, subtask_id)`` -- delete a sub-task."""
+
+    async def test_todo_remove_subtask_returns_confirmation(self):
+        """Removing an existing sub-task returns a confirmation line and
+        shrinks the parent's checklist.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        # Seed two sub-tasks.
+        ids: list[str] = []
+        for text in ("keep", "drop"):
+            add_result = manager._todo_manager.add_subtask(
+                "test-instance-id", "alpha", text
+            )
+            ids.append(add_result["todos"][0]["subtasks"][-1]["id"])
+        tools = _build_tools(manager=manager)
+        remove_subtask_tool = tools[8]
+
+        result = await remove_subtask_tool.coroutine(
+            node_id="alpha", subtask_id=ids[1]
+        )
+
+        assert "Removed sub-task" in result
+        assert ids[1] in result
+        assert "alpha" in result
+
+        # State: only "keep" remains
+        stored = manager._todo_manager.get_all("test-instance-id")
+        remaining = stored[0]["subtasks"]
+        assert len(remaining) == 1
+        assert remaining[0]["id"] == ids[0]
+        assert remaining[0]["text"] == "keep"
+
+    async def test_todo_remove_subtask_not_found_returns_error(self):
+        """Unknown ``node_id`` OR unknown ``subtask_id`` returns
+        ``ERROR:`` without mutating state.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        remove_subtask_tool = tools[8]
+
+        result = await remove_subtask_tool.coroutine(
+            node_id="n-missing", subtask_id="s-missing"
+        )
+
+        assert result.startswith("ERROR:")
+
+
+# =============================================================================
+# _format_graph -- sub-task rendering (Sub-Task Phase 1)
+# =============================================================================
+
+
+class TestFormatGraphSubtasks:
+    """``_format_graph`` renders sub-tasks as ``\u2610``/``\u2611``
+    checklists with verbose truncation at 5 items per node.
+    """
+
+    async def test_format_graph_renders_subtasks_in_linear_mode(self):
+        """Linear-mode rendering emits ``\u2610`` for pending and
+        ``\u2611`` for done sub-tasks, indented four spaces under the
+        parent node.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {
+                    "id": "alpha",
+                    "text": "Alpha",
+                    "subtasks": [
+                        {"text": "todo item"},
+                        {"text": "done item", "status": "done"},
+                    ],
+                }
+            ],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        list_tool = tools[2]
+
+        result = await list_tool.coroutine()
+
+        # Node line present
+        assert "Alpha" in result
+        # Pending icon for the first sub-task
+        assert "\u2610" in result
+        # Done icon for the second sub-task
+        assert "\u2611" in result
+        # Both texts visible
+        assert "todo item" in result
+        assert "done item" in result
+
+    async def test_format_graph_verbose_truncates_at_five(self):
+        """With 7 sub-tasks on one node, ``verbose=False`` (default)
+        shows 5 + ``+2 more`` marker; ``verbose=True`` shows all 7.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {
+                    "id": "alpha",
+                    "text": "Alpha",
+                    "subtasks": [{"text": f"item {i}"} for i in range(7)],
+                }
+            ],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        list_tool = tools[2]
+
+        # Default (verbose=False) -- truncate at 5
+        compact = await list_tool.coroutine()
+        assert "+2 more" in compact
+        # Items 0..4 visible, item 5 and 6 NOT visible
+        for i in range(5):
+            assert f"item {i}" in compact
+        assert "item 5" not in compact
+        assert "item 6" not in compact
+
+        # verbose=True -- show all 7
+        verbose = await list_tool.coroutine(verbose=True)
+        assert "+2 more" not in verbose
+        for i in range(7):
+            assert f"item {i}" in verbose
+
+    async def test_format_graph_renders_subtasks_in_branching_mode(self):
+        """Branching-mode rendering (a node with multiple successors) keeps
+        sub-task checklists under each node AND uses ``\u2514\u2192`` arrows
+        for the graph edges. This guards the interaction between the two
+        rendering passes so sub-tasks don't disappear when the linear
+        fallback is not taken.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {
+                    "id": "root",
+                    "text": "Root",
+                    "subtasks": [
+                        {"text": "root step 1"},
+                        {"text": "root step 2", "status": "done"},
+                    ],
+                },
+                {
+                    "id": "left",
+                    "text": "Left branch",
+                    "subtasks": [{"text": "left only"}],
+                },
+                {
+                    "id": "right",
+                    "text": "Right branch",
+                    "subtasks": [{"text": "right a"}, {"text": "right b"}],
+                },
+                {"id": "sink", "text": "Merge sink"},
+            ],
+            edges=[
+                {"from": "root", "to": "left"},
+                {"from": "root", "to": "right"},
+                {"from": "left", "to": "sink"},
+                {"from": "right", "to": "sink"},
+            ],
+        )
+        tools = _build_tools(manager=manager)
+        list_tool = tools[2]
+
+        result = await list_tool.coroutine()
+
+        # Branching arrow present (proves branching mode was triggered)
+        assert "\u2514\u2192" in result
+        # All sub-tasks of all three non-sink nodes appear
+        assert "root step 1" in result
+        assert "root step 2" in result
+        assert "left only" in result
+        assert "right a" in result
+        assert "right b" in result
+        # Both pending (``\u2610``) and done (``\u2611``) checklist icons
+        # appear -- confirming sub-task rendering doesn't collapse in
+        # branching mode.
+        assert "\u2610" in result
+        assert "\u2611" in result
+
+    async def test_format_graph_branching_subtasks_skip_merged_visits(self):
+        """When a merge node is re-encountered in the DFS walk, the
+        ``(merged)`` annotation is rendered and its sub-tasks are NOT
+        re-emitted (the first visit already covered them). This protects
+        against the doubled-checklist bug in branching mode.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {"id": "root", "text": "Root"},
+                {"id": "left", "text": "Left branch"},
+                {
+                    "id": "sink",
+                    "text": "Merge sink",
+                    "subtasks": [{"text": "sink item"}, {"text": "another"}],
+                },
+                {"id": "right", "text": "Right branch"},
+            ],
+            edges=[
+                {"from": "root", "to": "left"},
+                {"from": "left", "to": "sink"},
+                {"from": "root", "to": "right"},
+                {"from": "right", "to": "sink"},
+            ],
+        )
+        tools = _build_tools(manager=manager)
+        list_tool = tools[2]
+
+        result = await list_tool.coroutine()
+
+        # Merge annotation present
+        assert "(merged)" in result
+        # Sub-tasks of the merge node appear at most once for the sink
+        # node -- if duplicated, they'd be present twice each.
+        assert result.count("sink item") == 1
+        assert result.count("another") == 1

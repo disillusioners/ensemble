@@ -1,6 +1,6 @@
 # Todo Skill
 
-Track multi-step workflows with a todo graph (DAG). Plan work, track progress, and mark items complete. Two creation modes: a **flat list** for simple linear work, or an **explicit graph** for branching, parallel, and aggregating plans.
+Track multi-step workflows with a todo graph (DAG). Plan work, track progress, and mark items complete. Two creation modes: a **flat list** for simple linear work, or an **explicit graph** for branching, parallel, and aggregating plans. Attach **sub-tasks** to any node to break a single step into a small, checkable checklist.
 
 ## Tool Inventory
 
@@ -12,7 +12,11 @@ Track multi-step workflows with a todo graph (DAG). Plan work, track progress, a
 | `todo_update(node_id, status)` | Update one node's status by stable ID | Graph workflows (preferred; takes precedence over `index`) |
 | `todo_add_edge(from_id, to_id)` | Add a dependency edge between two nodes | Graph workflows |
 | `todo_remove_edge(from_id, to_id)` | Remove a dependency edge | Graph workflows |
-| `todo_list()` | View the current todo graph | Read-only, any time |
+| `todo_add_subtask(node_id, text)` | Add a checklist item to a node | Break down a node into smaller steps |
+| `todo_update_subtask(node_id, subtask_id, status, auto_complete=False)` | Check/uncheck a sub-task (binary: `pending` / `done`) | Track sub-task progress; optionally auto-complete the parent when all sub-tasks are done |
+| `todo_remove_subtask(node_id, subtask_id)` | Remove a sub-task | Clean up or correct mistakes |
+| `todo_list(verbose=False)` | View the current todo graph (truncates sub-tasks to 5 per node) | Read-only, any time |
+| `todo_list(verbose=True)` | View the current todo graph with all sub-tasks expanded | When you need the full checklist of a node |
 | `todo_clear()` | Clear all items | Reset between unrelated tasks |
 
 ## Choosing a Mode
@@ -48,6 +52,82 @@ Rules that follow from the tool contract:
 - `node_id` takes precedence over `index` in `todo_update`; provide one or the other.
 - Statuses: `pending`, `in_progress`, `done` (plus case-insensitive aliases like `completed`, `wip`, `started`).
 
+## Sub-Tasks
+
+Sub-tasks are lightweight checklist items nested inside a single todo node. They let you break a node's work into smaller, checkable steps without growing the graph itself.
+
+- Sub-tasks **do not participate in the graph structure** — they are local to their parent node, with no edges, no predecessors, no successors.
+- They exist purely to break a node's work into smaller checkable steps. Use them when a node is a meaningful unit of work but the agent (or user) wants finer-grained progress signals.
+- **Sub-task status is binary**: `pending` (☐) or `done` (☑). There is no `in_progress` state for sub-tasks — flip them once the step is done.
+- Sub-tasks are rendered as an indented checklist under their parent node when listed via `todo_list`.
+- **Limits**: max **20 sub-tasks per node**; max **500 characters** per sub-task text. Excess calls return `ERROR: Max sub-tasks (20) reached for node ...` or `ERROR: Sub-task text exceeds 500 characters`.
+- Sub-tasks survive `todo_update` on the parent node — changing the parent's status does not alter its sub-tasks.
+- `todo_clear` removes the entire graph including all sub-tasks.
+
+```python
+# Add sub-tasks to a node
+todo_add_subtask(node_id="n-a1b2c3d4", text="Create schema")
+todo_add_subtask(node_id="n-a1b2c3d4", text="Run migration")
+
+# Check off a sub-task
+todo_update_subtask(node_id="n-a1b2c3d4", subtask_id="s-e5f6g7h8", status="done")
+
+# Auto-complete parent when all sub-tasks done
+todo_update_subtask(node_id="n-a1b2c3d4", subtask_id="s-a1b2c3d4", status="done", auto_complete=True)
+```
+
+### `auto_complete` Behavior
+
+`auto_complete` is an **opt-in** flag on `todo_update_subtask` (default `False`). It only matters when you are marking a sub-task `done`.
+
+- When `auto_complete=True` and **all** sub-tasks on the parent node are `done` → the parent node's status is automatically set to `done`. The tool emits a human-readable confirmation line such as ``Parent node 'alpha' auto-completed (all sub-tasks done).``.
+- When `auto_complete=True` but **some** sub-tasks are still `pending` → no parent mutation occurs. The tool emits a note such as ``auto_complete requested but N sub-task(s) remain pending`` along with a count of remaining pending sub-tasks so you can finish them explicitly.
+- When `auto_complete=False` (the default) → the sub-task is updated normally and the parent node's status is **never** touched, regardless of how many sub-tasks are done.
+
+```python
+# After all sub-tasks are done, this final call auto-completes the parent
+todo_update_subtask(
+    node_id="n-a1b2c3d4",
+    subtask_id="s-finalstep",
+    status="done",
+    auto_complete=True,
+)
+# → Tool emits a confirmation line, e.g.:
+#    "Updated sub-task 's-finalstep' status to 'done'.
+#     Parent node 'n-a1b2c3d4' auto-completed (all sub-tasks done)."
+#    (the parent node n-a1b2c3d4 is now "done")
+```
+
+> **Reverse propagation does not happen.** Un-checking a sub-task (setting it back to `pending`) does **not** revert the parent node's status. Once a parent node is auto-completed, it stays `done` until you explicitly change it via `todo_update(node_id=..., status=...)`. If you accidentally complete a parent early, use `todo_update` to revert it.
+
+### `verbose` Parameter on `todo_list`
+
+`todo_list` accepts a single `verbose` flag that controls sub-task rendering:
+
+- `todo_list(verbose=False)` — the **default**. Sub-tasks are truncated to **5 per node** with a `+N more` suffix when a node has more than 5. Use this for routine progress checks; the output stays compact.
+- `todo_list(verbose=True)` — shows **all** sub-tasks for every node. Use this when you need to see the full checklist of a node with many sub-tasks, e.g. before deciding which `subtask_id` to update or to verify nothing was lost.
+
+```python
+# Default — compact view
+todo_list()
+# [0] ○ Setup DB
+#   ☐ Create schema
+#   ☐ Run migration
+#   +3 more
+
+# Verbose — full checklist
+todo_list(verbose=True)
+# [0] ○ Setup DB
+#   ☐ Create schema
+#   ☐ Run migration
+#   ☐ Seed dev data
+#   ☐ Verify connection
+#   ☐ Update env file
+#   ☐ Document setup steps
+```
+
 ## Behavioral Hint
 
 When you complete a task, mark it `done` via `todo_update`. The system returns a graph-aware reminder pointing to the **next ready items** — pending nodes whose predecessors are all done — and reports blocked items still waiting on a predecessor, or confirms completion. Keep your todo graph current throughout multi-step work; it tracks progress and prevents skipped steps.
+
+When a node represents work with several internal steps, attach **sub-tasks** with `todo_add_subtask` and check them off as you go. Pass `auto_complete=True` on the final `todo_update_subtask` to automatically promote the parent node to `done` once every sub-task is checked — this is the cleanest way to close out a multi-step node without a separate `todo_update` call. Reach for `todo_list(verbose=True)` when you need the full checklist of a node with many sub-tasks (e.g. before choosing which `subtask_id` to update, or to confirm nothing was lost). Remember: sub-task un-checking does **not** revert a parent node's status, so use `todo_update` explicitly if you need to re-open a finished parent.
