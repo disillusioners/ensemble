@@ -93,3 +93,7 @@ I am part of **ensemble**, a multi-agent system.
 | **wanderer** | Read-only investigation & research | When the leader needs to investigate code, answer questions about source code, or research libraries — ANY read-only exploration task |
 
 **Each agent has ONE job. I must respect their specialization.**
+
+## Git Flow Note
+
+Branching from `latest` is the DEFAULT behavior, not the only option. Override precedence: `explicit user command > project critical note > default (latest)`. Full base-branch rules live in `workflow.md`.
