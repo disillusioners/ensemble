@@ -229,6 +229,10 @@
 // =====================================================================
 
 .todo-graph {
+  // position: relative anchors the absolutely-positioned .graph-popup to the
+  // container so the popup can be placed in container coordinates derived
+  // from the SVG layout (see openCommentPopup in the component).
+  position: relative;
   padding: 12px;
   overflow-x: auto;
   overflow-y: visible;
@@ -276,10 +280,115 @@
   white-space: nowrap;
 }
 
-.graph-editor {
-  margin-top: 8px;
-  padding: 8px;
+// Graph-mode comment popup. A small panel anchored next to the clicked
+// node. Positioned in container coordinates by openCommentPopup; the
+// .placement-* class only drives the arrow-notch direction.
+.graph-popup {
+  position: absolute;
+  z-index: 10;
+  width: 240px;
   background: #0b1220;
   border: 1px solid #1e293b;
   border-radius: 6px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: popupIn 0.15s ease-out;
+  // Slightly soften the entrance so the popup feels anchored to the node
+  // rather than dropped in.
+  transform-origin: top left;
+}
+
+// Arrow notch — a CSS triangle on the side of the popup facing the node.
+// The colored border forms a triangle that points toward the node.
+.graph-popup::before {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+
+// Right placement: popup is to the right of the node → arrow on the left
+// edge of the popup, pointing left (toward the node).
+.graph-popup.placement-right::before {
+  left: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px 7px 6px 0;
+  border-color: transparent #1e293b transparent transparent;
+}
+
+// Left placement: arrow on the right edge, pointing right.
+.graph-popup.placement-left::before {
+  right: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px 0 6px 7px;
+  border-color: transparent transparent transparent #1e293b;
+}
+
+// Below placement: arrow on the top edge, pointing up.
+.graph-popup.placement-below::before {
+  top: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 0 6px 7px 6px;
+  border-color: transparent transparent #1e293b transparent;
+}
+
+// Above placement: arrow on the bottom edge, pointing down.
+.graph-popup.placement-above::before {
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 7px 6px 0 6px;
+  border-color: #1e293b transparent transparent transparent;
+}
+
+// Character count under the textarea. Stays muted at low counts, turns
+// amber as it approaches the limit, and red once it goes over.
+.char-count {
+  font-size: 0.7rem;
+  color: #64748b;
+  text-align: right;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+
+  &.warning {
+    color: #f59e0b;
+  }
+
+  &.exceeded {
+    color: #ef4444;
+    font-weight: 500;
+  }
+}
+
+@keyframes popupIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+// Side-placement popups anchor their entrance from the side closest to the
+// node, so the animation feels like it grows out of the node rather than
+// appearing in the middle of the panel.
+.graph-popup.placement-left {
+  transform-origin: top right;
+}
+
+.graph-popup.placement-above {
+  transform-origin: bottom left;
+}
+
+.graph-popup.placement-below {
+  transform-origin: top left;
 }

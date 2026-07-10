@@ -77,7 +77,7 @@
         </div>
       } @else {
         <!-- ============== GRAPH / DAG MODE ============== -->
-        <div class="todo-graph">
+        <div class="todo-graph" #graphContainer>
           <svg
             class="graph-svg"
             [attr.width]="graphWidth()"
@@ -138,7 +138,7 @@
                     <button
                       class="icon-btn comment-btn"
                       type="button"
-                      (click)="startEditComment(item, $event)"
+                      (click)="openCommentPopup(item, $event)"
                       [attr.aria-label]="item.comment ? 'Edit comment' : 'Add comment'"
                       [title]="item.comment ? 'Edit comment' : 'Add comment'"
                     >
@@ -149,33 +149,48 @@
               }
             }
           </svg>
-          <!-- Comment editor rendered as a sibling panel below the SVG when active,
-               so the foreignObject contents stay clean. -->
-          @for (item of todos(); track 'editor-' + item.id) {
-            @if (editingNodeId() === item.id) {
-              <div class="graph-editor" (click)="$event.stopPropagation()">
-                <div class="todo-comment-editor">
-                  <textarea
-                    class="comment-input"
-                    rows="2"
-                    placeholder="Add a comment…"
-                    [value]="editingComment()"
-                    (input)="onCommentInput($event)"
-                  ></textarea>
-                  <div class="editor-actions">
-                    <button
-                      class="editor-btn primary"
-                      type="button"
-                      (click)="saveComment(item, $event)"
-                      [disabled]="isSavingComment()"
-                    >Save</button>
-                    <button
-                      class="editor-btn secondary"
-                      type="button"
-                      (click)="cancelEdit($event)"
-                      [disabled]="isSavingComment()"
-                    >Cancel</button>
-                  </div>
+          <!-- Graph-mode comment popup. Rendered as a sibling of the SVG so the
+               foreignObject contents stay clean. Positioned in container coords
+               by openCommentPopup; placement class drives the arrow direction. -->
+          @if (commentPopupItem(); as popupItem) {
+            @if (commentPopupPosition(); as popupPos) {
+              <div
+                class="graph-popup"
+                [class.placement-right]="popupPos.placement === 'right'"
+                [class.placement-left]="popupPos.placement === 'left'"
+                [class.placement-above]="popupPos.placement === 'above'"
+                [class.placement-below]="popupPos.placement === 'below'"
+                [style.left.px]="popupPos.x"
+                [style.top.px]="popupPos.y"
+                (click)="$event.stopPropagation()"
+                role="dialog"
+                aria-label="Edit comment"
+              >
+                <textarea
+                  class="comment-input"
+                  rows="2"
+                  placeholder="Add a comment…"
+                  [value]="editingComment()"
+                  (input)="onCommentInput($event)"
+                ></textarea>
+                <div
+                  class="char-count"
+                  [class.warning]="commentCharWarning() && !commentCharExceeded()"
+                  [class.exceeded]="commentCharExceeded()"
+                >{{ commentCharCount() }} / 1000</div>
+                <div class="editor-actions">
+                  <button
+                    class="editor-btn primary"
+                    type="button"
+                    (click)="saveComment(popupItem, $event)"
+                    [disabled]="isSavingComment()"
+                  >Save</button>
+                  <button
+                    class="editor-btn secondary"
+                    type="button"
+                    (click)="cancelEdit($event)"
+                    [disabled]="isSavingComment()"
+                  >Cancel</button>
                 </div>
               </div>
             }

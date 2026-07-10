@@ -1,4 +1,4 @@
-import { Component, input, signal, computed, inject, effect, DestroyRef } from '@angular/core';
+import { Component, input, signal, computed, inject, effect, DestroyRef, ViewChild, ElementRef, HostListener } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
@@ -26,6 +26,16 @@ const NODE_HEIGHT = 48;
 const NODE_GAP_Y = 12;
 const LAYER_GAP_X = 80;
 const NODE_CENTER_Y_OFFSET = NODE_HEIGHT / 2;
+
+// Graph-mode comment popup sizing. The popup is a small absolutely-positioned
+// panel anchored next to the clicked node; these values are used to decide
+// whether the popup fits to the right / left / above / below the node.
+const POPUP_WIDTH = 240;
+const POPUP_HEIGHT = 110;
+const POPUP_GAP = 8;
+const GRAPH_CONTAINER_PADDING = 12;
+const MAX_COMMENT_LENGTH = 1000;
+const COMMENT_WARN_THRESHOLD = 800;
 
 function computeLayout(nodes: TodoNode[]): Map<string, { x: number; y: number }> {
   const adj = new Map<string, string[]>();
@@ -109,6 +119,15 @@ export class TodoListComponent {
   editingComment = signal<string>('');
   isSavingComment = signal(false);
 
+  // Graph-mode comment popup state. Linear mode ignores these and uses the
+  // existing inline editor below each todo item.
+  commentPopupNodeId = signal<string | null>(null);
+  commentPopupPosition = signal<{ x: number; y: number; placement: 'right' | 'left' | 'above' | 'below' } | null>(null);
+
+  // Reference to the .todo-graph container — used by openCommentPopup to read
+  // scroll position and client size for edge-flip math.
+  @ViewChild('graphContainer') graphContainer?: ElementRef<HTMLDivElement>;
+
   todos = computed<TodoNode[]>(() => this.sseService.todos());
 
   isVisible = computed(() => this.todos().length > 0);
@@ -156,6 +175,18 @@ export class TodoListComponent {
   doneCount = computed(() => this.todos().filter(t => t.status === 'done').length);
   totalCount = computed(() => this.todos().length);
 
+  // Derived popup item — looked up from todos by the popup's node id. Null
+  // when no popup is open or when the node has been removed from todos.
+  commentPopupItem = computed<TodoItem | null>(() => {
+    const id = this.commentPopupNodeId();
+    if (!id) return null;
+    return this.todos().find(t => t.id === id) ?? null;
+  });
+
+  commentCharCount = computed(() => this.editingComment().length);
+  commentCharWarning = computed(() => this.commentCharCount() >= COMMENT_WARN_THRESHOLD);
+  commentCharExceeded = computed(() => this.commentCharCount() > MAX_COMMENT_LENGTH);
+
   constructor() {
     // Reset collapse + close any open editor when the user switches instances.
     effect(() => {
@@ -200,10 +231,118 @@ export class TodoListComponent {
     this.editingComment.set(item.comment);
   }
 
+  /**
+   * Graph-mode entry point. Opens (or re-positions) a small popup anchored to
+   * the clicked node. Called from the node's comment button in the SVG —
+   * separate from `startEditComment` which linear mode uses for its inline
+   * editor below each item.
+   */
+  openCommentPopup(item: TodoItem, event: MouseEvent): void {
+    event.stopPropagation();
+
+    const pos = this.positionFor(item.id);
+    const container = this.graphContainer?.nativeElement;
+    if (!pos || !container) return;
+
+    // Node edges in container coordinates. The SVG is at (12, 12) inside
+    // `.todo-graph` because of its 12px padding, so SVG coords map to
+    // container coords by adding the padding offset.
+    const nodeLeft = pos.x + GRAPH_CONTAINER_PADDING;
+    const nodeRight = nodeLeft + NODE_WIDTH;
+    const nodeTop = pos.y + GRAPH_CONTAINER_PADDING;
+    const nodeCenterY = pos.y + GRAPH_CONTAINER_PADDING + NODE_CENTER_Y_OFFSET;
+
+    const visibleLeft = container.scrollLeft;
+    const visibleRight = visibleLeft + container.clientWidth;
+    const visibleBottom = container.clientHeight;
+
+    // Pick horizontal placement: prefer right of the node, flip to left if
+    // the popup would overflow the visible right edge, otherwise place
+    // centered below as a last resort.
+    const fitsRight = nodeRight + POPUP_GAP + POPUP_WIDTH <= visibleRight;
+    const fitsLeft = nodeLeft - POPUP_GAP - POPUP_WIDTH >= visibleLeft;
+
+    let placement: 'right' | 'left' | 'above' | 'below';
+    let x: number;
+    if (fitsRight) {
+      placement = 'right';
+      x = nodeRight + POPUP_GAP;
+    } else if (fitsLeft) {
+      placement = 'left';
+      x = nodeLeft - POPUP_GAP - POPUP_WIDTH;
+    } else {
+      placement = 'below';
+      x = nodeLeft + (NODE_WIDTH - POPUP_WIDTH) / 2;
+      // Clamp horizontally into the visible area.
+      x = Math.max(visibleLeft + 4, Math.min(x, visibleRight - POPUP_WIDTH - 4));
+    }
+
+    // Pick vertical position. For side placements, center on the node and
+    // flip above if it overflows the bottom. For the below fallback, place
+    // under the node and flip above if there's no room.
+    let y: number;
+    if (placement === 'right' || placement === 'left') {
+      y = nodeCenterY - POPUP_HEIGHT / 2;
+      if (y + POPUP_HEIGHT > visibleBottom) {
+        y = nodeTop - POPUP_GAP - POPUP_HEIGHT;
+        if (y < 0) y = Math.max(4, visibleBottom - POPUP_HEIGHT - 4);
+      } else if (y < 0) {
+        y = 4;
+      }
+    } else {
+      y = nodeTop + NODE_HEIGHT + POPUP_GAP;
+      if (y + POPUP_HEIGHT > visibleBottom) {
+        y = nodeTop - POPUP_GAP - POPUP_HEIGHT;
+        placement = 'above';
+        if (y < 0) y = 4;
+      }
+    }
+
+    // Set shared editor state (used by Save / Cancel) and popup state.
+    this.editingNodeId.set(item.id);
+    this.editingComment.set(item.comment);
+    this.commentPopupNodeId.set(item.id);
+    this.commentPopupPosition.set({ x, y, placement });
+  }
+
   cancelEdit(event?: Event): void {
     if (event) event.stopPropagation();
     this.editingNodeId.set(null);
     this.editingComment.set('');
+    // Also reset graph-mode popup state. No-op in linear mode since these
+    // signals are only ever set by openCommentPopup.
+    this.commentPopupNodeId.set(null);
+    this.commentPopupPosition.set(null);
+  }
+
+  /**
+   * Close the graph-mode popup without touching the shared editor signals.
+   * Kept for symmetry with cancelEdit; currently unused but available if a
+   * future change needs to dismiss only the popup.
+   */
+  closeCommentPopup(): void {
+    this.commentPopupNodeId.set(null);
+    this.commentPopupPosition.set(null);
+  }
+
+  // Outside-click detection for the graph-mode popup. Safe to leave
+  // unconditional: when no popup is open, this is a no-op. The popup's
+  // own div calls stopPropagation on click, and openCommentPopup also
+  // stops propagation on the comment-button click — so this handler
+  // only fires for clicks that genuinely landed outside the popup.
+  @HostListener('document:click', ['$event'])
+  onDocumentClick(_event: MouseEvent): void {
+    if (this.commentPopupNodeId()) {
+      this.closeCommentPopup();
+    }
+  }
+
+  @HostListener('document:keydown.escape', ['$event'])
+  onEscape(event: Event): void {
+    if (this.commentPopupNodeId()) {
+      event.preventDefault();
+      this.cancelEdit();
+    }
   }
 
   onCommentInput(event: Event): void {
