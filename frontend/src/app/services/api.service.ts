@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import type { TodoItem, TodoNode } from './sse.service';
+import type { TodoItem, TodoNode, SubTask } from './sse.service';
 import type {
   InstanceInfo,
   InstanceListResponse,
@@ -126,6 +126,43 @@ export class ApiService {
       'DELETE',
       `${this.API_BASE}/instances/${instanceId}/todos/edges`,
       { body: { from_id: fromId, to_id: toId } }
+    );
+  }
+
+  // Sub-tasks: add / update / remove. All return the freshly-rendered todo
+  // list so the caller can adopt the server's ordering / status as the
+  // source of truth (subtask mutations are NON-OPTIMISTIC in the UI).
+  addSubtask(
+    instanceId: string,
+    nodeId: string,
+    text: string,
+  ): Observable<{ todos: TodoNode[]; reminder: string }> {
+    return this.http.post<{ todos: TodoNode[]; reminder: string }>(
+      `${this.API_BASE}/instances/${instanceId}/todos/${nodeId}/subtasks`,
+      { text },
+    );
+  }
+
+  updateSubtask(
+    instanceId: string,
+    nodeId: string,
+    subtaskId: string,
+    status: string,
+    autoComplete: boolean,
+  ): Observable<{ todos: TodoNode[]; reminder: string; auto_completed: boolean }> {
+    return this.http.patch<{ todos: TodoNode[]; reminder: string; auto_completed: boolean }>(
+      `${this.API_BASE}/instances/${instanceId}/todos/${nodeId}/subtasks/${subtaskId}`,
+      { status, auto_complete: autoComplete },
+    );
+  }
+
+  removeSubtask(
+    instanceId: string,
+    nodeId: string,
+    subtaskId: string,
+  ): Observable<{ todos: TodoNode[]; reminder: string }> {
+    return this.http.delete<{ todos: TodoNode[]; reminder: string }>(
+      `${this.API_BASE}/instances/${instanceId}/todos/${nodeId}/subtasks/${subtaskId}`,
     );
   }
 

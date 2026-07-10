@@ -71,6 +71,59 @@
                     </div>
                   </div>
                 }
+                <!-- Sub-tasks section (linear mode). Toggle + add entry point
+                     are always rendered so users can create the first sub-task
+                     from the UI even when the list is empty. -->
+                <div class="subtask-section">
+                  <button
+                    class="subtask-toggle"
+                    type="button"
+                    (click)="toggleSubtaskExpand(item, $event)"
+                  >
+                    <mat-icon>{{ expandedSubtaskNodeId() === item.id ? 'expand_less' : 'expand_more' }}</mat-icon>
+                    <span class="subtask-count-badge">{{ subtaskCount(item).done }}/{{ subtaskCount(item).total }}</span>
+                  </button>
+                  @if (expandedSubtaskNodeId() === item.id) {
+                    <div class="subtask-list">
+                      @for (sub of item.subtasks; track sub.id) {
+                        <div class="subtask-item" [class.done]="sub.status === 'done'">
+                          <button
+                            class="subtask-checkbox"
+                            type="button"
+                            (click)="toggleSubtask(item, sub, $event)"
+                          >
+                            <mat-icon>{{ sub.status === 'done' ? 'check_box' : 'check_box_outline_blank' }}</mat-icon>
+                          </button>
+                          <span class="subtask-text">{{ sub.text }}</span>
+                          <button
+                            class="icon-btn subtask-remove"
+                            type="button"
+                            (click)="removeSubtask(item, sub, $event)"
+                            aria-label="Remove sub-task"
+                            title="Remove sub-task"
+                          >
+                            <mat-icon>close</mat-icon>
+                          </button>
+                        </div>
+                      }
+                      <div class="subtask-add">
+                        <input
+                          class="subtask-input"
+                          type="text"
+                          placeholder="Add a sub-task…"
+                          [value]="newSubtaskText()"
+                          (input)="onSubtaskTextInput($event)"
+                          (keydown.enter)="addSubtask(item)"
+                        />
+                        <button
+                          class="editor-btn primary"
+                          type="button"
+                          (click)="addSubtask(item)"
+                        >Add</button>
+                      </div>
+                    </div>
+                  }
+                </div>
               </div>
             </div>
           }
@@ -144,6 +197,22 @@
                     >
                       <mat-icon>{{ item.comment ? 'chat_bubble' : 'add_comment' }}</mat-icon>
                     </button>
+                    <!-- Sub-task button (graph mode). Always rendered so users
+                         can open the popup to add the first sub-task even
+                         when the list is empty. Shows a count badge when
+                         sub-tasks exist, a "+" icon when empty. -->
+                    <button
+                      class="icon-btn subtask-badge-btn"
+                      type="button"
+                      (click)="openSubtaskPopup(item, $event)"
+                      [title]="item.subtasks && item.subtasks.length ? 'Sub-tasks' : 'Add sub-task'"
+                    >
+                      @if (item.subtasks && item.subtasks.length > 0) {
+                        <span class="subtask-badge">{{ subtaskCount(item).done }}/{{ subtaskCount(item).total }}</span>
+                      } @else {
+                        <mat-icon>add_task</mat-icon>
+                      }
+                    </button>
                   </div>
                 </foreignObject>
               }
@@ -191,6 +260,69 @@
                     (click)="cancelEdit($event)"
                     [disabled]="isSavingComment()"
                   >Cancel</button>
+                </div>
+              </div>
+            }
+          }
+          <!-- Graph-mode sub-task popup. Sibling of the comment popup;
+               mutually exclusive (opening one closes the other). The
+               header shows the parent task text + a done/total badge,
+               followed by the checklist and an inline add input. -->
+          @if (subtaskPopupItem(); as subPopupItem) {
+            @if (subtaskPopupPosition(); as subPopupPos) {
+              <div
+                class="graph-popup subtask-popup"
+                [class.placement-right]="subPopupPos.placement === 'right'"
+                [class.placement-left]="subPopupPos.placement === 'left'"
+                [class.placement-above]="subPopupPos.placement === 'above'"
+                [class.placement-below]="subPopupPos.placement === 'below'"
+                [style.left.px]="subPopupPos.x"
+                [style.top.px]="subPopupPos.y"
+                (click)="$event.stopPropagation()"
+                role="dialog"
+                aria-label="Sub-tasks"
+              >
+                <div class="subtask-popup-header">
+                  <span class="subtask-popup-title" [title]="subPopupItem.text">{{ subPopupItem.text }}</span>
+                  <span class="subtask-count-badge">{{ subtaskCount(subPopupItem).done }}/{{ subtaskCount(subPopupItem).total }}</span>
+                </div>
+                <div class="subtask-list">
+                  @for (sub of subPopupItem.subtasks; track sub.id) {
+                    <div class="subtask-item" [class.done]="sub.status === 'done'">
+                      <button
+                        class="subtask-checkbox"
+                        type="button"
+                        (click)="toggleSubtask(subPopupItem, sub, $event)"
+                      >
+                        <mat-icon>{{ sub.status === 'done' ? 'check_box' : 'check_box_outline_blank' }}</mat-icon>
+                      </button>
+                      <span class="subtask-text">{{ sub.text }}</span>
+                      <button
+                        class="icon-btn subtask-remove"
+                        type="button"
+                        (click)="removeSubtask(subPopupItem, sub, $event)"
+                        aria-label="Remove sub-task"
+                        title="Remove sub-task"
+                      >
+                        <mat-icon>close</mat-icon>
+                      </button>
+                    </div>
+                  }
+                </div>
+                <div class="subtask-add">
+                  <input
+                    class="subtask-input"
+                    type="text"
+                    placeholder="Add a sub-task…"
+                    [value]="newSubtaskText()"
+                    (input)="onSubtaskTextInput($event)"
+                    (keydown.enter)="addSubtask(subPopupItem)"
+                  />
+                  <button
+                    class="editor-btn primary"
+                    type="button"
+                    (click)="addSubtask(subPopupItem)"
+                  >Add</button>
                 </div>
               </div>
             }

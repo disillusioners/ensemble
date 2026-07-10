@@ -1,6 +1,12 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
 
+export interface SubTask {
+  id: string;
+  text: string;
+  status: 'pending' | 'done';
+}
+
 export interface TodoNode {
   id: string;
   index: number;  // PRESERVED for backward compat — always present in SSE payload
@@ -8,6 +14,7 @@ export interface TodoNode {
   status: 'pending' | 'in_progress' | 'done';
   comment: string;
   next_ids: string[];
+  subtasks: SubTask[];
 }
 
 export type TodoItem = TodoNode;
@@ -320,7 +327,13 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          this.todos.set(data.todos ?? []);
+          // Defensively default subtasks to [] so older payloads and partial
+          // objects render without runtime errors in the UI templates.
+          const todos = (data.todos ?? []).map((t: any) => ({
+            ...t,
+            subtasks: t.subtasks ?? [],
+          }));
+          this.todos.set(todos);
         } catch (err) {
           console.error('[SSE] Failed to parse todo_update:', err);
         }

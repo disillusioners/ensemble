@@ -392,3 +392,202 @@
 .graph-popup.placement-below {
   transform-origin: top left;
 }
+
+// =====================================================================
+// Sub-task styles (shared between linear mode and the graph-mode popup).
+// Colors mirror the existing dark theme: #0f172a, #1e293b, #334155,
+// #475569, #e2e8f0, #94a3b8, #06b6d4, #8b5cf6.
+// =====================================================================
+
+.subtask-section {
+  margin-top: 2px;
+}
+
+.subtask-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 0.75rem;
+
+  &:hover {
+    color: #e2e8f0;
+  }
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+// Pill badge showing "done / total". Shared between the linear-mode toggle
+// and the graph-mode popup header — same surface treatment so they read as
+// the same kind of affordance.
+.subtask-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #334155;
+  color: #e2e8f0;
+  font-size: 0.7rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.subtask-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  padding-left: 18px;
+}
+
+.subtask-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: #cbd5e1;
+
+  &.done .subtask-text {
+    text-decoration: line-through;
+    opacity: 0.5;
+  }
+}
+
+.subtask-checkbox {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: #94a3b8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}
+
+.subtask-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.subtask-remove {
+  color: #64748b;
+  flex-shrink: 0;
+
+  &:hover {
+    color: #ef4444;
+  }
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+}
+
+.subtask-add {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  align-items: center;
+}
+
+.subtask-input {
+  flex: 1;
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  color: #e2e8f0;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 0.75rem;
+
+  &:focus {
+    outline: none;
+    border-color: #06b6d4;
+  }
+}
+
+// Graph-mode badge on the foreignObject node card. Slim pill so it doesn't
+// crowd the status icon and node text alongside the comment button.
+.subtask-badge-btn {
+  color: #94a3b8;
+  flex-shrink: 0;
+  padding: 0 2px;
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}
+
+.subtask-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: #334155;
+  color: #e2e8f0;
+  font-size: 0.65rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+// Sub-task popup (graph mode). Extends the shared .graph-popup base
+// (positioning, arrow notch, dark surface) so the visual treatment
+// matches the comment popup exactly.
+.subtask-popup {
+  gap: 6px;
+}
+
+.subtask-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #1e293b;
+}
+
+.subtask-popup-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+}
+
+// Inside the popup we drop the left indentation used in linear mode and
+// cap the height so a long checklist scrolls instead of pushing the
+// "Add" input off-screen.
+.subtask-popup .subtask-list {
+  padding-left: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}

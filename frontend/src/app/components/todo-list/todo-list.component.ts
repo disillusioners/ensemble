@@ -3,7 +3,7 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../services/api.service';
-import { SseService, TodoNode, TodoItem } from '../../services/sse.service';
+import { SseService, TodoNode, TodoItem, SubTask } from '../../services/sse.service';
 
 // Module-level helpers (no closure over component state)
 
@@ -124,6 +124,20 @@ export class TodoListComponent {
   commentPopupNodeId = signal<string | null>(null);
   commentPopupPosition = signal<{ x: number; y: number; placement: 'right' | 'left' | 'above' | 'below' } | null>(null);
 
+  // Graph-mode sub-task popup state. Rendered as a sibling panel — mutually
+  // exclusive with the comment popup (see openCommentPopup / openSubtaskPopup
+  // which both call closeAllPopups first).
+  subtaskPopupNodeId = signal<string | null>(null);
+  subtaskPopupPosition = signal<{ x: number; y: number; placement: 'right' | 'left' | 'above' | 'below' } | null>(null);
+
+  // Linear-mode expansion: which todo row's sub-task checklist is open.
+  expandedSubtaskNodeId = signal<string | null>(null);
+
+  // Buffer for the inline "Add a sub-task…" input. Shared between linear and
+  // graph popups so the user doesn't lose what they typed when switching
+  // context.
+  newSubtaskText = signal<string>('');
+
   // Reference to the .todo-graph container — used by openCommentPopup to read
   // scroll position and client size for edge-flip math.
   @ViewChild('graphContainer') graphContainer?: ElementRef<HTMLDivElement>;
@@ -183,6 +197,12 @@ export class TodoListComponent {
     return this.todos().find(t => t.id === id) ?? null;
   });
 
+  subtaskPopupItem = computed<TodoNode | null>(() => {
+    const id = this.subtaskPopupNodeId();
+    if (!id) return null;
+    return this.todos().find(t => t.id === id) ?? null;
+  });
+
   commentCharCount = computed(() => this.editingComment().length);
   commentCharWarning = computed(() => this.commentCharCount() >= COMMENT_WARN_THRESHOLD);
   commentCharExceeded = computed(() => this.commentCharCount() > MAX_COMMENT_LENGTH);
@@ -208,6 +228,16 @@ export class TodoListComponent {
     this.isCollapsed.update(v => !v);
   }
 
+  /**
+   * Defensively default each node's `subtasks` to `[]`. Mirrors the same
+   * normalization applied in the SSE `todo_update` handler so REST-derived
+   * payloads (refresh / subtask mutations) render without template errors
+   * against older or partial backend responses.
+   */
+  private normalizeTodos(todos: TodoNode[] | null | undefined): TodoNode[] {
+    return (todos ?? []).map(t => ({ ...t, subtasks: t.subtasks ?? [] }));
+  }
+
   refresh(event: Event): void {
     event.stopPropagation();
     const instanceId = this.instanceId();
@@ -216,7 +246,7 @@ export class TodoListComponent {
       .subscribe({
         next: (data) => {
           if (this.instanceId() !== instanceId) return;
-          this.sseService.todos.set(data ?? []);
+          this.sseService.todos.set(this.normalizeTodos(data));
         },
         error: (err) => {
           if (this.instanceId() !== instanceId) return;
@@ -239,6 +269,9 @@ export class TodoListComponent {
    */
   openCommentPopup(item: TodoItem, event: MouseEvent): void {
     event.stopPropagation();
+    // Mutually exclusive with the sub-task popup: tear down any other popup
+    // (and clear the inline editor state) before computing placement.
+    this.closeAllPopups();
 
     const pos = this.positionFor(item.id);
     const container = this.graphContainer?.nativeElement;
@@ -305,37 +338,52 @@ export class TodoListComponent {
     this.commentPopupPosition.set({ x, y, placement });
   }
 
+  /**
+   * Reset the shared comment editor state. Graph-mode popup signals are
+   * also cleared so linear-mode cancel behaves identically to closing the
+   * graph popups — delegates to `closeAllPopups` so the two paths can
+   * never drift.
+   */
   cancelEdit(event?: Event): void {
     if (event) event.stopPropagation();
-    this.editingNodeId.set(null);
-    this.editingComment.set('');
-    // Also reset graph-mode popup state. No-op in linear mode since these
-    // signals are only ever set by openCommentPopup.
-    this.commentPopupNodeId.set(null);
-    this.commentPopupPosition.set(null);
+    this.closeAllPopups();
   }
 
-  // Outside-click detection for the graph-mode popup. Safe to leave
+  /**
+   * Centralized teardown for both graph-mode popups and the shared editor
+   * state. Used by openCommentPopup / openSubtaskPopup to enforce mutual
+   * exclusion (opening one closes the other), by outside-click / Escape
+   * handlers, and by cancelEdit so all transient UI state goes away
+   * together.
+   */
+  closeAllPopups(): void {
+    this.commentPopupNodeId.set(null);
+    this.commentPopupPosition.set(null);
+    this.subtaskPopupNodeId.set(null);
+    this.subtaskPopupPosition.set(null);
+    this.editingNodeId.set(null);
+    this.editingComment.set('');
+  }
+
+  // Outside-click detection for the graph-mode popups. Safe to leave
   // unconditional: when no popup is open, this is a no-op. The popup's
-  // own div calls stopPropagation on click, and openCommentPopup also
-  // stops propagation on the comment-button click — so this handler
-  // only fires for clicks that genuinely landed outside the popup.
-  // Uses cancelEdit (not just closeCommentPopup) so all 4 editor
-  // signals are reset, preventing a stale editingNodeId from leaking
-  // into the linear-mode inline editor if an SSE update flips the
-  // mode while the popup is open.
+  // own div calls stopPropagation on click, and the opener buttons also
+  // stop propagation — so this handler only fires for clicks that
+  // genuinely landed outside the popup. Uses closeAllPopups (not just
+  // one popup's teardown) so both popup states and the shared editor
+  // state are reset together.
   @HostListener('document:click', ['$event'])
   onDocumentClick(_event: MouseEvent): void {
-    if (this.commentPopupNodeId()) {
-      this.cancelEdit();
+    if (this.commentPopupNodeId() || this.subtaskPopupNodeId()) {
+      this.closeAllPopups();
     }
   }
 
   @HostListener('document:keydown.escape', ['$event'])
   onEscape(event: Event): void {
-    if (this.commentPopupNodeId()) {
+    if (this.commentPopupNodeId() || this.subtaskPopupNodeId()) {
       event.preventDefault();
-      this.cancelEdit();
+      this.closeAllPopups();
     }
   }
 
@@ -396,5 +444,176 @@ export class TodoListComponent {
       case 'pending':
       default: return '○';
     }
+  }
+
+  // ---- Sub-task helpers ------------------------------------------------
+
+  /**
+   * Count done vs. total sub-tasks for a node. Defensive against missing /
+   * malformed `subtasks` so a stale todo payload never throws inside the
+   * template's `{{ ... }}` expression.
+   */
+  subtaskCount(node: TodoNode): { done: number; total: number } {
+    const subs = node.subtasks ?? [];
+    return {
+      done: subs.filter(s => s.status === 'done').length,
+      total: subs.length,
+    };
+  }
+
+  /**
+   * Linear-mode only. Toggles which todo row's sub-task checklist is open.
+   * Graph mode uses the floating popup, so this signal is unused there.
+   */
+  toggleSubtaskExpand(node: TodoNode, event: Event): void {
+    event.stopPropagation();
+    this.expandedSubtaskNodeId.update(id => (id === node.id ? null : node.id));
+  }
+
+  /**
+   * Sync the shared `newSubtaskText` signal from the underlying input.
+   * Bound via `(input)` on every "Add a sub-task…" input — both the
+   * inline row (linear mode) and the input inside the graph popup.
+   */
+  onSubtaskTextInput(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.newSubtaskText.set(target.value);
+  }
+
+  /**
+   * Toggle a sub-task's done/pending status. Non-optimistic on purpose —
+   * we wait for the API response so the backend's reminder + auto-complete
+   * logic (none of which is exposed in the UI) becomes the source of truth
+   * for the next render. `auto_complete` is hard-coded to `false` so the
+   * UI never silently flips parent node state behind the user's back.
+   */
+  toggleSubtask(node: TodoNode, subtask: SubTask, event: Event): void {
+    event.stopPropagation();
+    const targetInstanceId = this.instanceId();
+    const newStatus: 'pending' | 'done' = subtask.status === 'done' ? 'pending' : 'done';
+    this.api.updateSubtask(targetInstanceId, node.id, subtask.id, newStatus, false)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (res) => {
+          if (this.instanceId() !== targetInstanceId) return;
+          this.sseService.todos.set(this.normalizeTodos(res.todos));
+        },
+        error: (err) => {
+          if (this.instanceId() !== targetInstanceId) return;
+          console.error('Failed to toggle subtask:', err);
+        },
+      });
+  }
+
+  /**
+   * Add a new sub-task from the current `newSubtaskText`. Clears the
+   * buffer on success. Non-optimistic: adopts the server's todo list from
+   * the response so ordering and any server-side defaults stick.
+   */
+  addSubtask(node: TodoNode): void {
+    const text = this.newSubtaskText().trim();
+    if (!text) return;
+    const targetInstanceId = this.instanceId();
+    this.api.addSubtask(targetInstanceId, node.id, text)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (res) => {
+          if (this.instanceId() !== targetInstanceId) return;
+          this.sseService.todos.set(this.normalizeTodos(res.todos));
+          this.newSubtaskText.set('');
+        },
+        error: (err) => {
+          if (this.instanceId() !== targetInstanceId) return;
+          console.error('Failed to add subtask:', err);
+        },
+      });
+  }
+
+  /**
+   * Remove a sub-task. Non-optimistic — same reasoning as toggleSubtask.
+   */
+  removeSubtask(node: TodoNode, subtask: SubTask, event: Event): void {
+    event.stopPropagation();
+    const targetInstanceId = this.instanceId();
+    this.api.removeSubtask(targetInstanceId, node.id, subtask.id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (res) => {
+          if (this.instanceId() !== targetInstanceId) return;
+          this.sseService.todos.set(this.normalizeTodos(res.todos));
+        },
+        error: (err) => {
+          if (this.instanceId() !== targetInstanceId) return;
+          console.error('Failed to remove subtask:', err);
+        },
+      });
+  }
+
+  /**
+   * Graph-mode entry point for the sub-task popup. Mirrors openCommentPopup
+   * — closes any other popup first (mutual exclusion), then anchors the
+   * panel to the clicked node with the same right/left/above/below edge-flip
+   * math. The sub-task popup may be taller than the comment popup (it has
+   * a checklist + input), so we use a slightly larger estimate for the
+   * flip calculations; the actual rendered height is auto.
+   */
+  openSubtaskPopup(node: TodoNode, event: MouseEvent): void {
+    event.stopPropagation();
+    this.closeAllPopups();
+
+    const pos = this.positionFor(node.id);
+    const container = this.graphContainer?.nativeElement;
+    if (!pos || !container) return;
+
+    const nodeLeft = pos.x + GRAPH_CONTAINER_PADDING;
+    const nodeRight = nodeLeft + NODE_WIDTH;
+    const nodeTop = pos.y + GRAPH_CONTAINER_PADDING;
+    const nodeCenterY = pos.y + GRAPH_CONTAINER_PADDING + NODE_CENTER_Y_OFFSET;
+
+    const visibleLeft = container.scrollLeft;
+    const visibleRight = visibleLeft + container.clientWidth;
+    const visibleBottom = container.clientHeight;
+
+    // Estimate for edge-flip math; the actual rendered popup height is
+    // auto, so this just affects the direction choices below.
+    const SUBTASK_POPUP_HEIGHT = 220;
+
+    const fitsRight = nodeRight + POPUP_GAP + POPUP_WIDTH <= visibleRight;
+    const fitsLeft = nodeLeft - POPUP_GAP - POPUP_WIDTH >= visibleLeft;
+
+    let placement: 'right' | 'left' | 'above' | 'below';
+    let x: number;
+    if (fitsRight) {
+      placement = 'right';
+      x = nodeRight + POPUP_GAP;
+    } else if (fitsLeft) {
+      placement = 'left';
+      x = nodeLeft - POPUP_GAP - POPUP_WIDTH;
+    } else {
+      placement = 'below';
+      x = nodeLeft + (NODE_WIDTH - POPUP_WIDTH) / 2;
+      x = Math.max(visibleLeft + 4, Math.min(x, visibleRight - POPUP_WIDTH - 4));
+    }
+
+    let y: number;
+    if (placement === 'right' || placement === 'left') {
+      y = nodeCenterY - SUBTASK_POPUP_HEIGHT / 2;
+      if (y + SUBTASK_POPUP_HEIGHT > visibleBottom) {
+        y = nodeTop - POPUP_GAP - SUBTASK_POPUP_HEIGHT;
+        if (y < 0) y = Math.max(4, visibleBottom - SUBTASK_POPUP_HEIGHT - 4);
+      } else if (y < 0) {
+        y = 4;
+      }
+    } else {
+      y = nodeTop + NODE_HEIGHT + POPUP_GAP;
+      if (y + SUBTASK_POPUP_HEIGHT > visibleBottom) {
+        y = nodeTop - POPUP_GAP - SUBTASK_POPUP_HEIGHT;
+        placement = 'above';
+        if (y < 0) y = 4;
+      }
+    }
+
+    this.subtaskPopupNodeId.set(node.id);
+    this.subtaskPopupPosition.set({ x, y, placement });
   }
 }
