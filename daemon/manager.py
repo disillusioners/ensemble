@@ -76,6 +76,7 @@ from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
 from .services.skill_store_service import SkillStoreService
 from .services.skill_search_service import SkillSearchService
+from .services.skill_injection_service import SkillInjectionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
@@ -939,12 +940,26 @@ class InstanceManager:
                 trigger_repo=self._skill_trigger_repo,
                 metrics_service=self._skill_metrics_service,
             )
+
+            # Skill Evolution Phase 3: injection service (depends
+            # on both the Phase 2 ``_skill_search_service`` and the
+            # Phase 4 ``_skill_ab_test_repo`` so it's initialized
+            # here, after both blocks). Renders the search results
+            # into an injectable ``HumanMessage`` body and handles
+            # deterministic A/B variant selection.
+            self._skill_injection_service = SkillInjectionService(
+                search_service=self._skill_search_service,
+                config=self.config.skill_evolution,
+                ab_test_repo=self._skill_ab_test_repo,
+                skill_repo=self._skill_repo,
+            )
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
             self._skill_ab_test_repo = None
             self._skill_metrics_service = None
             self._skill_trigger_engine = None
+            self._skill_injection_service = None
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()

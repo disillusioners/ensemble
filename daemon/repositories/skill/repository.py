@@ -376,6 +376,27 @@ class SkillRepository:
     # COUNTERS (atomic)
     # --------------------------------------------------------
 
+    def _validate_counter(self, counter: str) -> None:
+        """Validate a counter name against the whitelist.
+
+        Used by :meth:`increment_counter`, :meth:`reset_counter`,
+        and :meth:`touch_last_target` (the latter not using this,
+        but kept for symmetry). Splits the validation out so the
+        three public methods stay short and consistent.
+
+        Args:
+            counter: Counter column name to validate.
+
+        Raises:
+            ValueError: If ``counter`` is not a known skill
+                counter column.
+        """
+        if counter not in _SKILL_COUNTER_COLUMNS:
+            raise ValueError(
+                f"Unknown skill counter column: {counter!r}. "
+                f"Allowed: {sorted(_SKILL_COUNTER_COLUMNS)}"
+            )
+
     def increment_counter(
         self,
         skill_id: str,
@@ -406,11 +427,7 @@ class SkillRepository:
             ValueError: If ``counter`` is not a known skill
                 counter column.
         """
-        if counter not in _SKILL_COUNTER_COLUMNS:
-            raise ValueError(
-                f"Unknown skill counter column: {counter!r}. "
-                f"Allowed: {sorted(_SKILL_COUNTER_COLUMNS)}"
-            )
+        self._validate_counter(counter)
         # The column name is whitelisted above; only the amount
         # and id are bound parameters, so the interpolation is
         # safe.
@@ -427,6 +444,65 @@ class SkillRepository:
                 f"Incremented skill counter: id={skill_id}, "
                 f"counter={counter}, amount={amount}"
             )
+
+    def reset_counter(
+        self,
+        skill_id: str,
+        counter: str,
+        value: int = 0,
+    ) -> None:
+        """Set a counter column to an absolute value.
+
+        Uses raw SQL ``UPDATE col = :value`` so the reset is
+        atomic and skips the read-modify-write race. The
+        column name is whitelisted against
+        :data:`_SKILL_COUNTER_COLUMNS` — ``ValueError`` is
+        raised for any other name.
+
+        Args:
+            skill_id: The skill row to update.
+            counter: Counter column name. Same whitelist as
+                :meth:`increment_counter`.
+            value: Absolute value to write (default ``0``).
+
+        Raises:
+            ValueError: If ``counter`` is not a known skill
+                counter column.
+        """
+        self._validate_counter(counter)
+        stmt = text(
+            f"UPDATE skills SET {counter} = :value WHERE id = :id"
+        )
+        with Session(self.engine) as session:
+            session.execute(
+                stmt, {"value": value, "id": skill_id}
+            )
+            session.commit()
+            logger.debug(
+                f"Reset skill counter: id={skill_id}, "
+                f"counter={counter}, value={value}"
+            )
+
+    def touch_last_used(self, skill_id: str) -> None:
+        """Stamp ``last_used_at`` on a skill row.
+
+        Uses raw SQL so the timestamp is set without a
+        read-modify-write round-trip. The ``skill_id`` is
+        bound, so there's no SQL injection risk.
+
+        Args:
+            skill_id: The skill row to update.
+        """
+        stmt = text(
+            "UPDATE skills SET last_used_at = :now WHERE id = :id"
+        )
+        with Session(self.engine) as session:
+            session.execute(
+                stmt,
+                {"now": _now_iso(), "id": skill_id},
+            )
+            session.commit()
+            logger.debug(f"Touched skill last_used_at: id={skill_id}")
 
     # --------------------------------------------------------
     # A/B TEST QUERIES
@@ -479,6 +555,45 @@ class SkillRepository:
                 .where(Skill.is_active == True)  # noqa: E712
             )
             return session.exec(stmt).first()
+
+    def list_all_active(
+        self,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[Skill]:
+        """List every active skill across all projects.
+
+        Used by the trigger engine (Phase 4) to evaluate every
+        enabled rule against every candidate skill in the
+        system. Unlike :meth:`list` which scopes to one
+        ``project_id``, this method returns the union of all
+        active rows (project-specific and ``project_id IS
+        NULL`` globals).
+
+        The hard ``limit`` is bounded at ``1000`` by default
+        because the trigger engine evaluates conditions in
+        Python and unbounded result sets would balloon
+        latency. For skill corpora above this ceiling, add a
+        paged iteration loop at the call site.
+
+        Args:
+            limit: Maximum number of rows to return (default
+                ``1000``).
+            offset: Number of rows to skip (default ``0``).
+
+        Returns:
+            List of active :class:`Skill` instances ordered
+            by ``created_at`` descending.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(Skill)
+                .where(Skill.is_active == True)  # noqa: E712
+                .order_by(col(Skill.created_at).desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(session.exec(stmt))
 
     # --------------------------------------------------------
     # FULL-TEXT SEARCH (BM25)
@@ -1008,6 +1123,38 @@ class SkillUsageRepository:
             )
             return list(session.exec(stmt))
 
+    def get_latest_for_skill_instance(
+        self,
+        skill_id: str,
+        instance_id: str,
+    ) -> SkillUsageRecord | None:
+        """Fetch the most recent usage record for a skill + instance.
+
+        Used by :class:`~daemon.services.skill_metrics_service.SkillMetricsService`
+        ``record_feedback`` to locate the usage record to stamp
+        the ``feedback_applied`` / ``feedback_note`` columns onto.
+        The record is the most recent by ``created_at``; ties are
+        broken by ``.first()`` (insertion order).
+
+        Args:
+            skill_id: The skill that was used.
+            instance_id: The instance that triggered the skill.
+
+        Returns:
+            The most recent :class:`SkillUsageRecord` for the
+            ``(skill_id, instance_id)`` pair, or ``None`` when no
+            record exists yet.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(SkillUsageRecord)
+                .where(SkillUsageRecord.skill_id == skill_id)
+                .where(SkillUsageRecord.instance_id == instance_id)
+                .order_by(col(SkillUsageRecord.created_at).desc())
+                .limit(1)
+            )
+            return session.exec(stmt).first()
+
     def has_applied_for_instance(self, instance_id: str) -> bool:
         """Check whether any usage record for an instance has feedback applied.
 
@@ -1129,9 +1276,14 @@ class SkillTriggerRepository:
             when none match.
         """
         with Session(self.engine) as session:
-            stmt = select(SkillTrigger).where(
-                SkillTrigger.project_id.is_(None)
-            )
+            if project_id is None:
+                stmt = select(SkillTrigger).where(
+                    SkillTrigger.project_id.is_(None)
+                )
+            else:
+                stmt = select(SkillTrigger).where(
+                    SkillTrigger.project_id == project_id
+                )
             if enabled_only:
                 stmt = stmt.where(SkillTrigger.is_enabled == True)  # noqa: E712
             return list(session.exec(stmt))

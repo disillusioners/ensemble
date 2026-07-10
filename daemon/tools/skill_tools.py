@@ -616,79 +616,113 @@ Returns:
         applied: bool | None = None,
         note: str = "",
     ) -> str:
-        """Record feedback on a skill's usefulness (Phase 2 stub).
+        """Record feedback on a skill's usefulness.
 
-        Records a feedback/usefulness signal for the given skill and
-        returns a deterministic confirmation string. This is the
-        Phase 2 stub: the tool only logs the event and does NOT
-        persist anything yet — full persistence (stamping
-        ``feedback_applied`` / ``feedback_note`` onto the latest
-        :class:`SkillUsageRecord`, bumping ``total_applied`` on
-        ``applied=True``) is the responsibility of the Phase 4
-        :class:`SkillMetricsService.record_feedback`.
+        Delegates to :meth:`SkillMetricsService.record_feedback` (Phase 4
+        backend) to stamp ``feedback_applied`` / ``feedback_note`` onto
+        the latest :class:`SkillUsageRecord` for ``(skill_id,
+        instance_id)``. The closure-injected ``current_instance_id`` is
+        forwarded so the metrics service can locate the right usage
+        row; ``project_id`` / ``agent_id`` are resolved from the
+        instance repository when available, falling back to ``None``.
+
+        Soft-fail contract: the tool NEVER raises. Every failure mode
+        — missing service, missing instance repo, no usage record to
+        update, service-raised exception — returns a deterministic
+        string the agent loop can render.
 
         Args:
             skill_id: The skill's UUID4 identifier.
-            applied: True if the skill was directly useful, False if it
-                was not relevant, or None / omitted if unsure.
-            note: Optional free-form feedback note.
+            applied: ``True`` if the skill was directly useful, ``False``
+                if it was not relevant, or ``None`` / omitted if unsure.
+            note: Optional free-form feedback note. Defaults to empty
+                string.
         """
+        metrics_service = getattr(manager, "_skill_metrics_service", None)
+        if metrics_service is None:
+            return "Skill metrics service is not yet available."
+        project_id = _get_project_id()
+        agent_id = _get_agent_id()
         short_id = skill_id[:8] if isinstance(skill_id, str) and skill_id else str(skill_id)
         try:
-            logger.info(
-                "Skill feedback (Phase 2 stub) for %s: applied=%s, note=%s",
-                skill_id,
-                applied,
-                note,
+            applied_ok = await metrics_service.record_feedback(
+                skill_id=skill_id,
+                instance_id=current_instance_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                applied=applied,
+                note=note,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                logger.warning(
+                    "skill_feedback raised for skill %s: %s",
+                    skill_id,
+                    e,
+                )
+            except Exception:
+                pass
+            return f"ERROR: skill_feedback failed: {e}"
+        if applied_ok:
+            return (
+                f"\u2705 Feedback recorded for skill {short_id}... "
+                f"Applied={applied}. Note: {note!r}"
+            )
         return (
-            f"\u2705 Feedback recorded for skill {short_id}... "
-            "(Phase 2 stub — persisted via Phase 4 "
-            "SkillMetricsService.record_feedback)."
+            f"\u26a0\ufe0f No usage record found for skill {short_id}... "
+            "Feedback cannot be applied."
         )
 
     skill_feedback._full_doc_ = """\
 Record feedback on a skill's usefulness.
 
-**Phase 2 stub**: the full backend is
-:meth:`SkillMetricsService.record_feedback` (Phase 4). Until
-Phase 4 rolls out, the tool *records the feedback event to the
-daemon log* and returns a confirmation string so the agent
-loop gets a deterministic tool response.
+Delegates to :meth:`SkillMetricsService.record_feedback` (Phase 4
+backend) which locates the latest :class:`SkillUsageRecord` for
+``(skill_id, current_instance_id)`` and stamps ``feedback_applied``
+plus ``feedback_note`` onto it. When ``applied=True``, the skill
+row's ``total_applied`` counter is also bumped by the service.
 
-Why a log-and-return instead of a hard "not yet implemented":
-we still want agents in the wild to be able to leave
-feedback (e.g. "this skill was misleading") so the
-skill-keeper agent has signal to act on in the next
-evolution pass, even before persistence is wired.
+The closure-injected ``current_instance_id`` is forwarded as
+``instance_id``; ``project_id`` and ``agent_id`` are resolved from
+``manager._instance_repository`` via the ``_get_project_id`` /
+``_get_agent_id`` helpers (returning ``None`` when the repo is
+missing or the lookup fails). The metrics service treats ``None``
+and ``""`` symmetrically for both fields.
 
 Args:
     skill_id: The skill's UUID4 identifier.
-    applied: ``True`` if the skill was directly useful, ``False`` if
-        it was not relevant or unhelpful, ``None`` (default) if the
-        caller is unsure and is leaving a note only.
+    applied: ``True`` if the skill was directly useful, ``False``
+        if it was not relevant or unhelpful, ``None`` (default) if
+        the caller is unsure and is leaving a note only.
     note: Optional free-form feedback note. Defaults to empty string.
 
 Returns:
-    On success::
+    On a record update (``metrics_service.record_feedback(...)``
+    returned ``True``)::
 
-        ✅ Feedback recorded for skill <short_id>... (Phase 2 stub — persisted via Phase 4 SkillMetricsService.record_feedback).
-        ---
-        skill_id: <skill_id>
-        applied: <bool|unspecified>
-        note: <note or '(none)'>
-        ---
+        ✅ Feedback recorded for skill <short_id>... Applied=<applied>. Note: '<note>'
 
-    The ``---`` fences around the echoed fields guard against prompt
-    injection from the ``skill_id`` / ``note`` user input (mirrors the
-    pattern in :mod:`daemon.tools.todo_tools`).
+    When the service returns ``False`` (no usage record to stamp)::
+
+        ⚠️ No usage record found for skill <short_id>... Feedback cannot be applied.
+
+    When ``manager._skill_metrics_service`` is absent (Phase-wiring
+    in progress)::
+
+        Skill metrics service is not yet available.
+
+    When the service raises, an ``ERROR: ...`` string is returned
+    containing the exception message; the underlying exception is
+    also logged at WARNING level so the daemon log retains a
+    breadcrumb.
 
 Soft-fail contract:
-    The stub never raises; it always returns a string. This
-    preserves the agent-loop contract: every tool call returns
-    a deterministic string the model can read.
+    The tool never raises — every code path returns a string. This
+    preserves the agent-loop contract: every tool call yields a
+    deterministic string the model can read. The
+    "not yet available" check is intentionally outside the
+    ``try/except`` so the soft-fail message isn't masked when the
+    service attribute is missing.
 """
 
     return [

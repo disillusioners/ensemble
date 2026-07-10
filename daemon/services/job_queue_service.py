@@ -1485,6 +1485,11 @@ class JobQueueService:
                     return canonical_job_id, ""
                 final_status = derived_status
 
+                await self._record_task_metrics(
+                    canonical_job_id,
+                    derived_status,
+                )
+
             elif decision == Decision.RETRY:
                 if self._retry_engine is None:
                     logger.error(
@@ -1575,6 +1580,7 @@ class JobQueueService:
                         from_admission_state=AdmissionState.ACTIVE.value,
                     )
                     final_status = "dead_letter"
+                await self._record_task_metrics(canonical_job_id, "failed")
         finally:
             # ── Step 3: release lock (always, even on error) ────────
             # F4/F7 fix: scope lock release to the specific
@@ -1765,7 +1771,276 @@ class JobQueueService:
             logger.warning(f"Queue '{queue_id}' not found, using default concurrency_limit=1")
             return 1
         return queue.concurrency_limit
-    
+
+    # ─── Skill Metrics Recording (Tier 0 — FREE) ───
+
+    async def _record_task_metrics(
+        self,
+        canonical_job_id: str,
+        derived_status: str,
+    ) -> None:
+        """Record Phase 4 skill metrics after a terminal job write.
+
+        Args:
+            canonical_job_id: Canonical JobItem ID whose terminal write
+                succeeded.
+            derived_status: Terminal status discriminator; ``"completed"``
+                records a successful task, all other values record failure.
+        """
+        try:
+            instance_manager = getattr(self, "_instance_manager", None)
+            metrics_service = (
+                getattr(instance_manager, "_skill_metrics_service", None)
+                if instance_manager is not None
+                else None
+            )
+            if metrics_service is None:
+                return
+
+            task_details = await self._get_task_details(canonical_job_id)
+            if task_details is None:
+                return
+
+            await metrics_service.record_task_completion(
+                instance_id=task_details["instance_id"],
+                agent_id=task_details["agent_id"],
+                project_id=task_details.get("project_id"),
+                task_succeeded=(derived_status == "completed"),
+                iterations=task_details.get("iterations", 0),
+                duration_seconds=task_details.get("duration_seconds", 0),
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Skill metrics recording failed for {canonical_job_id}: {exc}"
+            )
+
+    def _record_task_metrics_sync(
+        self,
+        canonical_job_id: str,
+        derived_status: str,
+    ) -> None:
+        """Record Phase 4 skill metrics from a synchronous finalizer.
+
+        Args:
+            canonical_job_id: Canonical JobItem ID whose terminal write
+                succeeded.
+            derived_status: Terminal status discriminator; ``"completed"``
+                records a successful task, all other values record failure.
+        """
+        try:
+            instance_manager = getattr(self, "_instance_manager", None)
+            metrics_service = (
+                getattr(instance_manager, "_skill_metrics_service", None)
+                if instance_manager is not None
+                else None
+            )
+            if metrics_service is None:
+                return
+            if self._loop is None or not self._loop.is_running():
+                return
+
+            details_future = asyncio.run_coroutine_threadsafe(
+                self._get_task_details(canonical_job_id),
+                self._loop,
+            )
+            task_details = details_future.result(timeout=5)
+            if task_details is None:
+                return
+
+            metrics_future = asyncio.run_coroutine_threadsafe(
+                metrics_service.record_task_completion(
+                    instance_id=task_details["instance_id"],
+                    agent_id=task_details["agent_id"],
+                    project_id=task_details.get("project_id"),
+                    task_succeeded=(derived_status == "completed"),
+                    iterations=task_details.get("iterations", 0),
+                    duration_seconds=task_details.get(
+                        "duration_seconds", 0
+                    ),
+                ),
+                self._loop,
+            )
+            metrics_future.result(timeout=5)
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                f"Skill metrics recording (sync) failed for "
+                f"{canonical_job_id}: {exc}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Skill metrics recording (sync) failed for "
+                f"{canonical_job_id}: {exc}"
+            )
+
+    async def _get_task_details(self, job_id: str) -> dict | None:
+        """Extract per-task details for the Phase 4 skill metrics hook.
+
+        Phase 4 of the Skill Evolution System. Called from the
+        :meth:`_finalize_terminal` metrics hook immediately after the
+        terminal write succeeds. Returns the fields
+        :class:`SkillMetricsService.record_task_completion` needs:
+
+        * ``instance_id`` and ``agent_id`` — sourced directly from the
+          :class:`JobItem` row (the job is the canonical handle; the
+          instance is recorded at claim time and the agent_id is set
+          at enqueue time).
+        * ``project_id`` — sourced from the JobItem, falls back to
+          ``None`` when the job is project-less (rare for system
+          queues but tolerated by the metrics service).
+        * ``iterations`` — count of AI (``role='agent'``)
+          messages created on or after the job's ``created_at`` on
+          the instance's message queue. This is the best available
+          approximation of "LLM iterations the task consumed" without
+          a dedicated ``task_metrics`` table. Returns ``0`` when the
+          message queue repository is unavailable or the lookup raises
+          — a missing count must never block the completion hook.
+        * ``duration_seconds`` — wall-clock seconds since the job's
+          ``created_at`` (an ISO-8601 string or ``datetime``). Falls
+          back to ``0`` on any parse failure.
+
+        Args:
+            job_id: The canonical :class:`JobItem` ID (already
+                resolved by the caller).
+
+        Returns:
+            A dict with keys ``instance_id``, ``agent_id``,
+            ``project_id``, ``iterations``, ``duration_seconds``;
+            ``None`` when the job row is missing (the caller treats
+            this as "no metrics to record" and skips the hook).
+        """
+        try:
+            job = await asyncio.to_thread(self._repository.get, job_id)
+        except Exception as exc:
+            logger.debug(
+                f"_get_task_details: failed to fetch job "
+                f"{job_id[:8]}...: {exc}"
+            )
+            return None
+        if job is None:
+            return None
+
+        instance_id = getattr(job, "instance_id", None)
+        agent_id = getattr(job, "agent_id", None)
+        project_id = getattr(job, "project_id", None)
+
+        # ── Duration ──────────────────────────────────────────────
+        duration_seconds = 0
+        created_at = getattr(job, "created_at", None)
+        job_created_at: datetime | None = None
+        if isinstance(created_at, datetime):
+            job_created_at = created_at
+            if job_created_at.tzinfo is None:
+                job_created_at = job_created_at.replace(tzinfo=timezone.utc)
+        elif isinstance(created_at, str) and created_at:
+            try:
+                # ``fromisoformat`` accepts the ``+00:00`` suffix
+                # directly; replace a literal ``Z`` (zulu) with the
+                # ``+00:00`` form for max compatibility.
+                job_created_at = datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                )
+                if job_created_at.tzinfo is None:
+                    job_created_at = job_created_at.replace(
+                        tzinfo=timezone.utc
+                    )
+            except (ValueError, TypeError):
+                job_created_at = None
+        if job_created_at is not None:
+            delta = datetime.now(timezone.utc) - job_created_at
+            duration_seconds = max(0, int(delta.total_seconds()))
+
+        # ── Iterations ────────────────────────────────────────────
+        # Count ``type='agent'`` rows on the instance's message queue
+        # created on or after this job's ``created_at`` — best-effort
+        # approximation for "LLM iterations the task consumed". The
+        # ``message_queue`` table stores both incoming prompts
+        # (``type='human'``) and agent responses (``type='agent'``);
+        # only the agent-side rows for the current task count toward
+        # the iteration tally. The ``_queue_repository`` handle is
+        # reached via the InstanceManager facade; missing facade OR
+        # missing repository OR a query error all collapse to ``0`` so
+        # the completion hook never raises.
+        iterations = 0
+        if instance_id:
+            try:
+                instance_manager = getattr(
+                    self, "_instance_manager", None
+                )
+                queue_repo = (
+                    getattr(
+                        instance_manager, "_queue_repository", None
+                    )
+                    if instance_manager is not None
+                    else None
+                )
+                if queue_repo is not None:
+                    messages = await asyncio.to_thread(
+                        queue_repo.get_by_instance, instance_id
+                    )
+                    task_messages = messages or []
+                    if job_created_at is None:
+                        logger.debug(
+                            f"_get_task_details: job {job_id[:8]}... "
+                            f"has no parseable created_at; counting all "
+                            f"agent messages"
+                        )
+                    else:
+                        try:
+                            filtered_messages = []
+                            for message in task_messages:
+                                msg_created_at = getattr(
+                                    message, "created_at", None
+                                )
+                                if isinstance(msg_created_at, datetime):
+                                    parsed_msg_created_at = msg_created_at
+                                elif (
+                                    isinstance(msg_created_at, str)
+                                    and msg_created_at
+                                ):
+                                    parsed_msg_created_at = datetime.fromisoformat(
+                                        msg_created_at.replace("Z", "+00:00")
+                                    )
+                                else:
+                                    raise ValueError(
+                                        "missing message created_at"
+                                    )
+                                if parsed_msg_created_at.tzinfo is None:
+                                    parsed_msg_created_at = (
+                                        parsed_msg_created_at.replace(
+                                            tzinfo=timezone.utc
+                                        )
+                                    )
+                                if parsed_msg_created_at >= job_created_at:
+                                    filtered_messages.append(message)
+                            task_messages = filtered_messages
+                        except (ValueError, TypeError) as exc:
+                            logger.debug(
+                                f"_get_task_details: failed to filter "
+                                f"agent messages by created_at for job "
+                                f"{job_id[:8]}...; counting all agent "
+                                f"messages: {exc}"
+                            )
+                    iterations = sum(
+                        1
+                        for m in task_messages
+                        if getattr(m, "type", None) == "agent"
+                    )
+            except Exception as exc:
+                logger.debug(
+                    f"_get_task_details: failed to count agent "
+                    f"messages for instance "
+                    f"{(instance_id or '')[:8]}...: {exc}"
+                )
+                iterations = 0
+
+        return {
+            "instance_id": instance_id,
+            "agent_id": agent_id,
+            "project_id": project_id,
+            "iterations": iterations,
+            "duration_seconds": duration_seconds,
+        }
+
     async def _try_start_job(self, job: JobItem) -> bool:
         """Try to start a pending job.
 
@@ -2680,6 +2955,10 @@ class JobQueueService:
                 if finalized is None:
                     return canonical_job_id, ""
                 final_status = derived_status
+                self._record_task_metrics_sync(
+                    canonical_job_id,
+                    derived_status,
+                )
 
             elif decision == Decision.RETRY:
                 if self._retry_engine is None:
@@ -2742,6 +3021,7 @@ class JobQueueService:
                         from_admission_state=AdmissionState.ACTIVE.value,
                     )
                     final_status = "dead_letter"
+                self._record_task_metrics_sync(canonical_job_id, "failed")
         finally:
             # F4/F7 fix (mirrors the async twin): scope lock release
             # to the specific ``(project_id, queue_id, job_id)``

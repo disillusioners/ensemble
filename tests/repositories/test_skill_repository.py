@@ -711,6 +711,59 @@ class TestSkillUsage:
         assert items[0].feedback_applied is True
         assert items[0].feedback_note == "helped user fix typo"
 
+    def test_get_latest_for_skill_instance_returns_most_recent(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """``get_latest_for_skill_instance`` returns the newest record."""
+        skill = _make_skill(skill_repo, project_id, "gl")
+        first = usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="inst-1", agent_id="a",
+        )
+        second = usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="inst-1", agent_id="a",
+        )
+
+        latest = usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id="inst-1"
+        )
+        assert latest is not None
+        # Newest by created_at → the second insert.
+        assert latest.id == second.id
+        assert latest.id != first.id
+
+    def test_get_latest_for_skill_instance_filters_by_instance(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """Records for a different instance are not returned."""
+        skill = _make_skill(skill_repo, project_id, "hm")
+        usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="inst-A", agent_id="a",
+        )
+        target = usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="inst-B", agent_id="a",
+        )
+
+        latest = usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id="inst-B"
+        )
+        assert latest is not None
+        assert latest.id == target.id
+        assert latest.instance_id == "inst-B"
+
+    def test_get_latest_for_skill_instance_no_records(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """No records → ``None`` (no error)."""
+        skill = _make_skill(skill_repo, project_id, "no-rec")
+        result = usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id="inst-NEVER"
+        )
+        assert result is None
+
     def test_update_feedback_nonexistent_returns_none(self, usage_repo):
         """update_feedback on an unknown record returns None."""
         assert usage_repo.update_feedback("ghost", True, "note") is None
@@ -1263,3 +1316,100 @@ class TestSkillABTest:
         active = ab_test_repo.get_active_tests()
         active_groups = {t.ab_test_group for t in active}
         assert active_groups == {group_active}
+
+
+# =============================================================================
+# SkillRepository — reset_counter / touch_last_used (Phase 4 additions)
+# =============================================================================
+
+
+class TestResetCounter:
+    """Tests for :meth:`SkillRepository.reset_counter`."""
+
+    def test_reset_counter_to_value(self, skill_repo, project_id):
+        """Resetting a counter sets it to the given value."""
+        skill = _make_skill(skill_repo, project_id, "foxtrot")
+
+        # Set the counter to a non-zero value first.
+        skill_repo.increment_counter(skill.id, "total_selections", amount=10)
+        fetched = skill_repo.get(skill.id)
+        assert fetched.total_selections == 10
+
+        skill_repo.reset_counter(skill.id, "total_selections", value=3)
+        fetched = skill_repo.get(skill.id)
+        assert fetched.total_selections == 3
+
+    def test_reset_counter_default_zero(self, skill_repo, project_id):
+        """Default value is ``0``."""
+        skill = _make_skill(skill_repo, project_id, "golf")
+        skill_repo.increment_counter(skill.id, "total_selections", amount=7)
+
+        skill_repo.reset_counter(skill.id, "total_selections")
+        fetched = skill_repo.get(skill.id)
+        assert fetched.total_selections == 0
+
+    def test_reset_counter_unknown_column_raises(
+        self, skill_repo, project_id
+    ):
+        """Unknown column names raise ``ValueError``."""
+        skill = _make_skill(skill_repo, project_id, "hotel")
+        with pytest.raises(ValueError) as exc_info:
+            skill_repo.reset_counter(skill.id, "no_such_counter")
+        msg = str(exc_info.value)
+        assert "no_such_counter" in msg
+        assert "Unknown" in msg or "Allowed" in msg
+
+    def test_reset_counter_consecutive_failures(
+        self, skill_repo, project_id
+    ):
+        """The metrics service resets consecutive_failures on success."""
+        skill = _make_skill(skill_repo, project_id, "india")
+        skill_repo.increment_counter(
+            skill.id, "consecutive_failures", amount=5
+        )
+
+        skill_repo.reset_counter(
+            skill.id, "consecutive_failures", value=0
+        )
+        fetched = skill_repo.get(skill.id)
+        assert fetched.consecutive_failures == 0
+
+
+class TestTouchLastUsed:
+    """Tests for :meth:`SkillRepository.touch_last_used`."""
+
+    def test_touch_last_used_sets_timestamp(
+        self, skill_repo, project_id
+    ):
+        """``touch_last_used`` populates ``last_used_at``."""
+        skill = _make_skill(skill_repo, project_id, "juliet")
+        # Default: last_used_at is None.
+        fetched = skill_repo.get(skill.id)
+        assert fetched.last_used_at is None
+
+        skill_repo.touch_last_used(skill.id)
+
+        fetched = skill_repo.get(skill.id)
+        assert fetched.last_used_at is not None
+        # The timestamp should parse as ISO-8601.
+        from datetime import datetime
+        parsed = datetime.fromisoformat(
+            fetched.last_used_at.replace("Z", "+00:00")
+        )
+        assert parsed.year >= 2026
+
+    def test_touch_last_used_is_idempotent_in_shape(
+        self, skill_repo, project_id
+    ):
+        """Repeated touches keep the timestamp in valid form."""
+        skill = _make_skill(skill_repo, project_id, "kilo")
+        skill_repo.touch_last_used(skill.id)
+        first = skill_repo.get(skill.id).last_used_at
+        skill_repo.touch_last_used(skill.id)
+        second = skill_repo.get(skill.id).last_used_at
+
+        assert first is not None
+        assert second is not None
+        # Second touch should be >= first (timestamps may be equal
+        # at second resolution, so allow equality).
+        assert second >= first

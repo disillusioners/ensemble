@@ -496,6 +496,12 @@ class SkillEvolutionConfig(BaseSettings):
     default_task_count_threshold: int = Field(default=20)
     default_daily_scan_hour: int = Field(default=3)  # 3 AM
 
+    # Phase 4: how often the ``skill_metric_scan`` maintenance job
+    # runs (hours). Defaults to daily (24h). The actual run-time gate
+    # lives in ``MaintenanceService._is_idle`` so the scan waits
+    # until the system has no in-flight work.
+    metric_scan_interval_hours: float = Field(default=24.0)
+
     # A/B testing
     ab_sample_size: int = Field(default=10)
     ab_min_difference: float = Field(default=0.15)  # Loser must be at least 15% worse

@@ -77,6 +77,45 @@ def _stringify_tool_message_content(m) -> tuple[str, str]:
     return tc_id, content_str
 
 
+def _build_graph_input(
+    content: str | list,
+    message_id: str,
+    skill_injection_msg: HumanMessage | None,
+) -> dict[str, list[HumanMessage]]:
+    """Build the LangGraph ``graph_input`` dict, optionally prepending a skill injection message.
+
+    Phase 3 helper used by all three ``graph_input = ...`` construction
+    sites in :meth:`InstanceMessagingService._process_message_with_tracking`.
+    Centralizing the construction ensures the prepend order is identical
+    across the retry-with-checkpoint, retry-without-checkpoint, and
+    first-attempt branches — a divergence there would silently double-
+    inject (or skip-inject) on retries.
+
+    The skill message is prepended (not appended) so the LangGraph
+    ``add_messages`` reducer sees it BEFORE the user message in the
+    final ordering — the agent's first read is the skill context, then
+    the user message. This mirrors the prompt layout the rest of the
+    codebase uses for system-context-then-user-input.
+
+    Args:
+        content: The user message content (string or multimodal
+            content-block list from ``_build_message_content``).
+        message_id: The queue message ID; becomes the user
+            ``HumanMessage.id`` for ``add_messages`` dedup.
+        skill_injection_msg: Optional ``HumanMessage`` carrying
+            the skill-injection block. ``None`` (the default
+            outside the first-attempt path) means no prepend.
+
+    Returns:
+        ``{"messages": [...]}`` dict ready for
+        ``graph.astream(graph_input, ...)``.
+    """
+    user_message = HumanMessage(content=content, id=message_id)
+    if skill_injection_msg is not None:
+        return {"messages": [skill_injection_msg, user_message]}
+    return {"messages": [user_message]}
+
+
 def _get_message_event_type(msg: dict) -> str:
     """Determine event type based on message content.
 
@@ -1586,7 +1625,17 @@ class InstanceMessagingService:
                             self._manager._instance_repository.set_metadata,
                             instance_id, "original_source", message_source,
                         )
-        
+
+        # ── Skill injection (Phase 3: dynamic skill evolution) ─────────────
+        # Placeholder for the optional ``HumanMessage`` that carries the
+        # skill-injection block into the LangGraph state. Default ``None``
+        # for retry / silent paths (no injection on retries — LangGraph's
+        # ``add_messages`` reducer already re-attached the checkpoint's
+        # original user message, so injecting again would duplicate).
+        # Set inside the ``if not is_retry:`` block below, then consumed
+        # by all three graph_input construction sites.
+        _skill_injection_msg: HumanMessage | None = None
+
         # Project context injection for first message only
         if not is_retry:
             is_completion_report = (
@@ -1687,7 +1736,87 @@ class InstanceMessagingService:
                             self._manager._instance_repository.set_metadata,
                             instance_id, "project_injected", True,
                         )
-        
+
+            # ── Skill Injection (Phase 3: dynamic skill evolution) ──
+            # Runs only on first attempt (``if not is_retry:`` above).
+            # Skipped for completion reports — those are internal pings,
+            # not real user messages, and the resolver doesn't need skill
+            # context for them. Gated on ``agent_meta.skill_injection``
+            # so opt-in agents control the cost of the search.
+            #
+            # The injection service is looked up via ``getattr(..., None)``
+            # so a manager built without ``skill_evolution`` config (or
+            # before Phase 3 wired it in) degrades to a no-op rather than
+            # raising ``AttributeError``. The whole block is wrapped in
+            # ``try/except`` so a transient DB / search error leaves the
+            # user message path intact — the graph still runs with just
+            # the bare ``content`` field.
+            if not is_completion_report:
+                try:
+                    # Re-fetch instance metadata — by now the project
+                    # injection block above may have stamped a new
+                    # ``project_id`` onto it.
+                    skill_instance_meta = await asyncio.to_thread(
+                        self._manager._instance_repository.get, instance_id
+                    )
+                    if skill_instance_meta is not None:
+                        from ..registry import get_registry
+                        registry = get_registry()
+                        agent_meta = registry.get_resolved(
+                            skill_instance_meta.agent_id
+                        )
+
+                        if agent_meta and getattr(
+                            agent_meta, "skill_injection", False
+                        ):
+                            skill_project_id: str | None = None
+                            if skill_instance_meta.instance_metadata:
+                                skill_project_id = (
+                                    skill_instance_meta.instance_metadata.get(
+                                        "project_id"
+                                    )
+                                )
+
+                            injection_service = getattr(
+                                self._manager,
+                                "_skill_injection_service",
+                                None,
+                            )
+                            if injection_service is not None:
+                                (
+                                    injection_text,
+                                    injected_skill_ids,
+                                ) = await injection_service.inject_skills(
+                                    message,
+                                    skill_project_id,
+                                    instance_id,
+                                    message_id,
+                                )
+                                if injection_text:
+                                    # HumanMessage MUST have an id for
+                                    # LangGraph's add_messages reducer
+                                    # deduplication. ``uuid4()`` avoids
+                                    # clashes with the user message id.
+                                    skill_message = HumanMessage(
+                                        content=injection_text,
+                                        id=str(uuid.uuid4()),
+                                    )
+                                    _skill_injection_msg = skill_message
+                                    # Track for Phase 4 metrics —
+                                    # the metrics service queries this
+                                    # to attribute future feedback to
+                                    # the skills that were offered.
+                                    injection_service.track_injection(
+                                        instance_id,
+                                        message_id,
+                                        injected_skill_ids,
+                                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Skill injection failed for {instance_id[:8]}...: {e}"
+                    )
+                    _skill_injection_msg = None
+
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
             await self._maybe_compact_context(instance_id, graph, config)
@@ -1702,18 +1831,24 @@ class InstanceMessagingService:
                 # checkpoint messages, so the agent sees full history + new message.
                 content = _build_message_content(message, images)
                 if content and not silent:
-                    graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+                    graph_input = _build_graph_input(
+                        content, message_id, _skill_injection_msg
+                    )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
                     graph_input = None
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
                 content = _build_message_content(message, images)
-                graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+                graph_input = _build_graph_input(
+                    content, message_id, _skill_injection_msg
+                )
         else:
             # First attempt - add message to conversation
             content = _build_message_content(message, images)
-            graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+            graph_input = _build_graph_input(
+                content, message_id, _skill_injection_msg
+            )
         
         # Build user message for pre-emit - use multimodal content if images present
         user_msg = HumanMessage(content=_build_message_content(message, images), id=message_id)
