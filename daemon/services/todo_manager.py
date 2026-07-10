@@ -1,18 +1,41 @@
-"""Per-instance in-memory todo state manager.
+"""Per-instance in-memory todo DAG state manager.
 
-Holds ephemeral todo lists keyed by instance_id. Todos are not persisted;
-they exist for the lifetime of the daemon process and are used by the
-todo tool surface during a single instance run.
+Replaces the previous flat-list TodoManager with a directed acyclic graph
+(DAG) implementation. Each instance owns a graph stored as
+``dict[node_id, TodoNode]``; edges are stored as adjacency lists
+(``next_ids``) on each node. The manager enforces DAG validity (no cycles)
+on all structural mutations and exposes both graph primitives
+(``add_node``, ``add_edge``, ``remove_edge``, ``remove_node``) and the
+legacy flat-list API (``create(instance_id, list[str])``) which auto-
+converts to a linear chain for backward compatibility.
+
+Todos are not persisted; they exist for the lifetime of the daemon
+process and are used by the todo tool surface during a single instance
+run.
 
 Thread Safety:
-    All dict mutations are guarded by threading.Lock. The lock is held
-    only for the duration of a single mutation/serialization step so
-    callers (sync or async) can compose freely without reentrancy concerns.
+    All state mutations and snapshot reads are guarded by a single
+    :class:`threading.Lock` (NOT :class:`asyncio.Lock`). Helpers that
+    require the lock (``_has_cycle``, ``_compute_reminder``) document
+    that the caller must already hold it.
+
+Frozen SSE Payload Schema:
+    :meth:`TodoGraphManager._to_dict` defines the JSON-serializable
+    shape that downstream tools (Phase 2), API routes (Phase 3), and the
+    Angular frontend (Phase 4) build against. Once published, the dict
+    shape — exactly six keys: ``id``, ``index``, ``text``, ``status``,
+    ``comment``, ``next_ids`` — is a contract and must not change without
+    cross-phase coordination.
 """
+
+from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+import uuid
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +43,10 @@ _VALID_STATUSES = ("pending", "in_progress", "done")
 
 # Hard cap on a single todo comment, in characters. Enforced at the HTTP
 # boundary (``daemon.routers.instances.set_todo_comment``) which maps an
-# over-length comment to a 400. This module re-enforces the same cap inside
-# :meth:`TodoManager.set_comment` as defense in depth so any non-HTTP caller
-# (tools, scripts, future internal jobs) cannot bypass the limit.
+# over-length comment to a 400. This module re-enforces the same cap
+# inside :meth:`TodoGraphManager.set_comment` as defense in depth so any
+# non-HTTP caller (tools, scripts, future internal jobs) cannot bypass
+# the limit.
 MAX_COMMENT_LENGTH = 1000
 
 # Aliases mapping common variants (including case variants) to canonical
@@ -63,154 +87,343 @@ def _normalize_status(status: str) -> str | None:
 
 
 @dataclass
-class TodoItem:
-    """A single todo entry.
+class TodoNode:
+    """A single node in the todo DAG.
 
-    Attributes:
-        index: Position within the instance's todo list (0-based).
-        text: Human-readable description of the item.
-        status: One of ``pending``, ``in_progress``, ``done``.
-        comment: Optional user-supplied annotation. Separate from ``text``
-            — editing ``text`` is not allowed; ``comment`` is a side-channel
-            for human feedback on a completed item (e.g. corrections,
-            follow-up notes). Defaults to empty string.
+    Identity is the string ``id`` (prefixed ``n-`` to guarantee non-
+    numeric). Edges are stored as ``next_ids`` — a list of node IDs that
+    follow this node. A node with empty ``next_ids`` is a terminal/sink
+    node.
+
+    The ``index`` field is preserved for backward compatibility: it is
+    derived from insertion order and included in serialized output so
+    existing consumers that reference ``item["index"]`` continue to work.
     """
 
-    index: int
+    id: str
     text: str
     status: str
     comment: str = ""
+    next_ids: list[str] = field(default_factory=list)
+    index: int = 0
 
 
-class TodoManager:
-    """In-memory, per-instance todo state manager.
+class TodoGraphManager:
+    """In-memory, per-instance todo DAG manager.
 
-    Each ``instance_id`` owns an ordered list of :class:`TodoItem`. The
-    manager exposes create/update/get/clear primitives that return plain
-    dicts for JSON-serializable transport to tool callers.
+    Each ``instance_id`` owns a graph stored as
+    ``dict[node_id, TodoNode]``. The manager exposes create/update/get
+    primitives that return plain dicts for JSON-serializable transport
+    to tool callers, plus graph-mutation primitives
+    (``add_node``, ``add_edge``, ``remove_edge``, ``remove_node``) and
+    structural validation (cycle detection via Kahn's algorithm).
 
     Thread Safety:
-        All state mutations are serialized through a single
-        :class:`threading.Lock`. Reads that produce returned dicts also
-        take the lock so callers observe a consistent snapshot.
+        All state mutations and snapshot reads are serialized through a
+        single :class:`threading.Lock`. Helpers that assume the lock is
+        held (``_has_cycle``, ``_compute_reminder``) document this
+        requirement; they must NOT be called from outside a ``with
+        self._lock:`` scope.
     """
 
+    # Hard cap on nodes per instance. Enforced in ``create`` (flat-list
+    # path), ``create_graph`` (explicit graph path), and ``add_node``
+    # (incremental path). Mirrors the documented 16-alias status
+    # normalization budget — small enough to fit comfortably in SSE
+    # payloads, large enough for realistic plans.
+    MAX_NODES = 200
+
     def __init__(self) -> None:
-        """Initialize the todo manager with empty per-instance state."""
-        self._instance_todos: dict[str, list[TodoItem]] = {}
+        """Initialize the manager with empty per-instance graphs."""
+        self._instance_graphs: dict[str, dict[str, TodoNode]] = {}
         self._lock = threading.Lock()
 
+    # ------------------------------------------------------------------
+    # Public creation API
+    # ------------------------------------------------------------------
+
     def create(self, instance_id: str, items: list[str]) -> list[dict]:
-        """Replace the instance's todo list with ``items`` (all pending).
+        """Backward-compatible create: flat list → linear chain DAG.
+
+        ``["A", "B", "C"]`` becomes three nodes
+        ``n-xxxxxx (A) → n-yyyyyy (B) → n-zzzzzz (C)`` with
+        ``next_ids = ["n-yyyyyy"], ["n-zzzzzz"], []`` respectively.
+
+        Each node also gets an ``index`` field (0, 1, 2, ...) for
+        backward compatibility with the flat-list API.
 
         Args:
             instance_id: Owning instance identifier.
             items: Ordered list of todo text entries.
 
         Returns:
-            The newly stored todo list as plain dicts.
+            The newly stored node list as plain dicts (six keys each:
+            ``id``, ``index``, ``text``, ``status``, ``comment``,
+            ``next_ids``).
+
+        Raises:
+            ValueError: If ``len(items)`` exceeds :data:`MAX_NODES`.
         """
-        new_items = [
-            TodoItem(index=i, text=text, status="pending", comment="")
-            for i, text in enumerate(items)
-        ]
+        if len(items) > self.MAX_NODES:
+            raise ValueError(
+                f"Cannot create {len(items)} todo nodes: exceeds maximum of "
+                f"{self.MAX_NODES}. Use todo_clear() to reset first."
+            )
+        node_ids = [self._generate_id() for _ in items]
+        nodes: dict[str, TodoNode] = {}
+        for i, text in enumerate(items):
+            next_ids = [node_ids[i + 1]] if i + 1 < len(items) else []
+            nodes[node_ids[i]] = TodoNode(
+                id=node_ids[i],
+                text=text,
+                status="pending",
+                comment="",
+                next_ids=next_ids,
+                index=i,
+            )
         with self._lock:
-            self._instance_todos[instance_id] = new_items
-            return [self._to_dict(item) for item in new_items]
+            self._instance_graphs[instance_id] = nodes
+            return [self._to_dict(node) for node in nodes.values()]
 
-    def update(self, instance_id: str, index: int, status: str) -> dict | None:
-        """Update the status of a single item and return the reminder payload.
-
-        The return value is a dict ``{"todos": [...], "reminder": str}`` so
-        callers (notably the ``todo_update`` tool) get the updated list AND
-        a human-readable reminder string in one round-trip. The reminder
-        points at the next pending item, prefixed with the user's comment
-        (when present) so the agent sees human feedback on the just-completed
-        item in the same breath as the next task to work on.
-
-        Reminder shape:
-            * When ``status == "done"`` and the completed item carries a
-              non-empty ``comment``:
-              ``"User commented:\\n---\\n{comment}\\n---\\n{next}"``
-              where ``{next}`` is the original next-pending reminder (or the
-              all-completed message when no item remains). The ``---``
-              fences visually separate the untrusted user-supplied comment
-              from the rest of the system-formatted reminder, so prompt
-              injection attempts embedded in the comment are obvious to the
-              agent.
-            * Otherwise: ``"⏭️ Next: {text}"`` or ``"All items completed! ✅"``
-              — the same wording the tool used to produce inline.
+    def create_graph(
+        self,
+        instance_id: str,
+        nodes: list[dict],
+        edges: list[dict],
+    ) -> list[dict]:
+        """Create a graph from explicit nodes + edges.
 
         Args:
             instance_id: Owning instance identifier.
-            index: Position of the item to update.
-            status: New status; must be one of ``pending``, ``in_progress``,
-                ``done``.
+            nodes: List of node dicts ``{"id": str, "text": str,
+                "next_ids"?: list[str]}``. User-supplied IDs must be
+                non-empty and NOT all-numeric (reserving the numeric
+                form for the backward-compat index path).
+            edges: List of edge dicts ``{"from": str, "to": str}``.
+                Node IDs referenced in ``edges`` must appear in
+                ``nodes`` (or be auto-discovered via ``next_ids``).
 
         Returns:
-            Dict with keys ``todos`` (full list snapshot) and ``reminder``
-            (formatted string), or ``None`` if the status is invalid or the
-            index does not exist for the instance.
+            The newly stored node list as plain dicts.
+
+        Raises:
+            ValueError: If any user-supplied ID is all-numeric, any
+                ``next_ids``/edge reference is dangling, the graph
+                contains a cycle, the node count exceeds
+                :data:`MAX_NODES`, or duplicate node IDs are supplied.
+        """
+        # Pre-flight: count check before validation so size-violations
+        # are reported cleanly.
+        if len(nodes) > self.MAX_NODES:
+            raise ValueError(
+                f"Cannot create {len(nodes)} todo nodes: exceeds maximum of "
+                f"{self.MAX_NODES}. Use todo_clear() to reset first."
+            )
+
+        # Validate user-supplied IDs (C3 mitigation): an all-numeric ID
+        # collides with the API's ``node_id.isdigit()`` backward-compat
+        # path which routes to ``set_comment_by_index``. Reject fast
+        # with a clear error rather than silently auto-prefixing.
+        for node_spec in nodes:
+            nid = node_spec.get("id", "")
+            if not isinstance(nid, str) or not nid:
+                raise ValueError(
+                    f"Node spec missing required 'id' field: {node_spec!r}"
+                )
+            if nid.isdigit():
+                raise ValueError(
+                    f"Node id {nid!r} is all-numeric and would collide "
+                    f"with the index-based backward-compat path. Use a "
+                    f"non-numeric id (e.g. 'n-{nid}' or 'step-{nid}')."
+                )
+
+        # Validate duplicate IDs among user-supplied nodes.
+        seen_ids: set[str] = set()
+        for node_spec in nodes:
+            nid = node_spec["id"]
+            if nid in seen_ids:
+                raise ValueError(
+                    f"Duplicate node id {nid!r} in nodes list."
+                )
+            seen_ids.add(nid)
+
+        # Build initial node map with auto-assigned ``index`` (insertion
+        # order). Default ``next_ids`` to empty list when not provided.
+        new_nodes: dict[str, TodoNode] = {}
+        for i, node_spec in enumerate(nodes):
+            nid = node_spec["id"]
+            text = node_spec.get("text", "")
+            next_ids = node_spec.get("next_ids") or []
+            new_nodes[nid] = TodoNode(
+                id=nid,
+                text=text,
+                status="pending",
+                comment="",
+                next_ids=list(next_ids),
+                index=i,
+            )
+
+        # Apply edges list: ``edges`` is the canonical source when
+        # provided, layered on top of any per-node ``next_ids`` already
+        # declared. Each ``{"from": ..., "to": ...}`` appends ``to`` to
+        # ``from``'s ``next_ids`` (de-duplicated).
+        for edge in edges:
+            from_id = edge.get("from")
+            to_id = edge.get("to")
+            if from_id not in new_nodes:
+                raise ValueError(
+                    f"Edge references unknown from-node {from_id!r}."
+                )
+            if to_id not in new_nodes:
+                raise ValueError(
+                    f"Edge references unknown to-node {to_id!r}."
+                )
+            if to_id not in new_nodes[from_id].next_ids:
+                new_nodes[from_id].next_ids.append(to_id)
+
+        # Validate no dangling ``next_ids`` references — only after
+        # edges have been merged in (so an edge to a previously-missing
+        # node still resolves).
+        for node in new_nodes.values():
+            for next_id in node.next_ids:
+                if next_id not in new_nodes:
+                    raise ValueError(
+                        f"Node {node.id!r} references dangling next_id "
+                        f"{next_id!r}."
+                    )
+
+        # Validate DAG (no cycles) before storing.
+        with self._lock:
+            if self._has_cycle(new_nodes):
+                raise ValueError(
+                    "create_graph() rejects cyclic graphs: the supplied "
+                    "nodes + edges contain a directed cycle."
+                )
+            self._instance_graphs[instance_id] = new_nodes
+            return [self._to_dict(node) for node in new_nodes.values()]
+
+    # ------------------------------------------------------------------
+    # Public mutation API
+    # ------------------------------------------------------------------
+
+    def update(
+        self,
+        instance_id: str,
+        node_id: str,
+        status: str,
+    ) -> dict | None:
+        """Update the status of a single node and return the reminder payload.
+
+        Identical contract to the previous ``TodoManager.update()``
+        except keyed by ``node_id`` instead of positional ``index``.
+        Returns ``{"todos": [...], "reminder": str}`` so callers (notably
+        the ``todo_update`` tool) get the updated list AND a human-
+        readable reminder string in one round-trip.
+
+        Reminder shape:
+            * Graph-aware: lists all "ready" pending nodes (those whose
+              predecessors are all ``done``) when branching is present,
+              falling back to "Waiting: {N} blocked items" when there
+              are pending nodes but none are ready, and "All items
+              completed!" when nothing remains.
+            * When ``status == "done"`` AND the completed node carries a
+              non-empty ``comment``: the reminder is prefixed with
+              ``"User commented:\\n---\\n{comment}\\n---\\n"`` (the
+              ``---`` fences guard against prompt injection — see
+              :meth:`_compute_reminder` for the full policy).
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Node identifier (must be prefixed ``n-`` for
+                internal callers; user-supplied numeric IDs are
+                reserved for ``update_by_index``).
+            status: New status; must be one of ``pending``,
+                ``in_progress``, ``done`` (after alias normalization).
+
+        Returns:
+            Dict with keys ``todos`` (full node snapshot) and
+            ``reminder`` (formatted string), or ``None`` if the status
+            is invalid or the ``node_id`` does not exist for the
+            instance.
         """
         normalized = _normalize_status(status)
         if normalized is None:
             logger.warning(
-                "TodoManager.update rejected invalid status %r for instance %s",
+                "TodoGraphManager.update rejected invalid status %r for "
+                "instance %s, node %s",
                 status,
                 instance_id,
+                node_id,
             )
             return None
 
         with self._lock:
-            items = self._instance_todos.get(instance_id)
-            if items is None or index < 0 or index >= len(items):
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
                 return None
-            target = items[index]
-            target.status = normalized
-            completed_comment = target.comment
-            # Compute reminder against the now-mutated list snapshot. We
-            # use _to_dict on each item so we don't depend on the dataclass
-            # vs dict asymmetry.
-            snapshot = [self._to_dict(item) for item in items]
-            next_pending = next(
-                (t for t in snapshot if t["status"] == "pending"),
-                None,
-            )
-            if next_pending is not None:
-                base_reminder = f"\n\n⏭️ Next: {next_pending['text']}"
-            else:
-                base_reminder = "\n\nAll items completed! ✅"
-            if normalized == "done" and completed_comment:
-                reminder = f"User commented:\n---\n{completed_comment}\n---\n" + base_reminder
-            else:
-                reminder = base_reminder
+            nodes[node_id].status = normalized
+            snapshot = [self._to_dict(n) for n in nodes.values()]
+            reminder = self._compute_reminder(nodes, node_id, normalized)
             return {"todos": snapshot, "reminder": reminder}
 
-    def set_comment(self, instance_id: str, index: int, comment: str) -> dict:
-        """Set the comment on the item at ``index``.
+    def update_by_index(
+        self,
+        instance_id: str,
+        index: int,
+        status: str,
+    ) -> dict | None:
+        """Backward-compat shim: resolve ``index`` → ``node_id``, then call :meth:`update`.
+
+        Resolution is by insertion order — the node returned by
+        iterating ``nodes.values()`` at position ``index``. This
+        matches the legacy contract where ``index`` was the row
+        position.
 
         Args:
             instance_id: Owning instance identifier.
-            index: Position of the item to annotate.
-            comment: The annotation text. Empty string clears the comment.
-                Must not exceed :data:`MAX_COMMENT_LENGTH` characters; the
-                limit is enforced here as defense in depth (the HTTP layer
-                returns 400 for the same violation).
+            index: Position of the node to update (0-based, by
+                insertion order).
+            status: New status.
 
         Returns:
-            The updated item as a plain dict.
+            Same as :meth:`update`, or ``None`` if the index does not
+            exist for the instance.
+        """
+        node_id = self._resolve_index_to_node_id(instance_id, index)
+        if node_id is None:
+            return None
+        return self.update(instance_id, node_id, status)
+
+    def set_comment(
+        self,
+        instance_id: str,
+        node_id: str,
+        comment: str,
+    ) -> dict:
+        """Set the comment on the node identified by ``node_id``.
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Node identifier.
+            comment: The annotation text. Empty string clears the
+                comment. Must not exceed :data:`MAX_COMMENT_LENGTH`
+                characters; the limit is enforced here as defense in
+                depth (the HTTP layer returns 400 for the same
+                violation).
+
+        Returns:
+            The updated node as a plain dict.
 
         Raises:
-            ValueError: If the instance has no todo list, the index is
-                out of range, **or** the supplied ``comment`` exceeds
-                :data:`MAX_COMMENT_LENGTH` characters. HTTP callers map
-                the index errors to ``404`` and the length error surfaces
-                from the HTTP-layer guard so it does not reach here under
-                normal flow.
+            ValueError: If the instance has no graph, the ``node_id``
+                does not resolve, or the supplied ``comment`` exceeds
+                :data:`MAX_COMMENT_LENGTH` characters.
         """
-        # Defense-in-depth length guard. The HTTP boundary enforces this and
-        # returns 400 before reaching here, but non-HTTP callers (tool layer,
-        # scripts) go straight through and must not bypass the limit.
+        # Defense-in-depth length guard — same rationale as the legacy
+        # :meth:`TodoManager.set_comment`. The HTTP boundary enforces
+        # this and returns 400 before reaching here, but non-HTTP
+        # callers (tool layer, scripts) go straight through and must
+        # not bypass the limit.
         if len(comment) > MAX_COMMENT_LENGTH:
             raise ValueError(
                 f"comment exceeds maximum length of {MAX_COMMENT_LENGTH} "
@@ -218,43 +431,544 @@ class TodoManager:
             )
 
         with self._lock:
-            items = self._instance_todos.get(instance_id)
-            if items is None or index < 0 or index >= len(items):
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
                 raise ValueError(
-                    f"index {index} out of range for instance {instance_id!r} "
-                    f"(list length: {0 if items is None else len(items)})"
+                    f"node {node_id!r} not found for instance {instance_id!r}"
                 )
-            items[index].comment = comment
-            return self._to_dict(items[index])
+            nodes[node_id].comment = comment
+            return self._to_dict(nodes[node_id])
+
+    def set_comment_by_index(
+        self,
+        instance_id: str,
+        index: int,
+        comment: str,
+    ) -> dict:
+        """Backward-compat shim: resolve ``index`` → ``node_id``, then call :meth:`set_comment`.
+
+        Args:
+            instance_id: Owning instance identifier.
+            index: Position of the node (0-based, by insertion order).
+            comment: The annotation text.
+
+        Returns:
+            The updated node as a plain dict.
+
+        Raises:
+            ValueError: If the index does not exist, or the comment
+                exceeds :data:`MAX_COMMENT_LENGTH`.
+        """
+        node_id = self._resolve_index_to_node_id(instance_id, index)
+        if node_id is None:
+            raise ValueError(
+                f"index {index} out of range for instance {instance_id!r}"
+            )
+        return self.set_comment(instance_id, node_id, comment)
+
+    # ------------------------------------------------------------------
+    # Public read API
+    # ------------------------------------------------------------------
 
     def get_all(self, instance_id: str) -> list[dict]:
-        """Return the instance's current todo list.
+        """Return the instance's current nodes.
+
+        Each dict conforms to the **frozen SSE payload schema** (six
+        keys: ``id``, ``index``, ``text``, ``status``, ``comment``,
+        ``next_ids``). Ordered by insertion order — matches the
+        iteration order of ``dict`` since Python 3.7.
 
         Args:
             instance_id: Owning instance identifier.
 
         Returns:
-            Plain-dict copy of the stored todos, or ``[]`` if none.
+            Plain-dict copies of the stored nodes, or ``[]`` if none.
         """
         with self._lock:
-            items = self._instance_todos.get(instance_id, [])
-            return [self._to_dict(item) for item in items]
+            nodes = self._instance_graphs.get(instance_id, {})
+            return [self._to_dict(node) for node in nodes.values()]
+
+    def get_graph(self, instance_id: str) -> dict:
+        """Return the graph as ``{nodes: [...], edges: [...]}`` structure.
+
+        Edges are derived from per-node ``next_ids`` adjacency lists
+        and emitted as ``{"from": str, "to": str}`` dicts (matching the
+        input shape expected by :meth:`create_graph`).
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            Structured graph snapshot. Both ``nodes`` and ``edges`` are
+            plain lists; ``nodes`` is ``[]`` if the instance has no
+            graph.
+        """
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id, {})
+            node_dicts = [self._to_dict(n) for n in nodes.values()]
+            edges: list[dict] = []
+            for node in nodes.values():
+                for next_id in node.next_ids:
+                    edges.append({"from": node.id, "to": next_id})
+            return {"nodes": node_dicts, "edges": edges}
 
     def clear(self, instance_id: str) -> None:
-        """Drop the instance's todo list entirely.
+        """Drop the instance's graph entirely.
 
         Args:
             instance_id: Owning instance identifier.
         """
         with self._lock:
-            self._instance_todos.pop(instance_id, None)
+            self._instance_graphs.pop(instance_id, None)
+
+    # ------------------------------------------------------------------
+    # Public graph-mutation API
+    # ------------------------------------------------------------------
+
+    def add_node(
+        self,
+        instance_id: str,
+        text: str,
+        next_ids: list[str] | None = None,
+    ) -> dict:
+        """Add a single node to an existing graph.
+
+        Args:
+            instance_id: Owning instance identifier.
+            text: Human-readable description of the new node.
+            next_ids: Optional list of successor node IDs that must
+                already exist in the graph. ``None`` is normalized to
+                ``[]`` (no successors). Defaults to ``None``.
+
+        Returns:
+            The newly created node as a plain dict (frozen schema).
+
+        Raises:
+            ValueError: If the instance has no graph (call
+                ``create_graph`` first), the count exceeds
+                :data:`MAX_NODES`, or any ``next_ids`` reference is
+                dangling. Adding the node must not introduce a cycle
+                (validated via :meth:`_has_cycle`).
+        """
+        resolved_next_ids = next_ids or []
+        new_node_id = self._generate_id()
+
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None:
+                raise ValueError(
+                    f"Instance {instance_id!r} has no graph. Call "
+                    f"create_graph() first."
+                )
+            if len(nodes) >= self.MAX_NODES:
+                raise ValueError(
+                    f"Cannot add node: instance already has "
+                    f"{len(nodes)} nodes (max {self.MAX_NODES})."
+                )
+            for next_id in resolved_next_ids:
+                if next_id not in nodes:
+                    raise ValueError(
+                        f"add_node references dangling next_id {next_id!r}."
+                    )
+
+            # Insert at the end (insertion order = ``len(nodes)``).
+            new_index = len(nodes)
+            nodes[new_node_id] = TodoNode(
+                id=new_node_id,
+                text=text,
+                status="pending",
+                comment="",
+                next_ids=list(resolved_next_ids),
+                index=new_index,
+            )
+
+            # Cycle check — only meaningful if the new node has
+            # outbound edges (a node with no successors can never be
+            # part of a cycle). The existing graph was already a DAG
+            # by construction, so introducing a cycle requires one of
+            # the new successors to eventually point back to the new
+            # node. We check the post-mutation state.
+            if resolved_next_ids and self._has_cycle(nodes):
+                # Roll back the insertion — leaving a temporarily
+                # cyclic graph in storage would surprise
+                # ``get_all``/``get_graph`` callers.
+                del nodes[new_node_id]
+                raise ValueError(
+                    f"add_node would introduce a cycle via next_ids="
+                    f"{resolved_next_ids!r}."
+                )
+
+            return self._to_dict(nodes[new_node_id])
+
+    def remove_node(
+        self,
+        instance_id: str,
+        node_id: str,
+    ) -> dict | None:
+        """Remove a node and clean up all inbound + outbound edges.
+
+        Outbound edges: the node's own ``next_ids`` is dropped with the
+        node. Inbound edges: any other node whose ``next_ids`` contains
+        ``node_id`` has it removed.
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Node identifier to remove.
+
+        Returns:
+            The removed node as a plain dict, or ``None`` if the
+            instance has no graph or the ``node_id`` does not resolve.
+        """
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
+                return None
+
+            removed = nodes.pop(node_id)
+
+            # Sweep inbound edges from every other node. We mutate the
+            # node-objects directly under the same lock — safe because
+            # no other thread sees the dict mid-iteration.
+            for other in nodes.values():
+                if node_id in other.next_ids:
+                    other.next_ids = [
+                        nid for nid in other.next_ids if nid != node_id
+                    ]
+
+            # Note: we do NOT re-pack ``index`` after removal — the
+            # ``index`` field is a one-way insertion-order record, not
+            # a "current position" rank. Consumers that need live row
+            # positions should re-sort by ``index`` after observing a
+            # removal (or rely on insertion-order iteration as the
+            # canonical order).
+
+            return self._to_dict(removed)
+
+    def add_edge(
+        self,
+        instance_id: str,
+        from_id: str,
+        to_id: str,
+    ) -> dict | None:
+        """Add a directed edge ``from_id → to_id``.
+
+        If the edge already exists (i.e., ``to_id`` is already in
+        ``from_id``'s ``next_ids``), the operation is a no-op and
+        returns the current graph.
+
+        Args:
+            instance_id: Owning instance identifier.
+            from_id: Source node identifier.
+            to_id: Target node identifier.
+
+        Returns:
+            The updated graph (per :meth:`get_graph`) on success, or
+            ``None`` if either node does not exist or the edge would
+            introduce a cycle.
+
+        Raises:
+            ValueError: If the instance has no graph, either node is
+                unknown, or the edge would create a cycle. (The HTTP
+                layer may translate these to appropriate status codes
+                — the method's ``None`` return path is reserved for
+                "instance missing or node missing", and ``ValueError``
+                for structural rejections.)
+        """
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None:
+                return None
+            if from_id not in nodes:
+                return None
+            if to_id not in nodes:
+                return None
+            if from_id == to_id:
+                # Self-loops are unconditionally cycles — reject fast.
+                return None
+
+            source = nodes[from_id]
+            if to_id not in source.next_ids:
+                source.next_ids.append(to_id)
+
+            # Cycle check: only meaningful if the edge was newly added.
+            # For idempotent re-adds we skip the check (no state
+            # change → no new cycle).
+            if self._has_cycle(nodes):
+                # Roll back the insertion to leave the graph in a
+                # consistent (DAG) state.
+                source.next_ids = [
+                    nid for nid in source.next_ids if nid != to_id
+                ]
+                return None
+
+            node_dicts = [self._to_dict(n) for n in nodes.values()]
+            edges = [
+                {"from": node.id, "to": next_id}
+                for node in nodes.values()
+                for next_id in node.next_ids
+            ]
+            return {"nodes": node_dicts, "edges": edges}
+
+    def remove_edge(
+        self,
+        instance_id: str,
+        from_id: str,
+        to_id: str,
+    ) -> dict | None:
+        """Remove a directed edge ``from_id → to_id``.
+
+        Args:
+            instance_id: Owning instance identifier.
+            from_id: Source node identifier.
+            to_id: Target node identifier.
+
+        Returns:
+            The updated graph (per :meth:`get_graph`) on success, or
+            ``None`` if the instance has no graph, either node does not
+            exist, or the edge does not exist.
+        """
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None:
+                return None
+            if from_id not in nodes or to_id not in nodes:
+                return None
+
+            source = nodes[from_id]
+            if to_id not in source.next_ids:
+                # Edge doesn't exist — treat as a no-op miss. Returning
+                # ``None`` keeps the contract "absent/missing → None"
+                # uniform across graph mutations.
+                return None
+
+            source.next_ids = [
+                nid for nid in source.next_ids if nid != to_id
+            ]
+
+            node_dicts = [self._to_dict(n) for n in nodes.values()]
+            edges = [
+                {"from": node.id, "to": next_id}
+                for node in nodes.values()
+                for next_id in node.next_ids
+            ]
+            return {"nodes": node_dicts, "edges": edges}
+
+    # ------------------------------------------------------------------
+    # Private helpers (all assume ``self._lock`` is held by the caller,
+    # unless explicitly documented otherwise).
+    # ------------------------------------------------------------------
+
+    def _has_cycle(self, nodes: dict[str, TodoNode]) -> bool:
+        """Detect cycles in a node map using Kahn's algorithm.
+
+        O(V+E) topological-sort approach. ``True`` indicates the graph
+        contains a cycle (NOT a valid DAG).
+
+        CRITICAL IMPLEMENTATION NOTES:
+          * Uses :class:`collections.deque` with ``popleft()`` — O(1)
+            per pop. The legacy list-based form ``queue.pop(0)`` was
+            O(n) and would silently degrade on dense graphs.
+          * When a node's in-degree drops to zero, the **child**
+            (the node whose in-degree just became 0) is appended to
+            the queue — NOT the parent that triggered the decrement.
+            The original plan had ``queue.append(nid)`` (the parent)
+            which would either detect nothing or loop forever.
+
+        MUST be called with ``self._lock`` held; reads the node map
+        without re-locking.
+
+        Handles gracefully:
+          * Empty node dict → returns ``False`` (vacuously a DAG).
+          * Disconnected components — each is processed via whatever
+            nodes reach zero in-degree.
+          * Self-loops (an edge from a node to itself is an immediate
+            cycle; Kahn's algorithm will not reduce the source's
+            in-degree past 1, so it stays unvisited).
+        """
+        in_degree: dict[str, int] = {nid: 0 for nid in nodes}
+        for node in nodes.values():
+            for next_id in node.next_ids:
+                if next_id in in_degree:
+                    in_degree[next_id] += 1
+
+        # Start with all zero-in-degree nodes (potential roots).
+        queue: deque[str] = deque(
+            nid for nid, deg in in_degree.items() if deg == 0
+        )
+        visited = 0
+        while queue:
+            nid = queue.popleft()  # O(1)
+            visited += 1
+            for next_id in nodes[nid].next_ids:
+                if next_id in in_degree:
+                    in_degree[next_id] -= 1
+                    if in_degree[next_id] == 0:
+                        queue.append(next_id)  # FIXED: append child, not parent
+        return visited != len(nodes)
+
+    def _compute_reminder(
+        self,
+        nodes: dict[str, TodoNode],
+        updated_node_id: str,
+        updated_status: str,
+    ) -> str:
+        """Compute a graph-aware reminder string.
+
+        Preserves the comment-fence prompt-injection protection from the
+        legacy :meth:`TodoManager.update`: when the updated node is
+        marked ``"done"`` AND has a non-empty ``comment``, the base
+        reminder is prefixed with
+        ``"User commented:\\n---\\n{comment}\\n---\\n"``. The ``---``
+        fences visually separate the untrusted user-supplied comment
+        from the rest of the system-formatted reminder, making prompt
+        injection attempts obvious to the agent. **This is a security-
+        critical pattern** — it must not be lost in the graph refactor.
+
+        Logic:
+          1. **Base reminder** (graph-state branch):
+             a. Find all "ready" pending nodes — pending nodes whose
+                ALL predecessors are ``done``.
+             b. If ready nodes exist:
+                ``"\\n\\n⏭️ Next: {text1}, {text2}, ..."`` (comma-join
+                all ready texts in insertion order).
+             c. Else if pending nodes exist (but none ready):
+                ``"\\n\\n⏳ Waiting: {count} blocked items"``.
+             d. Else (no pending at all):
+                ``"\\n\\nAll items completed! ✅"``.
+          2. **Comment-fence prefix**: if ``updated_status == "done"``
+             AND ``updated_node.comment`` is non-empty, prepend
+             ``"User commented:\\n---\\n{comment}\\n---\\n"``.
+          3. Return the combined string.
+
+        MUST be called with ``self._lock`` held; reads the node map
+        without re-locking.
+        """
+        updated_node = nodes[updated_node_id]
+
+        # Build reverse adjacency (predecessor map). A node is "ready"
+        # when ALL its predecessors are ``done`` and it itself is
+        # ``pending``. Insertion order is preserved by iterating the
+        # node dict, which is ordered by Python ≥3.7.
+        predecessors: dict[str, list[str]] = {nid: [] for nid in nodes}
+        for node in nodes.values():
+            for next_id in node.next_ids:
+                if next_id in predecessors:
+                    predecessors[next_id].append(node.id)
+
+        ready_nodes = [
+            node
+            for node in nodes.values()
+            if node.status == "pending"
+            and all(
+                nodes[pred_id].status == "done"
+                for pred_id in predecessors[node.id]
+            )
+        ]
+
+        if ready_nodes:
+            texts = ", ".join(node.text for node in ready_nodes)
+            base_reminder = f"\n\n⏭️ Next: {texts}"
+        elif any(node.status == "pending" for node in nodes.values()):
+            blocked_count = sum(
+                1 for node in nodes.values() if node.status == "pending"
+            )
+            base_reminder = f"\n\n⏳ Waiting: {blocked_count} blocked items"
+        else:
+            base_reminder = "\n\nAll items completed! ✅"
+
+        # Comment-fence prefix — exact wording & punctuation preserved
+        # from the legacy implementation so existing agent prompts/
+        # tests that match on this string keep working.
+        if updated_status == "done" and updated_node.comment:
+            return (
+                f"User commented:\n---\n{updated_node.comment}\n---\n"
+                + base_reminder
+            )
+        return base_reminder
 
     @staticmethod
-    def _to_dict(item: TodoItem) -> dict:
-        """Serialize a :class:`TodoItem` to a plain dict."""
+    def _generate_id() -> str:
+        """Generate a short, unique, non-numeric node ID.
+
+        Format: ``"n-" + uuid.uuid4().hex[:8]``.
+
+        The ``n-`` prefix guarantees the ID is never all-numeric,
+        preventing collision with the API's numeric-index backward-
+        compat path (``node_id.isdigit() → set_comment_by_index``). The
+        8-hex-char suffix gives ~4 billion possible IDs — collision
+        risk for <200 nodes per instance is negligible.
+        """
+        return f"n-{uuid.uuid4().hex[:8]}"
+
+    def _resolve_index_to_node_id(
+        self,
+        instance_id: str,
+        index: int,
+    ) -> str | None:
+        """Resolve an insertion-order ``index`` to its ``node_id``.
+
+        Used by ``update_by_index`` and ``set_comment_by_index``. Takes
+        the lock to read a consistent snapshot — the helper itself is
+        not called from inside any locked context.
+
+        Args:
+            instance_id: Owning instance identifier.
+            index: Position (0-based).
+
+        Returns:
+            The corresponding ``node_id``, or ``None`` if the
+            instance has no graph or ``index`` is out of range.
+        """
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or index < 0:
+                return None
+            try:
+                # ``dict.values()`` is insertion-ordered in Python 3.7+
+                # so indexing into it yields the Nth node. This is the
+                # explicit analog of the legacy ``items[index]`` look-up.
+                return list(nodes.values())[index].id
+            except IndexError:
+                return None
+
+    @staticmethod
+    def _to_dict(node: TodoNode) -> dict[str, Any]:
+        """Serialize a :class:`TodoNode` to a plain dict.
+
+        **FROZEN SCHEMA** — this is the SSE payload shape that Phases 2
+        (tools), 3 (API), and 4 (frontend) build against. Do NOT change
+        without coordinating across all phases.
+
+        Output shape (six keys, all required):
+            {
+                "id": "n-a1b2c3d4",         # Stable node identity (n-prefixed)
+                "index": 0,                 # Insertion-order position
+                "text": "Setup DB",         # Human-readable description
+                "status": "pending",        # pending | in_progress | done
+                "comment": "",              # User annotation side-channel
+                "next_ids": ["n-e5f6g7h8"]  # Adjacency list (successors)
+            }
+
+        Invariants:
+          * Exactly six keys — no extras, no omissions.
+          * ``index`` PRESERVED (backward compat — old index-keyed
+            callers keep working).
+          * ``id`` present, always ``n-`` prefixed.
+          * ``next_ids`` present (may be empty list), copied to
+            prevent external mutation of internal state.
+        """
         return {
-            "index": item.index,
-            "text": item.text,
-            "status": item.status,
-            "comment": item.comment,
+            "id": node.id,
+            "index": node.index,
+            "text": node.text,
+            "status": node.status,
+            "comment": node.comment,
+            "next_ids": list(node.next_ids),
         }
+
+
+# Backward-compatibility alias: existing import sites
+# (``from daemon.services.todo_manager import TodoManager``) keep
+# working unchanged. New code should prefer the explicit
+# ``TodoGraphManager`` name for clarity.
+TodoManager = TodoGraphManager
