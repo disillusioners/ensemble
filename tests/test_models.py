@@ -22,18 +22,18 @@ class TestInstanceCreate:
         """Test InstanceCreate with only required fields."""
         instance = InstanceCreate(**sample_instance_create_data)
 
-        # agent_id "coder" is normalized to canonical "developer" by the
-        # InstanceCreate validator (backward-compat alias for the rename).
-        assert instance.agent_id == "developer"
+        # agent_id "coder" is a standalone agent, preserved as-is
+        # (no normalization: normalize_agent_id validator was removed).
+        assert instance.agent_id == "coder"
         assert instance.instance_id is None
 
     def test_instance_create_optional(self, sample_instance_create_with_instance_id):
         """Test InstanceCreate with optional instance_id."""
         instance = InstanceCreate(**sample_instance_create_with_instance_id)
 
-        # agent_id "coder" is normalized to canonical "developer" by the
-        # InstanceCreate validator (backward-compat alias for the rename).
-        assert instance.agent_id == "developer"
+        # agent_id "coder" is a standalone agent, preserved as-is
+        # (no normalization: normalize_agent_id validator was removed).
+        assert instance.agent_id == "coder"
         assert instance.instance_id == "custom-instance-123"
 
     def test_instance_create_serialization(self, sample_instance_create_data):
@@ -41,9 +41,9 @@ class TestInstanceCreate:
         instance = InstanceCreate(**sample_instance_create_data)
         data = instance.model_dump()
 
-        # agent_id "coder" is normalized to canonical "developer" by the
-        # InstanceCreate validator (backward-compat alias for the rename).
-        assert data["agent_id"] == "developer"
+        # agent_id "coder" is a standalone agent, preserved as-is
+        # (no normalization: normalize_agent_id validator was removed).
+        assert data["agent_id"] == "coder"
         assert data["instance_id"] is None
 
     def test_instance_create_validation_missing_agent_dir(self):
@@ -328,6 +328,7 @@ class TestErrorCodes:
             "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
             "MAPPING_NOT_FOUND",
             "MAPPING_ALREADY_EXISTS",
+            "TODO_NOT_FOUND",
             "SERVICE_UNAVAILABLE",
             "BUILTIN_SERVER_PROTECTED",
         ]
@@ -419,9 +420,9 @@ class TestModelValidation:
         }
 
         instance = InstanceCreate.model_validate(data)
-        # agent_id "coder" is normalized to canonical "developer" by the
-        # InstanceCreate validator (backward-compat alias for the rename).
-        assert instance.agent_id == "developer"
+        # agent_id "coder" is a standalone agent, preserved as-is
+        # (no normalization: normalize_agent_id validator was removed).
+        assert instance.agent_id == "coder"
         assert instance.instance_id == "test-instance"
 
     def test_model_dump_json(self):
@@ -430,9 +431,9 @@ class TestModelValidation:
         json_str = instance.model_dump_json()
 
         assert "agent_id" in json_str
-        # agent_id "coder" is normalized to canonical "developer" by the
-        # InstanceCreate validator (backward-compat alias for the rename).
-        assert "developer" in json_str
+        # agent_id "coder" is a standalone agent, preserved as-is
+        # (no normalization: normalize_agent_id validator was removed).
+        assert "coder" in json_str
 
 
 class TestInstanceCreateProjectId:
