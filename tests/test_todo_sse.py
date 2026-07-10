@@ -209,7 +209,7 @@ class TestSSEFailureResilience:
         result = await update_tool.coroutine(index=0, status="done")
 
         assert not result.startswith("ERROR:")
-        assert "Updated item [0]" in result
+        assert "Updated index=0" in result
         # State was actually updated despite SSE failure
         assert (
             manager._todo_manager.get_all("sse-test-instance")[0]["status"] == "done"

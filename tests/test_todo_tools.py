@@ -2,7 +2,8 @@
 
 Mirrors the structure of ``tests/test_chart_tools.py``:
 
-  1. **Factory** — returns 4 tools with the documented names.
+  1. **Factory** — returns 6 tools with the documented names
+     (Phase 2 added ``todo_add_edge`` and ``todo_remove_edge``).
   2. **Registration** — each tool is tagged with ``_tool_category == "todo"``
      and NEVER ``"instance"`` (security counterpart of
      ``INNATE_SKILL_TOOL_CATEGORIES``).
@@ -42,9 +43,10 @@ def _make_manager() -> MagicMock:
 
 
 def _build_tools(manager: MagicMock | None = None, live_event_hub=None):
-    """Build the 4 todo tools with default instance_id.
+    """Build the 6 todo tools with default instance_id.
 
-    Returns the list ``[todo_create, todo_update, todo_list, todo_clear]``.
+    Returns the list ``[todo_create, todo_update, todo_list, todo_clear,
+    todo_add_edge, todo_remove_edge]``.
     """
     from daemon.tools.todo_tools import create_todo_tools
 
@@ -65,20 +67,28 @@ def _build_tools(manager: MagicMock | None = None, live_event_hub=None):
 class TestCreateTodoToolsFactory:
     """Factory shape for ``create_todo_tools``."""
 
-    def test_factory_returns_list_of_four_tools(self):
-        """Factory produces exactly the 4 documented tools."""
+    def test_factory_returns_list_of_six_tools(self):
+        """Factory produces exactly the 6 documented tools (Phase 2: was 4)."""
         tools = _build_tools()
 
         assert isinstance(tools, list)
-        assert len(tools) == 4
+        assert len(tools) == 6
 
     def test_factory_returns_documented_tool_names(self):
-        """The 4 tools are named ``todo_create``, ``todo_update``,
-        ``todo_list``, ``todo_clear`` — no more, no less."""
+        """The 6 tools are named ``todo_create``, ``todo_update``,
+        ``todo_list``, ``todo_clear``, ``todo_add_edge``,
+        ``todo_remove_edge`` — no more, no less."""
         tools = _build_tools()
         names = [t.name for t in tools]
 
-        assert names == ["todo_create", "todo_update", "todo_list", "todo_clear"]
+        assert names == [
+            "todo_create",
+            "todo_update",
+            "todo_list",
+            "todo_clear",
+            "todo_add_edge",
+            "todo_remove_edge",
+        ]
 
     def test_factory_creates_independent_closures_per_call(self):
         """Each call returns fresh tool objects (no shared closure state).
@@ -111,7 +121,7 @@ class TestCreateTodoToolsFactory:
 class TestTodoToolRegistration:
     """Every tool must be tagged ``_tool_category == "todo"``."""
 
-    def test_all_four_tools_registered_under_todo_category(self):
+    def test_all_six_tools_registered_under_todo_category(self):
         """The decorator ``@register_tool_category(\"todo\")`` tags every tool."""
         tools = _build_tools()
 
@@ -212,8 +222,9 @@ class TestTodoUpdate:
 
         result = await update_tool.coroutine(index=0, status="done")
 
-        # Header indicates the update
-        assert "Updated item [0]" in result
+        # Header indicates the update (Phase 2: lookup description includes
+        # the kind of identifier that resolved the node — ``index=0`` here).
+        assert "Updated index=0" in result
         assert "done" in result
         # Items are shown
         assert "A" in result and "B" in result and "C" in result
@@ -315,7 +326,7 @@ class TestTodoList:
         assert "No todo items." in result
 
     async def test_todo_list_header_included(self):
-        """Output starts with the documented ``📋 Current todo list:`` header."""
+        """Output starts with the documented ``📋 Current todo graph:`` header."""
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["A"])
         tools = _build_tools(manager=manager)
@@ -323,7 +334,7 @@ class TestTodoList:
 
         result = await list_tool.coroutine()
 
-        assert "Current todo list:" in result
+        assert "Current todo graph:" in result
 
 
 # =============================================================================
@@ -368,3 +379,314 @@ class TestTodoClear:
         result = await clear_tool.coroutine()
 
         assert "cleared" in result.lower()
+
+
+# =============================================================================
+# todo_create — graph mode (Phase 2)
+# =============================================================================
+
+
+class TestTodoCreateGraphMode:
+    """``todo_create(nodes, edges)`` — explicit graph input."""
+
+    async def test_todo_create_nodes_only_builds_independent_nodes(self):
+        """Passing ``nodes`` without ``edges`` creates isolated nodes
+        (no edges). All nodes share ``pending`` status.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        create_tool = tools[0]
+
+        result = await create_tool.coroutine(
+            nodes=[
+                {"id": "alpha", "text": "Step Alpha"},
+                {"id": "beta", "text": "Step Beta"},
+            ],
+        )
+
+        # Header advertises graph mode
+        assert "Todo graph created" in result
+        assert "2 nodes" in result
+        # Both nodes visible
+        assert "Step Alpha" in result
+        assert "Step Beta" in result
+        # Stored state matches input
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert {n["id"] for n in stored} == {"alpha", "beta"}
+
+    async def test_todo_create_with_edges_renders_branching_graph(self):
+        """Passing ``nodes`` + ``edges`` produces a graph whose render uses
+        the ``└→`` arrow for children and merges on shared descendants.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        create_tool = tools[0]
+
+        result = await create_tool.coroutine(
+            nodes=[
+                {"id": "root", "text": "Root"},
+                {"id": "left", "text": "Left branch"},
+                {"id": "right", "text": "Right branch"},
+                {"id": "sink", "text": "Merge sink"},
+            ],
+            edges=[
+                {"from": "root", "to": "left"},
+                {"from": "root", "to": "right"},
+                {"from": "left", "to": "sink"},
+                {"from": "right", "to": "sink"},
+            ],
+        )
+
+        # Tree connector appears
+        assert "\u2514\u2192" in result
+        # Merge annotation appears on the second visit of ``sink``
+        assert "(merged)" in result
+        # All four nodes visible
+        assert "Root" in result
+        assert "Left branch" in result
+        assert "Right branch" in result
+        assert "Merge sink" in result
+
+    async def test_todo_create_with_neither_returns_error(self):
+        """Calling ``todo_create()`` with no ``items`` and no ``nodes``
+        returns ``ERROR:`` and does not mutate state.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        create_tool = tools[0]
+
+        result = await create_tool.coroutine()
+
+        assert result.startswith("ERROR:")
+        assert manager._todo_manager.get_all("test-instance-id") == []
+
+    async def test_todo_create_items_takes_precedence_over_nodes(self):
+        """When both ``items`` and ``nodes`` are provided, ``items`` wins
+        (backward-compat path is taken).
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        create_tool = tools[0]
+
+        result = await create_tool.coroutine(
+            items=["Flat A", "Flat B"],
+            nodes=[{"id": "ignored", "text": "should not appear"}],
+        )
+
+        # Header reflects flat-list path
+        assert "Todo list created" in result
+        assert "Flat A" in result
+        assert "Flat B" in result
+        assert "should not appear" not in result
+
+
+# =============================================================================
+# todo_update — node_id path (Phase 2)
+# =============================================================================
+
+
+class TestTodoUpdateNodeId:
+    """``todo_update(node_id=..., status=...)`` — graph-aware lookup."""
+
+    async def test_todo_update_by_node_id_returns_confirmation(self):
+        """Updating by ``node_id`` succeeds and the lookup description
+        advertises the ``node_id=...`` form (vs the ``index=N`` form).
+        """
+        manager = _make_manager()
+        manager._todo_manager.create("test-instance-id", ["A", "B"])
+        tools = _build_tools(manager=manager)
+        update_tool = tools[1]
+
+        # Fetch a node_id from the manager
+        stored = manager._todo_manager.get_all("test-instance-id")
+        target_id = stored[0]["id"]
+
+        result = await update_tool.coroutine(node_id=target_id, status="done")
+
+        assert f"Updated node_id={target_id!r}" in result
+        assert "done" in result
+
+    async def test_todo_update_node_id_takes_precedence_over_index(self):
+        """When both ``node_id`` and ``index`` are provided, ``node_id``
+        wins (documented precedence rule).
+        """
+        manager = _make_manager()
+        manager._todo_manager.create("test-instance-id", ["A", "B"])
+        tools = _build_tools(manager=manager)
+        update_tool = tools[1]
+
+        stored = manager._todo_manager.get_all("test-instance-id")
+        target_id = stored[1]["id"]  # update the SECOND node
+
+        # Pass index=0 (would update "A") AND node_id=<B's id> → should update B
+        result = await update_tool.coroutine(
+            index=0, status="done", node_id=target_id
+        )
+
+        # Lookup description should reflect node_id path
+        assert f"node_id={target_id!r}" in result
+        # State should reflect B (index=1) being done, not A (index=0)
+        post = manager._todo_manager.get_all("test-instance-id")
+        assert post[0]["status"] == "pending"
+        assert post[1]["status"] == "done"
+
+    async def test_todo_update_with_neither_index_nor_node_id_returns_error(self):
+        """Calling ``todo_update(status='done')`` with no identifier
+        returns ``ERROR:`` without mutation.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create("test-instance-id", ["A"])
+        tools = _build_tools(manager=manager)
+        update_tool = tools[1]
+
+        result = await update_tool.coroutine(status="done")
+
+        assert result.startswith("ERROR:")
+        assert "Provide either index or node_id" in result
+
+
+# =============================================================================
+# todo_add_edge (Phase 2)
+# =============================================================================
+
+
+class TestTodoAddEdge:
+    """``todo_add_edge(from_id, to_id)`` — incremental edge insertion."""
+
+    async def test_todo_add_edge_returns_confirmation_and_graph(self):
+        """Adding a valid edge returns ``Edge added:`` and the updated graph."""
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {"id": "a", "text": "A"},
+                {"id": "b", "text": "B"},
+            ],
+            edges=[{"from": "a", "to": "b"}],
+        )
+        tools = _build_tools(manager=manager)
+        add_edge_tool = tools[4]
+
+        # Create a third node via create_graph, then add an edge to it
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {"id": "a", "text": "A"},
+                {"id": "b", "text": "B"},
+                {"id": "c", "text": "C"},
+            ],
+            edges=[
+                {"from": "a", "to": "b"},
+                {"from": "b", "to": "c"},
+            ],
+        )
+
+        result = await add_edge_tool.coroutine(from_id="a", to_id="c")
+
+        assert "Edge added" in result
+        assert "a \u2192 c" in result
+        # Graph state shows the new edge
+        graph = manager._todo_manager.get_graph("test-instance-id")
+        edges = {(e["from"], e["to"]) for e in graph["edges"]}
+        assert ("a", "c") in edges
+
+    async def test_todo_add_edge_cycle_returns_error(self):
+        """Adding an edge that would create a cycle is rejected and
+        returns ``ERROR:``. State is not mutated.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {"id": "a", "text": "A"},
+                {"id": "b", "text": "B"},
+            ],
+            edges=[{"from": "a", "to": "b"}],
+        )
+        tools = _build_tools(manager=manager)
+        add_edge_tool = tools[4]
+
+        result = await add_edge_tool.coroutine(from_id="b", to_id="a")
+
+        assert result.startswith("ERROR:")
+        # State unchanged
+        graph = manager._todo_manager.get_graph("test-instance-id")
+        edges = {(e["from"], e["to"]) for e in graph["edges"]}
+        assert ("b", "a") not in edges
+
+    async def test_todo_add_edge_unknown_node_returns_error(self):
+        """Adding an edge referencing a missing node returns ``ERROR:``."""
+        manager = _make_manager()
+        manager._todo_manager.create("test-instance-id", ["A"])
+        tools = _build_tools(manager=manager)
+        add_edge_tool = tools[4]
+
+        result = await add_edge_tool.coroutine(from_id="n-aaaa", to_id="n-bbbb")
+
+        assert result.startswith("ERROR:")
+
+
+# =============================================================================
+# todo_remove_edge (Phase 2)
+# =============================================================================
+
+
+class TestTodoRemoveEdge:
+    """``todo_remove_edge(from_id, to_id)`` — incremental edge removal."""
+
+    async def test_todo_remove_edge_returns_confirmation(self):
+        """Removing an existing edge returns ``Edge removed:`` and the
+        updated graph (without that edge).
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {"id": "a", "text": "A"},
+                {"id": "b", "text": "B"},
+            ],
+            edges=[{"from": "a", "to": "b"}],
+        )
+        tools = _build_tools(manager=manager)
+        remove_edge_tool = tools[5]
+
+        result = await remove_edge_tool.coroutine(from_id="a", to_id="b")
+
+        assert "Edge removed" in result
+        assert "a \u2192 b" in result
+        # State confirms edge gone
+        graph = manager._todo_manager.get_graph("test-instance-id")
+        edges = {(e["from"], e["to"]) for e in graph["edges"]}
+        assert ("a", "b") not in edges
+
+    async def test_todo_remove_edge_missing_returns_error(self):
+        """Removing a non-existent edge returns ``ERROR:`` without mutation."""
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {"id": "a", "text": "A"},
+                {"id": "b", "text": "B"},
+            ],
+            edges=[{"from": "a", "to": "b"}],
+        )
+        tools = _build_tools(manager=manager)
+        remove_edge_tool = tools[5]
+
+        # No edge b→c exists
+        result = await remove_edge_tool.coroutine(from_id="b", to_id="c")
+
+        assert result.startswith("ERROR:")
+
+    async def test_todo_remove_edge_unknown_node_returns_error(self):
+        """Removing with an unknown node returns ``ERROR:``."""
+        manager = _make_manager()
+        manager._todo_manager.create("test-instance-id", ["A"])
+        tools = _build_tools(manager=manager)
+        remove_edge_tool = tools[5]
+
+        result = await remove_edge_tool.coroutine(
+            from_id="n-aaaa", to_id="n-bbbb"
+        )
+
+        assert result.startswith("ERROR:")
