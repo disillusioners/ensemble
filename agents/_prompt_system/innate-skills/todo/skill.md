@@ -60,7 +60,11 @@ Sub-tasks are lightweight checklist items nested inside a single todo node. They
 - They exist purely to break a node's work into smaller checkable steps. Use them when a node is a meaningful unit of work but the agent (or user) wants finer-grained progress signals.
 - **Sub-task status is binary**: `pending` (☐) or `done` (☑). There is no `in_progress` state for sub-tasks — flip them once the step is done.
 - Sub-tasks are rendered as an indented checklist under their parent node when listed via `todo_list`.
-- **Limits**: max **20 sub-tasks per node**; max **500 characters** per sub-task text. Excess calls return `ERROR: Max sub-tasks (20) reached for node ...` or `ERROR: Sub-task text exceeds 500 characters`.
+- **Limits**: max **20 sub-tasks per node**; max **500 characters** per sub-task text. The manager raises `ValueError` for both caps, and the tool wraps them as `ERROR: Failed to add sub-task: {e}`:
+  - `ValueError("Cannot add sub-task: node '...' already has N sub-tasks (max 20).")` — per-node sub-task cap reached.
+  - `ValueError("sub-task text exceeds maximum length of 500 characters (got N)")` — sub-task text too long.
+  - For empty text: `ValueError("sub-task text must be a non-empty string")`.
+- A missing parent `node_id` (or missing instance) returns `ERROR: Node '<id>' not found in instance '<instance-id>'.`
 - Sub-tasks survive `todo_update` on the parent node — changing the parent's status does not alter its sub-tasks.
 - `todo_clear` removes the entire graph including all sub-tasks.
 

@@ -998,6 +998,67 @@ class TestTodoUpdateSubtask:
         assert "n-missing" in result
         assert "s-missing" in result
 
+    async def test_todo_update_subtask_auto_complete_parent_already_done(self):
+        """When ``auto_complete=True`` and ALL sub-tasks are done but the
+        parent node's status is ALREADY ``"done"``, the tool reports the
+        parent-already-done case explicitly — not the misleading
+        ``"0 sub-task(s) remain pending"`` wording that this branch
+        produced before the W2 fix.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        # Seed two sub-tasks.
+        ids: list[str] = []
+        for text in ("first", "second"):
+            add_result = manager._todo_manager.add_subtask(
+                "test-instance-id", "alpha", text
+            )
+            ids.append(add_result["todos"][0]["subtasks"][-1]["id"])
+        tools = _build_tools(manager=manager)
+        update_subtask_tool = tools[7]
+        update_tool = tools[1]
+
+        # Mark both sub-tasks done WITHOUT auto_complete (default
+        # False), so the parent stays ``pending``.
+        for sid in ids:
+            await update_subtask_tool.coroutine(
+                node_id="alpha",
+                subtask_id=sid,
+                status="done",
+            )
+        # Now set the parent node to ``"done"`` via todo_update.
+        await update_tool.coroutine(node_id="alpha", status="done")
+
+        # Sanity check: parent is done and all sub-tasks are done.
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["status"] == "done"
+        assert all(st["status"] == "done" for st in stored[0]["subtasks"])
+
+        # Call todo_update_subtask with auto_complete=True on one
+        # already-done sub-task. The manager will NOT re-flip the
+        # parent (it's already done) and returns auto_completed=False,
+        # so the tool's ``else`` branch fires with pending_count == 0
+        # and should emit the parent-already-done message.
+        result = await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=ids[0],
+            status="done",
+            auto_complete=True,
+        )
+
+        # The new (W2) message is present.
+        assert "already" in result
+        assert "auto_complete requested" in result
+        # The misleading old "0 ... remain pending" wording is gone.
+        assert "remain pending" not in result
+        # Parent status is unchanged (still done) — no demotion.
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["status"] == "done"
+
 
 # =============================================================================
 # todo_remove_subtask (Sub-Task Phase 1)

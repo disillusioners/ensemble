@@ -725,9 +725,13 @@ Returns:
                 current_instance_id, node_id, text
             )
             if result is None:
+                # The manager raises ValueError for "max sub-tasks
+                # exceeded" / "text too long" / "empty text", so this
+                # None branch is ONLY reached when the instance or
+                # node_id is unknown.
                 return (
-                    f"ERROR: Node '{node_id}' not found or max sub-tasks "
-                    f"exceeded"
+                    f"ERROR: Node '{node_id}' not found in instance "
+                    f"'{current_instance_id}'."
                 )
             todos = result["todos"]
             # The new sub-task is appended to the end of the parent's
@@ -854,11 +858,12 @@ Returns:
                         f"(all sub-tasks done)."
                     )
                 else:
-                    # Count sub-tasks still pending on the parent. The
-                    # vacuous-truth guard in the manager means this
-                    # branch is also reached when the node has zero
-                    # sub-tasks (0 pending → "0 sub-task(s) remain
-                    # pending") — that wording is faithful to the state.
+                    # Count sub-tasks still pending on the parent.
+                    # When pending_count == 0 the parent is already
+                    # 'done' (the manager only sets auto_completed when
+                    # the parent wasn't already done), so we report that
+                    # explicitly instead of saying "0 sub-task(s) remain
+                    # pending" — which would be confusing and wrong.
                     parent = next(
                         (n for n in todos if n["id"] == node_id), None
                     )
@@ -869,10 +874,17 @@ Returns:
                             for st in parent.get("subtasks", [])
                             if st.get("status") != "done"
                         )
-                    extra = (
-                        f"\nauto_complete requested but {pending_count} "
-                        f"sub-task(s) remain pending."
-                    )
+                    if pending_count == 0:
+                        extra = (
+                            f"\nauto_complete requested — all sub-tasks "
+                            f"are done, but parent node '{node_id}' is "
+                            f"already 'done'."
+                        )
+                    else:
+                        extra = (
+                            f"\nauto_complete requested but {pending_count} "
+                            f"sub-task(s) remain pending."
+                        )
             return (
                 f"{head}{extra}{reminder}\n\n"
                 f"{_format_graph(todos, verbose=False)}"
