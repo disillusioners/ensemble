@@ -501,3 +501,211 @@ class TestSSEPayloadStructure:
         b_node = next(n for n in todos_arg if n["id"] == b_id)
         assert b_node["next_ids"] == [c_id]
 
+
+# =============================================================================
+# Sub-task SSE payload — add/update/remove
+# =============================================================================
+
+
+class TestSubtaskSSEPayload:
+    """The three Sub-Task Phase 1 tools (``todo_add_subtask``,
+    ``todo_update_subtask``, ``todo_remove_subtask``) emit SSE events
+    whose payload conforms to the frozen 7-key schema AND whose
+    ``subtasks`` field carries the populated checklist (list of
+    ``{id, text, status}`` dicts) when present, or an empty list when
+    not.
+    """
+
+    async def test_sse_payload_after_add_subtask_has_seven_keys(self):
+        """``todo_add_subtask`` emits with the 7-key schema including the
+        ``subtasks`` key, and the parent's ``subtasks`` list now contains
+        a dict with the new item's id, text, and pending status.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create_graph(
+            "sse-test-instance",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        tools = _build_tools(hub=hub, manager=manager)
+        add_subtask_tool = tools[6]
+
+        await add_subtask_tool.coroutine(node_id="alpha", text="Run migration")
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        # 7-key schema on every payload node (the contract is uniform
+        # across all mutation tools).
+        assert len(todos_arg) == 1
+        assert set(todos_arg[0].keys()) == {
+            "id",
+            "index",
+            "text",
+            "status",
+            "comment",
+            "next_ids",
+            "subtasks",
+        }
+        # The parent's subtasks field now carries the new checklist item.
+        subs = todos_arg[0]["subtasks"]
+        assert isinstance(subs, list)
+        assert len(subs) == 1
+        assert subs[0]["text"] == "Run migration"
+        assert subs[0]["status"] == "pending"
+        assert isinstance(subs[0]["id"], str) and subs[0]["id"].startswith("s-")
+
+    async def test_sse_payload_after_update_subtask_has_seven_keys(self):
+        """``todo_update_subtask`` emits with the 7-key schema and the
+        ``subtasks`` field reflects the status flip on the targeted item.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create_graph(
+            "sse-test-instance",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        add_result = manager._todo_manager.add_subtask(
+            "sse-test-instance", "alpha", "Run migration"
+        )
+        subtask_id = add_result["todos"][0]["subtasks"][0]["id"]
+        tools = _build_tools(hub=hub, manager=manager)
+        update_subtask_tool = tools[7]
+
+        await update_subtask_tool.coroutine(
+            node_id="alpha",
+            subtask_id=subtask_id,
+            status="done",
+        )
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        assert len(todos_arg) == 1
+        assert set(todos_arg[0].keys()) == {
+            "id",
+            "index",
+            "text",
+            "status",
+            "comment",
+            "next_ids",
+            "subtasks",
+        }
+        subs = todos_arg[0]["subtasks"]
+        assert len(subs) == 1
+        assert subs[0]["id"] == subtask_id
+        assert subs[0]["status"] == "done"
+
+    async def test_sse_payload_after_remove_subtask_has_seven_keys(self):
+        """``todo_remove_subtask`` emits with the 7-key schema and the
+        ``subtasks`` field reflects the removal (empty list afterwards).
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create_graph(
+            "sse-test-instance",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        # Seed two sub-tasks; we'll remove one and verify the SSE.
+        ids: list[str] = []
+        for text in ("keep", "drop"):
+            res = manager._todo_manager.add_subtask(
+                "sse-test-instance", "alpha", text
+            )
+            ids.append(res["todos"][0]["subtasks"][-1]["id"])
+
+        tools = _build_tools(hub=hub, manager=manager)
+        remove_subtask_tool = tools[8]
+
+        await remove_subtask_tool.coroutine(
+            node_id="alpha", subtask_id=ids[1]
+        )
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        assert len(todos_arg) == 1
+        assert set(todos_arg[0].keys()) == {
+            "id",
+            "index",
+            "text",
+            "status",
+            "comment",
+            "next_ids",
+            "subtasks",
+        }
+        subs = todos_arg[0]["subtasks"]
+        assert isinstance(subs, list)
+        # One of the two seed items was removed.
+        assert len(subs) == 1
+        assert subs[0]["id"] == ids[0]
+        assert subs[0]["text"] == "keep"
+
+    async def test_sse_subtasks_field_is_list_of_dict_with_id_text_status(self):
+        """The ``subtasks`` field is a list of dicts with EXACTLY the
+        three documented keys ``id``, ``text``, ``status`` (no more,
+        no less) — matches the frozen Sub-Task Phase 1 schema.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create_graph(
+            "sse-test-instance",
+            nodes=[
+                {
+                    "id": "alpha",
+                    "text": "Alpha",
+                    "subtasks": [
+                        {"text": "first"},
+                        {"text": "second", "status": "done"},
+                    ],
+                }
+            ],
+            edges=[],
+        )
+        tools = _build_tools(hub=hub, manager=manager)
+        update_tool = tools[1]
+
+        # Trigger an emission via todo_update on the parent — produces
+        # an SSE with the full node list, including its subtasks.
+        await update_tool.coroutine(node_id="alpha", status="in_progress")
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        assert len(todos_arg) == 1
+        subs = todos_arg[0]["subtasks"]
+        assert isinstance(subs, list)
+        assert len(subs) == 2
+        for sub in subs:
+            assert isinstance(sub, dict)
+            assert set(sub.keys()) == {"id", "text", "status"}
+            assert isinstance(sub["id"], str) and sub["id"].startswith("s-")
+            assert isinstance(sub["text"], str)
+            assert sub["status"] in {"pending", "done"}
+
+    async def test_sse_subtasks_field_is_empty_list_when_no_subtasks(self):
+        """When a node has no checklist, the emitted ``subtasks`` field
+        is ``[]`` (empty list) — NEVER ``None`` — so the frontend can
+        iterate uniformly without a falsy/null branch.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create_graph(
+            "sse-test-instance",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        tools = _build_tools(hub=hub, manager=manager)
+        update_tool = tools[1]
+
+        await update_tool.coroutine(node_id="alpha", status="in_progress")
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        assert len(todos_arg) == 1
+        subs = todos_arg[0]["subtasks"]
+        # Explicit ``is []`` guards the contract precisely:
+        # ``None`` would silently break any iteration downstream.
+        assert subs == []
+        assert subs is not None
+        assert isinstance(subs, list)
+

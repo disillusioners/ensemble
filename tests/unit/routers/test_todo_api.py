@@ -932,3 +932,645 @@ class TestGetTodoGraph:
 
         assert resp.status_code == 404
         assert "Instance not found" in resp.json()["detail"]["message"]
+
+
+# =============================================================================
+# POST /api/instances/{instance_id}/todos/{node_id}/subtasks — sub-task create
+# =============================================================================
+
+
+class TestAddTodoSubtask:
+    """``POST .../todos/{node_id}/subtasks`` — append a sub-task to a node's checklist.
+
+    Sub-task API contract (Phase 3 endpoints, ``daemon/routers/instances.py``):
+
+    * Body: ``{"text": "..."}`` validated by Pydantic
+      (``min_length=1, max_length=500``). Empty / over-length inputs are
+      rejected by Pydantic with the auto-422 (NOT 400 — Pydantic's body
+      validation contract precedes the endpoint's manual 400 path).
+    * Success returns ``{"todos": [...], "reminder": str}`` (pass-through
+      from :meth:`TodoGraphManager.add_subtask`).
+    * ``400 INVALID_REQUEST`` when the per-node cap
+      (:data:`MAX_SUBTASKS_PER_NODE`, currently 20) is exceeded — surfaced
+      from the manager's ``ValueError``.
+    * ``404 TODO_NOT_FOUND`` when ``node_id`` is not in the instance's
+      graph.
+    * ``404 INSTANCE_NOT_FOUND`` when the instance itself is unknown.
+    * Emits a ``stream_todo_update`` SSE event on success.
+    """
+
+    def test_post_subtask_success_returns_todos_and_reminder(self, client_with_manager):
+        """A valid request returns 200 with ``{todos, reminder}`` keys.
+
+        The new sub-task is appended to the parent's ``subtasks`` list
+        with the auto-generated ``s-`` prefixed id and default
+        ``"pending"`` status. The ``reminder`` is recomputed against the
+        parent's last status (sub-task changes don't affect the graph
+        reminder — see ``TodoGraphManager.add_subtask``).
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        nodes = mgr._todo_manager.create("inst-1", ["Parent"])
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+
+        resp = client.post(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks",
+            json={"text": "Write tests first"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body.keys()) == {"todos", "reminder"}
+        # Single node, single subtask appended.
+        assert len(body["todos"]) == 1
+        sub_list = body["todos"][0]["subtasks"]
+        assert len(sub_list) == 1
+        assert sub_list[0]["text"] == "Write tests first"
+        assert sub_list[0]["status"] == "pending"
+        assert sub_list[0]["id"].startswith("s-")
+        # State persisted.
+        stored = mgr._todo_manager.get_all("inst-1")[0]["subtasks"]
+        assert len(stored) == 1
+        assert stored[0]["text"] == "Write tests first"
+
+    def test_post_subtask_empty_text_returns_422(self, client_with_manager):
+        """Empty ``text`` is rejected by Pydantic with 422 ``ValidationError``.
+
+        ``TodoSubtaskCreateRequest`` enforces ``min_length=1`` at the
+        Pydantic layer. Empty / missing ``text`` never reaches the
+        endpoint — FastAPI returns the standard 422 envelope before the
+        handler runs.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        nodes = mgr._todo_manager.create("inst-1", ["A"])
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+
+        resp = client.post(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks",
+            json={"text": ""},
+        )
+
+        # Pydantic body validation returns 422, not 400.
+        assert resp.status_code == 422
+        # State untouched — the rejected write must NOT have created an empty subtask.
+        assert mgr._todo_manager.get_all("inst-1")[0]["subtasks"] == []
+
+    def test_post_subtask_text_too_long_returns_422(self, client_with_manager):
+        """Text exceeding ``MAX_SUBTASK_TEXT_LENGTH`` (500 chars) returns 422.
+
+        Pydantic enforces ``max_length=500`` on ``TodoSubtaskCreateRequest``;
+        501 characters never reaches the handler. We pick 501 to make the
+        off-by-one intent explicit (500 must pass — covered by the happy
+        path; 501 must fail).
+        """
+        from daemon.services.todo_manager import MAX_SUBTASK_TEXT_LENGTH
+
+        client, state = client_with_manager
+        mgr = _make_manager()
+        nodes = mgr._todo_manager.create("inst-1", ["A"])
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+
+        over_limit = "x" * (MAX_SUBTASK_TEXT_LENGTH + 1)
+        resp = client.post(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks",
+            json={"text": over_limit},
+        )
+
+        # Pydantic body validation returns 422, not 400.
+        assert resp.status_code == 422
+        # State untouched.
+        assert mgr._todo_manager.get_all("inst-1")[0]["subtasks"] == []
+
+    def test_post_subtask_exceeds_max_returns_400(self, client_with_manager):
+        """Adding the (N+1)th sub-task to a node with ``MAX_SUBTASKS_PER_NODE`` returns 400.
+
+        The cap is enforced inside :meth:`TodoGraphManager.add_subtask`
+        which raises ``ValueError``; the router translates to ``400
+        INVALID_REQUEST``. We seed the parent with exactly
+        :data:`MAX_SUBTASKS_PER_NODE` sub-tasks via ``create_graph`` (the
+        spec-validated entry point) and confirm the (N+1)th POST is
+        rejected.
+        """
+        from daemon.services.todo_manager import MAX_SUBTASKS_PER_NODE
+
+        client, state = client_with_manager
+        mgr = _make_manager()
+        # Build the parent with exactly MAX_SUBTASKS_PER_NODE subtasks up-front.
+        seed_subtasks = [{"text": f"task-{i}"} for i in range(MAX_SUBTASKS_PER_NODE)]
+        nodes = mgr._todo_manager.create_graph(
+            "inst-1",
+            nodes=[{"id": "n-parent", "text": "Parent", "subtasks": seed_subtasks}],
+            edges=[],
+        )
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+
+        resp = client.post(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks",
+            json={"text": "one too many"},
+        )
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["detail"]["code"] == "INVALID_REQUEST"
+        assert "max" in body["detail"]["message"].lower() or "exceeds" in body["detail"]["message"].lower()
+        # State untouched — the over-cap subtask must NOT be persisted.
+        stored = mgr._todo_manager.get_all("inst-1")[0]["subtasks"]
+        assert len(stored) == MAX_SUBTASKS_PER_NODE
+
+    def test_post_subtask_on_unknown_node_returns_404(self, client_with_manager):
+        """POST against an unknown ``node_id`` returns 404 ``TODO_NOT_FOUND``.
+
+        The instance has a todo list (so the manager lookup succeeds),
+        but the addressed node does not exist.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        mgr._todo_manager.create("inst-1", ["real-node"])  # list exists
+        state["manager"] = mgr
+
+        resp = client.post(
+            "/api/instances/inst-1/todos/n-doesnotexist/subtasks",
+            json={"text": "ghost"},
+        )
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "TODO_NOT_FOUND"
+        assert "n-doesnotexist" in body["detail"]["message"]
+
+    def test_post_subtask_missing_instance_returns_404(self, client_with_manager):
+        """POST against a non-existent ``instance_id`` short-circuits to 404.
+
+        ``_check_instance_exists`` runs before any node lookup, so the
+        router never reaches the ``add_subtask`` manager call. The error
+        envelope is the canonical ``INSTANCE_NOT_FOUND`` shape used by
+        every instance-scoped endpoint.
+        """
+        client, state = client_with_manager
+        state["manager"] = _make_manager(has_instance=False)
+
+        resp = client.post(
+            "/api/instances/ghost/todos/n-anything/subtasks",
+            json={"text": "into the void"},
+        )
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "INSTANCE_NOT_FOUND"
+        assert "Instance not found" in body["detail"]["message"]
+
+    def test_post_subtask_emits_sse_on_success(self, client_with_live_hub):
+        """A successful POST re-emits ``stream_todo_update`` with the post-mutation list.
+
+        Mirrors the comment/edge endpoint SSE contract: every mutation
+        pings the hub with the updated snapshot so connected clients
+        re-render without polling. We assert the first node's
+        ``subtasks`` field reflects the freshly appended sub-task.
+        """
+        client, state, hub = client_with_live_hub
+        mgr = state["manager"]
+        nodes = mgr._todo_manager.create("inst-1", ["Parent"])
+        node_id = nodes[0]["id"]
+
+        resp = client.post(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks",
+            json={"text": "first sub-task"},
+        )
+
+        assert resp.status_code == 200
+        assert hub.stream_todo_update.await_count == 1
+        call = hub.stream_todo_update.await_args
+        assert call.args[0] == "inst-1"
+        assert isinstance(call.args[1], list)
+        # First node carries the new sub-task in its ``subtasks`` field.
+        parent = call.args[1][0]
+        assert parent["id"] == node_id
+        assert isinstance(parent["subtasks"], list)
+        assert len(parent["subtasks"]) == 1
+        assert parent["subtasks"][0]["text"] == "first sub-task"
+
+    def test_subtask_route_not_captured_by_comment_route(self, client_with_manager):
+        """The ``/subtasks`` route must NOT be hijacked by the comment catch-all.
+
+        Both endpoints are registered against ``/{node_id}/...`` paths,
+        so FastAPI's order-sensitive matcher depends on subtask routes
+        being declared FIRST. If a future refactor reorders the router
+        and POSTing ``{"text": "..."}`` to ``/{node_id}/subtasks`` is
+        mis-routed to the comment endpoint (which expects
+        ``{"comment": "..."}``), this regression test trips with either
+        a 422 (Pydantic body mismatch) or a successful comment write
+        (silently wrong). We assert the success path lands on the
+        sub-task endpoint with the correct shape ``{todos, reminder}``
+        and the sub-task actually persisted.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        nodes = mgr._todo_manager.create("inst-1", ["Parent"])
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+
+        resp = client.post(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks",
+            json={"text": "via sub-task route"},
+        )
+
+        # Success shape — NOT the comment endpoint's single-item payload.
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body.keys()) == {"todos", "reminder"}
+        # The sub-task was actually appended to the parent's checklist.
+        stored = mgr._todo_manager.get_all("inst-1")[0]["subtasks"]
+        assert len(stored) == 1
+        assert stored[0]["text"] == "via sub-task route"
+
+
+# =============================================================================
+# PATCH /api/instances/{instance_id}/todos/{node_id}/subtasks/{subtask_id}
+# =============================================================================
+
+
+class TestUpdateTodoSubtask:
+    """``PATCH .../todos/{node_id}/subtasks/{subtask_id}`` — update sub-task status.
+
+    Sub-task PATCH contract:
+
+    * Body: ``{"status": "...", "auto_complete": bool}``. ``status`` is
+      normalized (lowercase + strip); only ``"pending"`` and ``"done"``
+      pass — ``"in_progress"`` and its aliases return ``400
+      INVALID_REQUEST``.
+    * Success returns ``{"todos": [...], "reminder": str, "auto_completed": bool}``.
+    * ``auto_completed=True`` only when this call flipped the parent from
+      a non-done status to ``"done"`` AND ``auto_complete=True`` AND all
+      sub-tasks are now ``"done"`` (vacuous-truth guard excludes
+      zero-subtask nodes — see manager).
+    * ``404 TODO_NOT_FOUND`` for unknown ``node_id`` or unknown
+      ``subtask_id``.
+    * Emits ``stream_todo_update`` on success.
+    """
+
+    def _seed_node_with_subtask(self, mgr, texts=("only sub-task",)):
+        """Helper: create a single-node graph with one sub-task.
+
+        Returns ``(node_id, subtask_id)``. Pulls the actual ids off the
+        manager's return values so the test stays decoupled from the
+        ID generator's internal format. Uses ``create_graph`` because
+        that path validates + persists sub-task specs atomically;
+        ``add_subtask`` requires the parent graph to already exist.
+        """
+        seed_spec = [{
+            "id": "n-seed",
+            "text": "Parent",
+            "subtasks": [{"text": t} for t in texts],
+        }]
+        nodes = mgr._todo_manager.create_graph("inst-1", seed_spec, [])
+        assert len(nodes) == 1
+        assert len(nodes[0]["subtasks"]) == len(texts)
+        return "n-seed", nodes[0]["subtasks"][0]["id"]
+
+    def test_patch_subtask_status_returns_todos_reminder_auto_completed(self, client_with_manager):
+        """A valid PATCH returns 200 with the full three-key response shape.
+
+        We assert on the EXACT response shape — ``todos``, ``reminder``,
+        AND ``auto_completed`` keys must all be present (the third key is
+        unique to the PATCH endpoint and is part of the frozen contract).
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        node_id, subtask_id = self._seed_node_with_subtask(mgr)
+        state["manager"] = mgr
+
+        resp = client.patch(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{subtask_id}",
+            json={"status": "done", "auto_complete": False},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # EXACT three-key contract — auto_completed is part of the PATCH response.
+        assert set(body.keys()) == {"todos", "reminder", "auto_completed"}
+        # auto_complete=False → no propagation.
+        assert body["auto_completed"] is False
+        # The targeted subtask is now done.
+        parent = next(n for n in body["todos"] if n["id"] == node_id)
+        assert parent["subtasks"][0]["status"] == "done"
+
+    def test_patch_subtask_auto_complete_all_done_flips_parent(self, client_with_manager):
+        """``auto_complete=True`` with the last sub-task flipped to ``done`` → parent auto-completed.
+
+        We seed a single sub-task; flipping it to done with
+        ``auto_complete=True`` makes the vacuous-truth guard irrelevant
+        (the subtask list is non-empty AND all-done), so the parent
+        transitions to ``"done"`` and ``auto_completed`` is True.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        node_id, subtask_id = self._seed_node_with_subtask(mgr)
+        state["manager"] = mgr
+
+        resp = client.patch(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{subtask_id}",
+            json={"status": "done", "auto_complete": True},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auto_completed"] is True
+        # Parent flipped to done.
+        parent = next(n for n in body["todos"] if n["id"] == node_id)
+        assert parent["status"] == "done"
+        # And persisted.
+        stored = mgr._todo_manager.get_all("inst-1")
+        assert stored[0]["status"] == "done"
+
+    def test_patch_subtask_auto_complete_not_all_done_no_propagation(self, client_with_manager):
+        """``auto_complete=True`` with remaining pending sub-tasks → ``auto_completed=False`` and parent unchanged.
+
+        We seed TWO sub-tasks, mark one done via PATCH. The other remains
+        ``pending``, so the parent must NOT be auto-completed — the
+        ``all(st.status == "done" ...)`` predicate short-circuits.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        # Two subtasks up front.
+        nodes = mgr._todo_manager.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "first"}, {"text": "second"}],
+            }],
+            edges=[],
+        )
+        node_id = nodes[0]["id"]
+        first_subtask_id = nodes[0]["subtasks"][0]["id"]
+        state["manager"] = mgr
+
+        resp = client.patch(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{first_subtask_id}",
+            json={"status": "done", "auto_complete": True},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auto_completed"] is False
+        parent = next(n for n in body["todos"] if n["id"] == node_id)
+        # Parent status remains pending — partial completion never propagates.
+        assert parent["status"] == "pending"
+        # The other subtask is still pending.
+        statuses = [s["status"] for s in parent["subtasks"]]
+        assert "pending" in statuses and "done" in statuses
+
+    def test_patch_subtask_invalid_status_returns_400(self, client_with_manager):
+        """A status that doesn't normalize to ``pending`` or ``done`` returns 400.
+
+        The endpoint normalizes via ``lower() + strip()`` then checks
+        membership in the strict binary set. ``"in_progress"`` is the
+        canonical rejection case (it's a valid NODE status but NOT a
+        valid SUB-TASK status).
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        node_id, subtask_id = self._seed_node_with_subtask(mgr)
+        state["manager"] = mgr
+
+        resp = client.patch(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{subtask_id}",
+            json={"status": "in_progress", "auto_complete": False},
+        )
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["detail"]["code"] == "INVALID_REQUEST"
+        # And the underlying status is untouched.
+        stored = mgr._todo_manager.get_all("inst-1")[0]["subtasks"][0]["status"]
+        assert stored == "pending"
+
+    def test_patch_subtask_unknown_subtask_returns_404(self, client_with_manager):
+        """An unknown ``subtask_id`` returns 404 ``TODO_NOT_FOUND``.
+
+        The parent node exists; only the addressed sub-task is missing.
+        The router must report the addressed-resource-not-found (404),
+        not silently succeed.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        node_id, _subtask_id = self._seed_node_with_subtask(mgr)
+        state["manager"] = mgr
+
+        resp = client.patch(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/s-doesnotexist",
+            json={"status": "done", "auto_complete": False},
+        )
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "TODO_NOT_FOUND"
+        assert "s-doesnotexist" in body["detail"]["message"]
+
+    def test_patch_subtask_missing_instance_returns_404(self, client_with_manager):
+        """PATCH against a non-existent ``instance_id`` short-circuits to 404.
+
+        ``_check_instance_exists`` fires before the ``update_subtask``
+        manager call, so the endpoint never tries to look up the node
+        or sub-task. The error envelope is the canonical
+        ``INSTANCE_NOT_FOUND`` shape used by every instance-scoped
+        endpoint.
+        """
+        client, state = client_with_manager
+        state["manager"] = _make_manager(has_instance=False)
+
+        resp = client.patch(
+            "/api/instances/ghost/todos/n-anything/subtasks/s-anything",
+            json={"status": "done", "auto_complete": False},
+        )
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "INSTANCE_NOT_FOUND"
+        assert "Instance not found" in body["detail"]["message"]
+
+    def test_patch_subtask_emits_sse_on_success(self, client_with_live_hub):
+        """A successful PATCH re-emits ``stream_todo_update`` with the post-mutation list.
+
+        Seeds a parent with a single sub-task via ``create_graph`` (the
+        spec-validated entry point), PATCHes it to ``done``, and asserts
+        the hub is pinged once with the updated snapshot. The targeted
+        sub-task's ``status`` field must reflect the new value in the
+        emitted list.
+        """
+        client, state, hub = client_with_live_hub
+        mgr = state["manager"]
+        node_id, subtask_id = self._seed_node_with_subtask(mgr)
+
+        resp = client.patch(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{subtask_id}",
+            json={"status": "done", "auto_complete": False},
+        )
+
+        assert resp.status_code == 200
+        assert hub.stream_todo_update.await_count == 1
+        call = hub.stream_todo_update.await_args
+        assert call.args[0] == "inst-1"
+        assert isinstance(call.args[1], list)
+        # The single seeded node carries the updated sub-task.
+        parent = call.args[1][0]
+        assert parent["id"] == node_id
+        assert len(parent["subtasks"]) == 1
+        assert parent["subtasks"][0]["id"] == subtask_id
+        assert parent["subtasks"][0]["status"] == "done"
+
+
+# =============================================================================
+# DELETE /api/instances/{instance_id}/todos/{node_id}/subtasks/{subtask_id}
+# =============================================================================
+
+
+class TestRemoveTodoSubtask:
+    """``DELETE .../todos/{node_id}/subtasks/{subtask_id}`` — drop a sub-task.
+
+    Sub-task DELETE contract:
+
+    * Success returns ``{"todos": [...], "reminder": str}`` (two-key —
+      no ``auto_completed`` flag, since DELETE never propagates).
+    * ``404 TODO_NOT_FOUND`` when ``node_id`` or ``subtask_id`` is
+      unknown.
+    * ``404 INSTANCE_NOT_FOUND`` when the instance itself is unknown.
+    * Emits ``stream_todo_update`` on success.
+    """
+
+    def test_delete_subtask_success_returns_todos_and_reminder(self, client_with_manager):
+        """A valid DELETE returns 200 with the two-key contract ``{todos, reminder}``.
+
+        We assert on the EXACT shape (NOT three-key) — DELETE has no
+        ``auto_completed`` flag because removal never propagates.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        nodes = mgr._todo_manager.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "keep me"}, {"text": "remove me"}],
+            }],
+            edges=[],
+        )
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+        keep_id = nodes[0]["subtasks"][0]["id"]
+        remove_id = nodes[0]["subtasks"][1]["id"]
+
+        resp = client.delete(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{remove_id}",
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # Two-key contract: NO auto_completed on DELETE.
+        assert set(body.keys()) == {"todos", "reminder"}
+        parent = next(n for n in body["todos"] if n["id"] == node_id)
+        remaining_ids = [s["id"] for s in parent["subtasks"]]
+        assert remaining_ids == [keep_id]
+        # State persisted.
+        stored = mgr._todo_manager.get_all("inst-1")[0]["subtasks"]
+        assert len(stored) == 1
+        assert stored[0]["id"] == keep_id
+
+    def test_delete_subtask_unknown_subtask_returns_404(self, client_with_manager):
+        """Deleting an unknown ``subtask_id`` returns 404 ``TODO_NOT_FOUND``.
+
+        The parent exists (so the node lookup succeeds) but the
+        addressed sub-task does not. The router maps the manager's
+        ``None`` return to the 404 envelope with the missing id in the
+        message so clients can debug.
+        """
+        client, state = client_with_manager
+        mgr = _make_manager()
+        nodes = mgr._todo_manager.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "real"}],
+            }],
+            edges=[],
+        )
+        state["manager"] = mgr
+        node_id = nodes[0]["id"]
+
+        resp = client.delete(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/s-ghost",
+        )
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "TODO_NOT_FOUND"
+        assert "s-ghost" in body["detail"]["message"]
+        # The real sub-task must NOT be touched.
+        stored = mgr._todo_manager.get_all("inst-1")[0]["subtasks"]
+        assert len(stored) == 1
+        assert stored[0]["text"] == "real"
+
+    def test_delete_subtask_missing_instance_returns_404(self, client_with_manager):
+        """DELETE against a non-existent ``instance_id`` short-circuits to 404.
+
+        ``_check_instance_exists`` fires before the ``remove_subtask``
+        manager call, so the endpoint never tries to look up the node
+        or sub-task. The error envelope is the canonical
+        ``INSTANCE_NOT_FOUND`` shape used by every instance-scoped
+        endpoint.
+        """
+        client, state = client_with_manager
+        state["manager"] = _make_manager(has_instance=False)
+
+        resp = client.delete(
+            "/api/instances/ghost/todos/n-anything/subtasks/s-anything",
+        )
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["detail"]["code"] == "INSTANCE_NOT_FOUND"
+        assert "Instance not found" in body["detail"]["message"]
+
+    def test_delete_subtask_emits_sse_on_success(self, client_with_live_hub):
+        """A successful DELETE re-emits ``stream_todo_update`` with the post-mutation list.
+
+        Seeds a parent with two sub-tasks via ``create_graph``, removes
+        one, and asserts the hub is pinged once with the updated snapshot.
+        The remaining sub-task must still be present in the emitted
+        list (the deleted one is gone).
+        """
+        client, state, hub = client_with_live_hub
+        mgr = state["manager"]
+        nodes = mgr._todo_manager.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "keep"}, {"text": "remove"}],
+            }],
+            edges=[],
+        )
+        node_id = nodes[0]["id"]
+        keep_id = nodes[0]["subtasks"][0]["id"]
+        remove_id = nodes[0]["subtasks"][1]["id"]
+
+        resp = client.delete(
+            f"/api/instances/inst-1/todos/{node_id}/subtasks/{remove_id}",
+        )
+
+        assert resp.status_code == 200
+        assert hub.stream_todo_update.await_count == 1
+        call = hub.stream_todo_update.await_args
+        assert call.args[0] == "inst-1"
+        assert isinstance(call.args[1], list)
+        parent = call.args[1][0]
+        assert parent["id"] == node_id
+        # The deleted sub-task is gone; only the kept one remains.
+        remaining_ids = [s["id"] for s in parent["subtasks"]]
+        assert remaining_ids == [keep_id]

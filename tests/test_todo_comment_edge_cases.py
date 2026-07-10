@@ -632,3 +632,350 @@ class TestRouterSSEOnCommentEdgeCases:
         # Status / text are untouched.
         assert payload[1]["text"] == "beta"
         assert payload[1]["status"] == "pending"
+
+
+# =============================================================================
+# 4. Sub-task edge cases — cross-feature interaction with comments, edges,
+#    auto-completion, and ``create_graph`` validation.
+# =============================================================================
+
+
+class TestSubtaskEdgeCases:
+    """Cross-feature coverage for the Phase 1 sub-task checklist.
+
+    The router/API tests cover the sub-task endpoints in isolation. This
+    class fills the cross-feature gaps: a node carries both a comment
+    AND a sub-task list; sub-task mutations must not corrupt the
+    graph's edge structure; auto-completion must produce a coherent
+    reminder; and ``create_graph`` must reject malformed ``subtasks``
+    specs up-front so no invalid state ever lands in storage.
+    """
+
+    def test_subtask_and_comment_coexist_on_same_node(self):
+        """A node can carry both a comment AND a non-empty sub-task list.
+
+        The two fields live independently on :class:`TodoNode` —
+        ``comment`` is a single string, ``subtasks`` is a list. Setting
+        one must not overwrite, truncate, or otherwise interfere with
+        the other.
+        """
+        mgr = TodoManager()
+        nodes = mgr.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "first sub-task"}, {"text": "second sub-task"}],
+            }],
+            edges=[],
+        )
+        node_id = nodes[0]["id"]
+
+        # Annotate the parent with a comment (the other feature).
+        updated = mgr.set_comment("inst-1", node_id, "needs review")
+        assert updated["comment"] == "needs review"
+        # The sub-task list is intact.
+        assert len(updated["subtasks"]) == 2
+        assert updated["subtasks"][0]["text"] == "first sub-task"
+        assert updated["subtasks"][1]["text"] == "second sub-task"
+
+        # And the reverse: a comment set first must survive a sub-task
+        # addition.
+        mgr2 = TodoManager()
+        mgr2.create("inst-2", ["plain"])
+        mgr2.set_comment_by_index("inst-2", 0, "preexisting comment")
+        add_result = mgr2.add_subtask("inst-2", "n-fake-id-doesnt-exist", "ignored")
+        # add_subtask against a missing node returns None — that's the
+        # expected negative path. The comment on the real node is
+        # unaffected.
+        assert add_result is None
+        assert mgr2.get_all("inst-2")[0]["comment"] == "preexisting comment"
+
+    def test_subtask_mutations_do_not_affect_graph_edges(self):
+        """Adding / removing sub-tasks leaves the parent's ``next_ids`` adjacency intact.
+
+        Sub-tasks live on a separate dataclass field (``TodoNode.subtasks``)
+        from graph edges (``TodoNode.next_ids``). Mutating one must not
+        touch the other — the two are orthogonal features.
+        """
+        mgr = TodoManager()
+        # Branching DAG: A → B, A → C.
+        mgr.create_graph(
+            "inst-1",
+            nodes=[
+                {"id": "n-a", "text": "A"},
+                {"id": "n-b", "text": "B"},
+                {"id": "n-c", "text": "C"},
+            ],
+            edges=[{"from": "n-a", "to": "n-b"}, {"from": "n-a", "to": "n-c"}],
+        )
+
+        # Sanity: A has two outbound edges before any sub-task work.
+        before = mgr.get_all("inst-1")
+        a_before = next(n for n in before if n["id"] == "n-a")
+        assert set(a_before["next_ids"]) == {"n-b", "n-c"}
+
+        # Add a sub-task to A.
+        add_result = mgr.add_subtask("inst-1", "n-a", "outline")
+        assert add_result is not None
+        # Edges untouched.
+        after_add = mgr.get_all("inst-1")
+        a_after_add = next(n for n in after_add if n["id"] == "n-a")
+        assert set(a_after_add["next_ids"]) == {"n-b", "n-c"}
+        assert len(a_after_add["subtasks"]) == 1
+
+        # Add another, then remove the first.
+        new_sub_id = add_result["todos"][0]["subtasks"][0]["id"]
+        mgr.add_subtask("inst-1", "n-a", "follow-up")
+        mgr.remove_subtask("inst-1", "n-a", new_sub_id)
+
+        # Edges STILL untouched.
+        after_both = mgr.get_all("inst-1")
+        a_after_both = next(n for n in after_both if n["id"] == "n-a")
+        assert set(a_after_both["next_ids"]) == {"n-b", "n-c"}
+        assert len(a_after_both["subtasks"]) == 1
+        assert a_after_both["subtasks"][0]["text"] == "follow-up"
+
+        # And an edge mutation must not corrupt the sub-task list.
+        # Drop the A→B edge and verify the sub-task remains.
+        mgr.remove_edge("inst-1", "n-a", "n-b")
+        after_edge = mgr.get_all("inst-1")
+        a_after_edge = next(n for n in after_edge if n["id"] == "n-a")
+        assert a_after_edge["next_ids"] == ["n-c"]
+        assert len(a_after_edge["subtasks"]) == 1
+        assert a_after_edge["subtasks"][0]["text"] == "follow-up"
+
+    def test_auto_complete_propagates_to_reminder_with_comment_fence(self):
+        """After auto-completion, the reminder carries the parent's comment under fences.
+
+        The reminder format from :meth:`_compute_reminder` is
+        ``User commented:\n---\n{comment}\n---\n{next-or-blocked}`` when
+        a parent transitions to ``"done"`` AND carries a non-empty
+        comment. The sub-task auto-completion path must surface the
+        same fence-protected reminder — sub-task updates don't get a
+        special-case reminder.
+        """
+        mgr = TodoManager()
+        # Seed a parent with a comment AND a single sub-task.
+        nodes = mgr.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "only sub-task"}],
+            }],
+            edges=[],
+        )
+        node_id = nodes[0]["id"]
+        subtask_id = nodes[0]["subtasks"][0]["id"]
+        mgr.set_comment("inst-1", node_id, "Reviewed — looks good")
+
+        # Flip the sub-task to done with auto_complete=True. Because the
+        # parent's comment is non-empty AND the sub-task list is now
+        # all-done, the parent auto-completes AND the comment fence
+        # prefix is applied to the reminder.
+        result = mgr.update_subtask(
+            "inst-1", node_id, subtask_id, "done", auto_complete=True
+        )
+        assert result is not None
+        assert result["auto_completed"] is True
+        reminder = result["reminder"]
+        # Comment is preserved verbatim between the fences.
+        assert "User commented:\n---\nReviewed — looks good\n---\n" in reminder
+        # And since the parent is now done, the graph has no pending
+        # nodes — the base reminder is the "all completed" tail.
+        assert "All items completed!" in reminder
+
+    def test_auto_complete_with_pending_subtask_does_not_propagate(self):
+        """``auto_complete=True`` with remaining pending sub-tasks → no propagation.
+
+        Multiple sub-tasks, only one flipped to done. The parent's
+        ``status`` must remain ``"pending"``, the parent must not appear
+        in the reminder as done, and the response's ``auto_completed``
+        flag must be ``False``.
+        """
+        mgr = TodoManager()
+        nodes = mgr.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": "first"}, {"text": "second"}, {"text": "third"}],
+            }],
+            edges=[],
+        )
+        node_id = nodes[0]["id"]
+        first_sub = nodes[0]["subtasks"][0]["id"]
+
+        result = mgr.update_subtask(
+            "inst-1", node_id, first_sub, "done", auto_complete=True
+        )
+        assert result is not None
+        assert result["auto_completed"] is False
+
+        # Parent status is still pending.
+        stored = mgr.get_all("inst-1")
+        parent = next(n for n in stored if n["id"] == node_id)
+        assert parent["status"] == "pending"
+        # Two sub-tasks remain pending.
+        statuses = [s["status"] for s in parent["subtasks"]]
+        assert statuses.count("pending") == 2
+        assert statuses.count("done") == 1
+
+    def test_update_subtask_with_auto_complete_on_node_with_no_subtasks_returns_none(self):
+        """Defensive contract test: vacuous-truth guard is unreachable via public API.
+
+        The guard ``node.subtasks and all(...)`` at todo_manager.py:999-1004 protects
+        against ``all([]) == True`` accidentally auto-completing nodes with zero
+        sub-tasks. The guard is only reached AFTER the sub-task is found in
+        ``node.subtasks``, which is impossible when the list is empty (the lookup
+        at line 989 returns None first).
+
+        This test documents the contract:
+          * Calling update_subtask on a node with NO sub-tasks (and any
+            subtask_id) returns None (the sub-task is not found).
+          * The parent status is unchanged.
+          * The vacuous-truth guard is defensive — kept for future-proofing but
+            not exercised through the public surface.
+
+        If a future refactor introduces a code path that bypasses the
+        sub-task lookup (e.g., a bulk-update endpoint), this test will need
+        to be revisited.
+        """
+        mgr = TodoManager()
+        # Node with NO subtasks.
+        nodes = mgr.create_graph(
+            "inst-1",
+            nodes=[{"id": "n-empty", "text": "Empty parent"}],
+            edges=[],
+        )
+        node_id = nodes[0]["id"]
+
+        # Call update_subtask with auto_complete=True. The sub-task is not
+        # found → returns None BEFORE the vacuous-truth guard fires.
+        result = mgr.update_subtask(
+            "inst-1", node_id, "s-doesnotexist", "done", auto_complete=True
+        )
+        assert result is None
+
+        # Parent status is unchanged — the guard PREVENTS propagation if it
+        # ever were reachable.
+        stored = mgr.get_all("inst-1")
+        parent = next(n for n in stored if n["id"] == node_id)
+        assert parent["status"] == "pending"
+        assert parent["subtasks"] == []
+
+    def test_create_graph_with_non_list_subtasks_raises_value_error(self):
+        """``create_graph`` rejects non-list ``subtasks`` with ``ValueError``.
+
+        The validation lives in :meth:`TodoGraphManager.create_graph`
+        (NOT in the HTTP layer — the router never passes a non-list).
+        A ``subtasks`` field that is a string, dict, or any other type
+        is malformed and must surface as a ``ValueError`` BEFORE any
+        state mutation occurs (no partial graph on failure).
+        """
+        mgr = TodoManager()
+
+        malformed_specs = [
+            "this is a string, not a list",
+            {"text": "this is a dict, not a list"},
+            42,                                       # int
+            ("a", "tuple"),                           # tuple (mutable but not list)
+            None,                                     # None is normalized to [] — NOT malformed
+        ]
+        # None is special: it should be normalized to an empty list, not raise.
+        # The other four MUST raise.
+        for bad in malformed_specs[:-1]:
+            with pytest.raises(ValueError, match="must be a list"):
+                mgr.create_graph(
+                    "inst-1",
+                    nodes=[{"id": "n-x", "text": "X", "subtasks": bad}],
+                    edges=[],
+                )
+
+        # And the failed calls must not have left state behind.
+        assert mgr.get_all("inst-1") == []
+
+        # Positive control: ``subtasks=None`` is normalized to ``[]``
+        # and the call succeeds (returns the new node with empty
+        # sub-task list).
+        ok_nodes = mgr.create_graph(
+            "inst-2",
+            nodes=[{"id": "n-y", "text": "Y", "subtasks": None}],
+            edges=[],
+        )
+        assert ok_nodes[0]["subtasks"] == []
+
+    def test_remove_subtask_during_iteration_does_not_raise(self):
+        """Thread-safety invariant: ``remove_subtask`` racing with iteration is safe.
+
+        Two threads coordinate via ``threading.Barrier(2)`` so they
+        start as close to simultaneously as possible:
+
+          * The reader iterates over the parent's sub-task list many
+            times via ``get_all``, which goes through the manager's
+            internal lock and produces a fresh dict snapshot.
+          * The writer removes the first sub-task under the same lock.
+
+        Both ``get_all`` and ``remove_subtask`` are guarded by
+        ``self._lock``, and ``_to_dict`` deep-copies the subtask list
+        so the iterator never walks a list that another thread is
+        reassigning. This test is therefore a **defensive
+        documentation test** — there is no real race today, but if a
+        future refactor weakens the lock (e.g., reads the internal
+        list without the lock), this test will catch the regression
+        by collecting any exception the reader thread raises.
+
+        The invariant asserted after join: 9 sub-tasks remain (one
+        was removed) and no thread raised.
+        """
+        mgr = TodoManager()
+        # Seed a parent with 10 sub-tasks so the reader has plenty of
+        # work to do while the writer removes one.
+        mgr.create_graph(
+            "inst-1",
+            nodes=[{
+                "id": "n-parent",
+                "text": "Parent",
+                "subtasks": [{"text": f"sub-{i}"} for i in range(10)],
+            }],
+            edges=[],
+        )
+
+        errors: list[tuple[str, BaseException]] = []
+
+        def reader() -> None:
+            try:
+                barrier.wait()
+                # Snapshot via get_all — exercises the lock-protected path.
+                # Iterate enough times to overlap with the writer's removal.
+                for _ in range(50):
+                    items = mgr.get_all("inst-1")
+                    for sub in items[0]["subtasks"]:
+                        # Touch each sub to ensure full iteration.
+                        _ = sub["text"]
+            except BaseException as e:  # noqa: BLE001
+                errors.append(("reader", e))
+
+        def writer() -> None:
+            try:
+                barrier.wait()
+                # Remove first sub-task (race-target).
+                first_id = mgr.get_all("inst-1")[0]["subtasks"][0]["id"]
+                mgr.remove_subtask("inst-1", "n-parent", first_id)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(("writer", e))
+
+        barrier = threading.Barrier(2)
+        t1 = threading.Thread(target=reader)
+        t2 = threading.Thread(target=writer)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Neither thread raised — the lock and list-reassignment
+        # strategy is sound.
+        assert errors == [], f"Concurrent iteration raised: {errors}"
+        # Final state: 9 sub-tasks remain.
+        assert len(mgr.get_all("inst-1")[0]["subtasks"]) == 9

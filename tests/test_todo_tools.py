@@ -1119,6 +1119,55 @@ class TestTodoRemoveSubtask:
 
 
 # =============================================================================
+# Factory — _full_doc_ attribute on the three new sub-task tools
+# =============================================================================
+
+
+class TestFactoryFullDocSubtask:
+    """All 9 tools (including the 3 new sub-task tools) carry a
+    ``_full_doc_`` string used by the agent's tool-discovery layer.
+    Sub-tasks Phase 1 added 3 tools; each must advertise its full doc
+    alongside the existing 6.
+    """
+
+    def test_all_nine_tools_carry_full_doc_attribute(self):
+        """Every tool in the factory has ``_full_doc_`` set to a non-empty
+        string. Guards against a missing string assignment silently breaking
+        the tool-description endpoint.
+        """
+        tools = _build_tools()
+
+        for tool in tools:
+            doc = getattr(tool, "_full_doc_", None)
+            assert isinstance(doc, str), (
+                f"Tool {tool.name} missing or non-string _full_doc_ attribute"
+            )
+            assert doc, f"Tool {tool.name} has empty _full_doc_ string"
+
+    def test_three_new_subtask_tools_carry_full_doc_attribute(self):
+        """``todo_add_subtask``, ``todo_update_subtask``,
+        ``todo_remove_subtask`` — the three Sub-Task Phase 1 tools —
+        each carry a ``_full_doc_`` string. This is the explicit check
+        the task spec requires for the new tools.
+        """
+        tools = _build_tools()
+        by_name = {t.name: t for t in tools}
+
+        new_tools = [
+            "todo_add_subtask",
+            "todo_update_subtask",
+            "todo_remove_subtask",
+        ]
+        for name in new_tools:
+            assert name in by_name, f"Factory missing {name!r}"
+            doc = getattr(by_name[name], "_full_doc_", None)
+            assert isinstance(doc, str), (
+                f"{name} missing or non-string _full_doc_"
+            )
+            assert doc, f"{name} has empty _full_doc_"
+
+
+# =============================================================================
 # _format_graph -- sub-task rendering (Sub-Task Phase 1)
 # =============================================================================
 
