@@ -4,9 +4,10 @@ Endpoints under test (in ``daemon/routers/instances.py``):
 
   * ``GET    /api/instances/{instance_id}/todos``
         Returns the instance's todo list as a JSON array. Each item
-        has the **frozen Phase 3 schema** (six keys): ``id``,
-        ``index``, ``text``, ``status``, ``comment``, ``next_ids``.
-        Empty list ``[]`` when the instance has no todos yet.
+        has the **frozen Phase 3 schema** (seven keys): ``id``,
+        ``index``, ``text``, ``status``, ``comment``, ``next_ids``,
+        ``subtasks``. Empty list ``[]`` when the instance has no
+        todos yet.
   * ``POST   /api/instances/{instance_id}/todos/{node_id}/comment``
         Sets a comment on a todo node. Body: ``{"comment": "..."}``.
         ``node_id`` may be either a generated ``n-`` prefixed ID
@@ -134,15 +135,16 @@ class TestGetInstanceTodos:
         assert resp.json() == []
 
     def test_returns_full_list_with_all_fields(self, client_with_manager):
-        """Each item includes the six frozen-schema keys.
+        """Each item includes the seven frozen-schema keys.
 
         Phase 3 expanded the payload from four to six keys so the
         frontend can render node identity (``id``) and successor
-        adjacency (``next_ids``) without a second round-trip. The full
-        set is the *frozen* contract documented on
-        ``TodoGraphManager._to_dict``:
+        adjacency (``next_ids``) without a second round-trip; Phase 1b
+        of the todo-subtasks feature expanded it from six to seven
+        keys by adding ``subtasks``. The full set is the *frozen*
+        contract documented on ``TodoGraphManager._to_dict``:
 
-            ``id``, ``index``, ``text``, ``status``, ``comment``, ``next_ids``
+            ``id``, ``index``, ``text``, ``status``, ``comment``, ``next_ids``, ``subtasks``
         """
         client, state = client_with_manager
         mgr = _make_manager()
@@ -155,7 +157,7 @@ class TestGetInstanceTodos:
         body = resp.json()
         assert isinstance(body, list)
         assert len(body) == 3
-        expected_keys = {"id", "index", "text", "status", "comment", "next_ids"}
+        expected_keys = {"id", "index", "text", "status", "comment", "next_ids", "subtasks"}
         for item in body:
             assert set(item.keys()) == expected_keys
             # New graph-aware fields surface with sensible defaults:

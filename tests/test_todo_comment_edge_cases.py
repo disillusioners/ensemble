@@ -184,7 +184,7 @@ class TestConcurrentSetComment:
                     assert len(snapshot) == 20
                     for item in snapshot:
                         # Every key present, every value typed correctly.
-                        assert set(item.keys()) == {"id", "index", "text", "status", "comment", "next_ids"}
+                        assert set(item.keys()) == {"id", "index", "text", "status", "comment", "next_ids", "subtasks"}
                         assert isinstance(item["text"], str)
                         assert isinstance(item["comment"], str)
                         assert item["status"] in {"pending", "in_progress", "done"}

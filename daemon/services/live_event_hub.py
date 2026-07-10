@@ -349,7 +349,7 @@ class LiveEventHub:
         Args:
             instance_id: The instance this todo update belongs to.
             todos: List of todo node dicts (frozen Phase 1 schema). Each
-                dict has exactly six keys:
+                dict has exactly seven keys:
 
                 * ``id`` (str): Node identifier, always ``n-`` prefixed
                   (e.g., ``"n-a1b2c3d4"``). Stable across mutations.
@@ -364,10 +364,15 @@ class LiveEventHub:
                   Empty string when no comment is set.
                 * ``next_ids`` (list[str]): Adjacency list of successor
                   node IDs. Empty list for terminal (sink) nodes.
+                * ``subtasks`` (list[dict]): Checklist of sub-task dicts.
+                  Each dict has three keys: ``id`` (s-prefixed),
+                  ``text`` (description), ``status`` (pending|done —
+                  binary).
 
-                The dict shape is **frozen** across Phase 1 (manager),
-                Phase 3 (API), and Phase 4 (frontend) and must not be
-                changed without cross-phase coordination.
+                The dict shape is **frozen** across Phase 1 (manager)
+                and Phase 1b (sub-tasks); schema evolved from six to
+                seven keys and must not be changed without cross-phase
+                coordination.
         """
         event: dict[str, Any] = {
             "instance_id": instance_id,

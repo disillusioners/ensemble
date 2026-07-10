@@ -7,10 +7,10 @@ on every successful mutation. The events are delivered through
 ``asyncio.Queue``-based fanout (no DB persistence — see
 ``LiveEventHub._stream_to_connections``).
 
-Every payload item follows the **frozen 6-key schema** that the
+Every payload item follows the **frozen 7-key schema** that the
 frontend's Angular signals consume:
 
-    {id, index, text, status, comment, next_ids}
+    {id, index, text, status, comment, next_ids, subtasks}
 
 ``id`` is the stable node ID (``n-`` prefixed), ``index`` is the
 backward-compat insertion-order position, and ``next_ids`` carries the
@@ -299,13 +299,13 @@ class TestSSEPayloadStructure:
     """The ``todos`` argument sent to the hub mirrors the manager's stored state."""
 
     async def test_sse_payload_after_create_contains_serializable_dicts(self):
-        """Each ``todo`` in the payload is a plain 6-key dict.
+        """Each ``todo`` in the payload is a plain 7-key dict.
 
         The frontend JSON-serializes the payload directly — anything not
         a primitive would break its parser. The frozen Phase 1 schema
         carries exactly these keys per node::
 
-            {id, index, text, status, comment, next_ids}
+            {id, index, text, status, comment, next_ids, subtasks}
 
         ``comment`` is always present (default empty string) and
         ``next_ids`` is always present (default empty list) so the FE
@@ -328,6 +328,7 @@ class TestSSEPayloadStructure:
             "status",
             "comment",
             "next_ids",
+            "subtasks",
         }
         assert item["index"] == 0
         assert item["text"] == "Only one"
@@ -340,6 +341,9 @@ class TestSSEPayloadStructure:
         # always a list (never ``None``).
         assert item["next_ids"] == []
         assert isinstance(item["next_ids"], list)
+        # ``subtasks`` defaults to ``[]`` for a node with no checklist.
+        assert item["subtasks"] == []
+        assert isinstance(item["subtasks"], list)
 
     async def test_sse_payload_after_partial_progress_reflects_current_state(self):
         """After marking some items done, the payload reflects the new statuses.
@@ -361,13 +365,13 @@ class TestSSEPayloadStructure:
         # The newly-created list is all-pending (create replaces, not merges).
         assert [t["status"] for t in todos_arg] == ["pending", "pending", "pending"]
 
-    async def test_sse_payload_after_update_contains_six_keys(self):
-        """After ``todo_update``, the SSE payload still carries 6-key dicts.
+    async def test_sse_payload_after_update_contains_seven_keys(self):
+        """After ``todo_update``, the SSE payload still carries 7-key dicts.
 
-        The 6-key schema is the cross-phase contract — the FE
+        The 7-key schema is the cross-phase contract — the FE
         reconstructs graph state from the SSE stream alone and never
         needs to hit the API. A successful update must therefore emit
-        the same shape as ``todo_create`` (same six keys), not a
+        the same shape as ``todo_create`` (same seven keys), not a
         trimmed-down variant.
         """
         hub = AsyncMock()
@@ -391,6 +395,7 @@ class TestSSEPayloadStructure:
                 "status",
                 "comment",
                 "next_ids",
+                "subtasks",
             }
             assert isinstance(item["id"], str) and item["id"].startswith("n-")
             assert isinstance(item["next_ids"], list)
@@ -405,7 +410,7 @@ class TestSSEPayloadStructure:
 
         Node IDs are looked up from the manager (not positional
         indexes) — ``todo_add_edge`` is keyed by stable ``n-``-prefixed
-        IDs. The emission contains the full 6-key node list (not a
+        IDs. The emission contains the full 7-key node list (not a
         diff), because the FE re-renders from the snapshot.
         """
         hub = AsyncMock()
@@ -428,7 +433,7 @@ class TestSSEPayloadStructure:
 
         hub.stream_todo_update.assert_awaited_once()
         todos_arg = hub.stream_todo_update.call_args.args[1]
-        # Snapshot is the full node list, 6 keys each.
+        # Snapshot is the full node list, 7 keys each.
         assert len(todos_arg) == 3
         for item in todos_arg:
             assert set(item.keys()) == {
@@ -438,6 +443,7 @@ class TestSSEPayloadStructure:
                 "status",
                 "comment",
                 "next_ids",
+                "subtasks",
             }
         # A's next_ids now contains both B (original) and C (new edge).
         a_node = next(n for n in todos_arg if n["id"] == a_id)
@@ -475,7 +481,7 @@ class TestSSEPayloadStructure:
 
         hub.stream_todo_update.assert_awaited_once()
         todos_arg = hub.stream_todo_update.call_args.args[1]
-        # Snapshot is the full node list, 6 keys each.
+        # Snapshot is the full node list, 7 keys each.
         assert len(todos_arg) == 3
         for item in todos_arg:
             assert set(item.keys()) == {
@@ -485,6 +491,7 @@ class TestSSEPayloadStructure:
                 "status",
                 "comment",
                 "next_ids",
+                "subtasks",
             }
         # The removed edge is gone — A no longer points at B.
         a_node = next(n for n in todos_arg if n["id"] == a_id)

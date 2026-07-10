@@ -18,8 +18,11 @@ No DB, no asyncio, no SSE: these are pure sync unit tests of one class.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
+from daemon.services.todo_manager import MAX_SUBTASKS_PER_NODE
 from daemon.services.todo_manager import TodoGraphManager
 from daemon.services.todo_manager import TodoManager
 
@@ -396,12 +399,13 @@ class TestTodoManagerGetAll:
         assert isinstance(result, list)
         assert len(result) == 1
         item = result[0]
-        assert set(item.keys()) == {"id", "index", "text", "status", "comment", "next_ids"}
+        assert set(item.keys()) == {"id", "index", "text", "status", "comment", "next_ids", "subtasks"}
         assert item["index"] == 0
         assert item["text"] == "Only item"
         assert item["status"] == "pending"
         assert item["comment"] == ""
         assert item["next_ids"] == []
+        assert item["subtasks"] == []
 
     def test_get_all_reflects_updates(self):
         """``get_all`` after ``update`` returns the latest status."""
@@ -1055,8 +1059,8 @@ class TestTodoManagerBackwardCompat:
 class TestTodoGraphManagerStructure:
     """Schema-level assertions: payload shape, size caps, graph view."""
 
-    def test_to_dict_has_six_keys(self):
-        """``_to_dict`` emits exactly the six-key frozen schema.
+    def test_to_dict_has_seven_keys(self):
+        """``_to_dict`` emits exactly the seven-key frozen schema.
 
         This guards the contract downstream phases (tools, API, UI)
         rely on — any change requires cross-phase coordination.
@@ -1066,13 +1070,14 @@ class TestTodoGraphManagerStructure:
         nodes = mgr._instance_graphs["inst-1"]
         result = TodoGraphManager._to_dict(list(nodes.values())[0])
 
-        assert set(result.keys()) == {"id", "index", "text", "status", "comment", "next_ids"}
+        assert set(result.keys()) == {"id", "index", "text", "status", "comment", "next_ids", "subtasks"}
         assert isinstance(result["id"], str) and result["id"].startswith("n-")
         assert result["index"] == 0
         assert result["text"] == "X"
         assert result["status"] == "pending"
         assert result["comment"] == ""
         assert result["next_ids"] == []
+        assert result["subtasks"] == []
 
     def test_max_nodes_enforced_on_create(self):
         """Flat-list ``create`` caps at ``MAX_NODES`` (200)."""
@@ -1110,3 +1115,544 @@ class TestTodoGraphManagerStructure:
         mgr = TodoGraphManager()
 
         assert mgr.get_graph("never-created") == {"nodes": [], "edges": []}
+
+
+# =============================================================================
+# Phase 1 sub-task feature coverage
+# =============================================================================
+
+
+class TestTodoSubtasks:
+    """Phase 1 sub-task feature coverage for ``TodoGraphManager``."""
+
+    # ------------------------------------------------------------------
+    # add_subtask (5 tests)
+    # ------------------------------------------------------------------
+
+    def test_add_subtask_creates_pending_subtask(self):
+        """add_subtask returns ``{todos, reminder}``; new entry is ``pending``."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        result = mgr.add_subtask("inst-1", node_id, "do thing")
+
+        assert set(result.keys()) == {"todos", "reminder"}
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        assert len(node["subtasks"]) == 1
+        assert node["subtasks"][0]["status"] == "pending"
+        assert node["subtasks"][0]["text"] == "do thing"
+
+    def test_add_subtask_generates_s_prefixed_id(self):
+        """Auto-generated sub-task ids are prefixed with ``s-``."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        result = mgr.add_subtask("inst-1", node_id, "auto-id check")
+        sub_id = result["todos"][0]["subtasks"][0]["id"]
+
+        assert sub_id.startswith("s-")
+
+    def test_add_subtask_max_limit(self):
+        """The 21st sub-task on a node raises ``ValueError`` (cap is 20)."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        for i in range(MAX_SUBTASKS_PER_NODE):
+            mgr.add_subtask("inst-1", node_id, f"sub-{i}")
+
+        with pytest.raises(ValueError, match=r"sub-task|maximum|20"):
+            mgr.add_subtask("inst-1", node_id, "one too many")
+
+    def test_add_subtask_text_too_long(self):
+        """add_subtask rejects text exceeding MAX_SUBTASK_TEXT_LENGTH (500 chars)."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        long_text = "x" * 501  # One over the cap
+
+        with pytest.raises(ValueError, match=r"sub-task|maximum|500"):
+            mgr.add_subtask("inst-1", node_id, long_text)
+
+    def test_create_graph_subtask_text_too_long(self):
+        """create_graph rejects a subtask spec with text > MAX_SUBTASK_TEXT_LENGTH."""
+        mgr = TodoGraphManager()
+        long_text = "x" * 501
+
+        with pytest.raises(ValueError, match=r"subtasks|maximum|500"):
+            mgr.create_graph(
+                "inst-1",
+                [{"id": "x", "text": "X", "subtasks": [{"text": long_text}]}],
+                [],
+            )
+
+    def test_add_subtask_to_nonexistent_node(self):
+        """add_subtask returns ``None`` for an unknown node id."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+
+        result = mgr.add_subtask("inst-1", "n-deadbeef", "ghost")
+
+        assert result is None
+
+    def test_add_subtask_to_nonexistent_instance(self):
+        """add_subtask returns ``None`` for an unknown instance id."""
+        mgr = TodoGraphManager()
+
+        result = mgr.add_subtask("never-created", "n-deadbeef", "ghost")
+
+        assert result is None
+
+    # ------------------------------------------------------------------
+    # update_subtask (9 tests)
+    # ------------------------------------------------------------------
+
+    def test_update_subtask_to_done(self):
+        """Marking a sub-task done flips its status to ``done`` in the snapshot."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task")
+        st_id = mgr.get_all("inst-1")[0]["subtasks"][0]["id"]
+
+        result = mgr.update_subtask("inst-1", node_id, st_id, "done")
+
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        assert node["subtasks"][0]["status"] == "done"
+
+    def test_update_subtask_auto_complete_propagates(self):
+        """Marking all sub-tasks done with auto_complete=True flips parent."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task-1")
+        mgr.add_subtask("inst-1", node_id, "task-2")
+        st_ids = [st["id"] for st in mgr.get_all("inst-1")[0]["subtasks"]]
+        mgr.update_subtask("inst-1", node_id, st_ids[0], "done", auto_complete=True)
+
+        result = mgr.update_subtask(
+            "inst-1", node_id, st_ids[1], "done", auto_complete=True
+        )
+
+        assert result["auto_completed"] is True
+        parent = next(n for n in result["todos"] if n["id"] == node_id)
+        assert parent["status"] == "done"
+
+    def test_update_subtask_auto_complete_off_no_propagation(self):
+        """auto_complete=False leaves parent status even when all done."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task-1")
+        mgr.add_subtask("inst-1", node_id, "task-2")
+        st_ids = [st["id"] for st in mgr.get_all("inst-1")[0]["subtasks"]]
+        mgr.update_subtask("inst-1", node_id, st_ids[0], "done", auto_complete=False)
+
+        result = mgr.update_subtask(
+            "inst-1", node_id, st_ids[1], "done", auto_complete=False
+        )
+
+        assert result["auto_completed"] is False
+        parent = next(n for n in result["todos"] if n["id"] == node_id)
+        assert parent["status"] == "pending"
+
+    def test_update_subtask_auto_complete_skips_if_already_done(self):
+        """auto_complete=True is a no-op when parent is already done."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.update("inst-1", node_id, "done")
+        mgr.add_subtask("inst-1", node_id, "task-1")
+        st_id = mgr.get_all("inst-1")[0]["subtasks"][0]["id"]
+
+        result = mgr.update_subtask(
+            "inst-1", node_id, st_id, "done", auto_complete=True
+        )
+
+        assert result["auto_completed"] is False
+        parent = next(n for n in result["todos"] if n["id"] == node_id)
+        assert parent["status"] == "done"
+
+    def test_update_subtask_auto_complete_not_all_done(self):
+        """auto_complete=True but one sub-task still pending — no propagation."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task-1")
+        mgr.add_subtask("inst-1", node_id, "task-2")
+        st_ids = [st["id"] for st in mgr.get_all("inst-1")[0]["subtasks"]]
+
+        # Mark only the first done; leave the second pending.
+        result = mgr.update_subtask(
+            "inst-1", node_id, st_ids[0], "done", auto_complete=True
+        )
+
+        assert result["auto_completed"] is False
+        parent = next(n for n in result["todos"] if n["id"] == node_id)
+        assert parent["status"] == "pending"
+
+    def test_update_subtask_auto_complete_zero_subtasks(self):
+        """auto_complete=True on a node with zero sub-tasks cannot propagate.
+
+        The vacuous-truth guard ``if auto_complete and node.subtasks and ...``
+        in :meth:`TodoGraphManager.update_subtask` ensures a node with zero
+        sub-tasks never auto-completes. The observable consequence: with
+        no sub-tasks present, no valid ``subtask_id`` can match, so the
+        call returns ``None`` — ``auto_complete`` never gets a chance to
+        evaluate ``all([])``.
+        """
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        result = mgr.update_subtask(
+            "inst-1", node_id, "s-nonexistent", "done", auto_complete=True
+        )
+
+        assert result is None
+        parent = mgr.get_all("inst-1")[0]
+        assert parent["status"] == "pending"
+
+    def test_update_subtask_rejects_in_progress(self):
+        """Sub-task statuses are strictly binary — ``in_progress`` rejected."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task")
+        st_id = mgr.get_all("inst-1")[0]["subtasks"][0]["id"]
+
+        result = mgr.update_subtask("inst-1", node_id, st_id, "in_progress")
+
+        assert result is None
+
+    def test_update_subtask_nonexistent_subtask(self):
+        """update_subtask returns ``None`` for an unknown sub-task id."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task")
+
+        result = mgr.update_subtask("inst-1", node_id, "s-deadbeef", "done")
+
+        assert result is None
+
+    def test_update_subtask_returns_todos_and_reminder(self):
+        """update_subtask shape: ``todos`` + ``reminder`` + ``auto_completed``."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task")
+        st_id = mgr.get_all("inst-1")[0]["subtasks"][0]["id"]
+
+        result = mgr.update_subtask(
+            "inst-1", node_id, st_id, "done", auto_complete=False
+        )
+
+        assert set(result.keys()) == {"todos", "reminder", "auto_completed"}
+# ------------------------------------------------------------------
+    # remove_subtask (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_remove_subtask_removes_by_id(self):
+        """Removing one of two sub-tasks leaves the other in place."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "first")
+        mgr.add_subtask("inst-1", node_id, "second")
+        st_ids = [st["id"] for st in mgr.get_all("inst-1")[0]["subtasks"]]
+
+        result = mgr.remove_subtask("inst-1", node_id, st_ids[0])
+
+        assert set(result.keys()) == {"todos", "reminder"}
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        remaining_ids = [s["id"] for s in node["subtasks"]]
+        assert st_ids[0] not in remaining_ids
+        assert st_ids[1] in remaining_ids
+
+    def test_remove_subtask_nonexistent(self):
+        """remove_subtask returns ``None`` for an unknown sub-task id."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "task")
+
+        result = mgr.remove_subtask("inst-1", node_id, "s-deadbeef")
+
+        assert result is None
+
+    def test_remove_subtask_preserves_others(self):
+        """Removing the middle of three leaves the first and third intact."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "first")
+        mgr.add_subtask("inst-1", node_id, "second")
+        mgr.add_subtask("inst-1", node_id, "third")
+        st_ids = [st["id"] for st in mgr.get_all("inst-1")[0]["subtasks"]]
+
+        result = mgr.remove_subtask("inst-1", node_id, st_ids[1])
+
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        remaining_ids = [s["id"] for s in node["subtasks"]]
+        assert remaining_ids == [st_ids[0], st_ids[2]]
+
+    # ------------------------------------------------------------------
+    # _to_dict schema (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_to_dict_includes_subtasks_key(self):
+        """``_to_dict`` output has exactly the seven-key frozen schema."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["X"])
+        nodes = mgr._instance_graphs["inst-1"]
+        result = TodoGraphManager._to_dict(list(nodes.values())[0])
+
+        assert set(result.keys()) == {
+            "id",
+            "index",
+            "text",
+            "status",
+            "comment",
+            "next_ids",
+            "subtasks",
+        }
+
+    def test_to_dict_subtasks_empty_list_default(self):
+        """A node with no sub-tasks serializes ``subtasks`` as ``[]``."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["X"])
+
+        result = mgr.get_all("inst-1")[0]
+
+        assert result["subtasks"] == []
+
+    def test_to_dict_subtasks_serialized_correctly(self):
+        """Each serialized sub-task dict has exactly three keys."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "do thing")
+
+        node = mgr.get_all("inst-1")[0]
+
+        assert len(node["subtasks"]) == 1
+        sub = node["subtasks"][0]
+        assert set(sub.keys()) == {"id", "text", "status"}
+        assert sub["text"] == "do thing"
+        assert sub["status"] == "pending"
+
+    # ------------------------------------------------------------------
+    # create_graph with subtasks (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_create_graph_with_subtasks(self):
+        """create_graph accepts a ``subtasks`` key in node specs."""
+        mgr = TodoGraphManager()
+        result = mgr.create_graph(
+            "inst-1",
+            [
+                {
+                    "id": "x",
+                    "text": "X",
+                    "subtasks": [
+                        {"text": "step-a"},
+                        {"text": "step-b"},
+                    ],
+                }
+            ],
+            [],
+        )
+
+        assert len(result) == 1
+        assert len(result[0]["subtasks"]) == 2
+
+    def test_create_graph_subtasks_auto_id(self):
+        """Sub-tasks without explicit id get auto-generated ``s-`` ids."""
+        mgr = TodoGraphManager()
+        result = mgr.create_graph(
+            "inst-1",
+            [
+                {
+                    "id": "x",
+                    "text": "X",
+                    "subtasks": [{"text": "auto"}],
+                }
+            ],
+            [],
+        )
+
+        sub = result[0]["subtasks"][0]
+        assert sub["id"].startswith("s-")
+
+    def test_create_flat_list_no_subtasks(self):
+        """``create([\"A\", \"B\"])`` builds nodes with empty ``subtasks`` lists."""
+        mgr = TodoGraphManager()
+        result = mgr.create("inst-1", ["A", "B"])
+
+        assert len(result) == 2
+        for node in result:
+            assert node["subtasks"] == []
+
+    # ------------------------------------------------------------------
+    # add_node with subtasks (1 test)
+    # ------------------------------------------------------------------
+
+    def test_add_node_with_subtasks(self):
+        """add_node accepts an optional ``subtasks`` parameter."""
+        mgr = TodoGraphManager()
+        mgr.create_graph("inst-1", [{"id": "a", "text": "A"}], [])
+
+        result = mgr.add_node("inst-1", "B", subtasks=[{"text": "x"}])
+
+        assert len(result["subtasks"]) == 1
+        assert result["subtasks"][0]["text"] == "x"
+        assert result["subtasks"][0]["status"] == "pending"
+
+    # ------------------------------------------------------------------
+    # edge cases (8 tests)
+    # ------------------------------------------------------------------
+
+    def test_subtask_ids_unique_within_node(self):
+        """Two sub-tasks on the same node get different ids."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "a")
+        mgr.add_subtask("inst-1", node_id, "b")
+
+        node = mgr.get_all("inst-1")[0]
+        ids = [s["id"] for s in node["subtasks"]]
+        assert len(set(ids)) == 2
+
+    def test_subtask_status_accepts_aliases(self):
+        """Aliases normalize: ``completed`` → ``done``, ``cancelled`` → ``pending``."""
+        mgr = TodoGraphManager()
+        result = mgr.create_graph(
+            "inst-1",
+            [
+                {
+                    "id": "x",
+                    "text": "X",
+                    "subtasks": [
+                        {"text": "alpha", "status": "completed"},
+                        {"text": "beta", "status": "cancelled"},
+                    ],
+                }
+            ],
+            [],
+        )
+
+        subs = result[0]["subtasks"]
+        assert subs[0]["status"] == "done"
+        assert subs[1]["status"] == "pending"
+
+    def test_create_graph_malformed_subtasks_not_list(self):
+        """Subtasks must be a list — a string raises ``ValueError``."""
+        mgr = TodoGraphManager()
+        with pytest.raises(ValueError, match=r"subtasks|list"):
+            mgr.create_graph(
+                "inst-1",
+                [{"id": "x", "text": "X", "subtasks": "not a list"}],
+                [],
+            )
+
+    def test_create_graph_malformed_subtask_missing_text(self):
+        """A sub-task spec without ``text`` raises ``ValueError``."""
+        mgr = TodoGraphManager()
+        with pytest.raises(ValueError, match=r"text"):
+            mgr.create_graph(
+                "inst-1",
+                [{"id": "x", "text": "X", "subtasks": [{"id": "s-1"}]}],
+                [],
+            )
+
+    def test_create_graph_max_subtasks_per_node(self):
+        """create_graph rejects a node spec with 21 sub-tasks."""
+        mgr = TodoGraphManager()
+        with pytest.raises(ValueError, match=r"subtasks|maximum|20"):
+            mgr.create_graph(
+                "inst-1",
+                [
+                    {
+                        "id": "x",
+                        "text": "X",
+                        "subtasks": [{"text": f"s-{i}"} for i in range(21)],
+                    }
+                ],
+                [],
+            )
+
+    def test_add_node_max_subtasks_exceeded(self):
+        """add_node rejects 21 sub-task specs at creation time."""
+        mgr = TodoGraphManager()
+        mgr.create_graph("inst-1", [{"id": "a", "text": "A"}], [])
+        with pytest.raises(ValueError, match=r"subtasks|maximum|20"):
+            mgr.add_node(
+                "inst-1",
+                "B",
+                subtasks=[{"text": f"s-{i}"} for i in range(21)],
+            )
+
+    def test_subtask_id_collision_within_node(self):
+        """Duplicate explicit sub-task ids within one node raise ``ValueError``.
+
+        :meth:`TodoGraphManager._parse_subtask_specs` validates that all
+        resulting sub-task ids are unique within a single node's subtask
+        list. Two specs sharing the same explicit ``s-`` prefixed id
+        surface as a ``ValueError`` — silent acceptance is no longer
+        permitted because it creates inconsistent semantics between
+        ``update_subtask`` (first-match) and ``remove_subtask``
+        (all-matches).
+        """
+        mgr = TodoGraphManager()
+        with pytest.raises(ValueError, match=r"duplicate|unique"):
+            mgr.create_graph(
+                "inst-1",
+                [
+                    {
+                        "id": "x",
+                        "text": "X",
+                        "subtasks": [
+                            {"id": "s-collision", "text": "first"},
+                            {"id": "s-collision", "text": "second"},
+                        ],
+                    }
+                ],
+                [],
+            )
+
+    def test_concurrent_update_subtask_same_id(self):
+        """Two threads updating the same sub-task do not corrupt state."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        mgr.add_subtask("inst-1", node_id, "race-target")
+        st_id = mgr.get_all("inst-1")[0]["subtasks"][0]["id"]
+
+        barrier = threading.Barrier(2)
+        statuses = ["done", "pending"]
+
+        def worker(s):
+            barrier.wait()
+            mgr.update_subtask("inst-1", node_id, st_id, s)
+
+        threads = [
+            threading.Thread(target=worker, args=(s,)) for s in statuses
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        final = mgr.get_all("inst-1")[0]["subtasks"][0]["status"]
+        assert final in ("pending", "done")
+
+    def test_backward_compat_existing_tests_pass(self):
+        """``TodoManager`` alias still resolves to ``TodoGraphManager``."""
+        assert TodoManager is TodoGraphManager
+        mgr = TodoManager()
+        result = mgr.create("inst-1", ["A"])
+        assert len(result) == 1
+        assert result[0]["subtasks"] == []

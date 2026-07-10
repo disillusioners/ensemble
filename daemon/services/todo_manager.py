@@ -23,9 +23,11 @@ Frozen SSE Payload Schema:
     :meth:`TodoGraphManager._to_dict` defines the JSON-serializable
     shape that downstream tools (Phase 2), API routes (Phase 3), and the
     Angular frontend (Phase 4) build against. Once published, the dict
-    shape — exactly six keys: ``id``, ``index``, ``text``, ``status``,
-    ``comment``, ``next_ids`` — is a contract and must not change without
-    cross-phase coordination.
+    shape — exactly seven keys: ``id``, ``index``, ``text``, ``status``,
+    ``comment``, ``next_ids``, ``subtasks`` — is a contract and must not
+    change without cross-phase coordination. Schema evolved from v1
+    (six keys) to v2 (seven keys) when ``subtasks`` was added in
+    Phase 1 of the todo-subtasks feature.
 """
 
 from __future__ import annotations
@@ -86,6 +88,49 @@ def _normalize_status(status: str) -> str | None:
     return _STATUS_ALIASES.get(key)
 
 
+# Hard cap on subtasks per node and per subtask text length. Enforced at all
+# three entry points (add_subtask, create_graph per-node, add_node) so any
+# caller — HTTP, tool, internal job — is bounded consistently.
+MAX_SUBTASKS_PER_NODE = 20
+MAX_SUBTASK_TEXT_LENGTH = 500
+
+# Aliases for sub-task statuses. STRICTLY BINARY: subtasks are either
+# "pending" or "done". "in_progress" and its aliases are intentionally
+# REJECTED — sub-tasks are a simple checklist, not a multi-state workflow.
+# Lookup is case-insensitive (input is lowercased before lookup).
+_SUBTASK_STATUS_ALIASES: dict[str, str] = {
+    "done": "done",
+    "completed": "done",
+    "complete": "done",
+    "closed": "done",
+    "resolved": "done",
+    "finished": "done",
+    "pending": "pending",
+    "todo": "pending",
+    "cancelled": "pending",
+    "canceled": "pending",
+}
+
+
+def _normalize_subtask_status(status: str) -> str | None:
+    """Normalize a sub-task status string to its canonical value, or ``None`` if invalid.
+
+    Case-insensitive: input is lowercased before lookup. Empty strings and
+    unrecognized values return ``None`` so callers can raise or reject.
+
+    NOTE: Unlike :func:`_normalize_status` for node statuses, sub-task statuses
+    are STRICTLY BINARY ("pending" or "done"). ``in_progress`` and any of its
+    aliases (e.g., "started", "wip", "doing") are NOT accepted — sub-tasks are
+    a simple checklist, not a multi-state workflow.
+    """
+    if not isinstance(status, str):
+        return None
+    key = status.strip().lower()
+    if not key:
+        return None
+    return _SUBTASK_STATUS_ALIASES.get(key)
+
+
 @dataclass
 class TodoNode:
     """A single node in the todo DAG.
@@ -98,6 +143,10 @@ class TodoNode:
     The ``index`` field is preserved for backward compatibility: it is
     derived from insertion order and included in serialized output so
     existing consumers that reference ``item["index"]`` continue to work.
+
+    The ``subtasks`` field is a STRICTLY BINARY checklist (each item is
+    either ``"pending"`` or ``"done"``) for tracking fine-grained
+    acceptance criteria under a parent node. See :class:`SubTask`.
     """
 
     id: str
@@ -106,6 +155,32 @@ class TodoNode:
     comment: str = ""
     next_ids: list[str] = field(default_factory=list)
     index: int = 0
+    subtasks: list[SubTask] = field(default_factory=list)
+
+
+@dataclass
+class SubTask:
+    """A checklist item nested within a :class:`TodoNode`.
+
+    Sub-tasks are a STRICTLY BINARY checklist — each item is either
+    ``"pending"`` or ``"done"``. The richer ``"in_progress"`` state used
+    on parent nodes is intentionally NOT supported here: sub-tasks model
+    fine-grained acceptance criteria, and partial completion is the
+    parent's job to track, not the sub-task's.
+
+    Identity is the ``id`` field, formatted ``"s-" + uuid.uuid4().hex[:8]``
+    — the ``s-`` prefix guarantees the ID is never all-numeric, preventing
+    collision with the API's numeric-index backward-compat path.
+    """
+
+    id: str
+    text: str
+    status: str
+
+    @staticmethod
+    def _to_dict(st: "SubTask") -> dict:
+        """Serialize a :class:`SubTask` to a plain dict (exactly three keys)."""
+        return {"id": st.id, "text": st.text, "status": st.status}
 
 
 class TodoGraphManager:
@@ -157,9 +232,9 @@ class TodoGraphManager:
             items: Ordered list of todo text entries.
 
         Returns:
-            The newly stored node list as plain dicts (six keys each:
+            The newly stored node list as plain dicts (seven keys each:
             ``id``, ``index``, ``text``, ``status``, ``comment``,
-            ``next_ids``).
+            ``next_ids``, ``subtasks``).
 
         Raises:
             ValueError: If ``len(items)`` exceeds :data:`MAX_NODES`.
@@ -247,6 +322,24 @@ class TodoGraphManager:
                 )
             seen_ids.add(nid)
 
+        # Validate per-node ``subtasks`` lists. Each list is parsed and
+        # turned into a list of :class:`SubTask` objects before the
+        # ``TodoNode`` constructor runs, so the constructor receives
+        # already-validated data.
+        parsed_subtasks: dict[str, list[SubTask]] = {}
+        for node_spec in nodes:
+            nid = node_spec["id"]
+            raw_subtasks = node_spec.get("subtasks")
+            if raw_subtasks is None:
+                parsed_subtasks[nid] = []
+                continue
+            if not isinstance(raw_subtasks, list):
+                raise ValueError(
+                    f"Node {nid!r} 'subtasks' must be a list, got "
+                    f"{type(raw_subtasks).__name__}."
+                )
+            parsed_subtasks[nid] = self._parse_subtask_specs(raw_subtasks)
+
         # Build initial node map with auto-assigned ``index`` (insertion
         # order). Default ``next_ids`` to empty list when not provided.
         new_nodes: dict[str, TodoNode] = {}
@@ -261,6 +354,7 @@ class TodoGraphManager:
                 comment="",
                 next_ids=list(next_ids),
                 index=i,
+                subtasks=list(parsed_subtasks[nid]),
             )
 
         # Apply edges list: ``edges`` is the canonical source when
@@ -473,10 +567,10 @@ class TodoGraphManager:
     def get_all(self, instance_id: str) -> list[dict]:
         """Return the instance's current nodes.
 
-        Each dict conforms to the **frozen SSE payload schema** (six
+        Each dict conforms to the **frozen SSE payload schema** (seven
         keys: ``id``, ``index``, ``text``, ``status``, ``comment``,
-        ``next_ids``). Ordered by insertion order — matches the
-        iteration order of ``dict`` since Python 3.7.
+        ``next_ids``, ``subtasks``). Ordered by insertion order —
+        matches the iteration order of ``dict`` since Python 3.7.
 
         Args:
             instance_id: Owning instance identifier.
@@ -501,7 +595,8 @@ class TodoGraphManager:
         Returns:
             Structured graph snapshot. Both ``nodes`` and ``edges`` are
             plain lists; ``nodes`` is ``[]`` if the instance has no
-            graph.
+            graph. Each node dict conforms to the frozen seven-key
+            schema (see :meth:`_to_dict`).
         """
         with self._lock:
             nodes = self._instance_graphs.get(instance_id, {})
@@ -530,6 +625,7 @@ class TodoGraphManager:
         instance_id: str,
         text: str,
         next_ids: list[str] | None = None,
+        subtasks: list[dict] | None = None,
     ) -> dict:
         """Add a single node to an existing graph.
 
@@ -539,6 +635,10 @@ class TodoGraphManager:
             next_ids: Optional list of successor node IDs that must
                 already exist in the graph. ``None`` is normalized to
                 ``[]`` (no successors). Defaults to ``None``.
+            subtasks: Optional list of sub-task spec dicts to attach
+                to the new node. Each spec is parsed via
+                :meth:`_parse_subtask_specs`. ``None`` is normalized to
+                ``[]`` (no sub-tasks). Defaults to ``None``.
 
         Returns:
             The newly created node as a plain dict (frozen schema).
@@ -548,10 +648,17 @@ class TodoGraphManager:
                 ``create_graph`` first), the count exceeds
                 :data:`MAX_NODES`, or any ``next_ids`` reference is
                 dangling. Adding the node must not introduce a cycle
-                (validated via :meth:`_has_cycle`).
+                (validated via :meth:`_has_cycle`). Sub-task spec
+                validation failures (empty/too-long ``text``,
+                all-numeric ``id``, invalid ``status``, count over
+                :data:`MAX_SUBTASKS_PER_NODE`) also raise
+                ``ValueError``.
         """
         resolved_next_ids = next_ids or []
         new_node_id = self._generate_id()
+        # Validate sub-task specs up-front (cheap, no lock needed) so
+        # any spec violation surfaces before we mutate state.
+        parsed_subtasks = self._parse_subtask_specs(subtasks)
 
         with self._lock:
             nodes = self._instance_graphs.get(instance_id)
@@ -580,6 +687,7 @@ class TodoGraphManager:
                 comment="",
                 next_ids=list(resolved_next_ids),
                 index=new_index,
+                subtasks=parsed_subtasks,
             )
 
             # Cycle check — only meaningful if the new node has
@@ -754,6 +862,197 @@ class TodoGraphManager:
             return {"nodes": node_dicts, "edges": edges}
 
     # ------------------------------------------------------------------
+    # Public sub-task API
+    # ------------------------------------------------------------------
+
+    def add_subtask(
+        self,
+        instance_id: str,
+        node_id: str,
+        text: str,
+    ) -> dict | None:
+        """Append a sub-task to an existing node's checklist.
+
+        Sub-task IDs are auto-generated (``s-`` + 8 hex chars) — callers do
+        NOT supply them. Status defaults to ``"pending"``.
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Parent node identifier.
+            text: Sub-task description. Must be non-empty and ≤
+                :data:`MAX_SUBTASK_TEXT_LENGTH` characters.
+
+        Returns:
+            Dict with keys ``todos`` (full node snapshot as plain dicts) and
+            ``reminder`` (formatted string), or ``None`` if the instance or
+            node does not exist.
+
+        Raises:
+            ValueError: If ``text`` is empty/too long, or the node already
+                has :data:`MAX_SUBTASKS_PER_NODE` sub-tasks.
+        """
+        # Text validation up-front (cheap, no lock needed).
+        if not isinstance(text, str) or not text:
+            raise ValueError("sub-task text must be a non-empty string")
+        if len(text) > MAX_SUBTASK_TEXT_LENGTH:
+            raise ValueError(
+                f"sub-task text exceeds maximum length of "
+                f"{MAX_SUBTASK_TEXT_LENGTH} characters (got {len(text)})"
+            )
+
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
+                return None
+            node = nodes[node_id]
+            if len(node.subtasks) >= MAX_SUBTASKS_PER_NODE:
+                raise ValueError(
+                    f"Cannot add sub-task: node {node_id!r} already has "
+                    f"{len(node.subtasks)} sub-tasks (max "
+                    f"{MAX_SUBTASKS_PER_NODE})."
+                )
+            sub = SubTask(
+                id=self._generate_subtask_id(),
+                text=text,
+                status="pending",
+            )
+            node.subtasks.append(sub)
+            snapshot = [self._to_dict(n) for n in nodes.values()]
+            # Reminder is computed against the PARENT node's last update;
+            # sub-task changes do not affect the graph-level reminder logic,
+            # so we pass the parent's id + status verbatim — _compute_reminder
+            # is unchanged.
+            reminder = self._compute_reminder(nodes, node_id, node.status)
+            return {"todos": snapshot, "reminder": reminder}
+
+    def update_subtask(
+        self,
+        instance_id: str,
+        node_id: str,
+        subtask_id: str,
+        status: str,
+        auto_complete: bool = False,
+    ) -> dict | None:
+        """Update a sub-task's status, with optional parent auto-completion.
+
+        Sub-task statuses are STRICTLY BINARY (``"pending"`` or ``"done"``).
+        The :func:`_normalize_subtask_status` helper rejects ``in_progress``
+        and its aliases, returning ``None`` for invalid input — which the
+        method translates into a top-level ``None`` return (callers can treat
+        "invalid status" and "not found" uniformly).
+
+        Auto-completion policy:
+            When ``auto_complete=True`` AND every sub-task on the parent
+            node is ``"done"`` AND the parent's own status is NOT already
+            ``"done"``, the parent's status is set to ``"done"`` and
+            ``auto_completed=True`` is returned. The vacuous-truth guard
+            ``if auto_complete and node.subtasks and all(...)`` ensures a
+            node with zero sub-tasks never auto-completes from a sub-task
+            update — ``all([])`` is ``True`` in Python, which would surprise
+            callers. If ``auto_complete=True`` but NOT all sub-tasks are
+            done, ``auto_completed=False`` and the parent status is left
+            alone. If ``auto_complete=False``, no parent propagation occurs.
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Parent node identifier.
+            subtask_id: Sub-task identifier (``s-`` prefixed).
+            status: New status. Must normalize to ``"pending"`` or ``"done"``.
+            auto_complete: If ``True``, propagate completion to the parent
+                node when all sub-tasks are done. Defaults to ``False``.
+
+        Returns:
+            Dict with keys ``todos`` (full node snapshot), ``reminder``
+            (formatted string), and ``auto_completed`` (``True`` only when
+            this call flipped the parent from non-done to ``"done"`` via
+            auto-completion). Returns ``None`` if the instance, parent
+            node, or sub-task is not found, OR if ``status`` is invalid
+            (sub-task statuses are binary).
+        """
+        normalized = _normalize_subtask_status(status)
+        if normalized is None:
+            logger.warning(
+                "TodoGraphManager.update_subtask rejected invalid status %r "
+                "for instance %s, node %s, sub-task %s",
+                status,
+                instance_id,
+                node_id,
+                subtask_id,
+            )
+            return None
+
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
+                return None
+            node = nodes[node_id]
+            sub = next((s for s in node.subtasks if s.id == subtask_id), None)
+            if sub is None:
+                return None
+            sub.status = normalized
+
+            auto_completed = False
+            # VACUOUS TRUTH GUARD: ``all([]) == True`` in Python, so the
+            # explicit ``node.subtasks`` length check prevents a node with
+            # zero sub-tasks from auto-completing on this path. Only nodes
+            # that actually have a populated checklist participate.
+            if (
+                auto_complete
+                and node.subtasks
+                and all(st.status == "done" for st in node.subtasks)
+                and node.status != "done"
+            ):
+                node.status = "done"
+                auto_completed = True
+
+            snapshot = [self._to_dict(n) for n in nodes.values()]
+            # Reminder uses the LATEST status that meaningfully changed:
+            # either the sub-task's parent (if auto-completed) or the
+            # parent's current status otherwise. The comment-fence prefix
+            # still applies if the parent became done with a comment.
+            updated_id = node_id
+            updated_status = node.status
+            reminder = self._compute_reminder(nodes, updated_id, updated_status)
+            return {
+                "todos": snapshot,
+                "reminder": reminder,
+                "auto_completed": auto_completed,
+            }
+
+    def remove_subtask(
+        self,
+        instance_id: str,
+        node_id: str,
+        subtask_id: str,
+    ) -> dict | None:
+        """Remove a sub-task from a node's checklist.
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Parent node identifier.
+            subtask_id: Sub-task identifier to remove.
+
+        Returns:
+            Dict with keys ``todos`` (full node snapshot) and ``reminder``
+            (formatted string), or ``None`` if the instance, parent node,
+            or sub-task does not exist.
+        """
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
+                return None
+            node = nodes[node_id]
+            original_len = len(node.subtasks)
+            node.subtasks = [s for s in node.subtasks if s.id != subtask_id]
+            if len(node.subtasks) == original_len:
+                # Sub-task not found — keep the "missing → None" contract
+                # uniform with add_subtask / update_subtask.
+                return None
+            snapshot = [self._to_dict(n) for n in nodes.values()]
+            reminder = self._compute_reminder(nodes, node_id, node.status)
+            return {"todos": snapshot, "reminder": reminder}
+
+    # ------------------------------------------------------------------
     # Private helpers (all assume ``self._lock`` is held by the caller,
     # unless explicitly documented otherwise).
     # ------------------------------------------------------------------
@@ -900,6 +1199,20 @@ class TodoGraphManager:
         """
         return f"n-{uuid.uuid4().hex[:8]}"
 
+    @staticmethod
+    def _generate_subtask_id() -> str:
+        """Generate a short, unique, non-numeric sub-task ID.
+
+        Format: ``"s-" + uuid.uuid4().hex[:8]``.
+
+        Mirrors :meth:`_generate_id` for node IDs. The ``s-`` prefix
+        guarantees the ID is never all-numeric, preventing collision with
+        the API's numeric-index backward-compat path. The 8-hex-char
+        suffix gives ~4 billion possible IDs — collision risk for <20
+        sub-tasks per node is negligible.
+        """
+        return f"s-{uuid.uuid4().hex[:8]}"
+
     def _resolve_index_to_node_id(
         self,
         instance_id: str,
@@ -932,30 +1245,127 @@ class TodoGraphManager:
                 return None
 
     @staticmethod
+    def _parse_subtask_specs(specs: list[dict] | None) -> list[SubTask]:
+        """Parse + validate a list of sub-task spec dicts into SubTask objects.
+
+        Each spec must contain ``text`` (non-empty, ≤ MAX_SUBTASK_TEXT_LENGTH).
+        Optional ``id`` (must be s-prefixed, or auto-generated; all-numeric rejected).
+        Optional ``status`` (normalized via _normalize_subtask_status; default "pending").
+        Unknown fields silently ignored.
+        Total count must not exceed MAX_SUBTASKS_PER_NODE.
+
+        Raises:
+            ValueError: On any validation failure.
+        """
+        if specs is None:
+            return []
+        if not isinstance(specs, list):
+            raise ValueError(
+                f"subtasks must be a list, got {type(specs).__name__}."
+            )
+        if len(specs) > MAX_SUBTASKS_PER_NODE:
+            raise ValueError(
+                f"subtasks count {len(specs)} exceeds maximum of "
+                f"{MAX_SUBTASKS_PER_NODE}."
+            )
+        result: list[SubTask] = []
+        for i, spec in enumerate(specs):
+            if not isinstance(spec, dict):
+                raise ValueError(
+                    f"subtasks[{i}] must be a dict, got {type(spec).__name__}."
+                )
+            text = spec.get("text", "")
+            if not isinstance(text, str) or not text:
+                raise ValueError(
+                    f"subtasks[{i}].text must be a non-empty string."
+                )
+            if len(text) > MAX_SUBTASK_TEXT_LENGTH:
+                raise ValueError(
+                    f"subtasks[{i}].text exceeds maximum length of "
+                    f"{MAX_SUBTASK_TEXT_LENGTH} characters (got {len(text)})."
+                )
+            # ID handling: explicit non-empty ``id`` MUST be ``s-`` prefixed.
+            # All-numeric IDs are rejected (collision with index-based path).
+            # Non-s-prefixed, non-numeric IDs are silently replaced with an
+            # auto-generated one (no hard error).
+            raw_id = spec.get("id")
+            if raw_id is not None and raw_id != "":
+                if not isinstance(raw_id, str):
+                    raise ValueError(
+                        f"subtasks[{i}].id must be a string, got "
+                        f"{type(raw_id).__name__}."
+                    )
+                if raw_id.isdigit():
+                    raise ValueError(
+                        f"subtasks[{i}].id {raw_id!r} is all-numeric and "
+                        f"would collide with the index-based backward-compat "
+                        f"path. Use an 's-' prefixed id instead."
+                    )
+                if raw_id.startswith("s-"):
+                    sub_id = raw_id
+                else:
+                    sub_id = TodoGraphManager._generate_subtask_id()
+            else:
+                sub_id = TodoGraphManager._generate_subtask_id()
+            # Status normalization: defaults to "pending" if absent;
+            # explicit invalid statuses raise ValueError.
+            raw_status = spec.get("status", "pending")
+            normalized_status = _normalize_subtask_status(raw_status)
+            if normalized_status is None:
+                raise ValueError(
+                    f"subtasks[{i}].status {raw_status!r} is invalid. "
+                    f"Sub-task statuses are strictly binary ('pending' or "
+                    f"'done')."
+                )
+            result.append(
+                SubTask(id=sub_id, text=text, status=normalized_status)
+            )
+        # Post-pass: enforce unique sub-task ids within a single node's list.
+        # Done AFTER the per-spec validation so each spec's text/length/id
+        # checks fire first; collision is a list-level invariant, not a
+        # per-spec one. Auto-generated ids cannot collide by construction,
+        # so this only ever trips when callers supply duplicate explicit ids.
+        seen_sub_ids: set[str] = set()
+        for sub in result:
+            if sub.id in seen_sub_ids:
+                raise ValueError(
+                    f"duplicate sub-task id {sub.id!r} within the same node's "
+                    f"subtask list. Sub-task ids must be unique within a node."
+                )
+            seen_sub_ids.add(sub.id)
+        return result
+
+    @staticmethod
     def _to_dict(node: TodoNode) -> dict[str, Any]:
         """Serialize a :class:`TodoNode` to a plain dict.
 
-        **FROZEN SCHEMA** — this is the SSE payload shape that Phases 2
-        (tools), 3 (API), and 4 (frontend) build against. Do NOT change
-        without coordinating across all phases.
+        **FROZEN SCHEMA (v2)** — this is the SSE payload shape that
+        downstream consumers build against. Schema evolved from v1 (six
+        keys) to v2 (seven keys) when ``subtasks`` was added in Phase 1
+        of the todo-subtasks feature. Do NOT change without coordinating
+        across all consumers (tools, API, frontend).
 
-        Output shape (six keys, all required):
+        Output shape (seven keys, all required):
             {
                 "id": "n-a1b2c3d4",         # Stable node identity (n-prefixed)
                 "index": 0,                 # Insertion-order position
                 "text": "Setup DB",         # Human-readable description
                 "status": "pending",        # pending | in_progress | done
                 "comment": "",              # User annotation side-channel
-                "next_ids": ["n-e5f6g7h8"]  # Adjacency list (successors)
+                "next_ids": ["n-e5f6g7h8"], # Adjacency list (successors)
+                "subtasks": []              # Checklist of sub-tasks
             }
 
         Invariants:
-          * Exactly six keys — no extras, no omissions.
+          * Exactly seven keys — no extras, no omissions.
           * ``index`` PRESERVED (backward compat — old index-keyed
             callers keep working).
           * ``id`` present, always ``n-`` prefixed.
           * ``next_ids`` present (may be empty list), copied to
             prevent external mutation of internal state.
+          * ``subtasks`` present (may be empty list), each sub-task dict
+            conforms to the :meth:`SubTask._to_dict` shape — exactly
+            three keys (``id``, ``text``, ``status``).
         """
         return {
             "id": node.id,
@@ -964,6 +1374,7 @@ class TodoGraphManager:
             "status": node.status,
             "comment": node.comment,
             "next_ids": list(node.next_ids),
+            "subtasks": [SubTask._to_dict(st) for st in node.subtasks],
         }
 
 

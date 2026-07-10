@@ -425,14 +425,15 @@ async def get_instance_todos(
 ) -> list[dict]:
     """Return the instance's full todo list as a JSON array.
 
-    Each item shape (frozen Phase 1 schema — exactly six keys):
+    Each item shape (frozen Phase 1 schema — exactly seven keys):
         ``{
             "id": "n-a1b2c3d4",          # Stable node identity (n-prefixed)
             "index": 0,                  # Insertion-order position (preserved)
             "text": "...",               # Description
             "status": "pending|in_progress|done",
             "comment": "...",            # User annotation (may be empty)
-            "next_ids": ["n-..."]        # Successor node IDs (may be [])
+            "next_ids": ["n-..."],       # Successor node IDs (may be [])
+            "subtasks": [...]            # Sub-task checklist (each {id, text, status}); [] when none
         }``
 
     The response is the **augmented** graph view: each node carries its
