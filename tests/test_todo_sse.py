@@ -1,15 +1,25 @@
 """Tests for the SSE integration layer of the todo tools.
 
-Three tools (``todo_create``, ``todo_update``, ``todo_clear``) emit a
-``todo_update`` SSE event on every successful mutation. The events are
-delivered through ``LiveEventHub.stream_todo_update(instance_id, todos)``
-which uses an ``asyncio.Queue``-based fanout (no DB persistence — see
+Six tools (``todo_create``, ``todo_update``, ``todo_list``, ``todo_clear``,
+``todo_add_edge``, ``todo_remove_edge``) emit a ``todo_update`` SSE event
+on every successful mutation. The events are delivered through
+``LiveEventHub.stream_todo_update(instance_id, todos)`` which uses an
+``asyncio.Queue``-based fanout (no DB persistence — see
 ``LiveEventHub._stream_to_connections``).
+
+Every payload item follows the **frozen 6-key schema** that the
+frontend's Angular signals consume:
+
+    {id, index, text, status, comment, next_ids}
+
+``id`` is the stable node ID (``n-`` prefixed), ``index`` is the
+backward-compat insertion-order position, and ``next_ids`` carries the
+adjacency list for the DAG.
 
 Coverage lanes:
 
-  1. **Emission on mutation** — create/update/clear each invoke
-     ``stream_todo_update`` exactly once.
+  1. **Emission on mutation** — create/update/clear/add_edge/remove_edge
+     each invoke ``stream_todo_update`` exactly once on success.
   2. **Resilience** — SSE failure must NOT break the tool's user-facing
      contract (tool still returns its success string).
   3. **Optional hub** — when ``live_event_hub=None``, tools work without
@@ -48,13 +58,18 @@ def _make_manager_with_hub() -> MagicMock:
 
 
 def _build_tools(hub: AsyncMock | None = None, manager: MagicMock | None = None):
-    """Build the 4 todo tools with the supplied hub (or no hub).
+    """Build the 6 todo tools with the supplied hub (or no hub).
 
     ``manager`` is shared by both the caller and the tools so that tests
     can pre-populate state via ``manager._todo_manager.create(...)`` and
     then verify the same store after tool invocation. When omitted, a
     fresh manager is allocated (suitable for tests that only care about
     the SSE side-effect).
+
+    Returns the tools in canonical order::
+
+        [todo_create, todo_update, todo_list, todo_clear,
+         todo_add_edge, todo_remove_edge]
     """
     from daemon.tools.todo_tools import create_todo_tools
 
@@ -284,12 +299,17 @@ class TestSSEPayloadStructure:
     """The ``todos`` argument sent to the hub mirrors the manager's stored state."""
 
     async def test_sse_payload_after_create_contains_serializable_dicts(self):
-        """Each ``todo`` in the payload is a plain ``{index, text, status, comment}`` dict.
+        """Each ``todo`` in the payload is a plain 6-key dict.
 
         The frontend JSON-serializes the payload directly — anything not
-        a primitive would break its parser. ``comment`` is always present
-        (default empty string) so the FE doesn't have to handle a
-        missing-key case.
+        a primitive would break its parser. The frozen Phase 1 schema
+        carries exactly these keys per node::
+
+            {id, index, text, status, comment, next_ids}
+
+        ``comment`` is always present (default empty string) and
+        ``next_ids`` is always present (default empty list) so the FE
+        doesn't have to handle a missing-key case.
         """
         hub = AsyncMock()
         manager = _make_manager_with_hub()
@@ -301,11 +321,25 @@ class TestSSEPayloadStructure:
         todos_arg = hub.stream_todo_update.call_args.args[1]
         assert len(todos_arg) == 1
         item = todos_arg[0]
-        assert set(item.keys()) == {"index", "text", "status", "comment"}
+        assert set(item.keys()) == {
+            "id",
+            "index",
+            "text",
+            "status",
+            "comment",
+            "next_ids",
+        }
         assert item["index"] == 0
         assert item["text"] == "Only one"
         assert item["status"] == "pending"
         assert item["comment"] == ""
+        # ``id`` is the stable, ``n-``-prefixed node identifier; only the
+        # schema is checked here — value uniqueness is enforced elsewhere.
+        assert isinstance(item["id"], str) and item["id"].startswith("n-")
+        # ``next_ids`` defaults to ``[]`` for a single-node graph and is
+        # always a list (never ``None``).
+        assert item["next_ids"] == []
+        assert isinstance(item["next_ids"], list)
 
     async def test_sse_payload_after_partial_progress_reflects_current_state(self):
         """After marking some items done, the payload reflects the new statuses.
@@ -326,3 +360,137 @@ class TestSSEPayloadStructure:
         todos_arg = hub.stream_todo_update.call_args.args[1]
         # The newly-created list is all-pending (create replaces, not merges).
         assert [t["status"] for t in todos_arg] == ["pending", "pending", "pending"]
+
+    async def test_sse_payload_after_update_contains_six_keys(self):
+        """After ``todo_update``, the SSE payload still carries 6-key dicts.
+
+        The 6-key schema is the cross-phase contract — the FE
+        reconstructs graph state from the SSE stream alone and never
+        needs to hit the API. A successful update must therefore emit
+        the same shape as ``todo_create`` (same six keys), not a
+        trimmed-down variant.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create("sse-test-instance", ["A", "B"])
+        tools = _build_tools(hub=hub, manager=manager)
+        update_tool = tools[1]
+
+        await update_tool.coroutine(index=0, status="done")
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        # Full list, not a partial patch — every emission replaces the
+        # client-side graph snapshot.
+        assert len(todos_arg) == 2
+        for item in todos_arg:
+            assert set(item.keys()) == {
+                "id",
+                "index",
+                "text",
+                "status",
+                "comment",
+                "next_ids",
+            }
+            assert isinstance(item["id"], str) and item["id"].startswith("n-")
+            assert isinstance(item["next_ids"], list)
+        # The update changed statuses; payload reflects the mutation.
+        assert todos_arg[0]["status"] == "done"
+        assert todos_arg[1]["status"] == "pending"
+        # IDs are unique across nodes (one of the FE's dedup invariants).
+        assert todos_arg[0]["id"] != todos_arg[1]["id"]
+
+    async def test_sse_payload_after_add_edge_emits_with_updated_next_ids(self):
+        """``todo_add_edge`` emits an SSE event whose ``next_ids`` reflect the new edge.
+
+        Node IDs are looked up from the manager (not positional
+        indexes) — ``todo_add_edge`` is keyed by stable ``n-``-prefixed
+        IDs. The emission contains the full 6-key node list (not a
+        diff), because the FE re-renders from the snapshot.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        # Linear chain: A → B → C — adding A → C bypasses B and
+        # preserves DAG-ness (no cycle).
+        initial = manager._todo_manager.create(
+            "sse-test-instance", ["A", "B", "C"]
+        )
+        a_id = initial[0]["id"]
+        b_id = initial[1]["id"]
+        c_id = initial[2]["id"]
+        # Sanity check: A's auto-chain goes to B, not C.
+        assert initial[0]["next_ids"] == [b_id]
+
+        tools = _build_tools(hub=hub, manager=manager)
+        add_edge_tool = tools[4]
+
+        await add_edge_tool.coroutine(from_id=a_id, to_id=c_id)
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        # Snapshot is the full node list, 6 keys each.
+        assert len(todos_arg) == 3
+        for item in todos_arg:
+            assert set(item.keys()) == {
+                "id",
+                "index",
+                "text",
+                "status",
+                "comment",
+                "next_ids",
+            }
+        # A's next_ids now contains both B (original) and C (new edge).
+        a_node = next(n for n in todos_arg if n["id"] == a_id)
+        assert c_id in a_node["next_ids"]
+        assert b_id in a_node["next_ids"]
+        # B and C are otherwise unchanged.
+        b_node = next(n for n in todos_arg if n["id"] == b_id)
+        assert b_node["next_ids"] == [c_id]
+        c_node = next(n for n in todos_arg if n["id"] == c_id)
+        assert c_node["next_ids"] == []
+
+    async def test_sse_payload_after_remove_edge_emits_with_updated_next_ids(self):
+        """``todo_remove_edge`` emits an SSE event whose ``next_ids`` reflect the removal.
+
+        The first emission in the auto-built chain (A → B) is removed,
+        so A's ``next_ids`` becomes empty in the payload. As with
+        ``add_edge``, the full snapshot is re-sent (not a delta) so the
+        FE can re-render without bookkeeping.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        initial = manager._todo_manager.create(
+            "sse-test-instance", ["A", "B", "C"]
+        )
+        a_id = initial[0]["id"]
+        b_id = initial[1]["id"]
+        c_id = initial[2]["id"]
+        # Sanity check: A's auto-chain goes to B.
+        assert b_id in initial[0]["next_ids"]
+
+        tools = _build_tools(hub=hub, manager=manager)
+        remove_edge_tool = tools[5]
+
+        await remove_edge_tool.coroutine(from_id=a_id, to_id=b_id)
+
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        # Snapshot is the full node list, 6 keys each.
+        assert len(todos_arg) == 3
+        for item in todos_arg:
+            assert set(item.keys()) == {
+                "id",
+                "index",
+                "text",
+                "status",
+                "comment",
+                "next_ids",
+            }
+        # The removed edge is gone — A no longer points at B.
+        a_node = next(n for n in todos_arg if n["id"] == a_id)
+        assert b_id not in a_node["next_ids"]
+        assert a_node["next_ids"] == []
+        # B and C are otherwise unchanged (B still points to C).
+        b_node = next(n for n in todos_arg if n["id"] == b_id)
+        assert b_node["next_ids"] == [c_id]
+

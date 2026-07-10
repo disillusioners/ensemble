@@ -67,7 +67,7 @@ class TestConcurrentSetComment:
         mgr.create("inst-1", items)
 
         def writer(idx: int) -> None:
-            mgr.set_comment("inst-1", idx, f"by-thread-{idx}")
+            mgr.set_comment_by_index("inst-1", idx, f"by-thread-{idx}")
 
         with ThreadPoolExecutor(max_workers=16) as pool:
             futures = [pool.submit(writer, i) for i in range(n_items)]
@@ -105,7 +105,7 @@ class TestConcurrentSetComment:
 
         def writer(val: str) -> str:
             gate.wait()  # All workers released simultaneously for max contention.
-            mgr.set_comment("inst-1", 0, val)
+            mgr.set_comment_by_index("inst-1", 0, val)
             return val
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -139,11 +139,11 @@ class TestConcurrentSetComment:
 
         def comment_writer(i: int) -> None:
             # Cycle through the 30 items, overwriting comments repeatedly.
-            mgr.set_comment("inst-1", i % 30, f"comment-{i}")
+            mgr.set_comment_by_index("inst-1", i % 30, f"comment-{i}")
 
         def status_writer(i: int) -> None:
             status = ("done", "in_progress", "pending")[i % 3]
-            mgr.update("inst-1", i % 30, status)
+            mgr.update_by_index("inst-1", i % 30, status)
 
         with ThreadPoolExecutor(max_workers=16) as pool:
             futures = []
@@ -184,7 +184,7 @@ class TestConcurrentSetComment:
                     assert len(snapshot) == 20
                     for item in snapshot:
                         # Every key present, every value typed correctly.
-                        assert set(item.keys()) == {"index", "text", "status", "comment"}
+                        assert set(item.keys()) == {"id", "index", "text", "status", "comment", "next_ids"}
                         assert isinstance(item["text"], str)
                         assert isinstance(item["comment"], str)
                         assert item["status"] in {"pending", "in_progress", "done"}
@@ -194,7 +194,7 @@ class TestConcurrentSetComment:
         def writer() -> None:
             try:
                 for i in range(100):
-                    mgr.set_comment("inst-1", i % 20, f"write-{i}")
+                    mgr.set_comment_by_index("inst-1", i % 20, f"write-{i}")
             except BaseException as e:  # noqa: BLE001
                 errors.append(e)
 
@@ -236,7 +236,7 @@ class TestConcurrentSetComment:
                 # Alternate between two distinct values to maximise
                 # chance of a partial observation by the reader.
                 value = marker if (i % 2 == 0) else ""
-                mgr.set_comment("inst-1", 0, value)
+                mgr.set_comment_by_index("inst-1", 0, value)
                 i += 1
 
         def reader() -> None:
@@ -290,10 +290,10 @@ class TestSpecialCharactersInComment:
 
         multiline = "line 1\nline 2\nline 3"
         crlf = "win\r\nline\r\nbreak"
-        mgr.set_comment("inst-1", 0, multiline)
+        mgr.set_comment_by_index("inst-1", 0, multiline)
         assert mgr.get_all("inst-1")[0]["comment"] == multiline
 
-        mgr.set_comment("inst-1", 0, crlf)
+        mgr.set_comment_by_index("inst-1", 0, crlf)
         assert mgr.get_all("inst-1")[0]["comment"] == crlf
 
     def test_tab_and_whitespace_preserved(self):
@@ -306,7 +306,7 @@ class TestSpecialCharactersInComment:
         mixed = "a\tb  c\nd\te"
 
         for value in (with_tabs, padded, mixed):
-            mgr.set_comment("inst-1", 0, value)
+            mgr.set_comment_by_index("inst-1", 0, value)
             assert mgr.get_all("inst-1")[0]["comment"] == value
 
     def test_emoji_preserved(self):
@@ -320,7 +320,7 @@ class TestSpecialCharactersInComment:
         flag = "Region: 🇻🇳"
 
         for value in (emoji_comment, zwj_sequence, flag):
-            mgr.set_comment("inst-1", 0, value)
+            mgr.set_comment_by_index("inst-1", 0, value)
             assert mgr.get_all("inst-1")[0]["comment"] == value
 
     def test_cjk_characters_preserved(self):
@@ -336,7 +336,7 @@ class TestSpecialCharactersInComment:
         ]
 
         for value in cjk_samples:
-            mgr.set_comment("inst-1", 0, value)
+            mgr.set_comment_by_index("inst-1", 0, value)
             assert mgr.get_all("inst-1")[0]["comment"] == value
 
     def test_html_and_script_tags_stored_as_plain_text(self):
@@ -360,7 +360,7 @@ class TestSpecialCharactersInComment:
         ]
 
         for payload in payloads:
-            mgr.set_comment("inst-1", 0, payload)
+            mgr.set_comment_by_index("inst-1", 0, payload)
             stored = mgr.get_all("inst-1")[0]["comment"]
             assert stored == payload, (
                 f"Storage mutated payload {payload!r} to {stored!r}"
@@ -379,7 +379,7 @@ class TestSpecialCharactersInComment:
         ]
 
         for value in edge_cases:
-            mgr.set_comment("inst-1", 0, value)
+            mgr.set_comment_by_index("inst-1", 0, value)
             stored = mgr.get_all("inst-1")[0]["comment"]
             assert stored == value
 
@@ -397,14 +397,14 @@ class TestSpecialCharactersInComment:
 
         # 1000 emoji codepoints is exactly at the limit.
         at_limit = "🎉" * MAX_COMMENT_LENGTH
-        result = mgr.set_comment("inst-1", 0, at_limit)
+        result = mgr.set_comment_by_index("inst-1", 0, at_limit)
         assert result["comment"] == at_limit
         assert len(result["comment"]) == MAX_COMMENT_LENGTH
 
         # 1001 must raise.
         over_limit = "🎉" * (MAX_COMMENT_LENGTH + 1)
         with pytest.raises(ValueError, match="exceeds maximum length"):
-            mgr.set_comment("inst-1", 0, over_limit)
+            mgr.set_comment_by_index("inst-1", 0, over_limit)
         # The failed write must not have mutated state.
         assert mgr.get_all("inst-1")[0]["comment"] == at_limit
 
@@ -421,8 +421,8 @@ class TestSpecialCharactersInComment:
         mgr = TodoManager()
         mgr.create("inst-1", ["A", "B"])
         tricky_comment = "First line\n---\nSecond line\n---"
-        mgr.set_comment("inst-1", 0, tricky_comment)
-        result = mgr.update("inst-1", 0, "done")
+        mgr.set_comment_by_index("inst-1", 0, tricky_comment)
+        result = mgr.update_by_index("inst-1", 0, "done")
 
         assert result is not None
         reminder = result["reminder"]

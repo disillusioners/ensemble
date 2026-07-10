@@ -301,8 +301,13 @@ class TestTodoList:
         """All items appear in the output with their index and text."""
         manager = _make_manager()
         manager._todo_manager.create("test-instance-id", ["Task X", "Task Y"])
-        manager._todo_manager.update("test-instance-id", 0, "done")
-        manager._todo_manager.update("test-instance-id", 1, "in_progress")
+        # Phase 2: TodoGraphManager.update() keys on string node_id, not int.
+        # Use the backward-compat shim ``update_by_index`` for index-based
+        # mutations (it resolves int → node_id under the hood).
+        manager._todo_manager.update_by_index("test-instance-id", 0, "done")
+        manager._todo_manager.update_by_index(
+            "test-instance-id", 1, "in_progress"
+        )
         tools = _build_tools(manager=manager)
         list_tool = tools[2]
 
