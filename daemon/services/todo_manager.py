@@ -925,6 +925,96 @@ class TodoGraphManager:
             reminder = self._compute_reminder(nodes, node_id, node.status)
             return {"todos": snapshot, "reminder": reminder}
 
+    def add_subtasks(
+        self,
+        instance_id: str,
+        node_id: str,
+        texts: list[str],
+    ) -> dict | None:
+        """Append multiple sub-tasks atomically to a node's checklist.
+
+        All ``texts`` are validated up-front (before acquiring the lock);
+        the appends then happen within a single ``self._lock`` hold so the
+        mutation is atomic — either every sub-task is added or none are.
+        This avoids the partial-success window that looping
+        :meth:`add_subtask` would create, where each iteration re-acquires
+        the lock and could fail mid-way against the per-node cap.
+
+        The per-node cap is checked against the COMBINED count
+        (``existing + len(texts)``), not per-item, so a batch that would
+        push the node over :data:`MAX_SUBTASKS_PER_NODE` is rejected in
+        full rather than silently truncating.
+
+        Args:
+            instance_id: Owning instance identifier.
+            node_id: Parent node identifier.
+            texts: Sub-task descriptions. Each must be a non-empty string
+                ≤ :data:`MAX_SUBTASK_TEXT_LENGTH` characters. The combined
+                count (existing + new) must not exceed
+                :data:`MAX_SUBTASKS_PER_NODE`.
+
+        Returns:
+            Dict with keys ``todos`` (full node snapshot as plain dicts),
+            ``reminder`` (formatted string), and ``added_ids`` (the list of
+            newly created sub-task ids, in insertion order). Returns
+            ``None`` if the instance or node does not exist.
+
+        Raises:
+            ValueError: If ``texts`` is not a non-empty list, any entry is
+                not a non-empty string or exceeds the length cap, or the
+                combined count would exceed
+                :data:`MAX_SUBTASKS_PER_NODE`.
+        """
+        # Pre-lock validation: cheap checks that don't need graph state.
+        # Mirrors add_subtask's per-text rules but applied to every entry
+        # BEFORE any mutation, guaranteeing the atomic all-or-nothing
+        # contract.
+        if not isinstance(texts, list):
+            raise ValueError(
+                f"texts must be a list of strings, got "
+                f"{type(texts).__name__}."
+            )
+        if len(texts) == 0:
+            raise ValueError("texts must contain at least one sub-task.")
+        for i, t in enumerate(texts):
+            if not isinstance(t, str) or not t:
+                raise ValueError(f"texts[{i}] must be a non-empty string.")
+            if len(t) > MAX_SUBTASK_TEXT_LENGTH:
+                raise ValueError(
+                    f"texts[{i}] exceeds maximum length of "
+                    f"{MAX_SUBTASK_TEXT_LENGTH} characters (got {len(t)})."
+                )
+
+        with self._lock:
+            nodes = self._instance_graphs.get(instance_id)
+            if nodes is None or node_id not in nodes:
+                return None
+            node = nodes[node_id]
+            existing = len(node.subtasks)
+            if existing + len(texts) > MAX_SUBTASKS_PER_NODE:
+                raise ValueError(
+                    f"Cannot add {len(texts)} sub-task(s): node {node_id!r} "
+                    f"already has {existing} sub-task(s); {existing}+"
+                    f"{len(texts)} would exceed the maximum of "
+                    f"{MAX_SUBTASKS_PER_NODE}."
+                )
+            added_ids: list[str] = []
+            for t in texts:
+                sub = SubTask(
+                    id=self._generate_subtask_id(),
+                    text=t,
+                    status="pending",
+                )
+                node.subtasks.append(sub)
+                added_ids.append(sub.id)
+            snapshot = [self._to_dict(n) for n in nodes.values()]
+            reminder = self._compute_reminder(nodes, node_id, node.status)
+            return {
+                "todos": snapshot,
+                "reminder": reminder,
+                "added_ids": added_ids,
+            }
+
     def update_subtask(
         self,
         instance_id: str,

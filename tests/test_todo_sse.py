@@ -555,6 +555,39 @@ class TestSubtaskSSEPayload:
         assert subs[0]["status"] == "pending"
         assert isinstance(subs[0]["id"], str) and subs[0]["id"].startswith("s-")
 
+    async def test_sse_payload_after_batch_add_subtask_emits_once(self):
+        """A batched ``todo_add_subtask`` (``list[str]``) emits exactly ONE
+        ``todo_update`` SSE event — not one per item — and the payload's
+        ``subtasks`` list carries every appended item in insertion order.
+        """
+        hub = AsyncMock()
+        manager = _make_manager_with_hub()
+        manager._todo_manager.create_graph(
+            "sse-test-instance",
+            nodes=[{"id": "alpha", "text": "Alpha"}],
+            edges=[],
+        )
+        tools = _build_tools(hub=hub, manager=manager)
+        add_subtask_tool = tools[6]
+
+        await add_subtask_tool.coroutine(
+            node_id="alpha",
+            text=["Create schema", "Run migration", "Seed data"],
+        )
+
+        # Exactly one emission for the whole batch.
+        hub.stream_todo_update.assert_awaited_once()
+        todos_arg = hub.stream_todo_update.call_args.args[1]
+        subs = todos_arg[0]["subtasks"]
+        assert len(subs) == 3
+        assert [s["text"] for s in subs] == [
+            "Create schema",
+            "Run migration",
+            "Seed data",
+        ]
+        assert all(s["status"] == "pending" for s in subs)
+        assert all(s["id"].startswith("s-") for s in subs)
+
     async def test_sse_payload_after_update_subtask_has_seven_keys(self):
         """``todo_update_subtask`` emits with the 7-key schema and the
         ``subtasks`` field reflects the status flip on the targeted item.

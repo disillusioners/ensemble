@@ -1235,6 +1235,138 @@ class TestTodoSubtasks:
         assert node["subtasks"][0]["text"] == at_limit
 
     # ------------------------------------------------------------------
+    # add_subtasks (batch) (7 tests)
+    # ------------------------------------------------------------------
+
+    def test_add_subtasks_appends_all_in_order(self):
+        """add_subtasks appends every text and returns ``added_ids`` in
+        insertion order; each new sub-task is ``pending`` with an
+        ``s-``-prefixed id.
+        """
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        result = mgr.add_subtasks("inst-1", node_id, ["one", "two", "three"])
+
+        assert set(result.keys()) == {"todos", "reminder", "added_ids"}
+        assert len(result["added_ids"]) == 3
+        assert all(sid.startswith("s-") for sid in result["added_ids"])
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        assert [st["text"] for st in node["subtasks"]] == [
+            "one",
+            "two",
+            "three",
+        ]
+        assert all(st["status"] == "pending" for st in node["subtasks"])
+        # added_ids match the appended sub-task ids, in order.
+        assert result["added_ids"] == [st["id"] for st in node["subtasks"]]
+
+    def test_add_subtasks_accepts_single_element_list(self):
+        """A one-element list behaves like add_subtask but returns
+        ``added_ids`` with exactly one id.
+        """
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        result = mgr.add_subtasks("inst-1", node_id, ["only"])
+
+        assert len(result["added_ids"]) == 1
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        assert node["subtasks"][0]["text"] == "only"
+
+    def test_add_subtasks_to_nonexistent_node_returns_none(self):
+        """A missing parent node returns ``None`` with no mutation."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+
+        result = mgr.add_subtasks("inst-1", "n-deadbeef", ["ghost"])
+
+        assert result is None
+
+    def test_add_subtasks_to_nonexistent_instance_returns_none(self):
+        """A missing instance returns ``None``."""
+        mgr = TodoGraphManager()
+
+        result = mgr.add_subtasks("never-created", "n-deadbeef", ["ghost"])
+
+        assert result is None
+
+    def test_add_subtasks_empty_list_raises(self):
+        """An empty ``texts`` list raises ``ValueError`` and mutates
+        nothing.
+        """
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        with pytest.raises(ValueError, match=r"at least one"):
+            mgr.add_subtasks("inst-1", node_id, [])
+        assert mgr.get_all("inst-1")[0]["subtasks"] == []
+
+    def test_add_subtasks_rejects_empty_entry_atomically(self):
+        """An empty string anywhere in ``texts`` raises ``ValueError``
+        BEFORE any mutation — the node keeps zero sub-tasks (atomic).
+        """
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+
+        with pytest.raises(ValueError, match=r"non-empty"):
+            mgr.add_subtasks("inst-1", node_id, ["ok", "", "also-ok"])
+
+        assert mgr.get_all("inst-1")[0]["subtasks"] == []
+
+    def test_add_subtasks_combined_cap_exceeded_raises_atomically(self):
+        """When ``existing + len(texts)`` exceeds the cap, the whole
+        batch is rejected and NONE are appended (no partial success).
+        """
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        # Seed to one below the cap.
+        mgr.add_subtasks(
+            "inst-1",
+            node_id,
+            [f"seed-{i}" for i in range(MAX_SUBTASKS_PER_NODE - 1)],
+        )
+        # Two more would push to MAX+1.
+        with pytest.raises(ValueError, match=r"exceed the maximum|20"):
+            mgr.add_subtasks("inst-1", node_id, ["over-1", "over-2"])
+
+        stored = mgr.get_all("inst-1")[0]["subtasks"]
+        assert len(stored) == MAX_SUBTASKS_PER_NODE - 1
+        assert not any(st["text"] in ("over-1", "over-2") for st in stored)
+
+    def test_add_subtasks_at_combined_cap_boundary_succeeds(self):
+        """A batch that lands exactly on the cap is accepted."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        # Seed to cap - 2, then add exactly 2 → lands on the cap.
+        mgr.add_subtasks(
+            "inst-1",
+            node_id,
+            [f"seed-{i}" for i in range(MAX_SUBTASKS_PER_NODE - 2)],
+        )
+
+        result = mgr.add_subtasks("inst-1", node_id, ["final-1", "final-2"])
+
+        node = next(n for n in result["todos"] if n["id"] == node_id)
+        assert len(node["subtasks"]) == MAX_SUBTASKS_PER_NODE
+
+    def test_add_subtasks_text_too_long_raises(self):
+        """An entry exceeding ``MAX_SUBTASK_TEXT_LENGTH`` raises."""
+        mgr = TodoGraphManager()
+        mgr.create("inst-1", ["Parent"])
+        node_id = mgr.get_all("inst-1")[0]["id"]
+        long_text = "x" * (MAX_SUBTASK_TEXT_LENGTH + 1)
+
+        with pytest.raises(ValueError, match=r"maximum|500"):
+            mgr.add_subtasks("inst-1", node_id, ["ok", long_text])
+
+    # ------------------------------------------------------------------
     # update_subtask (12 tests)
     # ------------------------------------------------------------------
 

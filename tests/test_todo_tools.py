@@ -807,6 +807,149 @@ class TestTodoAddSubtask:
 
 
 # =============================================================================
+# todo_add_subtask — batch (list[str]) mode
+# =============================================================================
+
+
+class TestTodoAddSubtaskBatch:
+    """``todo_add_subtask(node_id, text)`` accepts a ``list[str]`` for
+    atomic batched insertion.
+    """
+
+    async def test_batch_returns_confirmation_with_all_ids(self):
+        """Passing a list appends every item in one call; the confirmation
+        line lists the count and every generated ``s-``-prefixed id, and
+        the rendered graph shows all items.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha",
+            text=["Create schema", "Run migration", "Seed data"],
+        )
+
+        assert "Added 3 sub-tasks" in result
+        assert "alpha" in result
+        # Three s-prefixed ids appear in the confirmation line.
+        assert result.count("s-") >= 3
+        for label in ("Create schema", "Run migration", "Seed data"):
+            assert label in result
+
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 3
+        assert [st["text"] for st in stored[0]["subtasks"]] == [
+            "Create schema",
+            "Run migration",
+            "Seed data",
+        ]
+        assert all(st["status"] == "pending" for st in stored[0]["subtasks"])
+
+    async def test_single_string_still_uses_singular_confirmation(self):
+        """Backward compat: a bare string still adds exactly one sub-task
+        and uses the singular ``Added sub-task '<id>'`` confirmation.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", text="Write unit tests"
+        )
+
+        assert "Added sub-task" in result
+        assert "s-" in result
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 1
+
+    async def test_batch_node_not_found_returns_error(self):
+        """A missing node on a batch call returns ``ERROR:`` without
+        creating any state.
+        """
+        manager = _make_manager()
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="n-missing", text=["a", "b"]
+        )
+
+        assert result.startswith("ERROR:")
+        assert "n-missing" in result
+
+    async def test_batch_combined_cap_exceeded_returns_error_atomically(
+        self,
+    ):
+        """When a batch would push the node over the cap, the tool returns
+        ``ERROR:`` and NONE of the batched items are appended.
+        """
+        from daemon.services.todo_manager import MAX_SUBTASKS_PER_NODE
+
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[
+                {
+                    "id": "alpha",
+                    "text": "Alpha",
+                    "subtasks": [
+                        {"text": f"item {i}"}
+                        for i in range(MAX_SUBTASKS_PER_NODE - 1)
+                    ],
+                }
+            ],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        # Two more would exceed the cap (cap - 1 + 2 = cap + 1).
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", text=["over-1", "over-2"]
+        )
+
+        assert result.startswith("ERROR:")
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == MAX_SUBTASKS_PER_NODE - 1
+        assert not any(
+            st["text"] in ("over-1", "over-2")
+            for st in stored[0]["subtasks"]
+        )
+
+    async def test_batch_empty_entry_returns_error_atomically(self):
+        """An empty string in the batch rejects the whole call; nothing is
+        appended (atomic all-or-nothing).
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", text=["ok", "", "also-ok"]
+        )
+
+        assert result.startswith("ERROR:")
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert stored[0]["subtasks"] == []
+
+
+# =============================================================================
 # todo_update_subtask (Sub-Task Phase 1)
 # =============================================================================
 

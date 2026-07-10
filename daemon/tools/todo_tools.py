@@ -23,7 +23,9 @@ Phase 2 of the todo graph transformation introduced:
 
 Phase 2 of the todo sub-tasks feature adds three checklist tools:
 
-  * ``todo_add_subtask`` — append a binary checklist item to a node.
+  * ``todo_add_subtask`` — append one or more binary checklist items to a
+    node (accepts a single ``text`` string or a ``list[str]`` for batched,
+    atomic insertion).
   * ``todo_update_subtask`` — toggle a sub-task's status, optionally
     auto-completing the parent when all sub-tasks are done.
   * ``todo_remove_subtask`` — delete a sub-task by id.
@@ -96,8 +98,11 @@ compatibility with agents that call ``todo_update(0, "done")``.
 
 Sub-task usage example::
 
-    # Add a sub-task to a node
+    # Add a single sub-task to a node
     todo_add_subtask("n-a1b2c3d4", "Write integration tests")
+
+    # Add several sub-tasks at once (atomic batch — all or nothing)
+    todo_add_subtask("n-a1b2c3d4", ["Create schema", "Run migration", "Seed data"])
 
     # Mark it done; auto-complete the parent when all sub-tasks are done
     todo_update_subtask("n-a1b2c3d4", "s-e5f6g7h8", "done", auto_complete=True)
@@ -706,8 +711,10 @@ Returns:
 
     @register_tool_category("todo")
     @tool
-    async def todo_add_subtask(node_id: str, text: str) -> str:
-        """Add a sub-task (checklist item) to a todo node.
+    async def todo_add_subtask(
+        node_id: str, text: str | list[str]
+    ) -> str:
+        """Add one or more sub-tasks (checklist items) to a todo node.
 
         Sub-tasks are binary (pending/done) checklist items nested within
         a graph node. They don't participate in the graph structure — they
@@ -715,14 +722,25 @@ Returns:
 
         Args:
             node_id: The parent node's stable ID (e.g. "n-a1b2c3d4").
-            text: The sub-task description (max 500 chars).
+            text: A single sub-task description, OR a list of descriptions
+                (each max 500 chars). A list adds them in one atomic batch
+                — either all are appended or none are.
 
         Returns:
-            Formatted graph with the new sub-task visible, or ERROR: string.
+            Formatted graph with the new sub-task(s) visible, or ERROR: string.
         """
         try:
-            result = manager._todo_manager.add_subtask(
-                current_instance_id, node_id, text
+            # Normalize ``text`` to a list so a single string and a list
+            # of strings share one code path. The ``str`` check MUST come
+            # before any iterable handling — ``str`` is iterable, so
+            # treating a bare string as a sequence would split it into
+            # characters.
+            if isinstance(text, str):
+                texts = [text]
+            else:
+                texts = list(text)
+            result = manager._todo_manager.add_subtasks(
+                current_instance_id, node_id, texts
             )
             if result is None:
                 # The manager raises ValueError for "max sub-tasks
@@ -734,65 +752,68 @@ Returns:
                     f"'{current_instance_id}'."
                 )
             todos = result["todos"]
-            # The new sub-task is appended to the end of the parent's
-            # ``subtasks`` list, so its id is the last entry's id.
-            parent = next(
-                (n for n in todos if n["id"] == node_id), None
-            )
+            added_ids = result["added_ids"]
             await _emit_update(live_event_hub, current_instance_id, todos)
             body = _format_graph(todos, verbose=False)
-            if parent is not None and parent.get("subtasks"):
-                subtask_id = parent["subtasks"][-1]["id"]
-                return (
-                    f"Added sub-task '{subtask_id}' to node '{node_id}'.\n\n"
-                    f"{body}"
+            if len(added_ids) == 1:
+                head = (
+                    f"Added sub-task '{added_ids[0]}' to node "
+                    f"'{node_id}'."
                 )
-            # Defensive fallback: the manager already accepted the
-            # mutation (otherwise we would have returned the ERROR
-            # branch above), but the returned snapshot didn't include
-            # the parent node — likely a transient state mismatch.
-            # Don't fabricate an id; just confirm the success and
-            # render the graph.
-            return (
-                f"Added sub-task to node '{node_id}'.\n\n"
-                f"{body}"
-            )
+            else:
+                ids_str = ", ".join(added_ids)
+                head = (
+                    f"Added {len(added_ids)} sub-tasks to node "
+                    f"'{node_id}': {ids_str}."
+                )
+            return f"{head}\n\n{body}"
         except Exception as e:
             return f"ERROR: Failed to add sub-task: {e}"
 
     todo_add_subtask._full_doc_ = """\
-Add a sub-task (checklist item) to a todo node.
+Add one or more sub-tasks (checklist items) to a todo node.
 
 Sub-tasks are STRICTLY BINARY — each item is either ``"pending"`` or
 ``"done"``. They do not participate in the graph structure (no
 ``next_ids``) and exist purely to track fine-grained acceptance
-criteria under a parent node. The ``text`` field is required and
+criteria under a parent node. Each ``text`` entry is required and
 capped at :data:`MAX_SUBTASK_TEXT_LENGTH` (500 chars); the per-node
 checklist is capped at :data:`MAX_SUBTASKS_PER_NODE` (20 items).
 
-The new sub-task's id is auto-generated (``s-`` + 8 hex chars) and
+The ``text`` argument accepts EITHER a single string OR a list of
+strings. Passing a list adds every item in one atomic batch — the
+combined count (existing + new) is validated up-front, so a batch
+that would exceed the per-node cap is rejected in full rather than
+silently truncating. This is the recommended way to attach several
+checklist items at once instead of issuing one call per item.
+
+The new sub-tasks' ids are auto-generated (``s-`` + 8 hex chars) and
 returned in the confirmation line so subsequent
-``todo_update_subtask`` / ``todo_remove_subtask`` calls can target it
-without re-listing the graph.
+``todo_update_subtask`` / ``todo_remove_subtask`` calls can target
+them without re-listing the graph.
 
 Args:
     node_id: The parent node's stable ID (e.g. ``"n-a1b2c3d4"``).
-    text: The sub-task description (max 500 chars).
+    text: A single sub-task description (str) OR a list of descriptions
+        (``list[str]``). Each entry: non-empty, max 500 chars.
 
 Behavior:
 
-* Calls ``manager._todo_manager.add_subtask`` which:
+* Calls ``manager._todo_manager.add_subtasks`` which:
   - returns ``None`` when the instance or ``node_id`` is unknown;
-  - raises :class:`ValueError` for empty/too-long ``text`` or when
-    the node already has the maximum number of sub-tasks.
-* Emits a ``todo_update`` SSE event on success.
+  - raises :class:`ValueError` for an empty/non-list ``text``, an
+    empty/too-long entry, or when the combined sub-task count would
+    exceed the per-node cap.
+* Emits a single ``todo_update`` SSE event on success (one event per
+  batch, regardless of how many items were added).
 * Renders the resulting graph with ``verbose=False`` (sub-tasks
   truncated at 5 per node with a ``+N more`` marker).
 
 Returns:
-    A confirmation line followed by the formatted graph on success.
-    Returns ``ERROR: ...`` when the parent node is missing, the
-    text is empty/too long, or the per-node sub-task cap is reached.
+    A confirmation line (listing the added sub-task id(s)) followed by
+    the formatted graph on success. Returns ``ERROR: ...`` when the
+    parent node is missing, an entry is empty/too long, or the per-node
+    sub-task cap would be exceeded.
 """
 
     @register_tool_category("todo")

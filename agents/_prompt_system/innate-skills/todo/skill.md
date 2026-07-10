@@ -12,7 +12,7 @@ Track multi-step workflows with a todo graph (DAG). Plan work, track progress, a
 | `todo_update(node_id, status)` | Update one node's status by stable ID | Graph workflows (preferred; takes precedence over `index`) |
 | `todo_add_edge(from_id, to_id)` | Add a dependency edge between two nodes | Graph workflows |
 | `todo_remove_edge(from_id, to_id)` | Remove a dependency edge | Graph workflows |
-| `todo_add_subtask(node_id, text)` | Add a checklist item to a node | Break down a node into smaller steps |
+| `todo_add_subtask(node_id, text)` | Add one or more checklist items to a node (`text` is a single string or `list[str]` for batched, atomic insertion) | Break down a node into smaller steps |
 | `todo_update_subtask(node_id, subtask_id, status, auto_complete=False)` | Check/uncheck a sub-task (binary: `pending` / `done`) | Track sub-task progress; optionally auto-complete the parent when all sub-tasks are done |
 | `todo_remove_subtask(node_id, subtask_id)` | Remove a sub-task | Clean up or correct mistakes |
 | `todo_list(verbose=False)` | View the current todo graph (truncates sub-tasks to 5 per node) | Read-only, any time |
@@ -61,17 +61,22 @@ Sub-tasks are lightweight checklist items nested inside a single todo node. They
 - **Sub-task status is binary**: `pending` (☐) or `done` (☑). There is no `in_progress` state for sub-tasks — flip them once the step is done.
 - Sub-tasks are rendered as an indented checklist under their parent node when listed via `todo_list`.
 - **Limits**: max **20 sub-tasks per node**; max **500 characters** per sub-task text. The manager raises `ValueError` for both caps, and the tool wraps them as `ERROR: Failed to add sub-task: {e}`:
-  - `ValueError("Cannot add sub-task: node '...' already has N sub-tasks (max 20).")` — per-node sub-task cap reached.
-  - `ValueError("sub-task text exceeds maximum length of 500 characters (got N)")` — sub-task text too long.
-  - For empty text: `ValueError("sub-task text must be a non-empty string")`.
+  - `ValueError("Cannot add N sub-task(s): node '...' already has M sub-task(s); M+N would exceed the maximum of 20.")` — per-node sub-task cap reached (the combined existing + new count is checked up-front for batch calls, so a too-large batch is rejected in full).
+  - `ValueError("texts[i] exceeds maximum length of 500 characters (got N)")` — a sub-task text entry is too long.
+  - For empty text: `ValueError("texts[i] must be a non-empty string")` (single-string calls reuse the same path).
 - A missing parent `node_id` (or missing instance) returns `ERROR: Node '<id>' not found in instance '<instance-id>'.`
 - Sub-tasks survive `todo_update` on the parent node — changing the parent's status does not alter its sub-tasks.
 - `todo_clear` removes the entire graph including all sub-tasks.
 
 ```python
-# Add sub-tasks to a node
+# Add a single sub-task to a node
 todo_add_subtask(node_id="n-a1b2c3d4", text="Create schema")
-todo_add_subtask(node_id="n-a1b2c3d4", text="Run migration")
+
+# Add several sub-tasks at once (atomic batch — all appended or none)
+todo_add_subtask(
+    node_id="n-a1b2c3d4",
+    text=["Create schema", "Run migration", "Seed data"],
+)
 
 # Check off a sub-task
 todo_update_subtask(node_id="n-a1b2c3d4", subtask_id="s-e5f6g7h8", status="done")
@@ -134,4 +139,4 @@ todo_list(verbose=True)
 
 When you complete a task, mark it `done` via `todo_update`. The system returns a graph-aware reminder pointing to the **next ready items** — pending nodes whose predecessors are all done — and reports blocked items still waiting on a predecessor, or confirms completion. Keep your todo graph current throughout multi-step work; it tracks progress and prevents skipped steps.
 
-When a node represents work with several internal steps, attach **sub-tasks** with `todo_add_subtask` and check them off as you go. Pass `auto_complete=True` on the final `todo_update_subtask` to automatically promote the parent node to `done` once every sub-task is checked — this is the cleanest way to close out a multi-step node without a separate `todo_update` call. Reach for `todo_list(verbose=True)` when you need the full checklist of a node with many sub-tasks (e.g. before choosing which `subtask_id` to update, or to confirm nothing was lost). Remember: sub-task un-checking does **not** revert a parent node's status, so use `todo_update` explicitly if you need to re-open a finished parent.
+When a node represents work with several internal steps, attach **sub-tasks** with `todo_add_subtask` and check them off as you go. Pass a `list[str]` as `text` to attach several items in one atomic batch rather than issuing a call per item. Pass `auto_complete=True` on the final `todo_update_subtask` to automatically promote the parent node to `done` once every sub-task is checked — this is the cleanest way to close out a multi-step node without a separate `todo_update` call. Reach for `todo_list(verbose=True)` when you need the full checklist of a node with many sub-tasks (e.g. before choosing which `subtask_id` to update, or to confirm nothing was lost). Remember: sub-task un-checking does **not** revert a parent node's status, so use `todo_update` explicitly if you need to re-open a finished parent.
