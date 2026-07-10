@@ -103,7 +103,7 @@ compaction:
   # the registry matches the active model. 0 = use built-in default (180k).
   context_window_default: 0
   context_window_overrides:
-    "agentic": 500000
+    "agentic": 600000
     "vision": 120000
   target_ratio: 0.40
   summarization_model: ""
