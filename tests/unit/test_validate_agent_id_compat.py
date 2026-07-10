@@ -59,8 +59,7 @@ class TestValidateAgentIdCompat:
 
         with patch("daemon.utils.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
-            mock_registry.resolve_pure_id.return_value = "valid-agent"
-            mock_registry.get.return_value = mock_metadata
+            mock_registry.get_resolved.return_value = mock_metadata
             mock_get_registry.return_value = mock_registry
 
             result = validate_agent_id("valid-agent")

@@ -424,10 +424,8 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     """Validate agent_id exists and return agent_id with path.
 
     This is the preferred function for validating agent references.
-    Resolves agent_id aliases (e.g., ``"coder"`` -> ``"developer"``) via
-    the registry before lookup so persisted/legacy references continue
-    to resolve after a rename. Returns the canonical agent_id from
-    the registry metadata, not the raw input.
+    Returns the canonical agent_id from the registry metadata along with
+    the resolved absolute path to the agent directory.
 
     Args:
         agent_id: The agent identifier to validate.
@@ -440,20 +438,7 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     """
     registry = get_registry()
 
-    # Resolve alias (e.g., "coder" -> "developer") before dict lookup.
-    # registry.get() does NOT resolve aliases, so this step is required
-    # to support backward-compatible references to renamed agents.
-    resolved_agent_id = registry.resolve_pure_id(agent_id)
-    if resolved_agent_id is None:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Agent not found: {agent_id}"
-            ).model_dump()
-        )
-
-    metadata = registry.get(resolved_agent_id)
+    metadata = registry.get_resolved(agent_id)
     if metadata is None:
         raise HTTPException(
             status_code=404,

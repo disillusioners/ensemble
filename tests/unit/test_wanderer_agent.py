@@ -2,9 +2,9 @@
 
 Tests Wanderer agent discovery, loading, tool filtering, and prompt composition.
 Wanderer is a read-only investigation agent that explores codebases, answers
-questions, and does library research WITHOUT modifying files. Wanderer is
-self-sufficient — all investigation is done directly with its own tools;
-it does not spawn other agent instances.
+questions, and does library research WITHOUT modifying files. Wanderer can
+delegate bounded investigation sub-tasks to coder instances for complex,
+multi-file investigations — wanderer itself never writes.
 
 All tests run in the unit test environment with langgraph mocks from conftest.py.
 """
@@ -53,10 +53,10 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
-# Expected tool categories in meta.json allow list (the 9 declared categories).
+# Expected tool categories in meta.json allow list (10 declared categories).
 EXPECTED_ALLOW_CATEGORIES = [
     "bash", "filesystem", "time", "self", "help",
-    "knowledge", "mcp", "context", "rag",
+    "knowledge", "mcp", "context", "rag", "instance",
 ]
 
 
@@ -189,25 +189,47 @@ class TestWandererMetaJsonValidation:
         allowed = meta.get("tools", {}).get("allow", [])
         assert "db" not in allowed
 
-    def test_tools_allow_does_not_contain_instance(self) -> None:
-        """Wanderer is self-sufficient and does not spawn other agent instances."""
+    def test_tools_allow_contains_instance(self) -> None:
+        """Wanderer delegates complex investigations to coder instances."""
         meta_path = WANDERER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         allowed = meta.get("tools", {}).get("allow", [])
-        assert "instance" not in allowed, (
-            f"tools.allow should not include 'instance' — wanderer does its own "
-            f"investigation. Got: {allowed}"
+        assert "instance" in allowed, (
+            f"tools.allow should include 'instance' so wanderer can spawn "
+            f"coder for complex investigations. Got: {allowed}"
         )
 
-    def test_team_members_field_is_absent(self) -> None:
-        """Wanderer is self-sufficient and has no team_members field."""
+    def test_team_members_field_is_present(self) -> None:
+        """Wanderer has a team_members field; wanderer delegates to coder."""
         meta_path = WANDERER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        assert "team_members" not in meta, (
-            f"meta.json should not define 'team_members' — wanderer does all "
-            f"investigation directly. Got: {meta.get('team_members')}"
+        assert "team_members" in meta, (
+            "meta.json must define 'team_members' — wanderer delegates "
+            "complex investigations to coder"
+        )
+
+    def test_team_members_contains_coder(self) -> None:
+        """Wanderer's only team member is coder."""
+        meta_path = WANDERER_AGENT_DIR / "meta.json"
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        team_members = meta.get("team_members", [])
+        assert isinstance(team_members, list)
+        assert team_members == ["coder"], (
+            f"team_members must be exactly ['coder'] (read-only invariant). "
+            f"Got: {team_members}"
+        )
+
+    def test_team_members_does_not_contain_opencode(self) -> None:
+        """team_members must not contain opencode — that's the coder agent's lane."""
+        meta_path = WANDERER_AGENT_DIR / "meta.json"
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        team_members = meta.get("team_members", [])
+        assert "opencode" not in team_members, (
+            f"team_members should not contain 'opencode': {team_members}"
         )
 
     def test_tools_config_parsed_by_registry(self) -> None:
@@ -280,8 +302,10 @@ class TestWandererToolFilter:
         assert "rag_query" in allowed_tools
         # self tools should resolve
         assert "inner_soul" in allowed_tools
-        # instance tools must NOT resolve (wanderer is self-sufficient)
-        assert "spawn_instance" not in allowed_tools
+        # instance tools MUST resolve (wanderer delegates complex investigations)
+        assert "spawn_instance" in allowed_tools
+        assert "send_message" in allowed_tools
+        assert "terminate_instance" in allowed_tools
 
     def test_wanderer_resolve_excludes_db_and_opencode(self) -> None:
         from daemon.tools.instance import resolve_tool_filter
@@ -346,6 +370,7 @@ class TestWandererToolFilter:
             MockTool("db_query"),  # Should be filtered out (db not in allow)
             MockTool("write_file"),  # Available but forbidden by soul policy
             MockTool("external_opencode_init_session"),  # Should be filtered out
+            MockTool("spawn_instance"),  # Available — wanderer delegates to coder
         ]
 
         mock_agent_meta = MagicMock()
@@ -373,8 +398,8 @@ class TestWandererToolFilter:
                 assert "db_query" not in tool_names
                 # opencode tools should be filtered out
                 assert "external_opencode_init_session" not in tool_names
-                # instance tools should be filtered out (wanderer is self-sufficient)
-                assert "spawn_instance" not in tool_names
+                # instance tools SHOULD be present (wanderer delegates to coder)
+                assert "spawn_instance" in tool_names
 
 
 # =============================================================================
@@ -395,13 +420,17 @@ class TestWandererSoulContent:
         assert "Wanderer" in content
         assert "investigator" in content.lower() or "investigation" in content.lower()
 
-    def test_soul_declares_readonly_discipline(self) -> None:
-        """Soul must declare read-only as a core identity, not just a rule."""
+    def test_soul_declares_readonly_discipline_with_coder_hands(self) -> None:
+        """Soul must declare read-only for wanderer and identify coder as hands."""
         soul_path = WANDERER_AGENT_DIR / "soul.md"
         content = soul_path.read_text(encoding="utf-8").lower()
-        # Must mention "read-only" or "read only"
+        # Wanderer is read-only
         assert "read-only" in content or "read only" in content, (
             "soul.md must explicitly declare read-only discipline"
+        )
+        # But wanderer delegates bounded investigation work to coder instances
+        assert "coder" in content, (
+            "soul.md must mention coder as the hands for complex investigations"
         )
 
     def test_soul_forbids_modifying_files(self) -> None:
@@ -413,27 +442,22 @@ class TestWandererSoulContent:
         # Must contain "never" near these references
         assert "never" in content
 
-    def test_soul_declares_self_sufficient_investigation(self) -> None:
-        """Wanderer is self-sufficient — all investigation is done directly."""
+    def test_soul_mentions_coder_delegation(self) -> None:
+        """Soul documents coder delegation for complex, multi-file investigations."""
         soul_path = WANDERER_AGENT_DIR / "soul.md"
         content = soul_path.read_text(encoding="utf-8").lower()
-        # Must mention doing investigation directly
-        assert "directly" in content, (
-            "soul.md must state that investigation is done directly"
+        # Must mention delegation / spawn to coder
+        assert "coder" in content
+        assert "delegat" in content or "spawn" in content, (
+            "soul.md must describe delegating to coder instances"
         )
-        # Must state that wanderer does not spawn other agents
-        assert "spawn" in content and "does not spawn" in content, (
-            "soul.md must explicitly say wanderer does not spawn other agents"
+        # Must NOT mention the obsolete coder→developer alias note
+        assert "coder→developer" not in content, (
+            "soul.md must not reference the obsolete coder→developer alias"
         )
-
-    def test_soul_mentions_future_coder_delegation_note(self) -> None:
-        """Soul documents the future coder→developer alias delegation note."""
-        soul_path = WANDERER_AGENT_DIR / "soul.md"
-        content = soul_path.read_text(encoding="utf-8")
-        assert "coder→developer" in content or "coder->developer" in content, (
-            "soul.md must include the future coder→developer alias note"
+        assert "coder->developer" not in content, (
+            "soul.md must not reference the obsolete coder->developer alias"
         )
-        assert "future" in content.lower()
 
     def test_soul_mentions_mcp_for_research(self) -> None:
         soul_path = WANDERER_AGENT_DIR / "soul.md"

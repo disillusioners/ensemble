@@ -243,8 +243,8 @@ def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str
     rejection when it is not.
 
     Both the caller's list entries AND the requested ``agent_id`` are
-    canonicalized via :func:`registry.resolve_pure_id` to prevent
-    alias-bypass attacks (e.g. ``"coder"`` for ``"developer"``).
+    canonicalized via :func:`registry.resolve_pure_id` so renamed agents
+    continue to match their ``team_members`` entries correctly.
 
     Secure default: ``team_members`` missing OR empty → deny everything.
 
@@ -288,15 +288,13 @@ def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str
             "Allowed team members: []"
         )
 
-    # Resolve caller-canonical id (resolves aliases like 'coder' →
-    # 'developer'); the canonical id is what team_members entries should
-    # match against.
+    # Use the caller's canonical id from the registry as the basis for
+    # team_members matching.
     caller_canonical = caller_meta.id
     raw_members = caller_meta.team_members or []
 
-    # Canonicalize each member so an attacker cannot bypass via aliases
-    # (e.g. caller = 'coder' with team_members = ['developer'] still
-    # works because 'developer' canonicalizes to itself).
+    # Canonicalize each member so a renamed team member still matches
+    # the requested agent_id consistently.
     allowed_canonical: set[str] = set()
     for member in raw_members:
         canonical = registry.resolve_pure_id(member)
@@ -588,7 +586,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # ``agent_id`` is in the caller's ``meta.json`` ``team_members`` list
         # before doing any work. Deny-by-default: missing/empty team_members
         # rejects all spawns. Both sides are canonicalized via the registry
-        # so legacy aliases (e.g. "coder") cannot bypass the check.
+        # to handle any future renames consistently.
         if not caller_agent_id:
             return (
                 "ERROR: spawn_instance invoked without a caller agent_id. "

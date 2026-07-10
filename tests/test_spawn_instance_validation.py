@@ -12,29 +12,29 @@ def test_backward_compatibility():
     """Test 2: Backward compatibility - agent_dir parameter."""
     registry = get_registry()
 
-    # Test 2a: agent_dir='./agents/coder' (with ./ prefix) → resolves to 'developer' via alias
+    # Test 2a: agent_dir='./agents/coder' (with ./ prefix) → resolves to 'coder' (standalone agent)
     resolved_id = registry.resolve_to_id("./agents/coder")
-    assert resolved_id == "developer", f"resolved_id={resolved_id}"
+    assert resolved_id == "coder", f"resolved_id={resolved_id}"
 
-    # Test 2b: agent_dir='agents/coder' (without ./ prefix) → resolves to 'developer' via alias
+    # Test 2b: agent_dir='agents/coder' (without ./ prefix) → resolves to 'coder' (standalone agent)
     resolved_id = registry.resolve_to_id("agents/coder")
-    assert resolved_id == "developer", f"resolved_id={resolved_id}"
+    assert resolved_id == "coder", f"resolved_id={resolved_id}"
 
 
 def test_new_feature_agent_id():
     """Test 3: New feature - agent_id parameter."""
     registry = get_registry()
 
-    # Test 3a: spawn_instance(agent_id='coder') → resolves to 'developer' via alias
+    # Test 3a: spawn_instance(agent_id='coder') → resolves to 'coder' (standalone agent)
     resolved_id = registry.resolve_to_id("coder")
-    assert resolved_id == "developer", f"resolved_id={resolved_id}"
+    assert resolved_id == "coder", f"resolved_id={resolved_id}"
 
     # Test 3b: agent_id takes precedence over agent_dir
     agent_id = "coder"
     resolved_agent_id = registry.resolve_to_id(agent_id) or agent_id
     metadata = registry.get(resolved_agent_id)
-    is_developer = metadata is not None and "developer" in str(metadata.path)
-    assert is_developer, f"metadata.path={metadata.path if metadata else None}"
+    is_coder = metadata is not None and "coder" in str(metadata.path)
+    assert is_coder, f"metadata.path={metadata.path if metadata else None}"
 
 
 def test_edge_cases():

@@ -1479,13 +1479,11 @@ class InstanceLifecycleService:
         stored_mcp = meta.instance_metadata.get("mcp_tool_names") if meta.instance_metadata else None
         mcp_tool_names = self._get_mcp_tool_names(instance_id, stored_mcp)
         
-        # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
-        # DB may still contain the old agent_id if migration was partial/skipped.
         registry = get_registry()
         agent_meta = registry.get_resolved(meta.agent_id)
-        resolved_agent_id = registry.resolve_pure_id(meta.agent_id) or meta.agent_id
         if agent_meta is None:
             raise ValueError(f"Agent not found: {meta.agent_id}")
+        resolved_agent_id = meta.agent_id
 
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches

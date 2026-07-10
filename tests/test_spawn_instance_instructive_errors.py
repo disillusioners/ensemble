@@ -300,18 +300,17 @@ class TestValidAgentId:
         """When agent exists, should return (agent_id, path) without raising."""
         mock_path = Path("/path/to/agent")
         mock_meta = MagicMock(spec=AgentMetadata)
-        mock_meta.id = "developer"
+        mock_meta.id = "coder"
         mock_meta.path = mock_path
 
         mock_registry = MagicMock()
-        mock_registry.resolve_pure_id.return_value = "developer"
-        mock_registry.get.return_value = mock_meta
+        mock_registry.get_resolved.return_value = mock_meta
 
         with patch("daemon.utils.get_registry", return_value=mock_registry):
             result = validate_agent_id("coder")
 
-            assert result == ("developer", mock_path)
-            mock_registry.get.assert_called_once_with("developer")
+            assert result == ("coder", mock_path)
+            mock_registry.get_resolved.assert_called_once_with("coder")
 
 
 class TestManagerSpawnInstanceErrors:

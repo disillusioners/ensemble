@@ -7,12 +7,12 @@ the spawn with a clear ERROR string when:
 
   1. The caller agent has no ``team_members`` list (deny-by-default).
   2. The caller agent has an empty ``team_members`` list (deny-by-default).
-  3. The requested ``agent_id`` (canonicalized via the registry) is NOT in
-     the caller's ``team_members`` list (also canonicalized).
+  3. The requested ``agent_id`` (resolved via the registry) is NOT in
+     the caller's ``team_members`` list (also resolved).
 
 The tests below cover all three rejection paths AND the happy path. They
-also cover alias-bypass prevention (e.g. ``"coder"`` for ``"developer"``)
-on BOTH sides of the comparison.
+also cover the post-alias-removal standalone 'coder' agent on BOTH sides
+of the comparison.
 
 These tests are pure authorization logic — no DB transactions are touched
 because the gate runs before ``manager.spawn_instance(...)``. The
@@ -305,54 +305,52 @@ class TestTeamMembersAuthorization:
         assert "not allowed to spawn" in result
         manager.spawn_instance.assert_not_called()
 
-    async def test_alias_request_resolves_to_canonical_id(self):
-        """A legacy alias in the request (e.g. 'coder') is canonicalized.
+    async def test_standalone_coder_rejected_by_leader_team_members(self):
+        """'coder' is now a STANDALONE agent (no alias to 'developer').
 
-        'coder' is registered as an alias for 'developer' in
-        ``daemon/registry.py::AGENT_ID_ALIASES``. leader's team_members
-        contains 'developer' (canonical), so the canonicalized request
-        'coder' → 'developer' must succeed.
+        It is NOT in leader's team_members, so leader is denied the spawn.
+        This pins the deny-by-default behavior post-alias-removal.
         """
-        manager = _make_manager(spawn_result=("id-alias-success", None))
+        manager = _make_manager()
         spawn = _get_spawn_instance_tool(manager, caller_agent_id="leader")
 
         result = await spawn.coroutine(
-            agent_id="coder", project_id="test-project-id"  # alias for 'developer'
+            agent_id="coder",          # standalone (no alias to developer)
+            project_id="test-project-id",
         )
 
-        assert isinstance(result, str)
-        assert not result.startswith("ERROR"), (
-            f"Alias 'coder' should canonicalize to 'developer' which IS in "
-            f"leader's team_members; got: {result!r}"
+        assert result.startswith("ERROR"), (
+            f"Standalone 'coder' is not in leader.team_members; spawn must "
+            f"be denied. Got: {result!r}"
         )
-        manager.spawn_instance.assert_called_once()
-        # The manager's spawn_instance receives the raw 'coder' (it also
-        # canonicalizes internally); the gate's job is just to authorize.
-        assert manager.spawn_instance.call_args.kwargs["agent_id"] == "coder"
+        assert "coder" in result.lower(), (
+            f"Error should mention the requested 'coder'; got: {result!r}"
+        )
+        assert "not allowed to spawn" in result, f"Got: {result!r}"
+        # Manager must NOT have been invoked
+        manager.spawn_instance.assert_not_called()
 
-    async def test_alias_caller_resolves_to_canonical_id(self):
-        """A legacy alias as the CALLER (e.g. 'coder' instance invoking spawn).
+    async def test_standalone_coder_caller_has_empty_team_members(self):
+        """'coder' is a standalone agent with empty team_members.
 
-        'coder' canonicalizes to 'developer', which has empty team_members.
-        So even though the caller id is technically 'coder', the
-        authorization is based on the CANONICAL caller (developer) which
-        has no permission to spawn anyone.
+        As caller, it cannot spawn anyone (deny-by-default). Error
+        references the actual caller id 'coder' (no alias
+        canonicalization).
         """
         manager = _make_manager()
-        # Build tools with the alias as caller_agent_id (mirrors an
-        # instance whose meta.json id was 'coder' before the rename).
         spawn = _get_spawn_instance_tool(manager, caller_agent_id="coder")
 
         result = await spawn.coroutine(agent_id="leader")
 
-        assert isinstance(result, str)
         assert result.startswith("ERROR"), (
-            f"Alias caller 'coder' canonicalizes to 'developer' (empty "
-            f"team_members); should be denied; got: {result!r}"
+            f"Standalone 'coder' has empty team_members — must be denied; "
+            f"got: {result!r}"
         )
-        assert "developer" in result.lower(), (
-            f"Error should show the canonical caller 'developer'; got: {result!r}"
+        assert "coder" in result.lower(), (
+            f"Error should reference the actual caller 'coder'; got: {result!r}"
         )
+        assert "not allowed to spawn" in result, f"Got: {result!r}"
+        # Manager must NOT have been invoked
         manager.spawn_instance.assert_not_called()
 
     async def test_empty_agent_id_request_rejected(self):
@@ -599,20 +597,33 @@ class TestCheckTeamMembershipUnit:
             f"'Allowed team members: []'; got: {err!r}"
         )
 
-    def test_alias_request_canonicalizes(self):
-        """Request 'coder' canonicalizes to 'developer' (in leader's list)."""
+    def test_standalone_coder_not_in_leader_team(self):
+        """'coder' is now a standalone agent and is NOT in leader's team_members.
+
+        Pre-removal: alias 'coder' canonicalized to 'developer' which WAS in leader's
+        team_members, so the call succeeded. Post-removal: coder has no alias, so
+        leader's team check sees the raw 'coder' which is missing → deny-by-default.
+        """
         from daemon.tools.instance import _check_team_membership
 
-        assert _check_team_membership("leader", "coder") is None
+        err = _check_team_membership("leader", "coder")
+        assert err is not None, "'coder' is standalone and not in leader's team_members; must be denied"
+        assert "not allowed to spawn" in err
+        assert "coder" in err  # error mentions the actual requested id (no alias hop)
 
-    def test_alias_caller_canonicalizes(self):
-        """Caller 'coder' canonicalizes to 'developer' (empty list)."""
+    def test_standalone_coder_caller_denied_for_any_request(self):
+        """'coder' as caller has empty team_members → any spawn request is denied.
+
+        Pre-removal: caller 'coder' canonicalized to 'developer' which has empty
+        team_members (same denial). Post-removal: same behavior, but the error
+        now references the raw caller id 'coder' (no canonicalization hop).
+        """
         from daemon.tools.instance import _check_team_membership
 
         err = _check_team_membership("coder", "leader")
-        assert err is not None
-        # Error message should reference the CANONICAL caller ('developer').
-        assert "developer" in err
+        assert err is not None, "caller 'coder' has empty team_members; must be denied"
+        assert "not allowed to spawn" in err
+        assert "coder" in err  # error references the actual caller id (no alias hop)
 
     def test_unknown_caller_returns_error(self):
         from daemon.tools.instance import _check_team_membership
@@ -632,8 +643,8 @@ class TestCheckTeamMembershipUnit:
         """''Developer'' (capital D) is rejected by ``_check_team_membership``.
 
         ``registry.resolve_pure_id`` is case-sensitive: only the exact
-        lowercase key in ``self._agents`` (or an explicit alias in
-        ``AGENT_ID_ALIASES``) resolves. Any other casING returns ``None``
+        lowercase key in ``self._agents`` (the alias dict is now empty)
+        resolves. Any other casING returns ``None``
         and the gate treats it as an unknown agent → reject with the
         usual deny-by-default error. This pins the SAFE fail-closed
         behavior so a future switch to case-insensitive resolution is

@@ -1275,10 +1275,7 @@ class InstanceMessagingService:
                     resolved_agent_id = agent_id_for_job
                 else:
                     agent_dir_value = str(agent_meta.path)
-                    resolved_agent_id = (
-                        registry.resolve_pure_id(agent_id_for_job)
-                        or agent_id_for_job
-                    )
+                    resolved_agent_id = agent_meta.id
 
                 # Resolve the instance's project_id so the message
                 # JobItem is project-scoped. Without this the JobItem is

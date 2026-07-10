@@ -641,42 +641,40 @@ class TestLLMModelParsing:
         assert agent.llm_model == "  "
 
 
-class TestAgentIdAliasBackwardCompatibility:
-    """Tests for the AGENT_ID_ALIASES backward-compatibility layer.
+class TestCoderAgentResolution:
+    """Tests for coder as a standalone agent (no alias to developer).
 
-    These tests guard against regressions when an agent_id is renamed
-    (e.g. ``coder`` → ``developer``). Old database rows, persisted
-    agent_ids, and external API consumers may still reference the old
-    id; the registry must transparently resolve the alias to the new
-    canonical id.
+    Coder is a first-class agent in its own right; there is no
+    alias indirection mapping ``coder`` to ``developer``. The registry
+    must resolve ``coder`` to itself.
     """
 
-    def test_resolve_pure_id_alias(self) -> None:
-        """resolve_pure_id('coder') returns 'developer' via alias."""
+    def test_resolve_pure_id_coder(self) -> None:
+        """resolve_pure_id('coder') returns 'coder' (standalone agent, no alias)."""
         registry = get_registry()
         result = registry.resolve_pure_id("coder")
-        assert result == "developer"
+        assert result == "coder"
 
-    def test_resolve_path_to_id_alias(self) -> None:
-        """resolve_path_to_id('./agents/coder') returns 'developer' via alias."""
+    def test_resolve_path_to_id_coder(self) -> None:
+        """resolve_path_to_id('./agents/coder') returns 'coder' (standalone agent, no alias)."""
         registry = get_registry()
         result = registry.resolve_path_to_id("./agents/coder")
-        assert result == "developer"
+        assert result == "coder"
 
-    def test_exists_alias(self) -> None:
-        """exists('coder') returns True via alias."""
+    def test_exists_coder(self) -> None:
+        """exists('coder') returns True (coder is a standalone agent)."""
         registry = get_registry()
         assert registry.exists("coder") is True
 
-    def test_get_resolved_alias(self) -> None:
-        """get_resolved('coder') returns the canonical developer metadata via alias."""
+    def test_get_resolved_coder(self) -> None:
+        """get_resolved('coder') returns the coder metadata directly."""
         registry = get_registry()
         resolved = registry.get_resolved("coder")
         assert resolved is not None
-        assert resolved.id == "developer"
+        assert resolved.id == "coder"
 
     def test_get_resolved_canonical(self) -> None:
-        """get_resolved('developer') returns the same metadata as get('developer')."""
+        """get_resolved('developer') returns the same metadata as get('developer') (canonical id, no alias indirection)."""
         registry = get_registry()
         assert registry.get_resolved("developer") == registry.get("developer")
 
@@ -687,9 +685,9 @@ class TestAgentIdAliasBackwardCompatibility:
         # Aliases to a non-existent canonical also resolve to None.
         assert registry.get_resolved("ghost-alias") is None
 
-    def test_instance_create_normalizes_alias(self) -> None:
-        """InstanceCreate(agent_id='coder') normalizes to 'developer'."""
+    def test_instance_create_preserves_coder(self) -> None:
+        """InstanceCreate(agent_id='coder') preserves 'coder' as-is (agent_id is preserved as-is, no normalization)."""
         from daemon.models.instance import InstanceCreate
 
         instance = InstanceCreate(agent_id="coder")
-        assert instance.agent_id == "developer"
+        assert instance.agent_id == "coder"

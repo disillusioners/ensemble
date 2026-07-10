@@ -26,9 +26,12 @@ SKIP_DIRS: frozenset[str] = frozenset({
 # Maps old agent_id -> new canonical agent_id. Used by ``resolve_pure_id``
 # and (transitively) by ``resolve_path_to_id`` and ``exists`` so that
 # persisted references to the old ID continue to resolve after a rename.
-AGENT_ID_ALIASES: dict[str, str] = {
-    "coder": "developer",
-}
+#
+# NOTE: 'coder' was removed from this map because agents/coder/ now exists
+# as a separate, canonical agent (direct hands-on implementer, distinct
+# from developer). Stale DB rows with agent_id='coder' will load
+# agents/coder/'s metadata directly.
+AGENT_ID_ALIASES: dict[str, str] = {}
 
 
 class ToolFilter(BaseModel):
@@ -88,8 +91,8 @@ class AgentMetadata(BaseModel):
             "Canonical agent_ids that THIS agent is allowed to spawn via "
             "spawn_instance. Empty/missing means deny-by-default — the agent "
             "cannot spawn any other agents. Enforced by the spawn_instance "
-            "tool layer before any DB transaction. Aliases (e.g. 'coder') are "
-            "resolved to canonical ids (e.g. 'developer') via the registry."
+            "tool layer before any DB transaction. Aliases are resolved to "
+            "canonical ids via the registry."
         ),
     )
 
@@ -224,9 +227,13 @@ class AgentRegistry:
         """Get agent metadata, resolving aliases first.
 
         Use this when ``agent_id`` may come from an external source (DB row,
-        API param, persisted metadata) that could contain a legacy alias
-        such as ``"coder"``. Returns ``None`` if the ID is unknown even
-        after alias resolution.
+        API param, persisted metadata) that could contain a legacy alias.
+        Returns ``None`` if the ID is unknown even after alias resolution.
+
+        With ``AGENT_ID_ALIASES`` empty (current state), this method is
+        functionally equivalent to :meth:`get` — it is retained as the
+        canonical entry point so future renames can be supported by
+        re-populating the alias map without touching call sites.
 
         Args:
             agent_id: The agent identifier (may be an alias).

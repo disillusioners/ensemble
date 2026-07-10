@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Re-export the canonical InstanceStatus enum from the repositories layer.
 # This avoids a duplicate definition and ensures a single source of truth
@@ -15,13 +15,6 @@ class InstanceCreate(BaseModel):
     agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
     instance_id: str | None = Field(default=None, description="Optional instance ID")
     project_id: str | None = Field(default=None, description="Optional project ID for associating instance with a project")
-
-    @field_validator("agent_id")
-    @classmethod
-    def normalize_agent_id(cls, v: str) -> str:
-        """Normalize agent_id aliases (backward compat for renamed agents)."""
-        from daemon.registry import AGENT_ID_ALIASES
-        return AGENT_ID_ALIASES.get(v, v)
 
     @model_validator(mode='after')
     def validate_agent(self):

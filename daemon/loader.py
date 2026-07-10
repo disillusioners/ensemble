@@ -99,8 +99,6 @@ def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = N
         _ensure_tool_metadata_populated()
 
     # Get agent's tool filter from registry
-    # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
-    # so tool filtering uses the correct agent's filter instead of skipping.
     tool_filter: ToolFilter | None = None
     agent_innate_skills: list[str] | None = None
     try:
@@ -109,9 +107,6 @@ def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = N
         if agent_meta is not None:
             tool_filter = agent_meta.tools
             agent_innate_skills = agent_meta.innate_skills
-            # Use resolved id for downstream tool filtering context
-            resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
-            agent_id = resolved_agent_id
     except (KeyError, ValueError, RuntimeError) as e:
         logger.debug(f"Registry lookup failed for {agent_id}: {e}")
         return ""

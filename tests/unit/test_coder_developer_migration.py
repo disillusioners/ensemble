@@ -522,26 +522,31 @@ class TestCoderDeveloperMigration:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Part B: Alias-Resolution Crash-Recovery Tests
+# Part B: Coder Agent ID Coverage Tests
 # ═════════════════════════════════════════════════════════════════════════════
-# These tests verify that the backward-compat alias resolution works correctly
-# when DB rows still contain the old `agent_id='coder'` value (simulating a
-# partial/failed migration where the rename UPDATE never ran).
+# These tests verify that DB rows / enqueue requests carrying
+# ``agent_id='coder'`` resolve correctly via the registry AFTER the alias
+# removal.
 #
-# Registry has AGENT_ID_ALIASES = {"coder": "developer"}, so:
-#   resolve_pure_id("coder") → "developer"
-#   resolve_pure_id("developer") → "developer"
-#   get("developer") → valid AgentMetadata
-#   get("coder") → None  (the canonical ID is "developer", not "coder")
+# Registry now has NO alias mapping (``AGENT_ID_ALIASES = {}``), and ``coder``
+# is a real, registered standalone agent at ``agents/coder/``. So:
+#   resolve_pure_id("coder") → "coder"          (standalone agent, no alias hop)
+#   resolve_pure_id("developer") → "developer"  (canonical agent)
+#   get_resolved("coder") → coder AgentMetadata (path=/agents/coder)
+#   get_resolved("developer") → developer AgentMetadata (path=/agents/developer)
 #
-# Bug that was fixed:
-#   instance_lifecycle._restore_instance() and job_queue_service.enqueue() used
-#   registry.get(meta.agent_id) DIRECTLY without alias resolution, so a DB row
-#   with agent_id='coder' would raise ValueError("Agent not found: coder").
+# Coverage scope:
+#   - ``_restore_instance()`` must load coder's metadata when DB row has
+#     ``agent_id='coder'`` and complete the restore without raising. Today
+#     ``coder`` is registered, so the lookup succeeds directly (no alias).
+#   - ``job_queue_service.enqueue()`` must create a job with
+#     ``agent_id='coder'`` and ``agent_dir=/agents/coder`` when the caller
+#     requests the standalone coder agent.
 #
-# Fix: both call sites now do
-#   resolved = registry.resolve_pure_id(agent_id) or agent_id
-#   agent_meta = registry.get(resolved)
+# Historical context: before the alias removal these tests asserted that
+# ``resolve_pure_id('coder')`` mapped to ``'developer'`` via
+# ``AGENT_ID_ALIASES``. That mapping is gone now; the tests pin the
+# post-removal contract instead.
 # ═════════════════════════════════════════════════════════════════════════════
 
 
@@ -578,12 +583,14 @@ def _setup_system_default_project():
         constants.SYSTEM_DEFAULT_PROJECT_ID = original
 
 
-class TestRestoreInstanceWithAlias:
-    """Verify _restore_instance() handles stale 'coder' agent_id from DB.
+class TestRestoreInstanceWithCoderAgentId:
+    """Verify ``_restore_instance()`` handles ``agent_id='coder'`` correctly.
 
-    Simulates a DB row that still has agent_id='coder' (partial migration).
-    The fix makes _restore_instance resolve the alias to 'developer' before
-    calling registry.get(), so it doesn't raise ValueError.
+    After the alias removal, ``coder`` is a standalone registered agent at
+    ``agents/coder/``. ``_restore_instance()`` looks up the agent via
+    ``registry.get_resolved(meta.agent_id)``, which (with no aliases)
+    resolves directly to coder's metadata. The restore must complete
+    without raising ``ValueError('Agent not found: coder')``.
     """
 
     @staticmethod
@@ -623,23 +630,26 @@ class TestRestoreInstanceWithAlias:
         return mock_manager, mock_cancellation_service
 
     def test_restore_instance_with_coder_agent_id_does_not_raise(self):
-        """_restore_instance must not raise when DB row has agent_id='coder'.
+        """``_restore_instance`` with ``agent_id='coder'`` loads coder's metadata.
 
-        Reproducer: a partially-migrated DB where instances.agent_id still
-        reads 'coder' (migration was not yet run, or server restarted before
-        it could run). Before the fix, registry.get('coder') returned None
-        → ValueError("Agent not found: coder"). After the fix, resolve_pure_id
-        maps 'coder' → 'developer' and the restore succeeds.
+        After the alias removal, ``coder`` is a registered standalone agent
+        at ``agents/coder/``. ``_restore_instance()`` calls
+        ``registry.get_resolved(meta.agent_id)`` which returns coder's
+        metadata directly (no alias hop). The restore must succeed.
+
+        Before the alias removal this test simulated a stale DB row that
+        relied on ``coder`` → ``developer`` alias resolution to succeed.
+        The new contract is simpler: ``coder`` resolves to coder, period.
         """
         # ── Mock manager ─────────────────────────────────────────────────────
         mock_manager, mock_cancellation_service = self._make_mock_manager()
         service = InstanceLifecycleService(mock_manager, mock_cancellation_service)
 
-        # ── Mock Instance row with stale 'coder' agent_id ────────────────────
+        # ── Mock Instance row with agent_id='coder' (the standalone agent) ──
         mock_meta = MagicMock()
         mock_meta.instance_id = "stale-instance-001"
-        mock_meta.agent_id = "coder"           # ← stale value (not yet migrated)
-        mock_meta.agent_dir = "/agents/coder"   # ← stale path (not yet migrated)
+        mock_meta.agent_id = "coder"           # ← standalone coder agent
+        mock_meta.agent_dir = "/agents/coder"  # ← coder's on-disk path
         mock_meta.parent_id = None
         mock_meta.instance_metadata = {"mcp_tool_names": []}
 
@@ -651,37 +661,33 @@ class TestRestoreInstanceWithAlias:
             patch("daemon.manager.build_instance_graph") as mock_build_graph,
             patch("daemon.manager.create_instance_tools") as mock_create_tools,
         ):
-            # Configure the mock registry so resolve_pure_id('coder') → 'developer'
+            # Configure the mock registry: with the alias map empty,
+            # ``get_resolved('coder')`` returns coder's metadata directly
+            # (no alias hop, no separate ``resolve_pure_id`` call).
             mock_registry = MagicMock()
-            mock_registry.resolve_pure_id.return_value = "developer"  # alias resolution
 
-            # Return valid metadata when asked for 'coder' (the alias-resolved
-            # lookup happens via ``get_resolved`` in production — see
-            # ``daemon/services/instance_lifecycle.py:1304``).
-            mock_developer_meta = MagicMock()
-            mock_developer_meta.path = Path("/agents/developer")
-            mock_developer_meta.llm_model = None
+            # get_resolved('coder') returns coder's metadata directly.
+            mock_coder_meta = MagicMock()
+            mock_coder_meta.path = Path("/agents/coder")
+            mock_coder_meta.llm_model = None
             mock_registry.get_resolved.side_effect = lambda aid: (
-                mock_developer_meta if aid == "coder" else None
+                mock_coder_meta if aid == "coder" else None
             )
             mock_get_registry.return_value = mock_registry
 
-            mock_load_prompt.return_value = ("You are a developer.", 10)
+            mock_load_prompt.return_value = ("You are a coder.", 10)
             mock_create_tools.return_value = []
             mock_build_graph.return_value = MagicMock()
-            mock_append_ctx.return_value = "You are a developer."
+            mock_append_ctx.return_value = "You are a coder."
 
             # ── Execute ────────────────────────────────────────────────────
-            # Before the fix: raises ValueError("Agent not found: coder")
-            # After the fix: succeeds because 'coder' is resolved to 'developer'
+            # Must succeed because 'coder' resolves to a registered agent.
             result = service._restore_instance("stale-instance-001", mock_meta)
 
-            # ── Verify alias resolution was called ─────────────────────────
-            # resolve_pure_id must be called with the stale 'coder' value
-            mock_registry.resolve_pure_id.assert_called_with("coder")
-            # get_resolved() must be called with the stale 'coder' value so
-            # the alias resolution chain (coder → developer → metadata) is
-            # exercised end-to-end.
+            # ── Verify the registry was consulted with 'coder' ───────────
+            # With the alias map empty, ``_restore_instance`` looks up the
+            # agent via ``registry.get_resolved`` and uses ``meta.agent_id``
+            # directly. No ``resolve_pure_id`` alias hop is needed any more.
             mock_registry.get_resolved.assert_called_with("coder")
             # The graph must be built and stored in instances dict
             assert result is not None
@@ -710,8 +716,10 @@ class TestRestoreInstanceWithAlias:
             patch("daemon.manager.build_instance_graph") as mock_build_graph,
             patch("daemon.manager.create_instance_tools") as mock_create_tools,
         ):
+            # Configure the mock registry: with the alias map empty,
+            # ``get_resolved('developer')`` returns developer's metadata
+            # directly.
             mock_registry = MagicMock()
-            mock_registry.resolve_pure_id.return_value = "developer"
             mock_developer_meta = MagicMock()
             mock_developer_meta.path = Path("/agents/developer")
             mock_developer_meta.llm_model = None
@@ -727,18 +735,22 @@ class TestRestoreInstanceWithAlias:
 
             result = service._restore_instance("fresh-instance-002", mock_meta)
 
-            # resolve_pure_id called with 'developer', get_resolved called with 'developer'
-            mock_registry.resolve_pure_id.assert_called_with("developer")
+            # With the alias map empty, ``_restore_instance`` looks up the
+            # agent via ``registry.get_resolved`` and uses ``meta.agent_id``
+            # directly. No ``resolve_pure_id`` alias hop is needed any more.
             mock_registry.get_resolved.assert_called_with("developer")
             assert result is not None
 
 
-class TestJobQueueEnqueueWithAlias:
-    """Verify job_queue_service.enqueue() handles stale 'coder' agent_id.
+class TestJobQueueEnqueueWithCoderAgentId:
+    """Verify ``job_queue_service.enqueue()`` handles ``agent_id='coder'``.
 
-    Both the idempotency path and the regular enqueue path must resolve
-    the 'coder' alias before calling registry.get(), otherwise
-    ValueError("Agent not found: coder") is raised.
+    After the alias removal, ``coder`` is a registered standalone agent.
+    Both the idempotency path and the regular enqueue path must:
+      * resolve ``"coder"`` via ``registry.get_resolved()`` to coder's
+        metadata (no alias hop)
+      * create the job with ``agent_id="coder"`` and
+        ``agent_dir="/agents/coder"``
     """
 
     @pytest.fixture
@@ -788,35 +800,51 @@ class TestJobQueueEnqueueWithAlias:
             queue_repo=mock_queue_repo,
         )
 
-    def _make_mock_registry_resolve_coder_to_developer(self):
-        """Registry mock: resolve_pure_id('coder')→'developer', get_resolved()→valid metadata.
+    def _make_mock_registry_coder_resolves_to_coder(self):
+        """Registry mock returning canonical metadata for ``coder`` and ``developer``.
 
-        ``enqueue`` now uses ``registry.get_resolved(agent_id)`` (alias-aware,
-        see ``daemon/services/job_queue_service.py:369,489``) instead of bare
-        ``registry.get(agent_id)``. The mock therefore must stub the alias-aware
-        method so it returns the developer metadata for both the legacy alias
-        (``"coder"``) and the canonical id (``"developer"``).
+        After the alias removal, ``AGENT_ID_ALIASES`` is empty and ``coder``
+        is a real agent at ``/agents/coder``. ``enqueue`` looks up the agent
+        via ``registry.get_resolved(agent_id)`` (see
+        ``daemon/services/job_queue_service.py:577,689``) — which with no
+        aliases is functionally ``registry.get``. The mock therefore:
+          * returns coder metadata (path=``/agents/coder``) for
+            ``get_resolved("coder")``
+          * returns developer metadata (path=``/agents/developer``) for
+            ``get_resolved("developer")``
+          * returns ``None`` for any other id.
+        Mirrors the production ``registry.get_resolved`` semantics with no
+        alias hops.
         """
         registry = MagicMock()
-        registry.resolve_pure_id.side_effect = lambda aid: {
-            "coder": "developer",
-            "developer": "developer",
-        }.get(aid, aid)
-        mock_meta = MagicMock()
-        mock_meta.path = "/agents/developer"
-        registry.get_resolved.side_effect = lambda aid: (
-            mock_meta if aid in ("coder", "developer") else None
-        )
+
+        mock_coder_meta = MagicMock()
+        mock_coder_meta.path = Path("/agents/coder")
+        mock_developer_meta = MagicMock()
+        mock_developer_meta.path = Path("/agents/developer")
+
+        def _get_resolved(aid: str):
+            if aid == "coder":
+                return mock_coder_meta
+            if aid == "developer":
+                return mock_developer_meta
+            return None
+
+        registry.get_resolved.side_effect = _get_resolved
         return registry
 
     @pytest.mark.asyncio
     async def test_enqueue_with_coder_agent_id_succeeds(
         self, service, mock_repository, mock_queue_repo
     ):
-        """enqueue(agent_id='coder') must not raise ValueError.
+        """``enqueue(agent_id='coder')`` resolves to coder and creates a job.
 
-        Before the fix: registry.get('coder') returns None → ValueError.
-        After the fix: resolve_pure_id('coder')→'developer', get('developer')→valid metadata → succeeds.
+        After the alias removal, ``coder`` is a registered standalone agent,
+        so ``registry.get_resolved('coder')`` returns coder's metadata.
+        ``enqueue`` uses this to derive ``agent_id`` and ``agent_dir`` for
+        the new job. The job must be created with the coder identity
+        (agent_id="coder", agent_dir="/agents/coder"), NOT the developer
+        identity.
         """
         expected_job = MagicMock()
         expected_job.job_id = "new-job-from-coder"
@@ -824,31 +852,37 @@ class TestJobQueueEnqueueWithAlias:
 
         with patch(
             "daemon.services.job_queue_service.get_registry",
-            return_value=self._make_mock_registry_resolve_coder_to_developer(),
+            return_value=self._make_mock_registry_coder_resolves_to_coder(),
         ):
             result = await service.enqueue(
-                agent_id="coder",          # ← stale value
+                agent_id="coder",          # standalone coder agent
                 message="test message",
                 source="api",
             )
 
         assert result.job_id == "new-job-from-coder"
         mock_repository.create.assert_called_once()
-        # The job must be created with the resolved agent_id 'developer', not 'coder'
+        # The job must be created with the resolved coder identity,
+        # NOT a developer alias.
         call_kwargs = mock_repository.create.call_args.kwargs
-        assert call_kwargs["agent_id"] == "developer", (
-            f"Expected agent_id='developer' in create(), got {call_kwargs['agent_id']!r}"
+        assert call_kwargs["agent_id"] == "coder", (
+            f"Expected agent_id='coder' in create(), got {call_kwargs['agent_id']!r}"
         )
-        assert call_kwargs["agent_dir"] == "/agents/developer"
+        assert call_kwargs["agent_dir"] == "/agents/coder", (
+            f"Expected agent_dir='/agents/coder' in create(), got {call_kwargs['agent_dir']!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_enqueue_with_coder_and_idempotency_key_succeeds(
         self, service, mock_repository, mock_queue_repo
     ):
-        """enqueue with idempotency_key and agent_id='coder' must not raise.
+        """``enqueue`` with ``idempotency_key`` and ``agent_id='coder'`` works.
 
-        This tests the idempotency path (lines 362-482 in job_queue_service.py)
-        which has its own alias-resolution call site.
+        Exercises the idempotency code path (``daemon/services/job_queue_service.py``
+        around line 577) which independently resolves the agent via
+        ``registry.get_resolved``. With the alias removed, ``coder``
+        resolves to the standalone coder agent and the new job is
+        created with coder identity.
         """
         expected_job = MagicMock()
         expected_job.job_id = "idempotent-job-from-coder"
@@ -856,10 +890,10 @@ class TestJobQueueEnqueueWithAlias:
 
         with patch(
             "daemon.services.job_queue_service.get_registry",
-            return_value=self._make_mock_registry_resolve_coder_to_developer(),
+            return_value=self._make_mock_registry_coder_resolves_to_coder(),
         ):
             result = await service.enqueue(
-                agent_id="coder",              # ← stale value
+                agent_id="coder",              # standalone coder agent
                 message="test message",
                 source="api",
                 idempotency_key="unique-key-001",  # ← triggers idempotency path
@@ -868,20 +902,24 @@ class TestJobQueueEnqueueWithAlias:
         assert result.job_id == "idempotent-job-from-coder"
         mock_repository.create_or_get_by_idempotency_key.assert_called_once()
         call_kwargs = mock_repository.create_or_get_by_idempotency_key.call_args.kwargs
-        assert call_kwargs["agent_id"] == "developer", (
-            f"Expected agent_id='developer' in create_or_get_by_idempotency_key(), "
+        assert call_kwargs["agent_id"] == "coder", (
+            f"Expected agent_id='coder' in create_or_get_by_idempotency_key(), "
             f"got {call_kwargs['agent_id']!r}"
         )
-        assert call_kwargs["agent_dir"] == "/agents/developer"
+        assert call_kwargs["agent_dir"] == "/agents/coder", (
+            f"Expected agent_dir='/agents/coder' in create_or_get_by_idempotency_key(), "
+            f"got {call_kwargs['agent_dir']!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_enqueue_with_developer_agent_id_still_works(
         self, service, mock_repository, mock_queue_repo
     ):
-        """enqueue(agent_id='developer') still works (sanity check).
+        """``enqueue(agent_id='developer')`` still works (sanity check).
 
-        Canonical agent_id must not regress — it should still resolve
-        correctly and create the job with the right values.
+        Canonical ``developer`` agent_id must not regress — it resolves
+        to the developer agent and creates the job with developer
+        identity (agent_id="developer", agent_dir="/agents/developer").
         """
         expected_job = MagicMock()
         expected_job.job_id = "new-job-from-developer"
@@ -889,7 +927,7 @@ class TestJobQueueEnqueueWithAlias:
 
         with patch(
             "daemon.services.job_queue_service.get_registry",
-            return_value=self._make_mock_registry_resolve_coder_to_developer(),
+            return_value=self._make_mock_registry_coder_resolves_to_coder(),
         ):
             result = await service.enqueue(
                 agent_id="developer",

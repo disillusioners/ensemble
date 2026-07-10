@@ -383,7 +383,7 @@ def sample_health_response_data():
 
 @pytest.fixture
 def sample_instance_create_data():
-    """Sample InstanceCreate data for testing alias normalization (coder → developer)."""
+    """Sample InstanceCreate data for the standalone 'coder' agent (no alias normalization)."""
     return {
         "agent_id": "coder",
     }
@@ -391,7 +391,7 @@ def sample_instance_create_data():
 
 @pytest.fixture
 def sample_instance_create_with_instance_id():
-    """Sample InstanceCreate data with custom instance_id (alias normalization test)."""
+    """Sample InstanceCreate data with custom instance_id for the standalone 'coder' agent."""
     return {
         "agent_id": "coder",
         "instance_id": "custom-instance-123",
