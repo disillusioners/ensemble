@@ -340,13 +340,34 @@ class LiveEventHub:
     ) -> None:
         """Stream todo update event to all active connections.
 
-        Emitted whenever the in-conversation todo list changes so the
-        frontend can re-render the checklist without a full reload.
+        Emitted whenever the in-conversation todo graph changes so the
+        frontend can re-render without a full reload. The method is
+        intentionally agnostic to dict contents — it serializes whatever
+        the todo manager hands it and pushes the payload through the
+        SSE queue.
 
         Args:
             instance_id: The instance this todo update belongs to.
-            todos: List of todo dicts (each with ``index``, ``text``,
-                ``status``, and ``comment``).
+            todos: List of todo node dicts (frozen Phase 1 schema). Each
+                dict has exactly six keys:
+
+                * ``id`` (str): Node identifier, always ``n-`` prefixed
+                  (e.g., ``"n-a1b2c3d4"``). Stable across mutations.
+                * ``index`` (int): Insertion-order position
+                  (0-based). Preserved for backward compatibility with
+                  pre-Phase-3 consumers that reference ``item.index``
+                  (e.g., Angular ``track item.index``).
+                * ``text`` (str): Human-readable description.
+                * ``status`` (str): One of ``"pending"``,
+                  ``"in_progress"``, or ``"done"``.
+                * ``comment`` (str): User annotation side-channel.
+                  Empty string when no comment is set.
+                * ``next_ids`` (list[str]): Adjacency list of successor
+                  node IDs. Empty list for terminal (sink) nodes.
+
+                The dict shape is **frozen** across Phase 1 (manager),
+                Phase 3 (API), and Phase 4 (frontend) and must not be
+                changed without cross-phase coordination.
         """
         event: dict[str, Any] = {
             "instance_id": instance_id,

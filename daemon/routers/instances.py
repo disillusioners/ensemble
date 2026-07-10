@@ -47,6 +47,29 @@ class TodoCommentRequest(BaseModel):
         ),
     )
 
+
+class TodoEdgeRequest(BaseModel):
+    """Request body for adding or removing a directed todo edge.
+
+    Used by the ``POST /{instance_id}/todos/edges`` and
+    ``DELETE /{instance_id}/todos/edges`` endpoints.
+
+    Attributes:
+        from_id: ID of the predecessor (source) node. Must be an
+            existing node in the instance's todo graph.
+        to_id: ID of the successor (target) node. Must be an
+            existing node in the instance's todo graph.
+    """
+
+    from_id: str = Field(
+        ...,
+        description="ID of the predecessor node (edge source).",
+    )
+    to_id: str = Field(
+        ...,
+        description="ID of the successor node (edge target).",
+    )
+
 # Create router with /instances prefix
 router = APIRouter(prefix="/instances", tags=["instances"])
 
@@ -372,7 +395,7 @@ async def get_messages(
 
 
 # ---------------------------------------------------------------------------
-# Todo list endpoints (read + comment annotation)
+# Todo list endpoints (read + comment annotation + graph edges)
 # ---------------------------------------------------------------------------
 
 
@@ -402,8 +425,20 @@ async def get_instance_todos(
 ) -> list[dict]:
     """Return the instance's full todo list as a JSON array.
 
-    Each item shape:
-        ``{"index": N, "text": "...", "status": "pending|in_progress|done", "comment": "..."}``
+    Each item shape (frozen Phase 1 schema — exactly six keys):
+        ``{
+            "id": "n-a1b2c3d4",          # Stable node identity (n-prefixed)
+            "index": 0,                  # Insertion-order position (preserved)
+            "text": "...",               # Description
+            "status": "pending|in_progress|done",
+            "comment": "...",            # User annotation (may be empty)
+            "next_ids": ["n-..."]        # Successor node IDs (may be [])
+        }``
+
+    The response is the **augmented** graph view: each node carries its
+    ``id`` and ``next_ids`` adjacency list, but the legacy ``index`` field
+    is PRESERVED so old clients (Angular ``track item.index``) keep
+    working without DOM teardown.
 
     Returns an empty list ``[]`` if the instance has no todo list (the
     underlying state is in-memory and ephemeral — a freshly-spawned
@@ -414,15 +449,175 @@ async def get_instance_todos(
     return manager._todo_manager.get_all(instance_id)
 
 
-# 9. POST /instances/{instance_id}/todos/{index}/comment - Annotate a todo item
-@router.post("/{instance_id}/todos/{index}/comment")
+# 8a. GET /instances/{instance_id}/todos/graph - Structured {nodes, edges}
+@router.get("/{instance_id}/todos/graph")
+async def get_instance_todo_graph(
+    instance_id: str,
+    request: Request,
+) -> dict:
+    """Return the instance's todo graph as ``{"nodes": [...], "edges": [...]}.
+
+    Edges are derived from per-node ``next_ids`` adjacency lists and
+    returned as ``{"from": str, "to": str}`` dicts — the same shape
+    accepted by ``create_graph`` inputs.
+
+    Prefer this endpoint over ``GET /todos`` when the consumer needs
+    explicit edge enumeration (e.g., graph rendering); for plain list
+    rendering the augmented list endpoint above is sufficient.
+
+    Returns ``{"nodes": [], "edges": []}`` if the instance has no todo
+    list.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+    return manager._todo_manager.get_graph(instance_id)
+
+
+# 8b. POST /instances/{instance_id}/todos/edges - Add a directed edge
+#
+# CRITICAL: this route is declared BEFORE the
+# ``POST /{instance_id}/todos/{node_id}/comment`` catch-all so the
+# literal segment ``edges`` is never captured by the ``{node_id}``
+# path parameter. FastAPI's route matching is order-sensitive.
+@router.post("/{instance_id}/todos/edges")
+async def add_todo_edge(
+    instance_id: str,
+    body: TodoEdgeRequest,
+    request: Request,
+) -> dict:
+    """Add a directed edge ``from_id → to_id`` to the todo graph.
+
+    Request body: ``{"from_id": str, "to_id": str}``.
+
+    The edge is rejected if either node does not exist, if ``from_id``
+    equals ``to_id`` (self-loop), or if adding the edge would create a
+    cycle in the graph (DAG invariant). The endpoint returns the updated
+    graph (``{"nodes": [...], "edges": [...]}``) on success and emits a
+    ``todo_update`` SSE event so the frontend re-renders.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``400`` if either node is missing, ``from_id == to_id``, or
+          adding the edge would introduce a cycle.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    result = manager._todo_manager.add_edge(
+        instance_id, body.from_id, body.to_id
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=(
+                    f"Cannot add edge {body.from_id} -> {body.to_id}: "
+                    f"node(s) not found or edge would create a cycle"
+                ),
+            ).model_dump(),
+        )
+
+    # Best-effort SSE re-emit so the frontend re-renders. Mirrors the
+    # ``_emit_update`` helper pattern in ``daemon.tools.todo_tools`` —
+    # any hub failure is logged and swallowed so a transport hiccup
+    # never blocks the write.
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_todo_update(
+                instance_id,
+                manager._todo_manager.get_all(instance_id),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"todo SSE emission failed for add_edge on "
+                f"instance {instance_id} ({body.from_id} -> {body.to_id}): {e}"
+            )
+
+    return result
+
+
+# 8c. DELETE /instances/{instance_id}/todos/edges - Remove a directed edge
+@router.delete("/{instance_id}/todos/edges")
+async def remove_todo_edge(
+    instance_id: str,
+    body: TodoEdgeRequest,
+    request: Request,
+) -> dict:
+    """Remove a directed edge ``from_id → to_id`` from the todo graph.
+
+    Request body: ``{"from_id": str, "to_id": str}``.
+
+    Returns the updated graph (``{"nodes": [...], "edges": [...]}``) on
+    success and emits a ``todo_update`` SSE event so the frontend
+    re-renders. Removing a non-existent edge is a no-op-miss reported as
+    ``404``.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager, either
+          node is missing, or the edge does not exist.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    result = manager._todo_manager.remove_edge(
+        instance_id, body.from_id, body.to_id
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.TODO_NOT_FOUND,
+                message=(
+                    f"Edge {body.from_id} -> {body.to_id} not found "
+                    f"for instance {instance_id}"
+                ),
+            ).model_dump(),
+        )
+
+    # Best-effort SSE re-emit (same pattern as add_todo_edge above).
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_todo_update(
+                instance_id,
+                manager._todo_manager.get_all(instance_id),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"todo SSE emission failed for remove_edge on "
+                f"instance {instance_id} ({body.from_id} -> {body.to_id}): {e}"
+            )
+
+    return result
+
+
+# 9. POST /instances/{instance_id}/todos/{node_id}/comment - Annotate a todo node
+#
+# Declared AFTER the literal ``/todos/edges`` routes so the static
+# ``edges`` segment is matched first by FastAPI's order-sensitive route
+# matcher.
+@router.post("/{instance_id}/todos/{node_id}/comment")
 async def set_todo_comment(
     instance_id: str,
-    index: int,
+    node_id: str,
     body: TodoCommentRequest,
     request: Request,
 ) -> dict:
-    """Set a comment on a todo item at ``index``.
+    """Set a comment on a todo node identified by ``node_id``.
+
+    ``node_id`` may be either:
+        * A **node ID** (e.g., ``"n-a1b2c3d4"``) — the preferred form.
+          Generated node IDs are always ``n-`` prefixed and therefore
+          never all-numeric, so they never collide with the legacy
+          numeric-index path.
+        * A **numeric index** (e.g., ``"0"``) — resolved to the Nth
+          node by insertion order. Preserved for backward compatibility
+          with the pre-Phase-3 contract.
+
+    Detection is automatic via ``node_id.isdigit()`` — no client opt-in
+    required.
 
     Request body: ``{"comment": "user comment text"}``. Empty / missing
     ``comment`` is treated as an empty string (clears any prior comment).
@@ -436,11 +631,11 @@ async def set_todo_comment(
         * ``400`` if the supplied ``comment`` exceeds :data:`MAX_COMMENT_LENGTH`
           characters. We enforce this explicitly here (rather than relying on
           Pydantic's auto-422) so the API returns a uniform error shape.
-        * ``404`` if ``index`` does not reference an existing item on the
-          instance's todo list (out of range, negative, or no list yet).
+        * ``404`` if ``node_id`` does not reference an existing node on
+          the instance's todo list.
 
     Returns:
-        The updated item dict on success.
+        The updated node dict on success.
     """
     manager = _get_manager(request)
     await _check_instance_exists(manager, instance_id)
@@ -462,20 +657,29 @@ async def set_todo_comment(
         )
 
     try:
-        updated = manager._todo_manager.set_comment(
-            instance_id, index, body.comment
-        )
+        if node_id.isdigit():
+            # Backward-compat: treat all-numeric path param as insertion-
+            # order index. Generated node IDs are ``n-`` prefixed and
+            # therefore never all-numeric, so there is no collision risk.
+            updated = manager._todo_manager.set_comment_by_index(
+                instance_id, int(node_id), body.comment
+            )
+        else:
+            updated = manager._todo_manager.set_comment(
+                instance_id, node_id, body.comment
+            )
     except ValueError as e:
-        # Index out of range OR instance has no todo list yet. We return 404
-        # because the *addressed resource* (the todo item at ``index``) does
-        # not exist — the URL points to a non-existent item, not to an
-        # otherwise-valid endpoint whose payload is malformed. This matches
-        # standard REST semantics: a missing addressed resource is a 404.
+        # node_id/index out of range OR instance has no todo list yet.
+        # We return 404 because the *addressed resource* (the todo node
+        # identified by ``node_id``) does not exist — the URL points to
+        # a non-existent node, not to an otherwise-valid endpoint whose
+        # payload is malformed. This matches standard REST semantics: a
+        # missing addressed resource is a 404.
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
                 code=ErrorCodes.TODO_NOT_FOUND,
-                message=f"Todo item at index {index} not found",
+                message=f"Todo node {node_id!r} not found",
             ).model_dump(),
         ) from e
 
@@ -493,7 +697,7 @@ async def set_todo_comment(
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"todo SSE emission failed for comment on "
-                f"instance {instance_id} index {index}: {e}"
+                f"instance {instance_id} node {node_id}: {e}"
             )
 
     return updated
