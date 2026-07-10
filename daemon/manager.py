@@ -36,6 +36,12 @@ from .repositories import (
     create_message_queue_repository,
     create_mcp_server_repository,
     create_infra_repository,
+    create_skill_repository,
+    create_skill_lineage_repository,
+    create_skill_embedding_repository,
+    create_skill_usage_repository,
+    create_skill_trigger_repository,
+    create_skill_ab_test_repository,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -67,6 +73,12 @@ from .services.error_reporting import ErrorReportingService
 from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
 from .services.event_publisher import EventPublisherService
+from .services.skill_embedding_service import SkillEmbeddingService
+from .services.skill_store_service import SkillStoreService
+from .services.skill_search_service import SkillSearchService
+from .services.skill_metrics_service import SkillMetricsService
+from .services.skill_trigger_engine import SkillTriggerEngine
+from .services.skill_trigger_seed import seed_default_triggers
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
 from .services.todo_manager import TodoManager
 from .cancellation import (
@@ -724,6 +736,17 @@ class InstanceManager:
         # NEW: Project repository for project context injection
         # Using the new repository layer with proper transaction management
         self._project_repository = create_project_repository(engine=self._engine, create_tables=False)
+
+        # Skill Evolution Phase 2: skill repositories (Phase 1 schema already created via SQLModel.metadata.create_all)
+        if self.config.skill_evolution is not None:
+            self._skill_repo = create_skill_repository(engine=self._engine, create_tables=False)
+            self._skill_lineage_repo = create_skill_lineage_repository(engine=self._engine, create_tables=False)
+            self._skill_embedding_repo = create_skill_embedding_repository(engine=self._engine, create_tables=False)
+        else:
+            self._skill_repo = None
+            self._skill_lineage_repo = None
+            self._skill_embedding_repo = None
+
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
 
@@ -852,6 +875,76 @@ class InstanceManager:
         # MCP service for managing MCP tool lifecycle
         from .services.mcp_service import McpService
         self._mcp_service = McpService(manager=self)
+
+        # Skill Evolution services (Phase 2 — wire through to manager facade)
+        if self.config.skill_evolution is not None:
+            skill_llm_config: dict[str, Any] = {
+                "base_url": self.config.llm.base_url,
+                "api_key": self.config.llm.api_key,
+                "model": self.config.llm.model,
+                "model_vision": self.config.llm.model_vision,
+                "temperature": self.config.llm.temperature,
+                "request_timeout": self.config.llm.request_timeout,
+            }
+            self._skill_embedding_service = SkillEmbeddingService(
+                config=self.config.skill_evolution,
+                embedding_repo=self._skill_embedding_repo,
+                llm_config=skill_llm_config,
+            )
+            self._skill_store_service = SkillStoreService(
+                skill_repo=self._skill_repo,
+                lineage_repo=self._skill_lineage_repo,
+                embedding_service=self._skill_embedding_service,
+            )
+            self._skill_search_service = SkillSearchService(
+                skill_repo=self._skill_repo,
+                embedding_repo=self._skill_embedding_repo,
+                embedding_service=self._skill_embedding_service,
+                llm_config=skill_llm_config,
+                config=self.config.skill_evolution,
+            )
+        else:
+            self._skill_embedding_service = None
+            self._skill_store_service = None
+            self._skill_search_service = None
+
+        # Skill Evolution Phase 4: Tier 0 metrics recorder + Tier 1
+        # trigger engine. The four new repositories (``usage``,
+        # ``trigger``, ``ab_test``) and the two services
+        # (``_skill_metrics_service``, ``_skill_trigger_engine``) are
+        # only created when ``skill_evolution`` is configured — same
+        # graceful-disabled pattern as the Phase 2 services above.
+        # The metrics service also needs ``_instance_repository`` so
+        # it can read/clear the ``last_injected_skill_ids`` metadata
+        # key the Phase 3 injection service stamps onto instances.
+        if self.config.skill_evolution is not None:
+            self._skill_usage_repo = create_skill_usage_repository(
+                engine=self._engine, create_tables=False
+            )
+            self._skill_trigger_repo = create_skill_trigger_repository(
+                engine=self._engine, create_tables=False
+            )
+            self._skill_ab_test_repo = create_skill_ab_test_repository(
+                engine=self._engine, create_tables=False
+            )
+            self._skill_metrics_service = SkillMetricsService(
+                usage_repo=self._skill_usage_repo,
+                skill_repo=self._skill_repo,
+                trigger_repo=self._skill_trigger_repo,
+                ab_test_repo=self._skill_ab_test_repo,
+                config=self.config.skill_evolution,
+                instance_repo=self._instance_repository,
+            )
+            self._skill_trigger_engine = SkillTriggerEngine(
+                trigger_repo=self._skill_trigger_repo,
+                metrics_service=self._skill_metrics_service,
+            )
+        else:
+            self._skill_usage_repo = None
+            self._skill_trigger_repo = None
+            self._skill_ab_test_repo = None
+            self._skill_metrics_service = None
+            self._skill_trigger_engine = None
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
@@ -1394,6 +1487,34 @@ class InstanceManager:
             self.config.persistence.checkpoint_cleanup_interval,
             checkpoint_cleanup.execute,
         )
+
+        # Skill Evolution Phase 4: seed the default Tier 1 trigger
+        # rules + register the periodic metric-scan maintenance job.
+        # Both are guarded by the ``skill_evolution`` config flag so a
+        # daemon without the feature keeps its current behavior. The
+        # seeding call is idempotent (matches by name) and the scan
+        # handler is also tolerant of a missing trigger engine (it
+        # no-ops gracefully).
+        if self.config.skill_evolution is not None:
+            try:
+                inserted = await seed_default_triggers(
+                    self._skill_trigger_repo, project_id=None
+                )
+                logger.info(
+                    f"Skill trigger seed (Phase 4): {inserted} new "
+                    f"default triggers inserted"
+                )
+            except Exception as seed_exc:
+                logger.warning(
+                    f"Skill trigger seed failed (Phase 4): {seed_exc}"
+                )
+
+            self._maintenance_service.register(
+                "skill_metric_scan",
+                self.config.skill_evolution.metric_scan_interval_hours,
+                self._run_skill_metric_scan,
+            )
+
         await self._maintenance_service.start()
 
         # ── Recover opencode sessions on startup ───────────────────────────
@@ -1465,11 +1586,11 @@ class InstanceManager:
 
     def _release_cached_instance(self, instance_id: str) -> None:
         """Release in-memory graph for a cached/non-active instance after TTL expires.
-        
+
         This removes the graph from memory while keeping the database record intact.
         The instance can be "hot resumed" if under TTL (graph still in memory),
         or "cold resumed" if over TTL (graph reloaded from checkpoint on next use).
-        
+
         Args:
             instance_id: The ID of the cached instance to release.
         """
@@ -1505,6 +1626,172 @@ class InstanceManager:
         ``_graph_tasks``.
         """
         self._last_context_usage.pop(instance_id, None)
+
+    async def _run_skill_metric_scan(self) -> None:
+        """Periodic Phase 4 trigger scan — enqueues analysis jobs.
+
+        Registered with :class:`MaintenanceService` so the
+        ``_is_idle`` gate keeps it from running while there's
+        in-flight work. Each registered project is processed
+        independently so a misconfigured project can't poison the
+        others; failures are isolated per-project and logged at
+        WARNING.
+
+        Steps per project:
+
+        1. Run ``trigger_engine.evaluate_all(project_id)`` — returns
+           the list of flagged skills for that scope.
+        2. For each flagged skill, enqueue a downstream job on the
+           project's ``system_parallel_queue``:
+
+           * ``trigger_action == "analyze"`` → ``job_type='skill_analysis'``
+           * ``trigger_action == "evolve_fix"`` → ``job_type='skill_evolution'``
+             with ``evolution_type='FIX'`` in the metadata.
+
+        All enqueues resolve the queue via
+        ``JobQueueRepository.get_by_name(project_id, 'system_parallel_queue')`` —
+        this is the constraint from the Phase 4 plan ("All job
+        enqueues MUST use ``system_parallel_queue``"). The message
+        carried on the JobItem is a short human-readable summary so
+        downstream handlers (Phase 5) can route without having to
+        re-derive the trigger context.
+
+        Soft-fails on every failure mode: missing trigger engine,
+        missing queue repo, missing job repo, missing trigger scan
+        config. The maintenance loop will retry on the next cycle.
+        """
+        if getattr(self, "_skill_trigger_engine", None) is None:
+            logger.debug(
+                "_run_skill_metric_scan: skill evolution not "
+                "configured — skipping"
+            )
+            return
+
+        # Locate the projects. ``list_projects(status="active")`` keeps
+        # the scan proportional to live projects; a future enhancement
+        # could widen this to per-project opt-in toggles.
+        try:
+            project_repo = getattr(self, "_project_repository", None)
+            if project_repo is None:
+                logger.debug(
+                    "_run_skill_metric_scan: no project_repository "
+                    "wired — skipping"
+                )
+                return
+
+            projects = await asyncio.to_thread(
+                project_repo.list_projects, status="active", limit=1000
+            )
+        except Exception as exc:
+            logger.warning(
+                f"_run_skill_metric_scan: failed to list projects: "
+                f"{exc}"
+            )
+            return
+
+        # Resolve the queue + job repos from the JobQueueService.
+        job_queue_service = getattr(self, "_job_queue_service", None)
+        if job_queue_service is None:
+            logger.debug(
+                "_run_skill_metric_scan: no job_queue_service — "
+                "skipping"
+            )
+            return
+        queue_repo = getattr(job_queue_service, "_queue_repo", None)
+        job_repo = getattr(job_queue_service, "_repository", None)
+        if queue_repo is None or job_repo is None:
+            logger.debug(
+                "_run_skill_metric_scan: queue/job repos missing — "
+                "skipping"
+            )
+            return
+
+        trigger_engine = self._skill_trigger_engine
+
+        for project in projects or []:
+            project_id = getattr(project, "project_id", None) or getattr(
+                project, "id", None
+            )
+            if not project_id:
+                continue
+            try:
+                flagged = await trigger_engine.evaluate_all(project_id)
+            except Exception as exc:
+                logger.warning(
+                    f"_run_skill_metric_scan: evaluate_all failed "
+                    f"for project {project_id}: {exc}"
+                )
+                continue
+            if not flagged:
+                continue
+
+            # Resolve the project's parallel queue once for the batch.
+            try:
+                parallel_queue = await asyncio.to_thread(
+                    queue_repo.get_by_name,
+                    project_id,
+                    "system_parallel_queue",
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"_run_skill_metric_scan: failed to resolve "
+                    f"system_parallel_queue for project "
+                    f"{project_id}: {exc}"
+                )
+                continue
+            if parallel_queue is None:
+                logger.warning(
+                    f"_run_skill_metric_scan: project {project_id} "
+                    f"has no system_parallel_queue — skipping enqueue"
+                )
+                continue
+
+            for item in flagged:
+                try:
+                    action = item.get("trigger_action")
+                    skill_id = item.get("skill_id")
+                    if not skill_id or not action:
+                        continue
+                    payload = {
+                        "skill_id": skill_id,
+                        "reason": item.get("reason", ""),
+                        "stats": item.get("stats", {}),
+                        "trigger_name": item.get("trigger_name", ""),
+                    }
+                    if action == "analyze":
+                        job_type = "skill_analysis"
+                    elif action == "evolve_fix":
+                        job_type = "skill_evolution"
+                        payload["evolution_type"] = "FIX"
+                    else:
+                        # Unknown action — surface as analysis so the
+                        # downstream pipeline can decide.
+                        job_type = "skill_analysis"
+                    message = (
+                        f"[skill_metric_scan] {action} "
+                        f"skill={skill_id} reason={payload['reason']}"
+                    )
+                    await asyncio.to_thread(
+                        job_repo.create,
+                        agent_id="skill-evolution",
+                        agent_dir="agents/skill_evolution",
+                        message=message,
+                        source="skill_metric_scan",
+                        project_id=project_id,
+                        priority=4,  # Below user-initiated (5), above retry (1)
+                        job_metadata=payload,
+                        queue_id=parallel_queue.queue_id,
+                        idempotency_key=None,
+                        job_type=job_type,
+                        instance_id=None,
+                        max_retries=2,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"_run_skill_metric_scan: enqueue failed for "
+                        f"skill {item.get('skill_id', '?')} on project "
+                        f"{project_id}: {exc}"
+                    )
     
     async def _cleanup_cached_instances(self) -> None:
         """Background task to release in-memory graphs for non-active cached instances exceeding TTL.

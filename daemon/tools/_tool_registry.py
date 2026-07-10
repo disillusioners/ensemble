@@ -203,6 +203,8 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "db": "daemon.tools.db_tools",
     "infra": "daemon.tools.infra",
     "system": "daemon.tools.system",
+    "skill-evolution": "daemon.tools.skill_evolution_tools",
+    "dynamic-skill": "daemon.tools.skill_tools",
 }
 
 

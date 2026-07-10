@@ -53,6 +53,8 @@ INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
     "opencode": ["external_opencode"],
     "chart": ["chart"],
     "todo": ["todo"],
+    "dynamic-skill": ["dynamic-skill"],
+    "skill-evolution": ["skill-evolution"],
 }
 
 
@@ -107,6 +109,8 @@ from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .chart_tools import create_chart_tools
 from .todo_tools import create_todo_tools
+from .skill_tools import create_skill_tools
+from .skill_evolution_tools import create_skill_evolution_tools
 from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
@@ -985,6 +989,21 @@ Returns:
         getattr(manager, "_live_hub", None),
     )
     tools.extend(todo_tool_list)
+
+    # ── Dynamic Skill tools (per-instance dynamic-skill surface, always available) ──
+    # Mirrors the todo/chart pattern above. These tools are auto-granted to
+    # agents with innate_skills:["dynamic-skill"] via INNATE_SKILL_TOOL_CATEGORIES.
+    # All 6 tools soft-fail when their underlying service is not yet wired
+    # to the manager, so importing this module is always safe.
+    skill_tool_list = create_skill_tools(manager, current_instance_id)
+    tools.extend(skill_tool_list)
+
+    # ── Skill Evolution tools (for the skill-keeper agent; Phase 2 stubs) ──
+    # Auto-granted to agents with innate_skills:["skill-evolution"]. These wrap
+    # SkillEvolutionService methods (Phase 5) and currently return soft-fail
+    # stub messages when the service is absent.
+    skill_evo_tools = create_skill_evolution_tools(manager, current_instance_id)
+    tools.extend(skill_evo_tools)
 
     # ── Database tools (external DB connection management, always available) ──
     # C3: Pass shared repository and pool_manager from the manager — these are
