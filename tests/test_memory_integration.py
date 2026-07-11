@@ -120,6 +120,7 @@ class TestFullLifecycleIntegration:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             access_tool = create_access_memory_tool("test_agent")
@@ -152,6 +153,7 @@ class TestFullLifecycleIntegration:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -234,6 +236,7 @@ class TestFullLifecycleIntegration:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             # RAG enabled
@@ -268,6 +271,7 @@ class TestEdgeCases:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -285,6 +289,7 @@ class TestEdgeCases:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -302,6 +307,7 @@ class TestEdgeCases:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -327,6 +333,7 @@ class TestEdgeCases:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             access_tool = create_access_memory_tool("test_agent")
@@ -364,6 +371,7 @@ class TestEdgeCases:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             access_tool = create_access_memory_tool("test-agent")
@@ -475,6 +483,7 @@ class TestRegressionChecks:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -493,6 +502,7 @@ class TestRegressionChecks:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -514,6 +524,7 @@ class TestRegressionChecks:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -576,6 +587,7 @@ class TestRegressionChecks:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             access_tool = create_access_memory_tool("test_agent")
@@ -631,6 +643,7 @@ class TestRegressionChecks:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             inner_soul = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -683,6 +696,7 @@ class TestAdditionalIntegration:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
+            mock_registry.get_resolved.return_value = mock_meta
             mock_get_registry.return_value = mock_registry
 
             access_tool = create_access_memory_tool("test_agent")

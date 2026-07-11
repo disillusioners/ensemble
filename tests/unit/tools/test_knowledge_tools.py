@@ -1261,6 +1261,7 @@ class TestKnowledgeToolsConditionalCreation:
                                             )
                                             mock_agent_meta.tools = None  # No restrictions
                                             mock_registry.get.return_value = mock_agent_meta
+                                            mock_registry.get_resolved.return_value = mock_agent_meta
                                             with patch("daemon.registry.get_registry", return_value=mock_registry):
                                                 tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
                 
@@ -1330,6 +1331,7 @@ class TestKnowledgeToolsConditionalCreation:
                                             )
                                             mock_agent_meta.tools = None  # No restrictions
                                             mock_registry.get.return_value = mock_agent_meta
+                                            mock_registry.get_resolved.return_value = mock_agent_meta
                                             with patch("daemon.registry.get_registry", return_value=mock_registry):
                                                 tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
                 
