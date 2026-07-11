@@ -49,8 +49,16 @@ def make_skill(
     project_id: str | None = "proj-1",
     category: str = "workflow",
     status: str = "active",
+    is_active: bool = True,
     lineage_origin: str = "imported",
     generation: int = 0,
+    ab_test_group: str | None = None,
+    total_selections: int = 0,
+    total_applied: int = 0,
+    total_completions: int = 0,
+    total_fallbacks: int = 0,
+    consecutive_failures: int = 0,
+    last_used_at: str | None = None,
     created_at: str = "2026-01-01T00:00:00+00:00",
     updated_at: str = "2026-01-01T00:00:00+00:00",
 ) -> MagicMock:
@@ -69,8 +77,16 @@ def make_skill(
             "project_id",
             "category",
             "status",
+            "is_active",
             "lineage_origin",
             "generation",
+            "ab_test_group",
+            "total_selections",
+            "total_applied",
+            "total_completions",
+            "total_fallbacks",
+            "consecutive_failures",
+            "last_used_at",
             "created_at",
             "updated_at",
         ]
@@ -82,8 +98,16 @@ def make_skill(
     skill.project_id = project_id
     skill.category = category
     skill.status = status
+    skill.is_active = is_active
     skill.lineage_origin = lineage_origin
     skill.generation = generation
+    skill.ab_test_group = ab_test_group
+    skill.total_selections = total_selections
+    skill.total_applied = total_applied
+    skill.total_completions = total_completions
+    skill.total_fallbacks = total_fallbacks
+    skill.consecutive_failures = consecutive_failures
+    skill.last_used_at = last_used_at
     skill.created_at = created_at
     skill.updated_at = updated_at
     return skill
@@ -403,10 +427,23 @@ class TestListSkills:
         )
 
     @pytest.mark.asyncio
-    async def test_list_skills_projection_strips_content(self):
-        """The list-shape dicts exclude ``content`` (and counters)."""
+    async def test_list_skills_projection_keeps_metric_and_lifecycle_fields(self):
+        """The list-shape dicts include metric / lifecycle fields the
+        Skills page card needs (``total_selections``, ``total_completions``,
+        ``ab_test_group``, ``is_active``, …) but still strip the
+        bulky ``content`` body.
+        """
         repo = make_skill_repo()
-        skill = make_skill(skill_id="s-1", project_id=None)
+        skill = make_skill(
+            skill_id="s-1",
+            project_id=None,
+            total_selections=10,
+            total_applied=7,
+            total_completions=5,
+            total_fallbacks=2,
+            ab_test_group="group-x",
+            last_used_at="2026-02-01T00:00:00+00:00",
+        )
         repo.list = MagicMock(return_value=([skill], 1))
         service = make_service(skill_repo=repo)
 
@@ -414,7 +451,7 @@ class TestListSkills:
 
         assert len(items) == 1
         projection = items[0]
-        # Required fields.
+        # Core metadata.
         assert projection["id"] == "s-1"
         assert projection["name"] == "code-review"
         assert projection["description"] == "Review code for bugs and style."
@@ -422,10 +459,20 @@ class TestListSkills:
         assert projection["status"] == "active"
         assert projection["created_at"] == "2026-01-01T00:00:00+00:00"
         assert projection["updated_at"] == "2026-01-01T00:00:00+00:00"
-        # Stripped fields.
+        # Lifecycle + A/B plumbing carried over.
+        assert projection["is_active"] is True
+        assert projection["lineage_origin"] == "imported"
+        assert projection["generation"] == 0
+        assert projection["ab_test_group"] == "group-x"
+        # Counter columns carried over so the success-rate chip can render.
+        assert projection["total_selections"] == 10
+        assert projection["total_applied"] == 7
+        assert projection["total_completions"] == 5
+        assert projection["total_fallbacks"] == 2
+        assert projection["consecutive_failures"] == 0
+        assert projection["last_used_at"] == "2026-02-01T00:00:00+00:00"
+        # Bulk body still stripped from the list projection.
         assert "content" not in projection
-        assert "total_selections" not in projection
-        assert "total_applied" not in projection
 
     @pytest.mark.asyncio
     async def test_list_skills_empty_when_nothing_matches(self):
@@ -719,6 +766,16 @@ class TestProjectSkillHelper:
             "description": "Review code for bugs and style.",
             "category": "workflow",
             "status": "active",
+            "is_active": True,
+            "lineage_origin": "imported",
+            "generation": 0,
+            "ab_test_group": None,
+            "total_selections": 0,
+            "total_applied": 0,
+            "total_completions": 0,
+            "total_fallbacks": 0,
+            "consecutive_failures": 0,
+            "last_used_at": None,
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
         }

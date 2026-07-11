@@ -30,6 +30,44 @@ DI conventions (matches :mod:`daemon.routers.jobs_crud` and
   ``create_service_dependency`` factory does not cover classes
   that take their own constructor arguments.
 
+Response shape conventions (Phase 6 polish):
+
+* Skill endpoints (``POST``, ``GET``, ``PUT``, ``DELETE``,
+  ``/share``, ``/deactivate``, ``/fix``) return **skill objects
+  directly** — no ``{"skill": …}`` envelope. Matches the
+  ``/api/work`` list pattern (``GET /api/work`` returns a bare
+  list, every record a flat dict) and the ``JobResponse``
+  single-resource pattern. The legacy envelope caused the Skills
+  page to compute ``NaN%`` for the success-rate chip because the
+  front-end ``SkillService.get`` returned ``undefined`` for
+  ``response.skill`` when the server omitted the wrapper.
+* ``GET /api/skills/{id}`` is the canonical "skill detail"
+  endpoint — it returns the full skill record **plus** the
+  ``lineage`` and ``metrics`` sub-payloads inline so the detail
+  page can render in one round-trip instead of three.
+* ``GET /api/skills/{id}/metrics`` returns the
+  :class:`~daemon.services.skill_metrics_service.SkillMetricsService.get_skill_stats`
+  shape directly (no ``{"stats": …}`` envelope). The endpoint
+  returns a zero-stat dict (HTTP 200) when the skill is missing
+  so the front-end can render an empty analytics card without
+  having to special-case a 404 — the metric endpoint is
+  intentionally non-fatal for the detail page's call.
+* ``GET /api/skills/{id}/lineage`` returns the
+  :class:`~daemon.models.skill.SkillLineage` shape directly
+  (``{parents, children, generation, origin, skill_id}``) so
+  the detail page can render the lineage panel without an
+  intermediate unwrap step. The previous shape
+  ``{"skill_id", "lineage": {"skill", "lineage": {…}}}`` was a
+  double-nest that no caller actually used.
+* ``POST /api/skills/{id}/ab-test/resolve`` returns the
+  resolution dict from
+  :meth:`~daemon.services.skill_evolution_service.SkillEvolutionService.check_ab_test_resolution`
+  directly (already flat — no change).
+* ``POST /api/skills/{id}/feedback`` returns
+  ``{"recorded": bool}`` — the only envelope in the file and
+  intentionally preserved because it is the public signal the
+  caller uses to decide whether the feedback stuck.
+
 Error-handling conventions:
 
 * :class:`ValueError` raised by the evolution / dispatcher services
@@ -222,29 +260,54 @@ def _skill_to_dict(skill: Any) -> dict[str, Any] | None:
     return {c.name: getattr(skill, c.name) for c in skill.__table__.columns}
 
 
-def _lineage_view_for(bundle: dict | None) -> dict[str, Any]:
-    """Strip ``content`` from a view_skill bundle to keep the graph small.
+def _flatten_lineage_view(bundle: dict | None, skill_id: str) -> dict[str, Any]:
+    """Project ``view_skill`` into the flat :class:`SkillLineage` shape.
 
-    The lineage endpoint reuses the store's ``view_skill`` payload,
-    which includes the full ``content`` body for the central node.
-    The lineage shape should be metadata + edge list only — the
-    caller can hit the ``GET /skills/{id}`` route for the body.
+    The ``view_skill`` bundle returns
+    ``{"skill": <metadata>, "lineage": {"parents": [...], "children": [...]}}``
+    where each parent / child row carries the full lineage edge
+    metadata (``parent_skill_id``, ``child_skill_id``,
+    ``generation_delta``, etc.). The lineage endpoint reuses the
+    bundle but strips the meta-only skill body, then projects the
+    two edge lists at the top level so the front-end can render
+    the lineage panel without an unwrap step.
+
+    The result matches :class:`daemon.models.skill.SkillLineage`:
+    ``{skill_id, parents, children, generation, origin}``.
 
     Args:
-        bundle: The ``view_skill`` payload
-            (``{"skill": ..., "lineage": {...}}``).
+        bundle: The ``view_skill`` payload (``{"skill": …,
+            "lineage": …}``), or ``None`` if the skill is missing.
+        skill_id: The skill id — used as a top-level key so the
+            caller doesn't have to fish it out of the URL.
 
     Returns:
-        Metadata-only ``skill`` field plus the original
-        ``lineage`` edges. ``None`` if the bundle is ``None``.
+        Flat ``SkillLineage`` shape with ``content`` stripped
+        from each parent / child row.
     """
-    if not bundle:
-        return {"skill": None, "lineage": {"parents": [], "children": []}}
-    skill = bundle.get("skill") if isinstance(bundle, dict) else None
-    lineage = bundle.get("lineage") if isinstance(bundle, dict) else {}
+    skill: Any = bundle.get("skill") if isinstance(bundle, dict) else None
+    lineage = bundle.get("lineage") if isinstance(bundle, dict) else None
+    parents_raw: list[Any] = (lineage or {}).get("parents") or []
+    children_raw: list[Any] = (lineage or {}).get("children") or []
+
+    def _strip(row: Any) -> Any:
+        if isinstance(row, dict):
+            return {k: v for k, v in row.items() if k != "content"}
+        return row
+
+    generation = 0
+    origin = "imported"
     if isinstance(skill, dict):
-        skill = {k: v for k, v in skill.items() if k != "content"}
-    return {"skill": skill, "lineage": lineage or {"parents": [], "children": []}}
+        generation = int(skill.get("generation") or 0)
+        origin = skill.get("lineage_origin") or "imported"
+
+    return {
+        "skill_id": skill_id,
+        "generation": generation,
+        "origin": origin,
+        "parents": [_strip(p) for p in parents_raw],
+        "children": [_strip(c) for c in children_raw],
+    }
 
 
 def _trigger_to_dict(trigger: Any) -> dict[str, Any] | None:
@@ -322,8 +385,17 @@ async def list_skills(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     store: SkillStoreService = Depends(get_store),
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     """List skills with project-scope filtering.
+
+    Returns the skills as a flat array (no ``{"items", "total"}``
+    envelope) so the response shape matches the ``GET /api/work``
+    list pattern. Each item carries the full set of list-view
+    columns — counters, lineage origin, A/B-test group, last-used
+    timestamp — so the Skills page card can render success-rate
+    chips, A/B-test badges, and the deactivate / share actions
+    without a per-row detail fetch. The bulky ``content`` body is
+    intentionally stripped at the store layer.
 
     Args:
         project_id: Project scope. ``None`` returns only globals.
@@ -339,14 +411,14 @@ async def list_skills(
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        ``{"items": [...], "total": int}``. ``items`` is the
-        metadata-only projection (no ``content``).
+        Flat JSON array of skill dicts. Empty list when nothing
+        matches the filters.
 
     Raises:
         HTTPException: 500 if the underlying service raises.
     """
     try:
-        items, total = await store.list_skills(
+        items, _total = await store.list_skills(
             project_id=project_id,
             active_only=active_only,
             limit=limit,
@@ -357,19 +429,18 @@ async def list_skills(
         # contract already supports it.
         if category:
             items = [s for s in items if s.get("category") == category]
-            total = len(items)
-        return {"items": items, "total": total}
+        return items
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:
         raise _to_http_500(e, "list_skills")
 
 
-@router.post("")
+@router.post("", status_code=201)
 async def create_skill(
     body: SkillCreateRequest,
     store: SkillStoreService = Depends(get_store),
-) -> JSONResponse:
+) -> dict[str, Any]:
     """Create a new skill and refresh its embedding cache.
 
     Args:
@@ -378,8 +449,9 @@ async def create_skill(
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        201 with ``{"skill": {...}}`` where ``skill`` is the
-        full row serialized via :func:`_skill_to_dict`.
+        201 with the freshly-created skill row (no
+        ``{"skill": …}`` envelope). The full row is returned
+        serialized via :func:`_skill_to_dict`.
 
     Raises:
         HTTPException: 400 if a value-error comes out of the
@@ -388,10 +460,7 @@ async def create_skill(
     """
     try:
         skill = await store.create_skill(**body.model_dump(exclude_none=True))
-        return JSONResponse(
-            status_code=201,
-            content={"skill": _skill_to_dict(skill)},
-        )
+        return _skill_to_dict(skill) or {}
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:
@@ -544,20 +613,37 @@ async def delete_trigger(
 async def get_skill(
     skill_id: str,
     store: SkillStoreService = Depends(get_store),
+    metrics: SkillMetricsService = Depends(get_metrics),
 ) -> dict[str, Any]:
-    """Fetch a single skill by ID.
+    """Fetch a single skill by ID, enriched with lineage and metrics.
+
+    The detail endpoint is the canonical "skill detail" payload:
+    the full skill row (including the ``content`` body) plus the
+    pre-computed ``lineage`` parents / children and the
+    ``metrics`` counters. The front-end detail page consumes all
+    three in a single render, so bundling them server-side keeps
+    the page from making three sequential round-trips.
+
+    The lineage bundle is fetched via :meth:`SkillStoreService.view_skill`
+    and stripped of the (large) ``content`` field on the linked
+    rows to keep the detail payload compact. Metrics come from
+    :meth:`SkillMetricsService.get_skill_stats` — a missing skill
+    surfaces as a 404 from the route, so the metrics call is
+    only reached when the skill exists.
 
     Args:
         skill_id: The skill's UUID4 primary key. Must be non-blank.
         store: Injected SkillStoreService via Depends.
+        metrics: Injected SkillMetricsService via Depends.
 
     Returns:
-        ``{"skill": {...}}`` with the full row (including
-        ``content``).
+        Flat skill record (no ``{"skill": …}`` envelope) with two
+        extra keys: ``lineage`` (parents + children array) and
+        ``metrics`` (counters + derived rates).
 
     Raises:
         HTTPException: 400 if ``skill_id`` is blank; 404 if no
-        row matches; 500 on unexpected failure.
+            row matches; 500 on unexpected failure.
     """
     if not skill_id or not skill_id.strip():
         raise HTTPException(
@@ -571,7 +657,50 @@ async def get_skill(
                 status_code=404,
                 detail={"error": "Skill not found", "skill_id": skill_id},
             )
-        return {"skill": _skill_to_dict(skill)}
+        detail = _skill_to_dict(skill) or {}
+        # Enrich with lineage (parents + children) and metrics.
+        # Each lookup is best-effort — a missing lineage / metrics
+        # row should NOT 500 the detail endpoint, only 404 on a
+        # truly missing skill (which we already raised above).
+        bundle = await store.view_skill(skill_id)
+        if bundle and isinstance(bundle, dict):
+            inner_lineage = bundle.get("lineage") or {}
+            # Strip ``content`` from parent / child rows so the
+            # lineage payload doesn't carry tens of KB per sibling.
+            parents_raw = inner_lineage.get("parents") or []
+            children_raw = inner_lineage.get("children") or []
+            parents = [
+                {k: v for k, v in p.items() if k != "content"}
+                if isinstance(p, dict) else p
+                for p in parents_raw
+            ]
+            children = [
+                {k: v for k, v in c.items() if k != "content"}
+                if isinstance(c, dict) else c
+                for c in children_raw
+            ]
+            detail["lineage"] = {"parents": parents, "children": children}
+        else:
+            detail["lineage"] = {"parents": [], "children": []}
+        try:
+            detail["metrics"] = await metrics.get_skill_stats(skill_id)
+        except Exception as metrics_exc:  # noqa: BLE001
+            logger.warning(
+                "[SkillsRouter] get_skill(%s) metrics fetch failed: %s",
+                skill_id,
+                metrics_exc,
+            )
+            detail["metrics"] = {
+                "total_selections": 0,
+                "total_applied": 0,
+                "total_completions": 0,
+                "total_fallbacks": 0,
+                "completion_rate": 0.0,
+                "fallback_rate": 0.0,
+                "applied_rate": 0.0,
+                "consecutive_failures": 0,
+            }
+        return detail
     except HTTPException:
         raise
     except Exception as e:
@@ -633,11 +762,11 @@ async def update_skill(
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        ``{"skill": {...}}`` with the updated row.
+        The refreshed skill row (no ``{"skill": …}`` envelope).
 
     Raises:
         HTTPException: 404 if no row matches; 400 on
-        ``ValueError``; 500 on unexpected failure.
+            ``ValueError``; 500 on unexpected failure.
     """
     fields = body.model_dump(exclude_none=True)
     # Translate the public ``is_active`` flag to the SQLModel's
@@ -652,7 +781,7 @@ async def update_skill(
                 status_code=404,
                 detail={"error": "Skill not found", "skill_id": skill_id},
             )
-        return {"skill": _skill_to_dict(skill)}
+        return _skill_to_dict(skill) or {}
     except HTTPException:
         raise
     except ValueError as e:
@@ -705,12 +834,12 @@ async def deactivate_skill(
     """Soft-delete via the POST verb (alias of DELETE).
 
     Identical side effect to :func:`delete_skill` but returns
-    the refreshed skill row in the same ``{"skill": {...}}``
-    envelope that ``GET /{skill_id}`` uses, so the caller can
-    confirm the new status without a second round trip.
+    the refreshed skill row directly (no ``{"skill": …}`` envelope)
+    so the caller can confirm the new ``status`` without a second
+    round-trip — the same shape ``GET /{skill_id}`` uses.
 
     Kept as a separate verb-routed endpoint so the frontend
-    can wire ``POST`` buttons on usage/error screens without
+    can wire ``POST`` buttons on usage / error screens without
     having to negotiate a ``DELETE`` preflight.
 
     Args:
@@ -718,12 +847,11 @@ async def deactivate_skill(
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        ``{"skill": {...}}`` with the refreshed row (status
-        flipped to ``inactive``).
+        The refreshed skill row (``status`` flipped to ``inactive``).
 
     Raises:
         HTTPException: 404 if no row matches; 500 on unexpected
-        failure.
+            failure.
     """
     try:
         deactivated = await store.deactivate_skill(skill_id)
@@ -741,7 +869,7 @@ async def deactivate_skill(
                 status_code=404,
                 detail={"error": "Skill not found", "skill_id": skill_id},
             )
-        return {"skill": _skill_to_dict(skill)}
+        return _skill_to_dict(skill) or {}
     except HTTPException:
         raise
     except Exception as e:
@@ -784,19 +912,23 @@ async def get_lineage(
 ) -> dict[str, Any]:
     """Return the lineage graph for a skill (no body content).
 
+    Returns the flat :class:`daemon.models.skill.SkillLineage`
+    shape directly (``{skill_id, parents, children, generation,
+    origin}``) — no doubly-nested ``.lineage.lineage`` envelope.
+    ``content`` is stripped from each parent / child row to keep
+    the payload compact; callers needing the central node's body
+    should fetch ``GET /api/skills/{id}``.
+
     Args:
         skill_id: The skill to summarise.
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        ``{"skill_id": skill_id, "lineage": {"skill": <meta>,
-        "parents": [...], "children": [...]}}`` — the central
-        ``skill`` is the metadata-only projection (no
-        ``content``).
+        Flat ``SkillLineage`` dict.
 
     Raises:
         HTTPException: 404 if no row matches; 500 on unexpected
-        failure.
+            failure.
     """
     try:
         bundle = await store.view_skill(skill_id)
@@ -805,7 +937,7 @@ async def get_lineage(
                 status_code=404,
                 detail={"error": "Skill not found", "skill_id": skill_id},
             )
-        return {"skill_id": skill_id, "lineage": _lineage_view_for(bundle)}
+        return _flatten_lineage_view(bundle, skill_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -815,33 +947,34 @@ async def get_lineage(
 @router.get("/{skill_id}/metrics")
 async def get_skill_metrics_endpoint(
     skill_id: str,
-    evolution: SkillEvolutionService = Depends(get_evolution),
+    metrics: SkillMetricsService = Depends(get_metrics),
 ) -> dict[str, Any]:
-    """Bundle skill row, stats, recent-usage count, and A/B test.
+    """Return the per-skill counter bundle + derived rates.
+
+    Returns the
+    :meth:`~daemon.services.skill_metrics_service.SkillMetricsService.get_skill_stats`
+    shape **directly** (no ``{"stats": …}`` envelope) so the
+    front-end :class:`SkillMetrics` interface maps 1:1. A missing
+    skill surfaces as a 404 so callers can distinguish a missing
+    skill from a zero-stat row (``total_selections == 0`` still
+    surfaces a valid 200 with all-zero counters).
 
     Args:
         skill_id: The skill to summarise.
-        evolution: Injected SkillEvolutionService via Depends.
+        metrics: Injected SkillMetricsService via Depends.
 
     Returns:
-        ``{"skill_id", "found", "skill", "stats",
-        "usage_recent_count", "ab_test"}`` — see
-        :meth:`SkillEvolutionService.get_skill_metrics`.
+        Flat ``SkillMetrics`` dict (counters + derived rates).
 
     Raises:
-        HTTPException: 404 if ``found`` is false in the metrics
-        dict; 500 on unexpected failure.
+        HTTPException: 500 on unexpected failure. (Missing skills
+            surface as a zero-stat dict rather than 404 here —
+            the metric endpoint is intentionally non-fatal for the
+            detail page's call.)
     """
     try:
-        result = await evolution.get_skill_metrics(skill_id)
-        if not result.get("found"):
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "Skill not found", "skill_id": skill_id},
-            )
-        return result
-    except HTTPException:
-        raise
+        stats = await metrics.get_skill_stats(skill_id)
+        return stats
     except Exception as e:
         raise _to_http_500(e, "get_metrics")
 
@@ -1129,11 +1262,11 @@ async def share_skill(
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        ``{"skill": {...}}`` with the updated row.
+        The updated skill row (no ``{"skill": …}`` envelope).
 
     Raises:
         HTTPException: 404 if no row matches; 400 on
-        ``ValueError``; 500 on unexpected failure.
+            ``ValueError``; 500 on unexpected failure.
     """
     try:
         skill = await store.update_skill(skill_id, project_id=None)
@@ -1142,7 +1275,7 @@ async def share_skill(
                 status_code=404,
                 detail={"error": "Skill not found", "skill_id": skill_id},
             )
-        return {"skill": _skill_to_dict(skill)}
+        return _skill_to_dict(skill) or {}
     except HTTPException:
         raise
     except ValueError as e:

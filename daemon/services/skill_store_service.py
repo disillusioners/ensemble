@@ -68,18 +68,41 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-# Fields projected by :meth:`SkillStoreService.list_skills`. The full
-# :meth:`Skill.to_dict` shape includes the ``content`` column (which
-# can be tens of KB for long skills), the counter columns (low-value
-# for a list view), and A/B-test plumbing. The list shape keeps the
-# payload tight — callers that need the full body should call
-# :meth:`view_skill`.
+# Fields projected by :meth:`SkillStoreService.list_skills`.
+#
+# Phase 6 polish: the list endpoint used to strip the counter columns
+# (``total_selections``, ``total_applied``, ``total_completions``,
+# ``total_fallbacks``, ``consecutive_failures``) and the lifecycle
+# fields (``status``, ``is_active``, ``ab_test_group``,
+# ``lineage_origin``, ``generation``, ``last_used_at``) on the
+# assumption that the list page only cared about the card metadata.
+# That assumption broke the Skills page — :class:`SkillCardComponent`
+# computes the success-rate chip from ``total_selections`` /
+# ``total_completions`` and the A/B-test badge from
+# ``ab_test_group``, so a list response with those columns missing
+# rendered ``NaN%`` and a silent no-op on A/B tests.
+#
+# The full column projection keeps the list payload compact (the
+# only column NOT in the list is the large ``content`` body) while
+# removing every "strip me here, fill me in detail" mismatch that
+# the detail page was carrying. The detail endpoint still adds
+# ``content`` + ``lineage`` + ``metrics`` on top.
 _LIST_SKILL_FIELDS: tuple[str, ...] = (
     "id",
     "name",
     "description",
     "category",
     "status",
+    "is_active",
+    "lineage_origin",
+    "generation",
+    "ab_test_group",
+    "total_selections",
+    "total_applied",
+    "total_completions",
+    "total_fallbacks",
+    "consecutive_failures",
+    "last_used_at",
     "created_at",
     "updated_at",
 )
@@ -469,9 +492,14 @@ class SkillStoreService:
 def _project_skill(skill: Any) -> dict:
     """Project a :class:`Skill` row down to the list-view dict shape.
 
-    Strips the (potentially large) ``content`` column and the
-    low-value counter columns so list responses stay small. Used
-    only by :meth:`SkillStoreService.list_skills` — callers that
+    Strips only the (potentially large) ``content`` column from the
+    full :class:`Skill` row. Everything else (lifecycle counters,
+    lineage origin, A/B-test group, timestamps) is forwarded so the
+    Skills list page can render success-rate chips, A/B-test
+    badges, and the deactivate / share actions without a per-row
+    detail fetch.
+
+    Used only by :meth:`SkillStoreService.list_skills` — callers that
     need the full body should call :meth:`SkillStoreService.view_skill`.
 
     Args:
@@ -481,7 +509,8 @@ def _project_skill(skill: Any) -> dict:
             mocks work cleanly).
 
     Returns:
-        Dict with keys ``id``, ``name``, ``description``,
-        ``category``, ``status``, ``created_at``, ``updated_at``.
+        Dict with the full set of list-view columns (everything
+        except ``content``). See :data:`_LIST_SKILL_FIELDS` for the
+        canonical column list.
     """
     return {field: getattr(skill, field) for field in _LIST_SKILL_FIELDS}

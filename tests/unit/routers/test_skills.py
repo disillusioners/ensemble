@@ -262,14 +262,18 @@ def skill_app_with_mock_services():
 
 
 class TestListSkills:
-    def test_returns_items_and_total(self, skill_app_with_mock_services):
+    def test_returns_flat_skill_array(self, skill_app_with_mock_services):
+        """Phase 6 polish: list endpoint returns a flat array of skill
+        dicts (matching the ``GET /api/work`` pattern). No
+        ``{"items", "total"}`` envelope.
+        """
         client = skill_app_with_mock_services["client"]
         response = client.get("/api/skills")
         assert response.status_code == 200
         body = response.json()
-        assert body["total"] == 1
-        assert isinstance(body["items"], list)
-        assert body["items"][0]["name"] == "test-skill"
+        assert isinstance(body, list)
+        assert len(body) == 1
+        assert body[0]["name"] == "test-skill"
 
     def test_passes_active_only_query_to_service(self, skill_app_with_mock_services):
         client = skill_app_with_mock_services["client"]
@@ -295,7 +299,7 @@ class TestListSkills:
         assert response.status_code == 200
         body = response.json()
         # Post-filter keeps only the workflow row.
-        assert {it["category"] for it in body["items"]} == {"workflow"}
+        assert {it["category"] for it in body} == {"workflow"}
 
     def test_500_when_service_raises(self, skill_app_with_mock_services):
         client = skill_app_with_mock_services["client"]
@@ -322,7 +326,9 @@ class TestCreateSkill:
         )
         assert response.status_code == 201
         body = response.json()
-        assert body["skill"]["id"] == "skill-abc"
+        # Phase 6 polish: skill object returned directly (no
+        # ``{"skill": …}`` envelope).
+        assert body["id"] == "skill-abc"
         store.create_skill.assert_awaited_once()
 
     def test_create_passes_fields_through(self, skill_app_with_mock_services):
@@ -354,7 +360,14 @@ class TestGetSkill:
         client = skill_app_with_mock_services["client"]
         response = client.get("/api/skills/skill-abc")
         assert response.status_code == 200
-        assert response.json()["skill"]["id"] == "skill-abc"
+        # Phase 6 polish: skill object returned directly (no
+        # ``{"skill": …}`` envelope) and enriched with lineage +
+        # metrics sub-payloads.
+        body = response.json()
+        assert body["id"] == "skill-abc"
+        # The enriched detail includes the lineage + metrics bundles.
+        assert "lineage" in body
+        assert "metrics" in body
 
     def test_get_404_when_missing(self, skill_app_with_mock_services):
         client = skill_app_with_mock_services["client"]
@@ -439,6 +452,12 @@ class TestSearchSkills:
 
 class TestLineage:
     def test_lineage_strips_content(self, skill_app_with_mock_services):
+        """Phase 6 polish: lineage returns the flat
+        :class:`SkillLineage` shape directly (``skill_id``,
+        ``parents``, ``children``, ``generation``, ``origin``).
+        No doubly-nested ``.lineage.lineage`` envelope. ``content``
+        is stripped from each parent / child row.
+        """
         client = skill_app_with_mock_services["client"]
         store = skill_app_with_mock_services["store"]
         store.view_skill = AsyncMock(
@@ -451,8 +470,30 @@ class TestLineage:
         assert response.status_code == 200
         body = response.json()
         assert body["skill_id"] == "skill-abc"
-        # ``content`` is stripped from the metadata-only projection.
-        assert "content" not in body["lineage"]["skill"]
+        # Flat shape: ``parents`` / ``children`` are at the top level.
+        assert "parents" in body
+        assert "children" in body
+        assert "generation" in body
+        assert "origin" in body
+
+    def test_lineage_strips_content_from_parent_rows(self, skill_app_with_mock_services):
+        """The ``content`` column is stripped from each parent /
+        child row so the lineage payload stays compact."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [{"parent_skill_id": "p-1", "content": "secret"}],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        body = response.json()
+        assert all("content" not in p for p in body["parents"])
 
     def test_lineage_404_when_missing(self, skill_app_with_mock_services):
         client = skill_app_with_mock_services["client"]
@@ -463,24 +504,34 @@ class TestLineage:
 
 
 class TestMetrics:
-    def test_metrics_returns_bundle(self, skill_app_with_mock_services):
+    def test_metrics_returns_flat_skill_metrics_dict(self, skill_app_with_mock_services):
+        """Phase 6 polish: the metrics endpoint returns the
+        :class:`SkillMetrics` shape directly — no
+        ``{"skill_id", "found", "skill", "stats", "usage_recent_count", "ab_test"}``
+        bundle.
+        """
         client = skill_app_with_mock_services["client"]
-        evolution = skill_app_with_mock_services["evolution"]
+        metrics = skill_app_with_mock_services["metrics"]
+        metrics.get_skill_stats = AsyncMock(
+            return_value={
+                "total_selections": 5,
+                "total_applied": 3,
+                "total_completions": 2,
+                "total_fallbacks": 1,
+                "completion_rate": 0.4,
+                "fallback_rate": 0.2,
+                "applied_rate": 0.6,
+                "consecutive_failures": 0,
+            }
+        )
         response = client.get("/api/skills/skill-abc/metrics")
         assert response.status_code == 200
         body = response.json()
-        assert body["skill_id"] == "skill-abc"
-        assert body["found"] is True
-        evolution.get_skill_metrics.assert_awaited_once()
-
-    def test_metrics_404_when_not_found(self, skill_app_with_mock_services):
-        client = skill_app_with_mock_services["client"]
-        evolution = skill_app_with_mock_services["evolution"]
-        evolution.get_skill_metrics = AsyncMock(
-            return_value={"skill_id": "missing", "found": False}
-        )
-        response = client.get("/api/skills/missing/metrics")
-        assert response.status_code == 404
+        # SkillMetrics shape — counters + derived rates directly.
+        assert body["total_selections"] == 5
+        assert body["total_completions"] == 2
+        assert body["completion_rate"] == 0.4
+        metrics.get_skill_stats.assert_awaited_once()
 
 
 class TestFeedback:

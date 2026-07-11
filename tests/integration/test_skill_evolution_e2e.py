@@ -284,7 +284,12 @@ def app(
 
 
 def _create_skill_via_api(client, name="lifecycle-skill", project_id=None):
-    """POST /api/skills and return the created skill dict."""
+    """POST /api/skills and return the created skill dict.
+
+    Phase 6 polish: the create endpoint returns the skill record
+    directly (no ``{"skill": …}`` envelope), matching the
+    single-resource pattern used by the rest of the surface.
+    """
     response = client.post(
         "/api/skills",
         json={
@@ -296,7 +301,7 @@ def _create_skill_via_api(client, name="lifecycle-skill", project_id=None):
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()["skill"]
+    return response.json()
 
 
 def _set_injected_metrics(metrics_service, instance_id, skill_ids):
@@ -345,18 +350,18 @@ class TestSkillLifecycleCreateReadUpdateDelete:
 
         response = app.get("/api/skills")
         assert response.status_code == 200
+        # Phase 6 polish: list endpoint returns a flat array
+        # (no ``{"items", "total"}`` envelope).
         body = response.json()
-        names = {it["name"] for it in body["items"]}
+        names = {it["name"] for it in body}
         assert {"a-skill", "b-skill"} <= names
-        assert body["total"] >= 2
 
     def test_list_filters_by_project_id(self, app):
         _create_skill_via_api(app, name="proj1-skill", project_id="proj-1")
         _create_skill_via_api(app, name="proj2-skill", project_id="proj-2")
 
         response = app.get("/api/skills?project_id=proj-1")
-        body = response.json()
-        names = {it["name"] for it in body["items"]}
+        names = {it["name"] for it in response.json()}
         assert "proj1-skill" in names
         assert "proj2-skill" not in names
 
@@ -366,10 +371,15 @@ class TestSkillLifecycleCreateReadUpdateDelete:
 
         response = app.get(f"/api/skills/{skill_id}")
         assert response.status_code == 200
+        # Phase 6 polish: detail endpoint returns the skill record
+        # directly (no ``{"skill": …}`` envelope), enriched with
+        # ``lineage`` and ``metrics`` sub-payloads.
         body = response.json()
-        assert body["skill"]["id"] == skill_id
+        assert body["id"] == skill_id
         # GET /skills/{id} returns the full body (including content).
-        assert body["skill"]["content"] == "test content body for search"
+        assert body["content"] == "test content body for search"
+        assert "lineage" in body
+        assert "metrics" in body
 
     def test_get_unknown_skill_returns_404(self, app):
         response = app.get("/api/skills/does-not-exist")
@@ -385,7 +395,7 @@ class TestSkillLifecycleCreateReadUpdateDelete:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["skill"]["description"] == "updated description"
+        assert body["description"] == "updated description"
 
     def test_update_skill_is_active_translates_to_status(self, app):
         created = _create_skill_via_api(app)
@@ -397,7 +407,7 @@ class TestSkillLifecycleCreateReadUpdateDelete:
         )
         body = response.json()
         # Public is_active=false must flip the underlying status column.
-        assert body["skill"]["status"] == "inactive"
+        assert body["status"] == "inactive"
 
     def test_delete_deactivates_skill(self, app):
         created = _create_skill_via_api(app)
@@ -410,11 +420,11 @@ class TestSkillLifecycleCreateReadUpdateDelete:
         # GET still returns it (soft delete).
         response = app.get(f"/api/skills/{skill_id}")
         assert response.status_code == 200
-        assert response.json()["skill"]["status"] == "inactive"
+        assert response.json()["status"] == "inactive"
 
         # But it drops out of the active-only list.
         response = app.get("/api/skills?active_only=true")
-        ids = {it["id"] for it in response.json()["items"]}
+        ids = {it["id"] for it in response.json()}
         assert skill_id not in ids
 
 
@@ -523,17 +533,24 @@ class TestSkillMetricsRecording:
 
         response = app.get(f"/api/skills/{skill_id}/metrics")
         assert response.status_code == 200
+        # Phase 6 polish: flat SkillMetrics shape — no ``{"skill_id",
+        # "found", "stats", "usage_recent_count", "ab_test"}`` bundle.
         body = response.json()
-        assert body["skill_id"] == skill_id
-        assert body["found"] is True
-        assert "stats" in body
-        assert body["stats"]["total_selections"] == 1
-        assert body["stats"]["total_completions"] == 1
-        assert body["usage_recent_count"] >= 1
+        assert body["total_selections"] == 1
+        assert body["total_completions"] == 1
+        assert "completion_rate" in body
 
-    def test_metrics_404_for_unknown_skill(self, app):
+    def test_metrics_zero_stats_for_unknown_skill(self, app):
+        """The metrics endpoint returns a zero-stat dict for an
+        unknown skill (the metrics service is non-fatal for the
+        detail page's call — missing skills surface as zero
+        counters rather than 404).
+        """
         response = app.get("/api/skills/does-not-exist/metrics")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total_selections"] == 0
+        assert body["total_completions"] == 0
 
 
 class TestSkillFix:
@@ -734,13 +751,14 @@ class TestSkillLineage:
         response = app.get(f"/api/skills/{created['id']}/lineage")
         assert response.status_code == 200
         body = response.json()
+        # Phase 6 polish: flat ``SkillLineage`` shape — no
+        # doubly-nested ``.lineage.lineage`` envelope.
         assert body["skill_id"] == created["id"]
-        assert body["lineage"]["skill"] is not None
-        # ``content`` is stripped — only metadata is returned.
-        assert "content" not in body["lineage"]["skill"]
+        assert "generation" in body
+        assert "origin" in body
         # No parents / children for a fresh skill.
-        assert body["lineage"]["lineage"]["parents"] == []
-        assert body["lineage"]["lineage"]["children"] == []
+        assert body["parents"] == []
+        assert body["children"] == []
 
     def test_lineage_after_evolution(self, app, repos):
         # Create root, then create a child via the lineage repo.
@@ -763,13 +781,13 @@ class TestSkillLineage:
         assert response.status_code == 200
         body = response.json()
         # The child has the root as a parent.
-        parent_ids = [p["parent_skill_id"] for p in body["lineage"]["lineage"]["parents"]]
+        parent_ids = [p["parent_skill_id"] for p in body["parents"]]
         assert root["id"] in parent_ids
 
         # The root sees the child.
         response = app.get(f"/api/skills/{root['id']}/lineage")
         body = response.json()
-        child_ids = [c["skill_id"] for c in body["lineage"]["lineage"]["children"]]
+        child_ids = [c["skill_id"] for c in body["children"]]
         assert child.id in child_ids
 
 
@@ -786,7 +804,7 @@ class TestSkillShare:
         assert response.status_code == 200
         body = response.json()
         # After share: project_id is None (global).
-        assert body["skill"]["project_id"] is None
+        assert body["project_id"] is None
 
     def test_share_404_for_unknown_skill(self, app):
         response = app.post("/api/skills/missing/share")

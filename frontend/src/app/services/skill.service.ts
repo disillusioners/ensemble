@@ -264,32 +264,28 @@ export class SkillService {
    * POST /api/skills/{id}/deactivate
    *
    * Soft-delete alias of the DELETE route — flips ``is_active`` to
-   * ``false`` server-side and returns ``{deactivated: true}``.
-   *
-   * Because the response does not include the refreshed ``Skill``
-   * row, we update the local list to flip ``is_active=false`` for
-   * the matching id instead of swapping in a server payload.
+   * ``false`` server-side. The backend now returns the refreshed
+   * ``Skill`` row directly (no envelope), so we splice it into the
+   * local ``skills`` signal — symmetric with how ``update()`` and
+   * ``shareToGlobal()`` reconcile list state.
    *
    * Args:
    *     id: Skill UUID.
    *
    * Returns:
-   *     ``Observable<{deactivated: boolean}>`` — re-thrown on error.
+   *     ``Observable<Skill>`` — re-thrown on error.
    */
-  deactivate(id: string): Observable<DeactivationResponse> {
+  deactivate(id: string): Observable<Skill> {
     return this.http
-      .post<DeactivationResponse>(
+      .post<{ skill?: Skill } | Skill>(
         `${this.API_BASE}/${encodeURIComponent(id)}/deactivate`,
         {}
       )
       .pipe(
-        tap(() => {
-          // No row payload to splice in — flip the local flag so the
-          // list re-renders correctly without a refetch.
+        map((res: any) => (res?.skill ?? res) as Skill),
+        tap((deactivatedSkill) => {
           this.skills.update((skills) =>
-            skills.map((skill) =>
-              skill.id === id ? { ...skill, is_active: false } : skill,
-            ),
+            skills.map((skill) => (skill.id === id ? deactivatedSkill : skill)),
           );
         }),
         catchError((err) => {
@@ -298,6 +294,7 @@ export class SkillService {
         })
       );
   }
+
 
   /**
    * POST /api/skills/search
