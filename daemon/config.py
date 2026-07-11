@@ -619,7 +619,20 @@ def load_config(config_path: str | None = None) -> Config:
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
     if "skill_evolution" in processed_config:
-        config_dict["skill_evolution"] = processed_config["skill_evolution"]
+        # Drop keys whose YAML value is ``null`` (None). pydantic-settings
+        # treats an explicitly-passed init kwarg — even ``None`` — as taking
+        # priority over environment variables, so a YAML ``embedding_base_url:
+        # null`` would shadow ``SKILL_EVOLUTION_EMBEDDING_BASE_URL`` and force
+        # the embedding service to fall back to ``llm.base_url`` (a chat-only
+        # endpoint with no ``/embeddings`` route -> "404 page not found").
+        # Stripping None lets the BaseSettings env-var source fill these in,
+        # matching the documented contract (``.env.example`` /
+        # ``config.yaml`` comments: "Falls back to llm.* if null", with env
+        # vars overriding YAML).
+        se_raw = processed_config["skill_evolution"]
+        config_dict["skill_evolution"] = {
+            k: v for k, v in se_raw.items() if v is not None
+        }
 
     # Create and validate config
     return Config(**config_dict)
