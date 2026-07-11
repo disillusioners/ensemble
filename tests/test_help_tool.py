@@ -232,10 +232,11 @@ class TestToolHelpFiltering:
         # Create mock registry
         mock_agent_meta = MagicMock()
         mock_agent_meta.tools = ToolFilter(allow=["bash", "filesystem"], deny=["write_file"])
-        
+
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_agent_meta
-        
+        mock_registry.get_resolved.return_value = mock_agent_meta
+
         return mock_registry
 
     @pytest.fixture
@@ -243,10 +244,11 @@ class TestToolHelpFiltering:
         """Set up a mock agent with full tool access."""
         mock_agent_meta = MagicMock()
         mock_agent_meta.tools = None  # No restrictions
-        
+
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_agent_meta
-        
+        mock_registry.get_resolved.return_value = mock_agent_meta
+
         return mock_registry
 
     @pytest.fixture
