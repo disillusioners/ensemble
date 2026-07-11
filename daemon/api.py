@@ -62,6 +62,7 @@ from daemon.routers import (
     work_router,
     projects_router,
     queues_router,
+    skills_router,        # /api/skills (Phase 6: skill management REST API)
     dlq_router,
     mcp_servers_router,
     notifications_router,
@@ -617,6 +618,57 @@ async def lifespan(app: FastAPI):
     # level global + setter + Depends factory).
     from daemon.routers.work import set_work_resolver
     set_work_resolver(work_resolver)
+
+    # Wire skills router services (Phase 6 Task 2 — REST API surface).
+    # The skills router uses 4 service DI accessors (created via
+    # ``create_service_dependency``) plus 2 module-level globals
+    # (trigger repo, job dispatcher). Both patterns are pulled from
+    # manager attributes that were initialized earlier in this lifespan
+    # block — see ``manager._skill_*`` wiring in daemon/manager.py.
+    from daemon.routers.skills import (
+        get_store,
+        get_search,
+        get_metrics,
+        get_evolution,
+        set_skill_trigger_repo,
+        set_skill_job_dispatcher,
+    )
+
+    # Phase 2 services — create_service_dependency accessors.
+    # Each one returns a closure whose .set_service() setter is what
+    # we call here. Defensive getattr on manager attributes in case
+    # a future refactor skips one of the service constructions —
+    # missing services will surface as 503s at request time rather
+    # than crashing the lifespan.
+    if getattr(manager, "_skill_store_service", None) is not None:
+        get_store.set_service(manager._skill_store_service)
+    if getattr(manager, "_skill_search_service", None) is not None:
+        get_search.set_service(manager._skill_search_service)
+    if getattr(manager, "_skill_metrics_service", None) is not None:
+        get_metrics.set_service(manager._skill_metrics_service)
+    if getattr(manager, "_skill_evolution_service", None) is not None:
+        get_evolution.set_service(manager._skill_evolution_service)
+
+    # Trigger repository — module-level global + setter (no factory).
+    if getattr(manager, "_skill_trigger_repo", None) is not None:
+        set_skill_trigger_repo(manager._skill_trigger_repo)
+
+    # Job dispatcher — module-level global + setter. This is the
+    # chokepoint the ``POST /api/skills/{id}/fix`` endpoint calls into
+    # to enqueue a ``skill_evolution`` JobItem on ``system_parallel_queue``.
+    if getattr(manager, "_skill_job_dispatcher", None) is not None:
+        set_skill_job_dispatcher(manager._skill_job_dispatcher)
+
+    logger.info(
+        "Skills router wired: store=%s search=%s metrics=%s evolution=%s "
+        "triggers=%s dispatcher=%s",
+        manager._skill_store_service is not None,
+        manager._skill_search_service is not None,
+        manager._skill_metrics_service is not None,
+        manager._skill_evolution_service is not None,
+        manager._skill_trigger_repo is not None,
+        manager._skill_job_dispatcher is not None,
+    )
 
     # Start StreamableHTTP session manager within lifespan
     session_mgr = get_kb_mcp_session_manager()
@@ -1286,6 +1338,7 @@ def create_app() -> FastAPI:
     api_router.include_router(work_router)          # /api/work  (Phase 4: virtual job mgmt)
     api_router.include_router(projects_router)      # /api/projects
     api_router.include_router(queues_router)        # /api/queues
+    api_router.include_router(skills_router)        # /api/skills (Phase 6: skill management REST API)
     api_router.include_router(dlq_router)           # /api/dlq
     api_router.include_router(mcp_servers_router)    # /api/mcp-servers
     api_router.include_router(notifications_router)   # /api/notifications

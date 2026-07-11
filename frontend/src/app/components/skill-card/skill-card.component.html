@@ -1,0 +1,91 @@
+<mat-card class="skill-card" [class.skill-deactivated]="!skill().is_active">
+  <div class="skill-card-header">
+    <div class="skill-card-badges">
+      <span
+        class="status-chip"
+        [style.backgroundColor]="statusColor() + '20'"
+        [style.color]="statusColor()">
+        <mat-icon class="status-icon">{{ statusIcon() }}</mat-icon>
+        {{ statusLabel() }}
+      </span>
+      <span
+        class="category-chip"
+        [style.backgroundColor]="categoryColor() + '20'"
+        [style.color]="categoryColor()">
+        <mat-icon class="category-icon">{{ categoryIcon() }}</mat-icon>
+        {{ skill().category }}
+      </span>
+      @if (skill().ab_test_group) {
+        <span class="ab-test-chip" [matTooltip]="'A/B test group: ' + skill().ab_test_group">
+          <mat-icon>science</mat-icon>
+          A/B: {{ abTestGroupDisplay() }}
+        </span>
+      }
+      @if (!skill().is_active) {
+        <span class="deactivated-badge">
+          <mat-icon>block</mat-icon>
+          Deactivated
+        </span>
+      }
+    </div>
+    <span class="relative-time">{{ relativeTime() }}</span>
+  </div>
+
+  <mat-card-content class="skill-card-content">
+    <h3 class="skill-name">{{ skill().name }}</h3>
+    <p class="skill-description">{{ skill().description }}</p>
+
+    <div class="metrics-row">
+      <span class="metric-chip" matTooltip="Total times this skill was applied">
+        <mat-icon>check</mat-icon>
+        {{ skill().total_applied }} applied
+      </span>
+      <span
+        class="metric-chip"
+        [style.color]="completionsColor()"
+        matTooltip="Total completions out of selections">
+        <mat-icon>flag</mat-icon>
+        {{ skill().total_completions }}/{{ skill().total_selections }} completed
+        ({{ successRateDisplay() }})
+      </span>
+      @if (skill().total_fallbacks > 0) {
+        <span
+          class="metric-chip warn"
+          matTooltip="Total fallback events when this skill did not help">
+          <mat-icon>warning</mat-icon>
+          {{ skill().total_fallbacks }} fallbacks
+        </span>
+      }
+    </div>
+
+    @if (false) {
+      <!-- placeholder for Phase 7 lineage badges -->
+      <div class="lineage-row"></div>
+    }
+  </mat-card-content>
+
+  <mat-card-actions class="skill-card-actions">
+    <button mat-button (click)="onView()">
+      <mat-icon>visibility</mat-icon>
+      View
+    </button>
+    @if (skill().is_active) {
+      <button mat-button (click)="onEdit()">
+        <mat-icon>edit</mat-icon>
+        Edit
+      </button>
+    }
+    @if (skill().is_active) {
+      <button mat-button (click)="onShare()">
+        <mat-icon>share</mat-icon>
+        Share to Global
+      </button>
+    }
+    @if (skill().is_active) {
+      <button mat-button color="warn" (click)="onDeactivate()">
+        <mat-icon>block</mat-icon>
+        Deactivate
+      </button>
+    }
+  </mat-card-actions>
+</mat-card>

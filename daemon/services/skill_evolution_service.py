@@ -564,11 +564,22 @@ class SkillEvolutionService:
     # Public API: A/B test resolution
     # --------------------------------------------------------
 
-    async def check_ab_test_resolution(self, ab_test_group: str) -> dict:
+    async def check_ab_test_resolution(
+        self,
+        ab_test_group: str,
+        winner_id: Optional[str] = None,
+    ) -> dict:
         """Decide whether an A/B test should resolve, extend, or wait.
 
         Decision tree:
 
+        0. **Forced winner** (``winner_id`` argument is set) →
+           validate the ID against the two persisted variants,
+           then run the same side effects as Path 2 / Path 3
+           (deactivate loser / resolve ab_test / promote winner).
+           ``reason='forced_winner'``. Skips the
+           sample-size / threshold / extension gates entirely —
+           the caller has explicit authority to pick.
         1. **Not enough data** (``comparisons < ab_sample_size``) →
            keep collecting. ``reason='needs_more_data'``.
         2. **Threshold met** (``difference >= ab_min_difference``) →
@@ -588,10 +599,23 @@ class SkillEvolutionService:
         Args:
             ab_test_group: The shared UUID grouping old + new
                 variants.
+            winner_id: Optional forced-winner skill ID. When set,
+                the test is force-resolved by selecting this
+                variant as the winner (the other variant is
+                deactivated). Must match one of the test's two
+                variant IDs — anything else raises
+                ``ValueError``. ``None`` (default) runs the
+                normal completion-rate-driven decision tree.
 
         Returns:
             Dict with ``resolved`` (bool), ``winner_id`` / ``loser_id``
             (str | None), ``reason`` (str), ``extension_count`` (int).
+            When ``winner_id`` is provided, ``reason`` is
+            ``"forced_winner"``.
+
+        Raises:
+            ValueError: When ``winner_id`` is provided but does
+                not match either variant of the test group.
         """
         sample_size = getattr(self._config, "ab_sample_size", 10) or 10
         min_diff = getattr(self._config, "ab_min_difference", 0.15) or 0.15
@@ -617,6 +641,52 @@ class SkillEvolutionService:
         extension_count = int(getattr(ab_test, "extension_count", 0) or 0)
         comparisons = int(getattr(ab_test, "comparisons", 0) or 0)
         difference = float(stats.get("difference", 0.0) or 0.0)
+
+        # Path 0: forced-winner override. Validates the supplied
+        # ID against the persisted variant pair and short-circuits
+        # the sample-size / threshold / extension gates. The
+        # caller (e.g. an admin UI) has explicit authority to
+        # pick a winner; we still run the same three concurrent
+        # side effects as Paths 2 / 3 so the persisted state
+        # matches the auto-resolution outcome.
+        if winner_id is not None:
+            skill_id_a = stats.get("skill_id_a")
+            skill_id_b = stats.get("skill_id_b")
+            if winner_id not in (skill_id_a, skill_id_b):
+                raise ValueError(
+                    f"winner_id={winner_id!r} is not a variant of "
+                    f"ab_test_group={ab_test_group!r} "
+                    f"(variants: {skill_id_a!r}, {skill_id_b!r})"
+                )
+            loser_id = (
+                skill_id_b if winner_id == skill_id_a else skill_id_a
+            )
+            logger.info(
+                f"[SkillEvolution] A/B test {ab_test_group}: forced "
+                f"winner={winner_id} (loser={loser_id})"
+            )
+            await asyncio.gather(
+                asyncio.to_thread(
+                    self._skill_repo.deactivate, loser_id,
+                ),
+                asyncio.to_thread(
+                    self._ab_test_repo.resolve,
+                    ab_test_group, winner_id,
+                ),
+                asyncio.to_thread(
+                    self._skill_repo.update,
+                    winner_id,
+                    ab_test_group=None,
+                    status="active",
+                ),
+            )
+            return {
+                "resolved": True,
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+                "reason": "forced_winner",
+                "extension_count": extension_count,
+            }
 
         if comparisons < sample_size:
             return {

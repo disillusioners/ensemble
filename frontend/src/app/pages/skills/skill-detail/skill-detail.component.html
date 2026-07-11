@@ -1,0 +1,258 @@
+<div class="skill-detail-container">
+  <!-- Header bar -->
+  <div class="detail-header">
+    <button mat-button (click)="onBack()" class="back-btn">
+      <mat-icon>arrow_back</mat-icon>
+      Back to Skills
+    </button>
+
+    <div class="detail-actions">
+      @if (skill()?.is_active) {
+        <button mat-button (click)="onEdit()">
+          <mat-icon>edit</mat-icon> Edit
+        </button>
+        <button mat-button (click)="onFix()">
+          <mat-icon>build</mat-icon> Request Fix
+        </button>
+        <button mat-button (click)="onShare()">
+          <mat-icon>share</mat-icon> Share to Global
+        </button>
+      }
+      @if (skill()?.is_active) {
+        <button mat-button color="warn" (click)="onDeactivate()">
+          <mat-icon>block</mat-icon> Deactivate
+        </button>
+      }
+    </div>
+  </div>
+
+  <!-- Loading -->
+  @if (loading() && !skill()) {
+    <div class="loading-container">
+      <mat-spinner></mat-spinner>
+    </div>
+  }
+
+  <!-- Error -->
+  @if (error()) {
+    <div class="error-container">
+      <mat-icon class="error-icon">error_outline</mat-icon>
+      <h3>Failed to load skill</h3>
+      <p>{{ error() }}</p>
+      <button mat-stroked-button color="primary" (click)="loadAll(skillId())">
+        <mat-icon>refresh</mat-icon> Retry
+      </button>
+    </div>
+  }
+
+  @if (skill(); as s) {
+    <!-- Skill meta header -->
+    <mat-card class="skill-meta-card">
+      <mat-card-header>
+        <div class="meta-badges">
+          <span class="status-chip" [style.backgroundColor]="statusColor() + '20'" [style.color]="statusColor()">
+            <mat-icon class="status-icon">{{ statusIcon() }}</mat-icon>
+            {{ statusLabel() }}
+          </span>
+          <span class="category-chip" [style.backgroundColor]="categoryColor() + '20'" [style.color]="categoryColor()">
+            <mat-icon class="category-icon">{{ categoryIcon() }}</mat-icon>
+            {{ s.category }}
+          </span>
+          @if (s.ab_test_group) {
+            <span class="ab-test-chip"><mat-icon>science</mat-icon> A/B: {{ s.ab_test_group }}</span>
+          }
+          <span class="generation-badge" matTooltip="Lineage generation">
+            Gen {{ s.generation }} • {{ s.lineage_origin }}
+          </span>
+        </div>
+      </mat-card-header>
+      <mat-card-content>
+        <h1 class="skill-name">{{ s.name }}</h1>
+        @if (s.description) {
+          <p class="skill-description">{{ s.description }}</p>
+        }
+        <div class="meta-row">
+          <span class="meta-key">ID:</span>
+          <code class="meta-value">{{ s.id }}</code>
+        </div>
+        @if (s.project_id) {
+          <div class="meta-row">
+            <span class="meta-key">Project:</span>
+            <span class="meta-value">{{ s.project_id }}</span>
+          </div>
+        } @else {
+          <div class="meta-row">
+            <span class="meta-key">Scope:</span>
+            <span class="meta-value">Global</span>
+          </div>
+        }
+        <div class="meta-row">
+          <span class="meta-key">Created:</span>
+          <span class="meta-value">{{ formatDate(s.created_at) }}</span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-key">Last used:</span>
+          <span class="meta-value">{{ formatDate(s.last_used_at) }}</span>
+        </div>
+      </mat-card-content>
+    </mat-card>
+
+    <!-- Metrics dashboard -->
+    <mat-card class="metrics-card">
+      <mat-card-header><mat-card-title>Metrics</mat-card-title></mat-card-header>
+      <mat-card-content>
+        @if (metrics(); as m) {
+          <div class="metrics-grid">
+            <div class="metric-tile">
+              <div class="metric-label">Success Rate</div>
+              <div class="metric-value" [style.color]="successRateColor()">{{ successRateDisplay() }}</div>
+              <mat-progress-bar mode="determinate" [value]="successRate() * 100" color="primary"></mat-progress-bar>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Selections</div>
+              <div class="metric-value">{{ m.total_selections }}</div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Applied</div>
+              <div class="metric-value">{{ m.total_applied }}</div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Completions</div>
+              <div class="metric-value">{{ m.total_completions }}</div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Fallbacks</div>
+              <div class="metric-value" [class.warn]="m.total_fallbacks > 0">{{ m.total_fallbacks }}</div>
+              <div class="metric-sub">{{ fallbackRateDisplay() }} of selections</div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Consec. Failures</div>
+              <div class="metric-value" [class.warn]="m.consecutive_failures > 2">{{ m.consecutive_failures }}</div>
+            </div>
+          </div>
+        } @else {
+          <p class="metrics-placeholder">No metrics available</p>
+        }
+      </mat-card-content>
+    </mat-card>
+
+    <!-- A/B testing panel -->
+    @if (hasAbTest()) {
+      <mat-card class="ab-test-card">
+        <mat-card-header>
+          <mat-card-title><mat-icon>science</mat-icon> A/B Test Status</mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          @if (abTest(); as ab) {
+            <div class="ab-grid">
+              <div class="ab-row"><span class="ab-key">Group:</span><span class="ab-value">{{ ab.group }}</span></div>
+              <div class="ab-row"><span class="ab-key">Comparisons:</span><span class="ab-value">{{ ab.comparison_count }}</span></div>
+              <div class="ab-row"><span class="ab-key">Extensions:</span><span class="ab-value">{{ ab.extension_count }}</span></div>
+              <div class="ab-row"><span class="ab-key">Variants:</span><span class="ab-value">{{ ab.variant_ids.length }}</span></div>
+              <div class="ab-row"><span class="ab-key">Started:</span><span class="ab-value">{{ formatDate(ab.started_at) }}</span></div>
+              @if (ab.resolved_at) {
+                <div class="ab-row"><span class="ab-key">Resolved:</span><span class="ab-value">{{ formatDate(ab.resolved_at) }}</span></div>
+              }
+            </div>
+            @if (!ab.resolved_at && ab.variant_ids.length > 0) {
+              <mat-divider></mat-divider>
+              <div class="ab-actions">
+                <p>Promote a variant to winner:</p>
+                <div class="ab-variant-buttons">
+                  <button mat-stroked-button (click)="onResolveAbTest(s.id)">Keep current</button>
+                  @for (vid of ab.variant_ids; track vid) {
+                    @if (vid !== s.id) {
+                      <button mat-flat-button color="primary" (click)="onResolveAbTest(vid)">
+                        Promote {{ vid.substring(0, 8) }}
+                      </button>
+                    }
+                  }
+                </div>
+              </div>
+            }
+          }
+        </mat-card-content>
+      </mat-card>
+    }
+
+    <!-- Lineage -->
+    @if (hasLineage()) {
+      <mat-card class="lineage-card">
+        <mat-card-header><mat-card-title>Lineage</mat-card-title></mat-card-header>
+        <mat-card-content>
+          @if (lineage(); as l) {
+            @if (l.parents.length > 0) {
+              <div class="lineage-section">
+                <h4><mat-icon>arrow_upward</mat-icon> Parents</h4>
+                <div class="lineage-list">
+                  @for (parent of l.parents; track parent.id) {
+                    <div class="lineage-item">
+                      <span class="lineage-name">{{ parent.name }}</span>
+                      <span class="lineage-meta">Gen {{ parent.generation }}</span>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+            @if (l.children.length > 0) {
+              <div class="lineage-section">
+                <h4><mat-icon>arrow_downward</mat-icon> Children</h4>
+                <div class="lineage-list">
+                  @for (child of l.children; track child.id) {
+                    <div class="lineage-item">
+                      <span class="lineage-name">{{ child.name }}</span>
+                      <span class="lineage-meta">Gen {{ child.generation }}</span>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+          }
+        </mat-card-content>
+      </mat-card>
+    }
+
+    <!-- Skill Content (markdown source) -->
+    <mat-card class="content-card">
+      <mat-card-header>
+        <mat-card-title>Content</mat-card-title>
+        <div class="content-actions">
+          <button mat-button (click)="onToggleContent()">
+            <mat-icon>{{ contentExpanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
+            {{ contentExpanded() ? 'Collapse' : 'Expand' }}
+          </button>
+        </div>
+      </mat-card-header>
+      <mat-card-content>
+        <pre class="skill-content" [class.collapsed]="!contentExpanded()">{{ s.content }}</pre>
+      </mat-card-content>
+    </mat-card>
+
+    <!-- Feedback submission -->
+    <mat-card class="feedback-card">
+      <mat-card-header><mat-card-title>Submit Feedback</mat-card-title></mat-card-header>
+      <mat-card-content>
+        <div class="feedback-row">
+          <mat-chip-listbox [value]="feedbackHelpful()" (change)="feedbackHelpful.set($event.value === 'helpful')">
+            <mat-chip-option [value]="'helpful'" [selected]="feedbackHelpful()">
+              <mat-icon>thumb_up</mat-icon> Helpful
+            </mat-chip-option>
+            <mat-chip-option [value]="'unhelpful'" [selected]="!feedbackHelpful()">
+              <mat-icon>thumb_down</mat-icon> Not Helpful
+            </mat-chip-option>
+          </mat-chip-listbox>
+        </div>
+        <mat-form-field appearance="outline" class="feedback-field">
+          <mat-label>Comments (optional)</mat-label>
+          <textarea matInput rows="3" [value]="feedbackText()" (input)="feedbackText.set($any($event.target).value)"></textarea>
+        </mat-form-field>
+      </mat-card-content>
+      <mat-card-actions align="end">
+        <button mat-flat-button color="primary" (click)="onSubmitFeedback()" [disabled]="feedbackSubmitting()">
+          <mat-icon>send</mat-icon>
+          @if (feedbackSubmitting()) { Submitting… } @else { Submit Feedback }
+        </button>
+      </mat-card-actions>
+    </mat-card>
+  }
+</div>

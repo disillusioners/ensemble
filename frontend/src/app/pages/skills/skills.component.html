@@ -1,0 +1,196 @@
+<div class="skills-container">
+  <!-- Header -->
+  <div class="skills-header">
+    <div class="header-left">
+      <h1 class="page-title">Skills</h1>
+      <span class="header-count">{{ filteredSkills().length }} of {{ skills().length }}</span>
+    </div>
+    <div class="header-actions">
+      <button mat-stroked-button (click)="onRefresh()" [disabled]="loading()" class="refresh-btn">
+        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+        Refresh
+      </button>
+      <button mat-flat-button color="primary" (click)="onOpenCreateForm()" class="create-btn">
+        <mat-icon>add</mat-icon>
+        New Skill
+      </button>
+    </div>
+  </div>
+
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <mat-form-field appearance="outline" class="filter-field">
+      <mat-label>Category</mat-label>
+      <mat-select [value]="categoryFilter()" (selectionChange)="onCategoryFilterChange($event.value)">
+        <mat-option value="all">All Categories</mat-option>
+        @for (cat of categories; track cat) {
+          <mat-option [value]="cat">{{ cat }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="filter-field">
+      <mat-label>Project</mat-label>
+      <mat-select [value]="projectFilter()" (selectionChange)="onProjectFilterChange($event.value)">
+        <mat-option value="all">All Projects</mat-option>
+        <mat-option value="global">Global Only</mat-option>
+        @for (project of projects(); track project.project_id) {
+          <mat-option [value]="project.project_id">{{ project.name }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="filter-field search-field">
+      <mat-label>Search</mat-label>
+      <input matInput [value]="searchQuery()"
+             (input)="onSearchChange($any($event.target).value)"
+             placeholder="Search by name or description…">
+      <mat-icon matSuffix>search</mat-icon>
+    </mat-form-field>
+
+    <mat-checkbox [checked]="activeOnly()"
+                  (change)="onActiveOnlyChange($event.checked)"
+                  class="active-only-checkbox">
+      Active only
+    </mat-checkbox>
+
+    @if (hasActiveFilters()) {
+      <button mat-button (click)="onClearFilters()" class="clear-filters-btn">
+        <mat-icon>clear</mat-icon>
+        Clear filters
+      </button>
+    }
+  </div>
+
+  <!-- Inline Create Form -->
+  @if (formOpen()) {
+    <mat-card class="skill-create-form">
+      <mat-card-header>
+        <mat-card-title>Create Skill</mat-card-title>
+        <mat-card-subtitle>Define a new reusable skill for the agent system</mat-card-subtitle>
+      </mat-card-header>
+      <mat-card-content>
+        <mat-form-field appearance="outline" class="form-field">
+          <mat-label>Name</mat-label>
+          <input matInput required
+                 [value]="formName()"
+                 (input)="formName.set($any($event.target).value)"
+                 placeholder="e.g., Code Review Checklist">
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="form-field">
+          <mat-label>Description</mat-label>
+          <input matInput
+                 [value]="formDescription()"
+                 (input)="formDescription.set($any($event.target).value)"
+                 placeholder="Short summary of what this skill does">
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="form-field">
+          <mat-label>Category</mat-label>
+          <mat-select [value]="formCategory()" (selectionChange)="formCategory.set($event.value)">
+            @for (cat of categories; track cat) {
+              <mat-option [value]="cat">{{ cat }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="form-field">
+          <mat-label>Content (markdown)</mat-label>
+          <textarea matInput required rows="10"
+                    [value]="formContent()"
+                    (input)="formContent.set($any($event.target).value)"
+                    placeholder="# Skill Title&#10;&#10;Describe the skill prompt here…"></textarea>
+        </mat-form-field>
+      </mat-card-content>
+      <mat-card-actions align="end">
+        <button mat-button (click)="onCancelCreateForm()" [disabled]="formSubmitting()">Cancel</button>
+        <button mat-flat-button color="primary"
+                (click)="onSubmitCreate()"
+                [disabled]="formSubmitting()"
+                class="submit-btn">
+          <mat-icon>save</mat-icon>
+          @if (formSubmitting()) { Creating… } @else { Create Skill }
+        </button>
+      </mat-card-actions>
+    </mat-card>
+  }
+
+  <!-- Main Content -->
+  <div class="skills-main">
+    <!-- Loading skeleton -->
+    @if (loading() && skills().length === 0) {
+      <div class="loading-container">
+        @for (i of [1, 2, 3]; track i) {
+          <div class="skeleton-card">
+            <div class="skeleton-header">
+              <div class="skeleton-badge"></div>
+              <div class="skeleton-badge small"></div>
+              <div class="skeleton-time"></div>
+            </div>
+            <div class="skeleton-content">
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line short"></div>
+            </div>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Error -->
+    @if (error() && skills().length === 0) {
+      <div class="error-container">
+        <mat-icon class="error-icon">error_outline</mat-icon>
+        <h3>Failed to load skills</h3>
+        <p>{{ error() }}</p>
+        <button mat-stroked-button color="primary" (click)="onRefresh()">
+          <mat-icon>refresh</mat-icon>
+          Try Again
+        </button>
+      </div>
+    }
+
+    <!-- Empty (no skills at all) -->
+    @if (isEmptyState()) {
+      <div class="empty-container">
+        <mat-icon class="empty-icon">school</mat-icon>
+        <h3>No skills found</h3>
+        @if (hasActiveFilters()) {
+          <p>Try adjusting your filters or
+            <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
+          </p>
+        } @else {
+          <p>Get started by creating your first skill.</p>
+        }
+        <button mat-flat-button color="primary" (click)="onOpenCreateForm()">
+          <mat-icon>add</mat-icon>
+          Create Skill
+        </button>
+      </div>
+    }
+
+    <!-- Filtered empty (skills exist but filter excludes them) -->
+    @if (isFilteredEmpty()) {
+      <div class="filtered-empty">
+        <mat-icon>filter_list</mat-icon>
+        <p>No skills match the current filters.</p>
+        <button mat-button color="primary" (click)="onClearFilters()">Clear filters</button>
+      </div>
+    }
+
+    <!-- Skill list -->
+    @if (hasSkills()) {
+      <div class="skill-list">
+        @for (skill of filteredSkills(); track skill.id) {
+          <app-skill-card
+            [skill]="skill"
+            (view)="onView(skill)"
+            (edit)="onEdit(skill)"
+            (share)="onShare(skill)"
+            (deactivate)="onDeactivate(skill)">
+          </app-skill-card>
+        }
+      </div>
+    }
+  </div>
+</div>

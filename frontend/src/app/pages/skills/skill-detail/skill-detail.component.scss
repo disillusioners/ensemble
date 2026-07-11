@@ -1,0 +1,130 @@
+:host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  min-height: 0;
+}
+
+.skill-detail-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--background-color, #1e1e1e);
+  gap: 16px;
+  box-sizing: border-box;
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0 16px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+
+  .back-btn mat-icon { margin-right: 4px; }
+  .detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+}
+
+// Meta card
+.skill-meta-card {
+  max-width: 900px;
+  .meta-badges { display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 0; }
+  .skill-name { font-size: 24px; font-weight: 600; margin: 8px 0; }
+  .skill-description { color: rgba(255,255,255,0.7); margin: 0 0 16px 0; }
+  .meta-row { display: flex; font-size: 13px; margin-bottom: 6px; }
+  .meta-key { flex: 0 0 100px; color: rgba(255,255,255,0.5); }
+  .meta-value { flex: 1; color: rgba(255,255,255,0.9); word-break: break-all; }
+}
+
+// Chip styles (mirror skill-card)
+.status-chip, .category-chip, .ab-test-chip, .generation-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 16px;
+  font-size: 12px; font-weight: 500;
+  mat-icon { font-size: 14px; width: 14px; height: 14px; }
+}
+.category-chip { font-weight: 600; border: 1px solid currentColor; }
+.ab-test-chip { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.generation-badge {
+  background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7);
+  cursor: help;
+}
+
+// Metrics
+.metrics-card { max-width: 900px; }
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+}
+.metric-tile {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+}
+.metric-label { font-size: 12px; color: rgba(255,255,255,0.5); }
+.metric-value { font-size: 20px; font-weight: 600; color: rgba(255,255,255,0.95); }
+.metric-value.warn { color: #ef4444; }
+.metric-sub { font-size: 11px; color: rgba(255,255,255,0.5); }
+// A/B test
+.ab-test-card { max-width: 900px; }
+.ab-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.ab-row { display: flex; font-size: 13px; }
+.ab-key { flex: 0 0 120px; color: rgba(255,255,255,0.5); }
+.ab-value { color: rgba(255,255,255,0.9); }
+.ab-actions { margin-top: 16px; }
+.ab-variant-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+// Lineage
+.lineage-card { max-width: 900px; }
+.lineage-section { margin-bottom: 16px; }
+.lineage-section h4 {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 8px 0; font-size: 14px; font-weight: 600;
+  color: rgba(255,255,255,0.9);
+  mat-icon { font-size: 18px; width: 18px; height: 18px; color: rgba(255,255,255,0.7); }
+}
+.lineage-list { display: flex; flex-direction: column; gap: 6px; }
+.lineage-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: rgba(255,255,255,0.03);
+  border-radius: 4px; font-size: 13px;
+}
+.lineage-name { color: rgba(255,255,255,0.9); font-weight: 500; }
+.lineage-meta { font-size: 11px; color: rgba(255,255,255,0.5); }
+
+// Content
+.content-card { max-width: 900px; }
+.content-actions { display: flex; gap: 8px; }
+.skill-content {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 16px;
+  border-radius: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(255,255,255,0.85);
+  max-height: 600px;
+  overflow-y: auto;
+  margin: 0;
+  &.collapsed { max-height: 200px; }
+}
+
+// Feedback
+.feedback-card { max-width: 900px; }
+.feedback-row { margin-bottom: 12px; }
+.feedback-field { width: 100%; }
+
+// Loading / error
+.loading-container, .error-container {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 48px 24px; text-align: center; max-width: 400px; margin: 64px auto;
+}
+.error-icon { font-size: 48px; width: 48px; height: 48px; color: #f44336; margin-bottom: 16px; }
