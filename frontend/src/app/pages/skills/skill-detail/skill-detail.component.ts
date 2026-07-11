@@ -21,6 +21,8 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { SkillService } from '../../../services/skill.service';
 import {
   SkillDetail,
@@ -51,6 +53,8 @@ import {
     MatTooltipModule,
     MatSnackBarModule,
     MatProgressBarModule,
+    MatFormFieldModule,
+    MatInputModule,
   ],
   templateUrl: './skill-detail.component.html',
   styleUrl: './skill-detail.component.scss',
