@@ -660,7 +660,7 @@ class TestTodoRemoveEdge:
 
 
 class TestTodoAddSubtask:
-    """``todo_graph_add_subtask(node_id, text)`` — append a binary checklist item."""
+    """``todo_graph_add_subtask(node_id, list)`` — append a binary checklist item."""
 
     async def test_todo_graph_add_subtask_returns_confirmation_with_subtask_id(self):
         """Adding a sub-task returns a confirmation line containing the
@@ -677,7 +677,7 @@ class TestTodoAddSubtask:
         add_subtask_tool = tools[6]
 
         result = await add_subtask_tool.coroutine(
-            node_id="alpha", text="Write unit tests"
+            node_id="alpha", list="Write unit tests"
         )
 
         # Confirmation line includes node_id and a generated sub-task id
@@ -703,7 +703,7 @@ class TestTodoAddSubtask:
         add_subtask_tool = tools[6]
 
         result = await add_subtask_tool.coroutine(
-            node_id="n-missing", text="orphan"
+            node_id="n-missing", list="orphan"
         )
 
         assert result.startswith("ERROR:")
@@ -739,7 +739,7 @@ class TestTodoAddSubtask:
         add_subtask_tool = tools[6]
 
         result = await add_subtask_tool.coroutine(
-            node_id="alpha", text="overflow"
+            node_id="alpha", list="overflow"
         )
 
         assert result.startswith("ERROR:")
@@ -754,7 +754,7 @@ class TestTodoAddSubtask:
 
 
 class TestTodoAddSubtaskBatch:
-    """``todo_graph_add_subtask(node_id, text)`` accepts a ``list[str]`` for
+    """``todo_graph_add_subtask(node_id, list)`` accepts a ``list[str]`` for
     atomic batched insertion.
     """
 
@@ -774,7 +774,7 @@ class TestTodoAddSubtaskBatch:
 
         result = await add_subtask_tool.coroutine(
             node_id="alpha",
-            text=["Create schema", "Run migration", "Seed data"],
+            list=["Create schema", "Run migration", "Seed data"],
         )
 
         assert "Added 3 sub-tasks" in result
@@ -807,7 +807,7 @@ class TestTodoAddSubtaskBatch:
         add_subtask_tool = tools[6]
 
         result = await add_subtask_tool.coroutine(
-            node_id="alpha", text="Write unit tests"
+            node_id="alpha", list="Write unit tests"
         )
 
         assert "Added sub-task" in result
@@ -824,7 +824,7 @@ class TestTodoAddSubtaskBatch:
         add_subtask_tool = tools[6]
 
         result = await add_subtask_tool.coroutine(
-            node_id="n-missing", text=["a", "b"]
+            node_id="n-missing", list=["a", "b"]
         )
 
         assert result.startswith("ERROR:")
@@ -858,7 +858,7 @@ class TestTodoAddSubtaskBatch:
 
         # Two more would exceed the cap (cap - 1 + 2 = cap + 1).
         result = await add_subtask_tool.coroutine(
-            node_id="alpha", text=["over-1", "over-2"]
+            node_id="alpha", list=["over-1", "over-2"]
         )
 
         assert result.startswith("ERROR:")
@@ -883,12 +883,142 @@ class TestTodoAddSubtaskBatch:
         add_subtask_tool = tools[6]
 
         result = await add_subtask_tool.coroutine(
-            node_id="alpha", text=["ok", "", "also-ok"]
+            node_id="alpha", list=["ok", "", "also-ok"]
         )
 
         assert result.startswith("ERROR:")
         stored = manager._todo_manager.get_all("test-instance-id")
         assert stored[0]["subtasks"] == []
+
+    async def test_text_alias_backward_compat(self):
+        """Backward compat: passing ``text=...`` (the legacy parameter
+        name) still adds the sub-task under the new ``list`` parameter.
+
+        Old agents may continue to send ``text`` even after the schema
+        advertises ``list`` — the tool must accept both.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        # Pass via the legacy `text=` alias.
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", text="single subtask"
+        )
+
+        assert "Added sub-task" in result
+        assert "s-" in result
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 1
+        assert stored[0]["subtasks"][0]["text"] == "single subtask"
+
+    async def test_json_string_array_auto_parse(self):
+        """When the ``list`` parameter is a JSON array string like
+        ``'["a","b"]'``, the tool auto-parses it into a 2-item list and
+        adds both sub-tasks atomically.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", list='["item1", "item2"]'
+        )
+
+        assert "Added 2 sub-tasks" in result
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 2
+        assert [st["text"] for st in stored[0]["subtasks"]] == [
+            "item1",
+            "item2",
+        ]
+
+    async def test_both_list_and_text_list_wins(self):
+        """When both `list` and `text` are provided, `list` takes precedence."""
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", list="from_list_param", text="from_text_param"
+        )
+
+        assert "Added sub-task" in result
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 1
+        assert stored[0]["subtasks"][0]["text"] == "from_list_param"
+
+    async def test_both_none_returns_error(self):
+        """When neither `list` nor `text` is provided, returns an ERROR string."""
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(node_id="alpha")
+
+        assert result.startswith("ERROR:")
+        assert "list" in result.lower()
+
+    async def test_invalid_json_string_falls_through_to_plain_string(self):
+        """A string starting with '[' but not valid JSON is treated as a plain
+        single sub-task description, not an error.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", list="[not valid json]"
+        )
+
+        assert "Added sub-task" in result
+        stored = manager._todo_manager.get_all("test-instance-id")
+        assert len(stored[0]["subtasks"]) == 1
+        assert stored[0]["subtasks"][0]["text"] == "[not valid json]"
+
+    async def test_json_array_of_non_strings_raises_error(self):
+        """A JSON array containing non-string elements (e.g. numbers) is
+        parsed successfully but the manager rejects non-string entries.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", list="[1, 2, 3]"
+        )
+
+        assert result.startswith("ERROR:")
 
 
 # =============================================================================

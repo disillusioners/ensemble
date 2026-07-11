@@ -535,7 +535,7 @@ class TestSubtaskSSEPayload:
         tools = _build_tools(hub=hub, manager=manager)
         add_subtask_tool = tools[6]
 
-        await add_subtask_tool.coroutine(node_id="alpha", text="Run migration")
+        await add_subtask_tool.coroutine(node_id="alpha", list="Run migration")
 
         hub.stream_todo_update.assert_awaited_once()
         todos_arg = hub.stream_todo_update.call_args.args[1]
@@ -576,7 +576,7 @@ class TestSubtaskSSEPayload:
 
         await add_subtask_tool.coroutine(
             node_id="alpha",
-            text=["Create schema", "Run migration", "Seed data"],
+            list=["Create schema", "Run migration", "Seed data"],
         )
 
         # Exactly one emission for the whole batch.

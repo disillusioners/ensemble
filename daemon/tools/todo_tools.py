@@ -46,7 +46,9 @@ is owned by ``TodoGraphManager._normalize_status`` — tools pass status
 strings through unchanged.
 """
 
+import json
 import logging
+from builtins import list as _list_type
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -664,25 +666,63 @@ Returns:
     @register_tool_category("todo")
     @tool
     async def todo_graph_add_subtask(
-        node_id: str, text: str | list[str]
+        node_id: str,
+        list: str | list[str] | None = None,
+        text: str | list[str] | None = None,
     ) -> str:
-        """Add binary checklist item(s) to a node. text may be a str or list[str]
+        """Add binary checklist item(s) to a node. `list` may be a str or list[str]
         (atomic batch: all added or none). Sub-tasks are pending/done only.
+        A JSON-encoded array string (e.g. '["a","b"]') is auto-parsed into a list.
 
         Args:
             node_id: Parent node ID.
-            text: One description, or a list (each <= 500 chars).
+            list: One description, or a list of descriptions (each <= 500 chars).
+                A JSON array string is auto-parsed into a list.
+            text: Deprecated alias for `list`. Kept so old agents passing
+                `text=...` continue to work; new callers should use `list`.
         """
         try:
-            # Normalize ``text`` to a list so a single string and a list
+            # Promote legacy `text=` kwarg to the new `list` parameter.
+            # NOTE: the parameter name `list` shadows the built-in
+            # `list` type inside this function body, so we use
+            # `list_value` as a local alias and avoid `list(...)`.
+            if list is None and text is not None:
+                list_value = text
+            elif list is not None:
+                list_value = list
+            else:
+                return (
+                    "ERROR: Provide `list` (one sub-task description or a list "
+                    "of descriptions)."
+                )
+            # If a JSON-encoded array string was passed (e.g. '["a","b"]'), parse it.
+            # Fall back silently to plain-string handling on parse failure so a
+            # legitimate string that happens to contain brackets isn't rejected.
+            if (
+                isinstance(list_value, str)
+                and list_value.startswith("[")
+                and list_value.endswith("]")
+            ):
+                try:
+                    parsed = json.loads(list_value)
+                    # ``list`` is shadowed by the parameter name above; use
+                    # the module-level alias ``_list_type`` to reach the
+                    # real built-in.
+                    if isinstance(parsed, _list_type):
+                        list_value = parsed
+                except ValueError:
+                    pass
+            # Normalize ``list_value`` to a list so a single string and a list
             # of strings share one code path. The ``str`` check MUST come
             # before any iterable handling — ``str`` is iterable, so
             # treating a bare string as a sequence would split it into
             # characters.
-            if isinstance(text, str):
-                texts = [text]
+            if isinstance(list_value, str):
+                texts = [list_value]
             else:
-                texts = list(text)
+                # list_value is already a list[str]; copy defensively for isolation.
+                # Avoid `list(list_value)` because the parameter name shadows the built-in.
+                texts = list_value[:]
             result = manager._todo_manager.add_subtasks(
                 current_instance_id, node_id, texts
             )
@@ -720,11 +760,11 @@ Add one or more sub-tasks (checklist items) to a todo node.
 Sub-tasks are STRICTLY BINARY — each item is either ``"pending"`` or
 ``"done"``. They do not participate in the graph structure (no
 ``next_ids``) and exist purely to track fine-grained acceptance
-criteria under a parent node. Each ``text`` entry is required and
+criteria under a parent node. Each ``list`` entry is required and
 capped at :data:`MAX_SUBTASK_TEXT_LENGTH` (500 chars); the per-node
 checklist is capped at :data:`MAX_SUBTASKS_PER_NODE` (20 items).
 
-The ``text`` argument accepts EITHER a single string OR a list of
+The ``list`` argument accepts EITHER a single string OR a list of
 strings. Passing a list adds every item in one atomic batch — the
 combined count (existing + new) is validated up-front, so a batch
 that would exceed the per-node cap is rejected in full rather than
@@ -738,14 +778,17 @@ them without re-listing the graph.
 
 Args:
     node_id: The parent node's stable ID (e.g. ``"n-a1b2c3d4"``).
-    text: A single sub-task description (str) OR a list of descriptions
-        (``list[str]``). Each entry: non-empty, max 500 chars.
+    list: A single sub-task description (str) OR a list of descriptions
+        (``list[str]``). Each entry: non-empty, max 500 chars. A JSON array
+        string (e.g. ``'["a","b"]'``) is auto-parsed into a list.
+    text: Deprecated alias for ``list``. Provided so old agents passing
+        ``text=...`` continue to work. Prefer ``list`` in new calls.
 
 Behavior:
 
 * Calls ``manager._todo_manager.add_subtasks`` which:
   - returns ``None`` when the instance or ``node_id`` is unknown;
-  - raises :class:`ValueError` for an empty/non-list ``text``, an
+  - raises :class:`ValueError` for an empty/non-list ``list``, an
     empty/too-long entry, or when the combined sub-task count would
     exceed the per-node cap.
 * Emits a single ``todo_update`` SSE event on success (one event per
