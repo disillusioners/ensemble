@@ -5,10 +5,11 @@
   "icon": "⚙️",
   "color": "accent-orange",
   "version": "1.0.0",
-  "innate_skills": ["todo"],
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": true,
   "capabilities": ["docker", "kubernetes", "terraform", "ci-cd", "shell-ops"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "db", "infra", "project"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "db", "infra", "project", "dynamic-skill"]
   },
   "team_members": ["explorer"]
 }

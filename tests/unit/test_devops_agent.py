@@ -149,20 +149,36 @@ class TestDevopsMetaJsonValidation:
         assert isinstance(meta.get("innate_skills"), list), "innate_skills should be a list"
         assert "tools" in meta, "tools field should be present"
 
-    def test_innate_skills_is_todo(self) -> None:
-        """DevOps should have innate_skills == ['todo'].
+    def test_innate_skills_is_dynamic_skill_and_todo(self) -> None:
+        """DevOps should have innate_skills == ['dynamic-skill', 'todo'].
 
-        DevOps is an infra/shell-ops specialist that does not delegate.
-        It declares only the 'todo' skill for in-flight task tracking —
-        no opencode delegation, no dynamic-skill injection.
+        DevOps is an infra/shell-ops specialist that executes operations
+        directly via bash. It declares 'dynamic-skill' (for skill search /
+        injection) and 'todo' (for in-flight task tracking) — no opencode
+        delegation.
         """
         meta_path = DEVOPS_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
         innate_skills = meta.get("innate_skills", [])
-        assert innate_skills == ["todo"], (
-            f"DevOps should have innate_skills == ['todo'], got: {innate_skills}"
+        assert innate_skills == ["dynamic-skill", "todo"], (
+            f"DevOps should have innate_skills == ['dynamic-skill', 'todo'], got: {innate_skills}"
+        )
+
+    def test_skill_injection_enabled(self) -> None:
+        """DevOps should have skill_injection == true.
+
+        With dynamic-skill in innate_skills, the skill_injection flag enables
+        the runtime to auto-inject relevant skills before each user message
+        (mirrors the worker agent).
+        """
+        meta_path = DEVOPS_AGENT_DIR / "meta.json"
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+        assert meta.get("skill_injection") is True, (
+            f"DevOps should have skill_injection == true, got: {meta.get('skill_injection')!r}"
         )
 
     def test_capabilities_field_exists(self) -> None:
@@ -319,11 +335,12 @@ class TestDevopsPromptComposition:
         assert "docker" in system_prompt.lower() or "deployment" in system_prompt.lower()
 
     def test_no_opencode_skill_content_in_system_prompt(self) -> None:
-        """Verify no opencode/dynamic-skill skill files leak into the prompt.
+        """Verify no opencode skill files leak into the prompt.
 
-        DevOps declares innate_skills=['todo'] so the todo skill IS loaded.
-        What we must verify is that no other innate-skill content (opencode,
-        dynamic-skill, openspace) leaks in via the centralized registry.
+        DevOps declares innate_skills=['dynamic-skill', 'todo'] so both the
+        dynamic-skill and todo skills ARE loaded. What we must verify is that
+        no other innate-skill content (opencode, openspace) leaks in via the
+        centralized registry.
         """
         from daemon.loader import load_agent_skills, load_agent_prompts, compose_system_prompt
 
@@ -332,12 +349,12 @@ class TestDevopsPromptComposition:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Only the todo skill should be loaded (no opencode/dynamic-skill/openspace)
+        # Only dynamic-skill and todo should be loaded (no opencode/openspace)
         skills = load_agent_skills(DEVOPS_AGENT_DIR, meta)
         loaded = set(skills.keys())
-        forbidden = loaded - {"todo"}
+        forbidden = loaded - {"dynamic-skill", "todo"}
         assert not forbidden, (
-            f"Only 'todo' skill should be loaded for DevOps, got extras: {forbidden}"
+            f"Only 'dynamic-skill' and 'todo' skills should be loaded for DevOps, got extras: {forbidden}"
         )
 
         # Also verify that the soul.md does not contain "OpenCode_Skill" tool
