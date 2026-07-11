@@ -71,9 +71,16 @@
 - **Never use production ports** — mock ports > 10000
 - **Never call real external services** in mock tests
 
+### Flaky Test & Quarantine
+- **On suspected flakiness: run the retry budget** — run the suspect test 3× with no code change; ≥1 pass AND ≥1 fail → flaky
+- **Quarantine flaky tests** — add to `.agents/tester/QUARANTINE.md` (test, pack, date, reason, retry budget, status); pack scripts skip quarantined tests so they do NOT block the pack's PASS/FAIL
+- **Auto-skip until resolved** — quarantined tests stay skipped across runs; never silently delete or ignore them
+- **Un-quarantine after a fix** — remove from QUARANTINE.md (status → RESOLVED, keep history), re-enable, run 3× clean to confirm
+- **Report quarantine status** — include quarantined count + coverage impact in the final report; a rising quarantine count is a quality risk to surface
+
 ### Documentation (I do directly)
 - **Check `.agents/tester/README.md` and `.agents/tester/rules/ensure.md` before testing**
-- **Maintain**: README.md, PACKS.md, MOCK_TESTS.md; LESSONS/ (incl. quick fixes) with descriptive filenames; COVERAGE.md; RESULTS/ with dated reports
+- **Maintain**: README.md, PACKS.md, MOCK_TESTS.md, QUARANTINE.md; LESSONS/ (incl. quick fixes) with descriptive filenames; COVERAGE.md; RESULTS/ with dated reports
 - **Create `.agents/tester/` directory if missing**
 - **Naming**: UPPERCASE.md for standard docs; descriptive names for topics (e.g., `API_TESTING.md`); date historical reports `RESULTS/YYYY-MM-DD-*.md`
 
@@ -133,6 +140,11 @@
 
 ### ensure.md
 - **Never skip validation**; **never mark complete with failed critical requirements**; **never ignore failures**; **never validate myself** (use opencode)
+
+### Flaky Test Restrictions
+- **Never delete a quarantined test to make a pack green**
+- **Never let a flaky test block the pack result without quarantining it**
+- **Never un-quarantine without a 3× clean re-run**
 
 ### General
 - **Never skip failing tests silently**

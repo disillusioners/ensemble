@@ -477,18 +477,36 @@ Test pack cannot meet timeout requirement. Manual intervention required.
 
 ---
 
-## Flaky Test Handling
+## Flaky Test & Quarantine Workflow
 
 **Definition**: A flaky test passes and fails across multiple runs with no code changes.
 
-**Detection**: If a test fails on run 1 but passes on run 2 with no fixes applied → mark as potentially flaky.
+### Detection (Retry Budget)
+- If a test fails on run 1 but passes on run 2 with no fix applied → suspect flakiness
+- Run the suspect test 3× (retry budget = 3) with no code change
+- If results show ≥1 pass AND ≥1 fail → confirm flaky
 
-**Action**:
-1. Run the test 3 times
-2. If results show ≥1 pass AND ≥1 fail → flag as flaky:
-   - Document in `.agents/tester/LESSONS/` (e.g., `flaky-test-[test-name].md`)
-   - Skip in future test runs until resolved
-   - Report to leader
+### Quarantine
+1. Add an entry to `.agents/tester/QUARANTINE.md` (see template below): test name, pack, date, reason, retry budget used, attempts (pass/fail), status=`QUARANTINED`
+2. Mark the test as skipped in its pack (pack script skips quarantined tests via marker/env) — quarantined tests do NOT count toward the pack's PASS/FAIL
+3. Document in `.agents/tester/LESSONS/` (e.g., `flaky-test-[test-name].md`) with the failure pattern and suspected root cause
+4. Report to leader
+
+### Auto-Skip (Until Resolved)
+- Quarantined tests stay skipped across all future runs — no re-evaluation each run
+- The pack remains green if all non-quarantined tests pass
+- Track the quarantine list; a rising count is a quality signal to surface to the leader
+
+### Un-Quarantine (After a Fix)
+1. A fix is attempted (quick fix or full workflow) targeting the suspected root cause
+2. Update QUARANTINE.md entry (status → RESOLVED, keep history in the Resolved table)
+3. Re-enable the test in its pack
+4. Run the test 3× clean (all pass) to confirm resolution
+5. If any run fails → re-quarantine; the fix did not resolve the flakiness
+
+### Reporting
+- Final report includes: quarantined count, list of quarantined tests, coverage impact (X tests skipped)
+- Flag a rising quarantine count as a quality risk
 
 ---
 
@@ -881,6 +899,7 @@ Session IDs: [list of opencode session IDs used]
 - Unit Tests: X tests | Mock Tests: X tests
 - ensure.md: X/Y requirements passed
 - Quick Fixes Applied: X fixes
+- Quarantined: X tests skipped (see QUARANTINE.md)
 
 ### Scope Decision (include whenever scope was reduced)
 > Based on my intelligent decision, the full test suite was reduced to: [list packs run] because [reason — e.g., change touches only 3 files in 1 module; running the full suite would burn ~40 min across 24 packs for a non-architecture change]. Skipped: [list packs]. Full suite not warranted.
@@ -972,7 +991,7 @@ Session IDs: [list of opencode session IDs used]
 - **Need integration testing?** → I design mock test spec, opencode implements
 - **Session reuse?** → Quick fixes #1 priority, then related tasks
 - **Multiple test targets?** → Prioritize: ensure.md (critical) > mock tests > unit tests > edge cases
-- **Flaky tests?** → Flag in LESSONS/, spawn opencode to investigate
+- **Flaky tests?** → Run retry budget (3×); if flaky, quarantine in QUARANTINE.md (auto-skip, don't block pack); spawn opencode to investigate root cause
 - **New testing knowledge?** → I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
 - **ensure.md critical requirements failing?** → Testing is NOT complete until they pass
@@ -1024,4 +1043,26 @@ Update after each test run:
 - **Status**: PASS/FAIL/TIMEOUT
 - Add new entry for new packs
 - Mark deprecated packs as DEPRECATED
+```
+
+---
+
+## QUARANTINE.md Template
+
+Registry of flaky tests currently skipped (auto-skipped in their packs; do NOT count toward PASS/FAIL):
+
+```markdown
+# Quarantined Tests
+
+## Active
+
+| Test | Pack | Date Quarantined | Reason | Retry Budget | Attempts (P/F) | Status |
+|------|------|------------------|--------|--------------|----------------|--------|
+| [test_name] | [pack] | [date] | [failure pattern / suspected cause] | 3 | 2P/1F | QUARANTINED |
+
+## Resolved (history)
+
+| Test | Pack | Date Resolved | Fix | Confirming Runs |
+|------|------|---------------|-----|-----------------|
+| [test_name] | [pack] | [date] | [commit/fix] | 3× PASS |
 ```

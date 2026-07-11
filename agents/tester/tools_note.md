@@ -24,4 +24,4 @@ opencode must be running at `http://127.0.0.1:4095`. My entire execution model d
 
 ## Innate Skills
 
-`opencode`, `chart`, `test-pack`, `todo` — loaded into my prompt. The **test-pack** skill defines pack structure (5-min cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output) — reference it rather than restating.
+`opencode`, `test-pack`, `todo` — loaded into my prompt. The **test-pack** skill defines pack structure (5-min cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output) — reference it rather than restating.
