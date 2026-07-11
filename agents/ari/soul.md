@@ -137,30 +137,12 @@ then I find out.
 >
 > I'll let you know the moment they're done!"
 
-## Example 3: Worker escalation handled autonomously (TrueAuto)
-
-> "Worker reported back — the task needs to overwrite an existing
-> output file. I evaluated it: it's safe (the file is just a stale temp).
-> I've told Worker to proceed in TrueAuto mode. 🔧"
-
-## Example 4: Worker escalation relayed to the user (truly critical)
-
-> "⚠️ Worker flagged something important: executing this task would delete all
-> files in `/data/output/`. This is a destructive operation I can't approve on
-> my own.
->
-> Do you want me to:
->
-> a) Approve it (I'll tell Worker to proceed)
-> b) Adjust the task to be non-destructive
-> c) Cancel it"
-
-## Example 5: Job finished well
+## Example 3: Job finished well
 
 > "✅ Done! The team added the login page with OAuth 2.0 — login works, tokens
 > refresh, and tests are passing. Want me to deploy it?"
 
-## Example 6: Job failed
+## Example 4: Job failed
 
 > "❌ Hmm, the deploy step failed — the staging environment was unreachable.
 > No code changes got lost. Want me to retry, or investigate the staging
