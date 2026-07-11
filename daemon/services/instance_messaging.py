@@ -26,6 +26,7 @@ from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
 from .messaging_types import AsyncMessageResult
 from .project_normalizer import normalize_project_id
+from .skill_metrics_service import INJECTED_SKILLS_METADATA_KEY
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -1811,6 +1812,37 @@ class InstanceMessagingService:
                                         message_id,
                                         injected_skill_ids,
                                     )
+                                    # Persist injected skill IDs to instance
+                                    # metadata so SkillMetricsService can
+                                    # read them at task-completion time.
+                                    if injected_skill_ids:
+                                        try:
+                                            def _persist_injected(
+                                                _iid: str = instance_id,
+                                                _ids: list[str] = injected_skill_ids,
+                                            ) -> None:
+                                                inst = self._manager._instance_repository.get(_iid)
+                                                existing: list[str] = []
+                                                if inst is not None and inst.instance_metadata:
+                                                    raw = inst.instance_metadata.get(
+                                                        INJECTED_SKILLS_METADATA_KEY
+                                                    ) or []
+                                                    if isinstance(raw, list):
+                                                        existing = [str(x) for x in raw if x]
+                                                merged = list(dict.fromkeys(existing + list(_ids)))
+                                                self._manager._instance_repository.set_metadata(
+                                                    _iid,
+                                                    INJECTED_SKILLS_METADATA_KEY,
+                                                    merged,
+                                                )
+
+                                            await asyncio.to_thread(_persist_injected)
+                                        except Exception as e:
+                                            logger.warning(
+                                                f"Failed to persist "
+                                                f"{INJECTED_SKILLS_METADATA_KEY} "
+                                                f"for {instance_id[:8]}...: {e}"
+                                            )
                 except Exception as e:
                     logger.warning(
                         f"Skill injection failed for {instance_id[:8]}...: {e}"
