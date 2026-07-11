@@ -1020,6 +1020,29 @@ class TestTodoAddSubtaskBatch:
 
         assert result.startswith("ERROR:")
 
+    async def test_empty_list_returns_clear_error(self):
+        """Passing ``list=[]`` (empty Python list) returns a clear,
+        actionable error — NOT the generic 'Failed to add sub-task'
+        message from the exception handler.
+        """
+        manager = _make_manager()
+        manager._todo_manager.create_graph(
+            "test-instance-id",
+            nodes=[{"id": "alpha", "text": "Alpha task"}],
+            edges=[],
+        )
+        tools = _build_tools(manager=manager)
+        add_subtask_tool = tools[6]
+
+        result = await add_subtask_tool.coroutine(
+            node_id="alpha", list=[]
+        )
+
+        assert result.startswith("ERROR:")
+        assert "cannot be empty" in result
+        # Must NOT be the generic exception-handler message
+        assert "Failed to add sub-task" not in result
+
 
 # =============================================================================
 # todo_graph_update_subtask (Sub-Task Phase 1)

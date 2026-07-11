@@ -723,6 +723,12 @@ Returns:
                 # list_value is already a list[str]; copy defensively for isolation.
                 # Avoid `list(list_value)` because the parameter name shadows the built-in.
                 texts = list_value[:]
+            # Guard: empty list is a caller error, not an internal failure.
+            if not texts:
+                return (
+                    "ERROR: Provide at least one sub-task description "
+                    "(list cannot be empty)."
+                )
             result = manager._todo_manager.add_subtasks(
                 current_instance_id, node_id, texts
             )
