@@ -239,3 +239,11 @@
     gap: 0.5rem;
   }
 }
+
+// Snackbar overrides (rendered in the overlay, hence ::ng-deep)
+::ng-deep {
+  .info-snackbar {
+    --mdc-snackbar-container-color: #1e293b;
+    --mdc-snackbar-supporting-text-color: #f1f5f9;
+  }
+}

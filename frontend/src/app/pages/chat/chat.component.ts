@@ -4,6 +4,7 @@ import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
@@ -28,6 +29,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
+    MatSnackBarModule,
     InstanceListComponent,
     ProjectTabBarComponent,
     ChatInterfaceComponent,
@@ -45,7 +47,13 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected readonly tabStateService = inject(TabStateService);
   protected readonly instanceService = inject(InstanceService);
   private readonly projectService = inject(ProjectService);
+  private readonly snackBar = inject(MatSnackBar);
   private routeSubscription: Subscription | null = null;
+
+  /** Front-end cooldown (ms) between consecutive message sends, preventing
+   *  duplicate submissions from double Enter / double click. */
+  private readonly SEND_COOLDOWN_MS = 3000;
+  private lastSendTime = 0;
 
   readonly agents = signal<Agent[]>([]);
   readonly currentInstanceId = signal<string | null>(null);
@@ -379,6 +387,23 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected onSendMessage(payload: MessagePayload): void {
     const instance = this.currentInstance();
     if (!instance) return;
+
+    // Cooldown guard: block consecutive sends within SEND_COOLDOWN_MS to
+    // prevent duplicate submissions from double Enter / double click. Both
+    // the send button and the Enter key route through this handler, so this
+    // single check covers both triggers.
+    const now = Date.now();
+    const elapsed = now - this.lastSendTime;
+    if (this.lastSendTime > 0 && elapsed < this.SEND_COOLDOWN_MS) {
+      const remaining = Math.ceil((this.SEND_COOLDOWN_MS - elapsed) / 1000);
+      this.snackBar.open(
+        `Please wait ${remaining}s before sending another message.`,
+        'Dismiss',
+        { duration: 2000, panelClass: 'info-snackbar' }
+      );
+      return;
+    }
+    this.lastSendTime = now;
 
     // Clear any previous error
     this.sendError.set(null);

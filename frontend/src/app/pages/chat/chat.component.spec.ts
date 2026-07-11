@@ -30,22 +30,71 @@ const mockSseService = {
   clearEvents: jest.fn(),
 };
 
+// Mock MatSnackBar for testing
+const mockSnackBar = {
+  open: jest.fn(),
+};
+
+interface TestMessagePayload {
+  content: string;
+  images?: string[];
+}
+
 // Testable ChatComponent (mirrors actual component logic)
 class TestableChatComponent {
   private readonly api = mockApiService;
   private readonly sseService = mockSseService;
+  private readonly snackBar = mockSnackBar;
   protected readonly tabStateService: MockTabStateService;
 
   readonly currentInstanceId = signal<string | null>(null);
+  readonly currentInstance = signal<InstanceInfo | null>(null);
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
+
+  /** Mirrors ChatComponent.SEND_COOLDOWN_MS */
+  private readonly SEND_COOLDOWN_MS = 3000;
+  private lastSendTime = 0;
+
+  messageInputRef: { clearInput: jest.Mock } = { clearInput: jest.fn() };
 
   // Navigation calls tracked for testing
   navigateCalls: Array<{ path: string[] }> = [];
 
   constructor(tabStateService: MockTabStateService) {
     this.tabStateService = tabStateService;
+  }
+
+  protected onSendMessage(payload: TestMessagePayload): void {
+    const instance = this.currentInstance();
+    if (!instance) return;
+
+    const now = Date.now();
+    const elapsed = now - this.lastSendTime;
+    if (this.lastSendTime > 0 && elapsed < this.SEND_COOLDOWN_MS) {
+      const remaining = Math.ceil((this.SEND_COOLDOWN_MS - elapsed) / 1000);
+      this.snackBar.open(
+        `Please wait ${remaining}s before sending another message.`,
+        'Dismiss',
+        { duration: 2000, panelClass: 'info-snackbar' }
+      );
+      return;
+    }
+    this.lastSendTime = now;
+
+    this.sendError.set(null);
+    this.isSending.set(true);
+
+    this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
+      next: () => {
+        this.messageInputRef.clearInput();
+      },
+      error: (err: any) => {
+        this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
+        this.isSending.set(false);
+      }
+    });
   }
 
   protected onTerminateInstance(instanceId: string): void {
@@ -308,6 +357,68 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       expect(component.navigateCalls).toHaveLength(1);
       expect(component.navigateCalls[0].path).toEqual(['/']);
+    });
+  });
+
+  describe('onSendMessage() - Send Cooldown', () => {
+    beforeEach(() => {
+      component.currentInstance.set(createMockInstance({ instance_id: 'cooldown-inst' }));
+      mockApiService.sendMessage.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next({});
+          return { unsubscribe: () => {} };
+        }
+      });
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('should send the message on the first attempt', () => {
+      jest.spyOn(Date, 'now').mockReturnValue(1000);
+      component.onSendMessage({ content: 'hello' });
+
+      expect(mockApiService.sendMessage).toHaveBeenCalledWith('cooldown-inst', 'hello', undefined);
+      expect(mockSnackBar.open).not.toHaveBeenCalled();
+    });
+
+    it('should block a second send within 3s and show a notification', () => {
+      jest.spyOn(Date, 'now').mockReturnValue(1000);
+      component.onSendMessage({ content: 'hello' });
+      component.onSendMessage({ content: 'hello again' });
+
+      expect(mockApiService.sendMessage).toHaveBeenCalledTimes(1);
+      expect(mockSnackBar.open).toHaveBeenCalledWith(
+        expect.stringContaining('Please wait'),
+        'Dismiss',
+        { duration: 2000, panelClass: 'info-snackbar' }
+      );
+    });
+
+    it('should allow another send after the 3s cooldown elapses', () => {
+      const nowSpy = jest.spyOn(Date, 'now');
+      nowSpy.mockReturnValueOnce(1000);
+      nowSpy.mockReturnValueOnce(1000 + 3001);
+
+      component.onSendMessage({ content: 'hello' });
+      expect(mockApiService.sendMessage).toHaveBeenCalledTimes(1);
+
+      component.onSendMessage({ content: 'hello again' });
+      expect(mockApiService.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('should clear input on a successful send', () => {
+      component.onSendMessage({ content: 'hello' });
+
+      expect(component.messageInputRef.clearInput).toHaveBeenCalled();
+    });
+
+    it('should not send when no instance is set', () => {
+      component.currentInstance.set(null);
+      component.onSendMessage({ content: 'hello' });
+
+      expect(mockApiService.sendMessage).not.toHaveBeenCalled();
     });
   });
 });
