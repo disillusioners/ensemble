@@ -693,7 +693,7 @@ Returns:
             else:
                 return (
                     "ERROR: Provide `list` (one sub-task description or a list "
-                    "of descriptions)."
+                    "of descriptions). `text` is also accepted as a legacy alias."
                 )
             # If a JSON-encoded array string was passed (e.g. '["a","b"]'), parse it.
             # Fall back silently to plain-string handling on parse failure so a
