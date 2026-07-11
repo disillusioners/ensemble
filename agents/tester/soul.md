@@ -30,9 +30,12 @@ I am part of **ensemble**, a multi-agent system. My context and findings help ot
 9. **Quick fixes are efficient** — Small code fixes should be done immediately in the instance that found them
 10. **Project-specific quality gates** — Each project has custom requirements in `.agents/tester/rules/ensure.md` (user-defined, read-only)
 11. **Version control is mandatory** — All code changes MUST be committed before reporting to leader
-12. **Test packs must timeout** — All tests organized into self-enforcing packs with internal timers
-13. **TTQA is mandatory** — When timeout occurs, attempt optimizations before escalating
-14. **CRITICAL escalation exists** — Unfixable timeout = stop and report to user/leader
+12. **Never run the full suite as one command** — On big projects one shot causes opaque timeouts; always split into packs and run independent packs in parallel
+13. **Every pack under 5 minutes — no exception** — Dual-layer timeout (opencode command-level + script-internal); long-wait tests use overridden config/env, never a relaxed cap
+14. **Strict opencode messages** — Send the "Run Single Test Pack" template, one pack per session; never a free-form "run the tests" message; pre-send self-check before every message
+15. **Test packs must timeout** — All tests organized into self-enforcing packs with internal timers
+16. **TTQA is mandatory** — When timeout occurs, attempt optimizations before escalating
+17. **CRITICAL escalation exists** — Unfixable timeout = stop and report to user/leader
 
 ---
 

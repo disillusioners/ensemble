@@ -50,6 +50,38 @@
 - **Ensure cleanup** — All processes killed, ports freed after test
 - **Validate ensure.md after mock tests** — Quality gates
 
+### Full Project Test: Split & Parallel (Defense in Depth)
+
+**Problem:** On big projects, an ambiguous opencode message makes opencode run the entire suite at once → opaque timeout, failures impossible to locate. A single fix is not enough — defense must be multi-layered.
+
+#### Layer 1 — Plan Before Sending
+- **List every pack to run** and estimate each pack's runtime; if any estimate > 5 min, split it further **before** spawning.
+- **One pack per opencode session** — never bundle multiple packs into one message.
+- **Independent packs run in parallel** (separate sessions launched concurrently); dependent packs run sequentially.
+
+#### Layer 2 — Strict Message Template (Mandatory)
+- **Always send opencode the "Run Single Test Pack" message template** (see workflow.md). Never send a free-form "run the tests" / "run unit tests" / "run all tests" message — that is what causes opencode to run everything at once.
+- The template **must**: (a) name exactly ONE pack path, (b) explicitly forbid running any other pack/test, (c) include the 5-min command-level timeout wrapper, (d) state the expected output format (PASS/FAIL/TIMEOUT).
+
+#### Layer 3 — Dual-Layer Timeout (Mandatory, both layers)
+- **Layer 3a — opencode command-level:** Command opencode to wrap the run with `timeout 300 <cmd>` (bash) or `subprocess.run(..., timeout=300)` (Python). This is the outer guard — even if opencode ignores scope and tries to run more, it cannot exceed 5 min.
+- **Layer 3b — script-internal:** The pack script must also self-timeout at 5 min (or the per-type limit, whichever is lower). This is the inner guard for hung tests inside the pack.
+
+#### Layer 4 — Pre-Send Self-Check
+- **Before sending each opencode message**, verify it against the Pre-Send Checklist (see workflow.md): names exactly one pack? has the command-level timeout wrapper? explicitly forbids other packs? pack estimated < 5 min? PACKS.md entry valid?
+- **If any check fails → fix the message before sending.** Never send a message that fails the self-check.
+
+#### Layer 5 — Long-Timeout Override Pattern
+- **A test that inherently needs long-timeout logic** (retries, sleeps, real waits, polling) must NOT relax the 5-min cap.
+- **Instead, write it as a separate pack with overridden config/env** — fewer retry counts, shorter sleep intervals, accelerated timers, fast mock endpoints — so it still completes under 5 min.
+- **Document the override** in MOCK_TESTS.md / PACKS.md so the reduced values are intentional, not accidental.
+
+#### Hard Rules
+- **5-minute hard cap per pack — NO EXCEPTION.** If it can't fit, split it.
+- **Never run the full suite as one opencode command.**
+- **Never run packs sequentially when they are independent** — run in parallel.
+- **Aggregate PASS/FAIL/TIMEOUT from every parallel session** into one report; one pack's timeout must not block the others.
+
 ### Test Pack Organization
 - **All tests must be organized into packs** — Each pack is a self-contained script
 - **One script per pack** — Each pack defined in PACKS.md must have exactly one corresponding script file
@@ -62,12 +94,14 @@
 - **Phase-scoped testing** — When leader provides phase context (modified files), prefer running only relevant test packs
 - **Skip irrelevant test packs** — Don't run tests for unaffected modules/features (unless full test is appropriate)
 - **Report scope to leader** — "Running [packs], skipped [packs]"
-- **Pack timeout limits (canonical):**
-  - E2E tests: 5 minutes maximum
+- **5-minute hard cap — NO EXCEPTION** — No pack may exceed 5 minutes, ever. If it can't fit, split it.
+- **Pack timeout limits (canonical, all ≤ 5 min hard cap):**
   - Unit tests: 2 minutes maximum
   - Integration tests: 5 minutes maximum
   - Feature tests: 5 minutes maximum
-  - Mock tests: Per MOCK_TESTS.md specification (must still follow timeout protection rule above)
+  - E2E tests: 5 minutes maximum
+  - Mock tests: Per MOCK_TESTS.md specification (≤ 5 min, must still follow timeout protection rule above)
+- **Dual-layer timeout is mandatory for every pack** — opencode command-level timeout (Layer 1) AND script-internal timeout (Layer 2). One layer alone is not enough.
 - **Pack naming convention:** `<scope>_<type>_test` (e.g., `core_unit_test`, `auth_integration_test`)
 - **Pack must output explicit status:** `PASS` / `FAIL` / `TIMEOUT`
 - **Partial pass handling:** If some tests pass and some fail, report `FAIL` with individual results. If any test times out, report `TIMEOUT`.
@@ -137,6 +171,18 @@
 - **Never allow tests to run indefinitely** — All packs must complete or timeout
 - **Never skip TTQA when timeout occurs** — Must attempt optimizations before escalating
 - **Never run tests with stale PACKS.md** — Must validate script existence and registration before running
+
+### Full Project Test Restrictions
+- **Never send a free-form/ambiguous test-run message to opencode** — Always use the "Run Single Test Pack" template (e.g., never "run the tests", "run unit tests", "run all tests")
+- **Never run the entire test suite as a single opencode command** — Always split into packs first
+- **Never name more than one pack in a single opencode message** — One pack per session
+- **Never let opencode "discover and run" extra tests** — Template must forbid it explicitly
+- **Never allow any pack to exceed 5 minutes** — No exception, even for "slow" test types
+- **Never rely on script-only timeout** — opencode command-level timeout is also mandatory (dual-layer)
+- **Never run a full project test sequentially when packs are independent** — Use parallel sessions
+- **Never relax the timeout to accommodate a slow test** — Refactor with overridden config/env instead
+- **Never skip the pre-send self-check** — Verify each message against the checklist before sending
+- **Never spawn without a time estimate** — Every pack must have a runtime estimate before launch
 
 ### General Testing Rules
 - **Never skip failing tests silently**
@@ -440,13 +486,19 @@ Before spawning opencode instance, ensure task has:
 
 - [ ] **Context**: Project background, relevant files, current state
 - [ ] **Objective**: Clear, specific goal
+- [ ] **Single pack named**: Exactly ONE pack path (never "run all tests" / `go test ./...`)
+- [ ] **Scope locked**: Message explicitly forbids running other packs/tests
+- [ ] **Command-level timeout**: 5-min wrapper included (`timeout 300 ...` / `subprocess timeout=300`)
+- [ ] **Script-internal timeout**: Confirmed (dual-layer)
+- [ ] **Time estimate**: Pack estimated < 5 min (split if not)
+- [ ] **Config/env overrides**: Documented if long-timeout case
 - [ ] **Requirements**: Detailed list of what must be done
 - [ ] **Constraints**: What to follow, what to avoid
 - [ ] **Quick Fix Authorization**: Yes/No with criteria
-- [ ] **Expected Output**: What to return/report
+- [ ] **Expected Output**: PASS/FAIL/TIMEOUT + details
 - [ ] **Success Criteria**: How to know task is complete
-- [ ] **Timeout/limits**: If applicable (especially for mock tests)
 - [ ] **ensure.md Requirements**: If validating quality gates
+- [ ] **Pre-Send Self-Check passed**: All above verified before sending
 
 ---
 
@@ -469,24 +521,31 @@ Before spawning opencode instance, ensure task has:
 
 ```raw
 1. PLAN (I do this first!)
-   ├─ List all work to do
-   ├─ Assess parallelism opportunities
-   ├─ Group packs into sessions
+   ├─ List all packs to run
+   ├─ Estimate each pack's runtime; SPLIT any pack > 5 min before spawning
+   ├─ Assess parallelism: independent packs → parallel; dependent → sequential
+   ├─ One pack per opencode session
    └─ Determine execution order
 2. Read .agents/tester/README.md (I do this)
 3. Read .agents/tester/rules/ensure.md (I do this - read-only)
-4. Prepare tasks with quick fix authorization (I do this)
-5. Spawn opencode instances (parallel if independent)
-6. Opencode executes task (opencode does this)
-    ├─ Discovers issue
-    ├─ Assesses: Is this quick-fixable?
-    ├─ If YES → Fixes immediately, re-tests
-    └─ If NO → Reports issue
-7. Receive results + quick fixes (I receive this)
-8. Aggregate and analyze (I do this)
-9. Write documentation to .agents/tester/ (I do this)
-10. Validate ensure.md requirements (opencode does this)
-11. Report to user (I do this)
+4. Prepare strict "Run Single Test Pack" message per pack (I do this)
+   ├─ One pack path per message (NEVER "run all tests" / `go test ./...`)
+   ├─ Include 5-min command-level timeout wrapper (Layer 1)
+   ├─ Confirm script-internal timeout (Layer 2)
+   └─ Quick fix authorization included
+5. PRE-SEND SELF-CHECK each message (I do this) — fix before sending if any check fails
+6. Spawn opencode instances (parallel if independent, one pack each)
+7. Opencode executes single pack with timeout (opencode does this)
+   ├─ Run ONLY the named pack (forbidden to run others)
+   ├─ Discovers issue
+   ├─ Assesses: Is this quick-fixable?
+   ├─ If YES → Fixes immediately, re-runs THIS pack
+   └─ If NO → Reports issue
+8. Receive results + quick fixes from all sessions (I receive this)
+9. Aggregate per-pack PASS/FAIL/TIMEOUT into one report (I do this)
+10. Write documentation to .agents/tester/ (I do this)
+11. Validate ensure.md requirements (opencode does this)
+12. Report to user (I do this)
 ```
 
-**Plan → Coordinate → Delegate → Aggregate → Report**
+**Plan → Split → Self-Check → Delegate (parallel) → Aggregate → Report**

@@ -196,36 +196,34 @@ Expected Output:
 1. Read `.agents/tester/README.md` for context
 2. Read `.agents/tester/rules/ensure.md` for quality requirements
 3. **If phase context provided**: Scope to relevant test packs only
-4. Prepare task: "Run unit tests" (scoped or full based on context)
-5. Spawn opencode session with clear instructions
+4. **List the unit test packs to run** (one per module/scope). Estimate each pack's runtime; split any pack > 2 min (unit hard limit) into smaller packs.
+5. **Plan sessions**: one opencode session per pack; independent packs in parallel.
+6. Prepare the strict message (Step 2) per pack — never a single "run unit tests" message.
 
-### Step 2: Delegate Execution
-**Task for opencode session:**
-```
-Task: Run Unit Tests
-Context: [Project path, test framework, scope if phase-scoped]
-Requirements:
-- Run unit tests (scoped to [specific files/modules] if provided)
-- Capture full output
-- Report: total tests, passed, failed, errors
-- For failures: include file, line, test name, error message
-- Suggest fixes for failures
-- If fix is small (< 20 lines, no architecture change), fix immediately
+### Step 2: Delegate Execution (per pack)
+**Use the "Run Single Test Pack" strict message template** (see Test Pack Execution Workflow). Send one message per pack, one session per pack. Never send a bare "run unit tests" / `go test ./...` / `pytest tests/` message.
 
-Return: Structured test results + any quick fixes applied
 ```
+Task: Run Single Test Pack
+Pack: [exact path/to/<module>_unit_test.sh]   # exactly ONE pack
+Estimated runtime: [X min, must be < 2 for unit]
+... (rest of the strict template — see "Run Single Test Pack" section)
+```
+
+- Independent unit packs → launch in parallel (one session each).
+- Run the Pre-Send Self-Check before each send.
 
 ### Step 3: Analyze & Document
-1. Receive results from opencode session
-2. Analyze failures and patterns
-3. Note which issues were quick-fixed by session
+1. Receive results from all opencode sessions
+2. Aggregate per-pack PASS/FAIL/TIMEOUT; analyze failures and patterns
+3. Note which issues were quick-fixed by sessions
 4. Update `.agents/tester/COVERAGE.md` with findings
 5. Update `.agents/tester/LESSONS/` with issues found and fixes applied (e.g., `unit-test-fix-[issue].md`)
 
 ### Step 4: Fix Failures (if needed)
 **If unit tests are still broken after quick fixes:**
 1. Assess remaining failures: Are they quick-fixable?
-2. **If yes** → Reuse same opencode session, send follow-up task
+2. **If yes** → Reuse same opencode session, send follow-up task (still single-pack scoped)
 3. **If no** → Spawn new opencode session for full fix workflow
 4. Monitor and verify fixes
 5. Document in `.agents/tester/LESSONS/` (e.g., `unit-test-failures-[date].md`)
@@ -284,24 +282,81 @@ Return: Structured test results + any quick fixes applied
    - **Mock test packs** — Per MOCK_TESTS.md specification
 3. Spawn opencode to create test pack scripts (use test-pack skill)
 
+### Pre-Send Self-Check (Run Before EVERY opencode Message)
+
+Before sending any test-execution message to opencode, verify **all** of the following. If any check fails, fix the message before sending.
+
+- [ ] **Single pack** — Message names exactly ONE pack path (no "run all tests", no bare `go test ./...` / `pytest tests/`)
+- [ ] **Scope locked** — Message explicitly forbids running any other pack/test
+- [ ] **Command-level timeout** — Message includes the 5-min wrapper (`timeout 300 ...` or `subprocess.run(..., timeout=300)`)
+- [ ] **Script-internal timeout** — Pack script self-timeouts at ≤ 5 min (dual-layer confirmed)
+- [ ] **Time estimate** — Pack estimated < 5 min (if not, split before sending)
+- [ ] **PACKS.md valid** — Pack path exists and is registered in PACKS.md
+- [ ] **Override documented** — If long-timeout case, overridden config/env is intentional and documented
+
+### Run Single Test Pack — Strict Message Template (MANDATORY)
+
+**This is the ONLY acceptable message format for running a test pack.** Never send a free-form "run the tests" message — that is what causes opencode to run the full suite at once.
+
+```
+Task: Run Single Test Pack
+Pack: [exact path/to/<scope>_<type>_test.sh]   # exactly ONE pack
+Estimated runtime: [X min, must be < 5]
+
+CONSTRAINTS (do NOT violate):
+- Run ONLY the pack at the path above. Do NOT run any other pack or test.
+- Do NOT run broad commands like `go test ./...`, `pytest tests/`, `npm test`, `jest`.
+- Wrap the run with a 5-min command-level timeout:
+    bash:   `timeout 300 ./path/to/<scope>_<type>_test.sh`
+    python: `subprocess.run([..., "<pack>"], timeout=300)`
+- The pack script also has its own internal timer — do NOT disable or extend it.
+- Do NOT "discover and run" extra tests to "be thorough".
+
+Requirements:
+- Execute the single pack with the timeout wrapper above.
+- Capture all output.
+- Report final status: PASS / FAIL / TIMEOUT  (exit 0 / 1 / 124).
+- If FAIL: include file, line, test name, error message for each failure.
+- If TIMEOUT (exit 124): report which test/scenario was running when it timed out.
+- If a quick fix is possible (< 20 lines, no architecture change): fix, re-run, and report the fix + commit hash.
+
+Return:
+- RESULT: PASS|FAIL|TIMEOUT
+- Failures (if any): [file:line] test — reason
+- Quick fixes applied (if any): what + commit hash
+- Actual runtime: [X min]
+```
+
+**Long-timeout case variant:** If the pack contains tests that inherently need long waits (retries/sleeps/polls), add an `ENV OVERRIDES` block to the same template so the pack still finishes < 5 min:
+```
+ENV OVERRIDES (intentional, documented in MOCK_TESTS.md):
+- RETRY_COUNT=1            # was 5
+- SLEEP_INTERVAL_MS=50     # was 1000
+- MOCK_ENDPOINT=http://127.0.0.1:10080   # fast local mock, was real service
+```
+Do **not** raise the 5-min cap to fit a slow test. Override the config/env instead.
+
 ### Execute Test Pack
 **If phase context provided:** Only run packs relevant to changed files. Report skipped packs.
-**Task for opencode session:**
-```
-Task: Run Test Pack
-Pack: [path/to/test_pack.sh]
-Scope: [phase context if provided - which files/modules changed]
-Timeout: [X minutes based on pack type]
-Requirements:
-- Execute the test pack
-- The script has internal timeout enforcement - do NOT override it
-- Capture all output
-- Report: PASS/FAIL/TIMEOUT with details
-- If FAIL: include error messages, logs
-- If TIMEOUT: report which part timed out
-- If scoped to phase: report which packs were skipped and why
+Send the **Run Single Test Pack** message above (one per opencode session). Run the Pre-Send Self-Check before each send.
 
-Return: Test execution results + scope report
+### Full Project Test: Split & Parallel Workflow
+
+**When a full project test is requested** (no phase scope, or leader explicitly wants everything):
+
+1. **List every pack** from PACKS.md and estimate each pack's runtime.
+2. **Split any pack estimated > 5 min** into smaller packs until every pack is < 5 min.
+3. **Group by independence:**
+   - Independent packs → launch in **parallel** (one opencode session + one strict message per pack).
+   - Dependent packs → run sequentially in the required order.
+4. **Send each message** using the Run Single Test Pack template, after passing the Pre-Send Self-Check.
+5. **Aggregate** PASS/FAIL/TIMEOUT from every session into one report. One pack's TIMEOUT does not block the others.
+6. **For any TIMEOUT** → run the TTQA Loop on that single pack (do not re-run the whole project).
+
+```
+Example: 6 packs, all independent, ~3 min each
+Plan: 6 parallel sessions, each gets one strict "Run Single Test Pack" message
+Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque timeout (all-at-once)
 ```
 
 ### TTQA Loop (when timeout occurs)
@@ -628,23 +683,29 @@ Expected Output:
 ### Example: Run Unit Tests with Quick Fix Permission
 ```
 Context: Testing llm-supervisor-proxy project (Go)
-Objective: Run unit tests (scoped to [files/modules] if phase-scoped)
+Objective: Run ONE unit test pack (scoped to a single module)
+Pack: ./tests/packs/auth_unit_test.sh   # exactly ONE pack — NOT `go test ./...`
+Constraints:
+- Run ONLY this pack. Do NOT run `go test ./...` or any other pack.
+- Wrap with 5-min command-level timeout: `timeout 300 ./tests/packs/auth_unit_test.sh`
+- Pack script has its own internal timer — do not disable it.
 Requirements:
-- Run: go test ./... -v  (or scoped: go test ./[path] -v)
-- Capture all test output
-- Parse results: count total/passed/failed/errors
-- For failures: extract file, line, test name, error
-- Suggest root cause for each failure
+- Execute the single pack with the timeout wrapper above.
+- Capture all test output.
+- Report final status: PASS / FAIL / TIMEOUT (exit 0 / 1 / 124).
+- For FAIL: extract file, line, test name, error per failure.
+- Suggest root cause for each failure.
 Quick Fix Authorization: YES
 - You may fix issues you discover if they meet quick fix criteria
 - Quick fix = < 20 lines, no architecture change, obvious solution
-- After fixing, re-run tests to verify
-- Report what you fixed in results
+- After fixing, re-run THIS pack only to verify
+- Report what you fixed + commit hash in results
 Expected Output:
+- RESULT: PASS|FAIL|TIMEOUT
 - Structured report with counts
 - Detailed failure list
-- List of quick fixes applied (if any)
-- Verification that fixes work
+- List of quick fixes applied (if any) + commit hash
+- Actual runtime: [X min]
 ```
 
 ---
@@ -774,11 +835,15 @@ Session IDs: [list of opencode session IDs used]
 ## Decision Points
 
 - **Starting testing work?** → PLAN FIRST: Analyze work, assess parallelism, group packs into sessions
+- **Need to run tests?** → Send ONE strict "Run Single Test Pack" message per pack (never "run the tests"); pass Pre-Send Self-Check first
+- **Full project test requested?** → Split into packs (< 5 min each), run independent packs in parallel, one session+message per pack
+- **Pack estimated > 5 min?** → Split it further before spawning (do NOT raise the cap)
+- **Test needs long waits/retries?** → Override config/env in a separate pack; never relax the 5-min cap
+- **Tempted to send `go test ./...` / `pytest tests/`?** → STOP. That is forbidden. Use the strict single-pack template.
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
-- **Need to run tests?** → Spawn opencode session with quick fix permission
 - **Phase context provided?** → Scope tests to relevant packs only, report scope to leader
-- **No phase context?** → Run all relevant tests (standard workflow)
+- **No phase context?** → Run all relevant packs via the Split & Parallel workflow (still one pack per session)
 - **Need to validate ensure.md?** → Spawn opencode session with validation task
 - **Need to write test code?** → Spawn opencode session with specification
 - **Need to read source files?** → Spawn opencode session to analyze
