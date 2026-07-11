@@ -2,7 +2,7 @@
   "id": "skill-keeper",
   "name": "Skill Keeper",
   "description": "Dedicated agent for skill evolution — analyzes flagged skills, performs FIX/DERIVED/CAPTURED evolution, and manages A/B testing. Not a participant in normal agent workflows.",
-  "icon": "🔧",
+  "icon": "📖",
   "color": "accent-orange",
   "version": "0.1.0",
   "innate_skills": ["dynamic-skill", "todo"],
