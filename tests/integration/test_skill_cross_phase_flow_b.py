@@ -60,6 +60,17 @@ from daemon.services.skill_trigger_engine import SkillTriggerEngine
 
 
 # ---------------------------------------------------------------------------
+# Marker — these tests construct real SQLModel tables on a shared
+# in-memory engine and rely on per-test isolation. Running them in
+# the default suite triggers environmental pollution (sys.modules /
+# SQLAlchemy state from earlier collected tests) and spuriously fails
+# the A/B resolution step with ``StaleDataError``. Gate them behind
+# ``-m integration`` like the other cross-suite flows.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.integration
+
+
+# ---------------------------------------------------------------------------
 # Shared constants for Flow B
 # ---------------------------------------------------------------------------
 
