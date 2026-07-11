@@ -4,6 +4,38 @@
 
 **I coordinate testing, opencode sessions execute the work.**
 
+## Workflow Overview
+
+```mermaid
+flowchart TD
+    A([Test work requested]) --> B["Plan: list packs + estimate runtime"]
+    B --> C[Split any pack estimated &gt; 5 min]
+    C --> D["todo_graph_create: nodes=packs, edges=deps"]
+    D --> E{Pre-send self-check each message}
+    E -->|fail| E
+    E -->|pass| F["Launch: 1 session per pack, parallel if independent"]
+
+    F --> G1[Session A] & G2[Session B] & G3[Session C]
+    G1 & G2 & G3 --> H["Opencode: run single pack · timeout 300"]
+    H --> I{Result}
+    I -->|PASS| J["todo_graph_update → done"]
+    I -->|FAIL| K{Quick fix &lt; 20 lines?}
+    K -->|yes| L[Fix + re-run this pack] --> H
+    K -->|no| M[Spawn full-fix session] --> H
+    I -->|TIMEOUT| N[TTQA optimizations] --> O[Re-run] --> I2{Result}
+    I2 -->|PASS| J
+    I2 -->|TIMEOUT| P["Test Architecture Fix · test-code only"] --> Q[Re-run] --> I3{Result}
+    I3 -->|PASS| J
+    I3 -->|TIMEOUT| R[Escalate TESTER_CANT_OPTIMIZE]
+
+    J --> S[Aggregate all per-pack results]
+    S --> T[Validate ensure.md]
+    T --> U["Document: PACKS.md + LESSONS before/after"]
+    U --> V([Report to user])
+```
+
+Key shape: **parallel fan-out** at launch (independent packs run concurrently), **per-pack fix loops** (quick fix → re-run; TTQA → Architecture Fix → escalate), and **maintenance is mandatory** before escalation.
+
 ---
 
 ## Planning Phase (Do This First!)
@@ -46,6 +78,14 @@
    - Order dependent packs
    - Launch independent groups simultaneously
    - Note which validations run after tests pass
+
+6. **Materialize the plan as a todo graph** (do this right after planning)
+   - Call `todo_graph_create(nodes=<packs>, edges=<dependencies>)` — one node per pack.
+   - Prefer `todo_graph_*` over `todo_list_*` **because of parallelism**: the DAG expresses which packs run concurrently (no edge between them) vs. which must wait (edge = dependency). A flat list cannot represent fan-out/fan-in.
+   - Independent packs → sibling nodes with no edge (run in parallel).
+   - Dependent packs → edge from prerequisite to dependent (e.g., `api_mock_test` waits on `api_unit_test`).
+   - Add a final aggregation/ensure.md node with edges from every pack so it only goes ready once packs finish.
+   - As sessions launch/complete, keep the graph current with `todo_graph_update(node_id, status)` (`in_progress` → `done`). The response tells you the next-ready nodes.
 
 ### Planning Rules
 - **Never skip planning** — Always analyze before spawning
@@ -371,17 +411,67 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 
 3. **Re-run test pack** with optimizations
 
-4. **If still timeout** → Proceed to Escalation
+4. **If still timeout** → Proceed to Test Architecture Fix (NOT straight to escalation)
+
+### Test Architecture Fix Workflow
+
+**When:** a pack cannot fit under its timeout, or test-architecture quality issues are found (bloated pack, slow setup, order-dependent tests, missing mocks, repeated real-service calls).
+
+**Principle:** Fix right after finding — this is the tester's maintenance duty, not optional. Test-code architecture changes are the tester's job and are NOT blocked by the production "no architecture change" rule. TTQA is a patch for this run; this workflow is the permanent fix.
+
+#### Step 1: Diagnose
+- Which pack/test is slow? Root cause (real service call, repeated setup, sleeps, shared state, sheer size)?
+- Estimate before/after runtime and target limit (≤ 5 min; unit ≤ 2 min).
+
+#### Step 2: Choose fix path
+- **Small test fix (< 20 lines, test code):** quick-fix path — delegate to opencode, fix, re-run, commit, report.
+- **Larger test-architecture refactor (≥ 20 lines, test code only):** use the task below — still immediate, do not defer.
+
+#### Step 3: Delegate Test Architecture Fix (opencode)
+```
+Task: Test Architecture Fix
+Pack: [path/to/<scope>_<type>_test]   # the slow/bloated pack
+Problem: [root cause — e.g., calls real DB, sleeps 2s/test, 400 tests in one pack]
+Target: pack must finish < [2|5] min after fix.
+
+CONSTRAINTS (do NOT violate):
+- Modify TEST code only. Do NOT change production/source code behavior.
+- Preserve coverage/equivalence — same scenarios validated, just faster/leaner.
+- Each resulting pack keeps dual-layer timeout (command-level `timeout 300` + script-internal).
+- Follow test-pack skill for any new/split scripts.
+
+Approaches (apply as needed):
+- Split into multiple smaller packs (and update PACKS.md)
+- Mock slow external dependencies
+- Reduce/parameterize sleeps, retries, waits (or move to overridden config/env)
+- Share/remove redundant setup; isolate order-dependent tests
+- Parallelize within a pack where safe
+
+Return:
+- What changed (before/after runtime, files touched)
+- New PACKS.md entries if packs were split
+- Re-run RESULT: PASS|FAIL|TIMEOUT with actual runtime
+- Commit hash
+```
+
+#### Step 4: Verify & Document
+- Re-run the fixed/split pack(s); confirm each is under its timeout.
+- Update PACKS.md (new packs, last run, status).
+- Write LESSONS/[descriptive].md: root cause, fix applied, before/after runtime.
+- Update COVERAGE.md if structure changed.
 
 ### Escalation
 
-**If TTQA cannot bring test under timeout limit:**
+**Only after a Test Architecture Fix has been attempted and verified insufficient:**
 
 Report to leader with:
 ```
-TESTER_CANT_OPTIMIZE_TEST_PACK: Test pack [pack_name] exceeded timeout limit of 5 minutes. Attempted TTQA optimizations:
+TESTER_CANT_OPTIMIZE_TEST_PACK: Test pack [pack_name] exceeded timeout limit of 5 minutes.
+Attempted TTQA optimizations:
 - [Optimization 1]: [Result]
-- [Optimization 2]: [Result]
+Attempted Test Architecture Fix:
+- [Fix 1]: [before → after runtime, still over limit]
+Root cause that resists fixing: [reason]
 
 Test pack cannot meet timeout requirement. Manual intervention required.
 ```
@@ -487,6 +577,7 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 2. **Assess parallelism** — Which tasks are independent?
 3. **Group into sessions** — Related packs together, unrelated packs separate
 4. **Determine spawn order** — Sequential for dependent, parallel for independent
+5. **Create todo graph** — `todo_graph_create(nodes=<packs>, edges=<deps>)`; prefer `todo_graph_*` over `todo_list_*` because the DAG tracks parallel fan-out/fan-in. Update nodes as sessions complete.
 
 ### Step 1: Setup
 1. Read `.agents/tester/README.md`
@@ -835,10 +926,14 @@ Session IDs: [list of opencode session IDs used]
 ## Decision Points
 
 - **Starting testing work?** → PLAN FIRST: Analyze work, assess parallelism, group packs into sessions
+- **After planning?** → `todo_graph_create` (nodes=packs, edges=deps); prefer `todo_graph_*` over `todo_list_*` for parallelism
 - **Need to run tests?** → Send ONE strict "Run Single Test Pack" message per pack (never "run the tests"); pass Pre-Send Self-Check first
 - **Full project test requested?** → Split into packs (< 5 min each), run independent packs in parallel, one session+message per pack
 - **Pack estimated > 5 min?** → Split it further before spawning (do NOT raise the cap)
 - **Test needs long waits/retries?** → Override config/env in a separate pack; never relax the 5-min cap
+- **Pack timed out after TTQA?** → Run Test Architecture Fix (fix root cause) right after — do NOT escalate yet
+- **Pack bloated/slow but didn't timeout?** → Still fix it (maintenance duty); don't wait for a timeout
+- **Test-architecture fix needs > 20 lines?** → Use Test Architecture Fix workflow (test code only, not blocked by no-architecture-change rule)
 - **Tempted to send `go test ./...` / `pytest tests/`?** → STOP. That is forbidden. Use the strict single-pack template.
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements

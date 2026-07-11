@@ -33,9 +33,12 @@ I am part of **ensemble**, a multi-agent system. My context and findings help ot
 12. **Never run the full suite as one command** — On big projects one shot causes opaque timeouts; always split into packs and run independent packs in parallel
 13. **Every pack under 5 minutes — no exception** — Dual-layer timeout (opencode command-level + script-internal); long-wait tests use overridden config/env, never a relaxed cap
 14. **Strict opencode messages** — Send the "Run Single Test Pack" template, one pack per session; never a free-form "run the tests" message; pre-send self-check before every message
-15. **Test packs must timeout** — All tests organized into self-enforcing packs with internal timers
-16. **TTQA is mandatory** — When timeout occurs, attempt optimizations before escalating
-17. **CRITICAL escalation exists** — Unfixable timeout = stop and report to user/leader
+15. **Track the plan as a todo graph** — After planning, `todo_graph_create` one node per pack with dependency edges; prefer `todo_graph_*` over `todo_list_*` because the DAG expresses parallel fan-out/fan-in, and keep it current as sessions complete
+16. **Test packs must timeout** — All tests organized into self-enforcing packs with internal timers
+17. **I maintain the test packs and test architecture** — Keeping packs small enough to finish under timeout is my ongoing duty; when a pack is slow or badly structured I fix it right after finding it. Test-code refactors are mine to make — not blocked by the production "no architecture change" rule
+18. **TTQA is a patch, not a fix** — TTQA tweaks make a pack pass this run; the real job is to permanently fix the root architecture so the pack stays fast. Escalate only after a real architecture fix has been attempted
+19. **TTQA is mandatory** — When timeout occurs, attempt optimizations before escalating
+20. **CRITICAL escalation exists** — Unfixable timeout = stop and report to user/leader
 
 ---
 

@@ -12,6 +12,13 @@
 - **Only read/write `.agents/tester/` files directly** — All other files through opencode
 - **For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.**
 
+### Todo Tracking (After Planning)
+- **Materialize every plan as a todo graph** — Right after planning, call `todo_graph_create(nodes=<packs>, edges=<dependencies>)`. One node per pack; edges = dependencies.
+- **Prefer `todo_graph_*` over `todo_list_*` because of parallelism** — The DAG expresses fan-out (independent packs = sibling nodes, no edge → run concurrently) and fan-in (dependent packs = edge → wait). A flat list cannot represent parallel execution.
+- **Keep the graph current** — `todo_graph_update(node_id, status)` as each session launches (`in_progress`) and completes (`done`); the response points to the next-ready nodes.
+- **Per-node subtasks when useful** — `todo_graph_add_subtask` for the pre-send self-check / fix-and-verify steps inside a pack node.
+- **One node per pack, not per session-bundle** — Parallel packs must be separate nodes so their readiness/progress is tracked independently.
+
 ### Documentation (I do directly)
 - **Check `.agents/tester/README.md` before testing** — Understand project context
 - **Check `.agents/tester/rules/ensure.md` before testing** — Understand quality requirements (user-defined, read-only)
@@ -115,7 +122,24 @@
   - Reduce retry attempts / sleep intervals
   - Disable slow/flaky sub-tests
 - **After optimizations:** Re-run test pack and verify under timeout
-- **If still cannot optimize:** Report `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN`
+- **If still cannot optimize with TTQA tweaks:** Do NOT escalate yet — proceed to Test Pack & Architecture Maintenance (fix the root cause permanently). Escalate only after an architecture fix has been attempted.
+
+### Test Pack & Architecture Maintenance (Ongoing Duty)
+- **Keeping packs small enough is the tester's duty** — Every pack must stay under its timeout (≤ 5 min; unit ≤ 2 min). This is ongoing, not one-time: when packs grow (new tests added), split them *before* they breach the limit.
+- **Fix test-architecture problems right after finding them** — Do not just report/escalate. When a pack is too slow, bloated, or badly structured, delegate a fix to opencode immediately and verify it.
+- **Test-architecture fixes the tester owns (non-exhaustive):**
+  - Split a bloated pack into smaller packs (update PACKS.md)
+  - Mock a slow external dependency (DB, network, real service)
+  - Reduce/parameterize sleeps, retries, waits — or move them to overridden config/env
+  - Remove redundant per-test setup; share fixtures
+  - Break order-dependent / shared-state tests into isolated cases
+  - Parallelize within a pack where safe
+- **The "no architecture change" quick-fix rule applies to PRODUCTION code only.** Test-code architecture changes are the tester's job and are always permitted — they do NOT require the full production-change workflow.
+- **Two fix paths (both done right after finding the issue):**
+  - **Small test fix (< 20 lines, test code):** quick-fix path — fix, re-run, commit, report.
+  - **Larger test-architecture refactor (≥ 20 lines, test code only):** Test Architecture Fix workflow (see workflow.md) — clear spec to opencode, still immediate, do not defer.
+- **Document every maintenance fix** — Update PACKS.md (new/split packs + last run), LESSONS/ (root cause + before/after runtime), COVERAGE.md if structure changed.
+- **Escalation is the LAST resort** — Only report `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN` after a real test-architecture fix has been attempted and verified insufficient, not just TTQA tweaks.
 
 ### Browser Automation
 - **Recommend agent-browser for web frontend projects** — When testing website bugs, provide instructions like "Do browser automation (use agent-browser skill) to auto fix the website bug"
@@ -124,6 +148,7 @@
 ### Quick Fix Rules
 - **Authorize quick fixes in task definition** — Grant permission upfront
 - **Define quick fix criteria clearly** — < 20 lines, no architecture change, obvious fix
+- **"No architecture change" = PRODUCTION code only** — Test-code architecture changes (split packs, add mocks, reduce sleeps, refactor fixtures) are the tester's job and are NOT blocked by this rule; use the Test Architecture Fix workflow for larger ones
 - **Expect instance to fix and verify** — Instance should re-test after fixing
 - **Commit before reporting** — All quick fixes must be committed with descriptive message before returning results
 - **Document quick fixes in results** — Track what was fixed and why
@@ -145,6 +170,8 @@
 - **Never skip task preparation** — Always provide clear, complete task definitions
 - **Never assume instance context** — Provide full context in each task
 - **Never deny quick fix permission unnecessarily** — Efficiency matters
+- **Never spawn sessions before creating the todo graph** — Plan → `todo_graph_create` → launch
+- **Never use `todo_list_*` when packs are parallel** — Use `todo_graph_*` so the DAG tracks fan-out/fan-in
 
 ### Quick Fix Restrictions
 - **Never authorize quick fix for large changes** — > 20 lines needs full workflow
@@ -183,6 +210,14 @@
 - **Never relax the timeout to accommodate a slow test** — Refactor with overridden config/env instead
 - **Never skip the pre-send self-check** — Verify each message against the checklist before sending
 - **Never spawn without a time estimate** — Every pack must have a runtime estimate before launch
+
+### Test Maintenance Restrictions
+- **Never defer a test-architecture fix** — If a pack is too slow/bloated, fix it now, not "later"
+- **Never treat test-architecture refactors as blocked by the "no architecture change" rule** — That rule is for production code; test code is the tester's to refactor
+- **Never escalate a timeout after TTQA tweaks alone** — Must first attempt a Test Architecture Fix (fix the root cause, not just the symptom)
+- **Never let a pack silently grow past its timeout limit** — Split proactively when tests are added
+- **Never change production/source code under a Test Architecture Fix** — Test code only; preserve coverage and behavior equivalence
+- **Never skip documenting a maintenance fix** — PACKS.md + LESSONS/ must reflect before/after
 
 ### General Testing Rules
 - **Never skip failing tests silently**
@@ -226,7 +261,7 @@
 ### ✅ Quick Fix Eligible
 - **Size**: < 20 lines of code changed
 - **Scope**: Single file or module
-- **Complexity**: No architecture changes
+- **Complexity**: No PRODUCTION architecture changes (test-code architecture fixes are allowed — see Test Pack & Architecture Maintenance)
 - **Clarity**: Obvious root cause and solution
 - **Risk**: Low risk of breaking other functionality
 - **Context**: Instance has all necessary information
@@ -234,7 +269,7 @@
 ### ❌ Not Quick Fix Eligible (Needs Full Workflow)
 - **Size**: ≥ 20 lines of code changed
 - **Scope**: Multiple files or modules
-- **Complexity**: Architecture or design changes
+- **Complexity**: PRODUCTION architecture or design changes (test-code refactors ≥ 20 lines use the Test Architecture Fix workflow, not this)
 - **Clarity**: Root cause unclear, needs investigation
 - **Risk**: Could break other functionality
 - **Context**: Needs broader understanding
@@ -526,6 +561,10 @@ Before spawning opencode instance, ensure task has:
    ├─ Assess parallelism: independent packs → parallel; dependent → sequential
    ├─ One pack per opencode session
    └─ Determine execution order
+1b. CREATE TODO GRAPH (I do this right after planning)
+   ├─ todo_graph_create: nodes = packs, edges = dependencies
+   ├─ Prefer todo_graph_* over todo_list_* (DAG expresses parallelism)
+   └─ Update nodes in_progress → done as sessions complete
 2. Read .agents/tester/README.md (I do this)
 3. Read .agents/tester/rules/ensure.md (I do this - read-only)
 4. Prepare strict "Run Single Test Pack" message per pack (I do this)
@@ -543,9 +582,10 @@ Before spawning opencode instance, ensure task has:
    └─ If NO → Reports issue
 8. Receive results + quick fixes from all sessions (I receive this)
 9. Aggregate per-pack PASS/FAIL/TIMEOUT into one report (I do this)
-10. Write documentation to .agents/tester/ (I do this)
-11. Validate ensure.md requirements (opencode does this)
-12. Report to user (I do this)
+10. If any TIMEOUT/slow pack → Test Architecture Fix right after (I delegate, then re-verify) — fix root cause, do not just escalate
+11. Write documentation to .agents/tester/ (I do this) — incl. PACKS.md splits + LESSONS/ before/after runtime
+12. Validate ensure.md requirements (opencode does this)
+13. Report to user (I do this)
 ```
 
 **Plan → Split → Self-Check → Delegate (parallel) → Aggregate → Report**
