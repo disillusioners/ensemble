@@ -571,6 +571,46 @@ class TestGetStatusExecution:
         assert "Last Activity: 2026-06-07T00:00:00Z" in result
         assert "Working on it..." in result
 
+    @pytest.mark.asyncio
+    async def test_get_status_surfaces_worker_error(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When latest_response is an error dict, get_status reports [ERROR]."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-failed",
+                "state": "IDLE",
+                "last_activity": "2026-06-07T00:00:00Z",
+            }
+        )
+        error_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {
+                    "error": "API Error 500: Unexpected server error",
+                },
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=error_response,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(t for t in tools if t.name == "external_opencode_get_status")
+
+            result = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert "[ERROR]" in result
+        assert "API Error 500" in result
+
 
 class TestAnswerQuestionExecution:
     """End-to-end test of ``external_opencode_answer_question``."""
@@ -1272,6 +1312,95 @@ class TestWaitForResultExecution:
 
         assert isinstance(result, str)
         assert result.startswith("[COMPLETED]")
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_returns_error_on_worker_http_500(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When worker fails with HTTP 500, wait_for_result returns [ERROR].
+
+        Bug fix: previously the IDLE state with ``{"error": ...}`` in
+        ``latest_response`` was reported as ``[COMPLETED]`` — misleading
+        the agent. Now the error is surfaced.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-failed"}
+        )
+        error_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {
+                    "error": "API Error 500: Unexpected server error",
+                },
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=error_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[ERROR]")
+        assert "API Error 500" in result
+        assert "[COMPLETED]" not in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_completed_on_success_path_unchanged(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Regression: success path (latest_response={'result': ...}) still returns [COMPLETED]."""
+        # Already covered by test_wait_for_result_returns_completed_on_idle but
+        # explicitly verify the result-shape (not error-shape) goes through the
+        # success branch.
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-success"}
+        )
+        ok_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"result": {"text": "all good"}},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+        assert "[ERROR]" not in result
 
 
 # =============================================================================

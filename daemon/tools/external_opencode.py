@@ -533,6 +533,19 @@ Special prompts (bypass BUSY check):
             response = data.get("latest_response")
             questions = data.get("questions", [])
 
+            # Detect worker errors stored as {"error": "..."} in latest_response.
+            # Without this, agents see a normal "Latest Response" line and assume
+            # the operation succeeded — but the worker actually failed (e.g.
+            # HTTP 500 from OpenCode API) and the state just happens to be IDLE.
+            if isinstance(response, dict) and "error" in response:
+                output = [
+                    f"State: {state}",
+                    f"Last Activity: {record.get('last_activity', '')}",
+                    "",
+                    f"[ERROR] Worker request failed: {response.get('error')}",
+                ]
+                return "\n".join(output)
+
             output = [
                 f"State: {state}",
                 f"Last Activity: {record.get('last_activity', '')}",
@@ -610,6 +623,19 @@ Returns:
                 data = resp.data or {}
                 state = data.get("state", "UNKNOWN")
                 if state == "IDLE":
+                    response_inner = data.get("latest_response")
+                    # Worker errors are stored as {"error": "<msg>"} in
+                    # latest_response. Without this check, the IDLE branch
+                    # would always report [COMPLETED] even when the worker
+                    # actually failed (e.g. HTTP 500 from OpenCode API) —
+                    # misleading the agent into thinking the request
+                    # succeeded.
+                    if (
+                        isinstance(response_inner, dict)
+                        and "error" in response_inner
+                    ):
+                        err_text = response_inner.get("error") or "unknown error"
+                        return f"[ERROR] Worker request failed: {err_text}"
                     return f"[COMPLETED] Session completed.\n{_format_response(resp)}"
                 if state == "WAITING_FOR_INPUT":
                     questions = data.get("questions", [])
