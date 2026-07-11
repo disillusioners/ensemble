@@ -17,7 +17,7 @@ class BuiltinServerDefinition(ABC):
     # dependency — it relies only on external CLI binaries (``uvx``,
     # ``npx``) that we cannot introspect without spawning subprocesses.
     # Subclasses override this with the importable package name (e.g.
-    # ``"openspace-ai"``) when they require an optional Python package
+    # ``"my-mcp-server"``) when they require an optional Python package
     # that may not be installed. ``is_available()`` consults this
     # attribute; the bootstrap and warmup pool layers rely on
     # ``is_available()`` to skip unavailable built-ins cleanly
@@ -65,10 +65,11 @@ class BuiltinServerDefinition(ABC):
 
         Subclasses override ``required_package`` (or override this method
         directly) when they require an optional Python package that may
-        not be installed (e.g. ``openspace-ai`` for the OpenSpace built-in).
-        When this returns ``False``, the bootstrap and warmup pool layers
-        skip the server entirely — no DB record, no connection attempt —
-        rather than failing later with an opaque subprocess error.
+        not be installed (e.g. ``my-mcp-server`` for a third-party
+        built-in). When this returns ``False``, the bootstrap and warmup
+        pool layers skip the server entirely — no DB record, no
+        connection attempt — rather than failing later with an opaque
+        subprocess error.
 
         Returns:
             ``True`` if the built-in can be used safely. Default ``True``

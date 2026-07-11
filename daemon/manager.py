@@ -1238,12 +1238,13 @@ class InstanceManager:
             )
             stdio_config = McpStdioConfig(**config_dict)
             # Per-server timeout override. Built-in servers that run
-            # long-running tools (e.g. OpenSpace's execute_task) opt in by
-            # overriding ``tool_call_timeout`` on their definition; servers
-            # without an override return ``None`` and fall back to the
-            # pool-wide default. ``getattr`` (not direct attribute access)
-            # keeps this resilient if a third-party definition subclasses
-            # the ABC without re-declaring the property.
+            # long-running tools (e.g. an agent-execution tool that may
+            # run for several minutes) opt in by overriding
+            # ``tool_call_timeout`` on their definition; servers without
+            # an override return ``None`` and fall back to the pool-wide
+            # default. ``getattr`` (not direct attribute access) keeps
+            # this resilient if a third-party definition subclasses the
+            # ABC without re-declaring the property.
             server_timeout = getattr(definition, "tool_call_timeout", None)
             pool.register_server(
                 name,

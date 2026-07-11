@@ -63,16 +63,15 @@ def redact_secrets(config: dict) -> dict:
        contains any of ``KEY``, ``TOKEN``, ``SECRET``, ``PASSWORD``,
        ``BASE``, or ``HEADERS`` (case-insensitive substring match)
        have their values replaced with ``"[REDACTED]"``.
-       Non-sensitive env keys such as ``OPENSPACE_MODEL`` and
-       ``OPENSPACE_MCP_TRANSPORT`` are preserved intact.
+       Non-sensitive env keys such as ``MY_MCP_LOG_LEVEL`` and
+       ``MY_MCP_TRANSPORT`` are preserved intact.
 
     2. ``url`` top-level value (if present and a string): any userinfo
        (``user:pass@``) is stripped as a defense-in-depth measure in
        case a builtin server's ``build_config`` ever lets one slip
-       through. Builtin servers (e.g. OpenSpace) already reject
-       userinfo at build time — this layer exists so a malformed
-       legacy/stored config still doesn't leak credentials over the
-       API.
+       through. Builtin servers already reject userinfo at build time
+       — this layer exists so a malformed legacy/stored config still
+       doesn't leak credentials over the API.
 
     The original input dict is not mutated.
 
@@ -90,7 +89,7 @@ def redact_secrets(config: dict) -> dict:
             if not isinstance(env_key, str):
                 continue
             upper_key = env_key.upper()
-            # ``BASE`` covers OpenSpace-style ``*_API_BASE`` (endpoint URL);
+            # ``BASE`` covers ``*_API_BASE`` (endpoint URL);
             # ``HEADERS`` covers ``*_EXTRA_HEADERS`` (HTTP headers dict that
             # typically carries Authorization tokens). Trade-off: ``BASE`` may
             # over-redact future vars like ``DATABASE_BASE_PATH`` — acceptable
@@ -126,7 +125,7 @@ def _mcp_server_to_info(mcp_server) -> McpServerInfo:
 
     # For built-in servers, parse config to get initial_values for form pre-fill.
     # Note: parse_config only recovers schema-defined fields. Injected env vars
-    # (credentials, OPENSPACE_MCP_TRANSPORT) live in the stored env dict but are
+    # (credentials, transport pins) live in the stored env dict but are
     # not part of the schema, so they will NOT appear in initial_values on
     # round-trip — this is intentional, those values are sourced from the
     # runtime environment rather than user input.
@@ -372,7 +371,7 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
         )
 
     # Build the final config from user values. ``build_config()`` may
-    # raise ``McpConfigValidationError`` (e.g. OpenSpace rejects a
+    # raise ``McpConfigValidationError`` (e.g. a builtin that rejects a
     # ``ftp://`` URL or embedded userinfo) — translate that into a 422
     # rather than letting it surface as an opaque 500. ``BuiltinConfigValidationError``
     # (from ``validate_config_values`` above) is also caught here as a
@@ -392,7 +391,8 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
         # McpConfigValidationError is a ValueError subclass — catch it
         # explicitly so it doesn't bubble up as a 500. Some builtins
         # raise it from build_config() for env-driven checks (e.g.
-        # ENS_OPENSPACE_REMOTE_URL scheme / userinfo).
+        # a remote URL scheme / userinfo check in the server's own
+        # validate_config).
         raise HTTPException(
             status_code=422,
             detail=ErrorResponse(

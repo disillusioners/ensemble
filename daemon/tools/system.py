@@ -75,7 +75,6 @@ _TRACKED_ENV_PREFIXES = [
     "RAG_IS_REQUIRED",
     "MCP_",
     "LIGHTRAG_",
-    "OPENSPACE_",
     "QUEUE_DISCARD_ON_STARTUP",
 ]
 _TRACKED_ENV_EXACT = [
@@ -90,10 +89,6 @@ _TRACKED_ENV_EXACT = [
 # Explicit env var names that are ALWAYS masked (unless nomask=True),
 # even if they don't match the suffix patterns above (e.g. LIGHT_RAG_*).
 _SECRET_ENV_VARS: frozenset[str] = frozenset({
-    "OPENSPACE_API_KEY",
-    "OPENSPACE_LLM_API_KEY",
-    "OPENSPACE_LLM_API_BASE",
-    "OPENSPACE_LLM_EXTRA_HEADERS",
     "SOURCE_CREDENTIAL_KEY",
     "LIGHTRAG_API_KEY",
     "POSTGRES_URL",
@@ -377,7 +372,7 @@ def create_system_tools(manager: "InstanceManager", current_instance_id: str) ->
 The tool enumerates ``os.environ`` and includes a variable if its name
 starts with one of the tracked prefixes (``ENSEMBLE_``, ``OPENAI_``,
 ``POSTGRES_``, ``RAG_IS_REQUIRED``, ``MCP_``, ``LIGHTRAG_``,
-``OPENSPACE_``, ``QUEUE_DISCARD_ON_STARTUP``) OR equals one of the
+``QUEUE_DISCARD_ON_STARTUP``) OR equals one of the
 tracked exact names (``DATABASE_URL_POSTGRES``, ``POSTGRES_URL``,
 ``SOURCE_CREDENTIAL_KEY``, ``RAG_IS_REQUIRED``, ``TEMP``, ``TMP``).
 
@@ -393,9 +388,7 @@ Args:
 Masking policy (applied when ``nomask=False``):
 
 * The value is returned as ``"[REDACTED]"`` if the variable name is in
-  the explicit secret allow-list (``OPENSPACE_API_KEY``,
-  ``OPENSPACE_LLM_API_KEY``, ``OPENSPACE_LLM_API_BASE``,
-  ``OPENSPACE_LLM_EXTRA_HEADERS``, ``SOURCE_CREDENTIAL_KEY``,
+  the explicit secret allow-list (``SOURCE_CREDENTIAL_KEY``,
   ``LIGHTRAG_API_KEY``, ``POSTGRES_URL``,
   ``DATABASE_URL_POSTGRES``) OR if its name ends with any of
   ``_API_KEY``, ``_TOKEN``, ``_PASSWORD``, ``_SECRET``, ``_HEADERS``.

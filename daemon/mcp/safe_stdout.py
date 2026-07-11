@@ -20,7 +20,7 @@ server opt-in via::
     python -m daemon.mcp.safe_stdout daemon.mcp.kb_server [args...]
 
 Note: when the launcher is invoked by other daemon code (for example
-the OpenSpace MCP integration), ``sys.executable`` is used in place of
+the stdio MCP integration), ``sys.executable`` is used in place of
 ``python`` so the wrapper runs under the same interpreter that owns the
 virtualenv. Direct users can invoke ``python -m ...`` as shown above.
 

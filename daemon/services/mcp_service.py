@@ -476,17 +476,18 @@ class McpService:
                 ]
 
                 # Per-server tool-call timeout override: builtin
-                # definitions (e.g. OpenSpace ``execute_task`` is up to
-                # ~15min) declare their own ``tool_call_timeout``.
-                # STDIO-pooled servers reach create_lazy_mcp_tools via
-                # the warmup pool and never hit the long-running path,
-                # but HTTP/SSE remote-mode servers (and any non-pooled
-                # server) DO land here in the cold-discovery lazy
-                # creation path and need the override applied at wrap
-                # time. ``is not None`` is used so a definition can
-                # explicitly return ``0`` to disable timeout wrapping
-                # entirely (handled by ``tool_adapter``) — never coerce
-                # 0 to the global default.
+                # definitions (e.g. a long-running agent-execution tool
+                # that may run for several minutes) declare their own
+                # ``tool_call_timeout``. STDIO-pooled servers reach
+                # create_lazy_mcp_tools via the warmup pool and never
+                # hit the long-running path, but HTTP/SSE remote-mode
+                # servers (and any non-pooled server) DO land here in
+                # the cold-discovery lazy creation path and need the
+                # override applied at wrap time. ``is not None`` is
+                # used so a definition can explicitly return ``0`` to
+                # disable timeout wrapping entirely (handled by
+                # ``tool_adapter``) — never coerce 0 to the global
+                # default.
                 server_timeout = self._get_per_server_timeout(server.name)
                 effective_timeout = (
                     server_timeout if server_timeout is not None
@@ -591,8 +592,9 @@ class McpService:
             return None
         # ``tool_call_timeout`` is a property on the abstract base class
         # (returns None by default) and may be overridden by subclasses
-        # (e.g. OpenSpace returns 900). ``getattr`` is defensive against
-        # future subclasses that might not override the property.
+        # (e.g. a long-running builtin may return a value up to ~900s).
+        # ``getattr`` is defensive against future subclasses that might
+        # not override the property.
         return getattr(definition, "tool_call_timeout", None)
 
     def get_mcp_tools(self, instance_id: str) -> list[BaseTool]:
