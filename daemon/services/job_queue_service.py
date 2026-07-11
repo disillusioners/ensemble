@@ -1163,6 +1163,7 @@ class JobQueueService:
         return {
             "cancelled_queued": cancelled_queued,
             "cancelled_active": cancelled_active,
+            "orphaned_reaped": orphaned_reaped,
             "total_processed": total,
         }
     

@@ -924,39 +924,6 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
-    const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
-      width: '420px',
-      panelClass: 'dark-modal-panel',
-    });
-
-    dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
-      if (!confirmed) {
-        return;
-      }
-      this.cleanupInProgress.set(true);
-      this.jobService.cleanupAllJobs().subscribe({
-        next: (result) => {
-          this.cleanupInProgress.set(false);
-          this.snackBar.open(
-            `Cancelled ${result.cancelled_queued} queued, ${result.cancelled_active} active jobs`,
-            'Close',
-            { duration: 5000, panelClass: 'success-snackbar' }
-          );
-          this.onRefresh();
-        },
-        error: (err) => {
-          console.error('Failed to cleanup jobs:', err);
-          this.cleanupInProgress.set(false);
-          this.snackBar.open(
-            err?.message || 'Failed to cleanup jobs',
-            'Dismiss',
-            { duration: 5000, panelClass: 'error-snackbar' }
-          );
-        },
-      });
-    });
-  }
-
   protected onViewJobDetails(job: Job): void {
     this.selectedJob.set(job);
     this.drawerOpen.set(true);

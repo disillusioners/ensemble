@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, func, select as sql_select, text
+from sqlalchemy import bindparam, exists, literal, not_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
@@ -2186,14 +2187,32 @@ SET admission_state = 'queued',
           net for both kinds.
         * ``deleted_at IS NULL`` — soft-deleted rows are already
           hidden and should stay terminal-on-paper.
-        * The orphan test uses a ``NOT EXISTS`` against ``instances``
-          and ``job_locks`` so live ``active`` jobs (whose instance is
-          still in a non-terminal status and whose lock row exists)
-          are untouched. The check is intentionally DEFERRABLE-friendly
-          — concurrent INSERTs into ``instances`` cannot make a
-          truly-orphaned row suddenly look alive because the
-          ``instances`` row would still need to be in a non-terminal
-          status, which a freshly-finalised worker never is.
+        * The orphan test is a ``NOT EXISTS`` against ``instances``
+          so live ``active`` jobs (whose instance is still in a
+          non-terminal status) are untouched. The check is
+          deliberately race-tolerance friendly — concurrent INSERTs
+          into ``instances`` cannot make a truly-orphaned row suddenly
+          look alive because the ``instances`` row would still need to
+          be in a non-terminal status, which a freshly-finalised worker
+          never is.
+        * A row with ``instance_id IS NULL`` is also orphan: there is
+          no underlying instance to ever fire the observer feedback,
+          so a stuck-active flag here can only mean the lock was
+          already released under us.
+
+        Implementation notes:
+
+        The ``NOT IN :terminal_statuses`` predicate is built with an
+        ``expanding=True`` ``bindparam`` so SQLAlchemy renders the
+        IN-list correctly on both PostgreSQL (``NOT IN (:p1, :p2, …)``)
+        and SQLite (the dialect expands it the same way at execute
+        time). Without ``expanding=True`` SQLAlchemy binds the tuple
+        as a single parameter, which is a syntax error on both
+        backends. Built as a typed ``select(literal(1))`` subquery
+        wrapped in ``exists(...)`` rather than a bare ``text(...)``
+        because the inverted form (``~exists(...)``) needs a
+        ``ColumnElement`` — a ``TextClause`` cannot be inverted and
+        raises ``AssertionError``.
 
         Returns:
             List of ``JobItem`` rows that are stuck ``active`` but
@@ -2203,51 +2222,78 @@ SET admission_state = 'queued',
         """
         terminal_instance_statuses = ("completed", "failed", "cancelled", "dead")
 
+        # Correlated EXISTS subquery: 1 row iff the job's instance is
+        # alive (non-terminal). The ``expanding=True`` bindparam turns
+        # ``i.status NOT IN :terminal_statuses`` into a properly
+        # parameterised list, instead of a single placeholder that the
+        # backends interpret as a literal and reject.
+        live_instance_subquery = (
+            select(literal(1))
+            .select_from(text("instances i"))
+            .where(text("i.instance_id = job_queue_items.instance_id"))
+            .where(
+                text("i.status NOT IN :terminal_statuses").bindparams(
+                    bindparam("terminal_statuses", expanding=True)
+                )
+            )
+        )
+
         with SQLModelSession(self.engine) as session:
             stmt = (
                 select(JobItem)
                 .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
                 .where(JobItem.deleted_at.is_(None))
-                # No instance at all → orphan.
-                # OR instance exists but already terminal → orphan.
+                # Orphan = NULL instance_id OR no live (non-terminal)
+                # instance backing the row. ``not_`` of the EXISTS
+                # subquery is the only form that emits portable SQL
+                # across both PostgreSQL and SQLite.
                 .where(
                     (JobItem.instance_id.is_(None))
-                    | ~text(
-                        "EXISTS ("
-                        "  SELECT 1 FROM instances i"
-                        "  WHERE i.instance_id = job_queue_items.instance_id"
-                        "    AND i.status NOT IN :terminal_statuses"
-                        ")"
-                    ).bindparams(
-                        # sqlite-style placeholder via bindparam;
-                        # SQLAlchemy expands ``NOT IN :param`` into a
-                        # parameterised sub-query on PostgreSQL and an
-                        # expanded IN-list on SQLite.
-                        terminal_statuses=terminal_instance_statuses,
-                    )
+                    | not_(exists(live_instance_subquery))
                 )
                 .order_by(JobItem.created_at.asc(), JobItem.job_id)
+                # Bind the tuple at execute time so the expanding
+                # IN-list sees the full set of terminal statuses.
+                .params(terminal_statuses=list(terminal_instance_statuses))
             )
             return list(session.exec(stmt))
 
     def force_finalize_orphan(self, job_id: str, terminal_reason: str = "cancelled") -> JobItem | None:
-        """Force ``active → done`` on an orphan job whose trigger guard may fire.
+        """Force ``active → done`` on an orphan job.
+
+        Three predicates decide what an orphan looks like; the
+        matching ``force_finalize_orphan`` must therefore be safe to
+        call regardless of how the row got stuck.
+
+        Implementation choice:
 
         The PostgreSQL constraint trigger
-        ``trg_job_queue_items_active_lock_guard`` rejects the UPDATE if
-        there is no matching ``job_locks`` row for the job's instance
-        — which is exactly the case for a stuck ``active`` row that
-        never had a lock written (or had its lock removed under us).
-        The trigger is ``DEFERRABLE INITIALLY DEFERRED``, so disabling
-        it for the duration of the statement lets the UPDATE land; on
-        COMMIT the trigger is re-enabled and the row has been removed
-        from the ``active`` set already, so subsequent writers cannot
-        re-introduce a leak via the same backdoor.
+        ``trg_job_queue_items_active_lock_guard`` rejects the UPDATE
+        when ``admission_state='active' AND job_type != 'message'``
+        and there is no matching ``job_locks`` row. The trigger ONLY
+        fires for ``job_type != 'message'``; for ``message`` orphans
+        (the dominant failure mode in practice — observer feedback
+        can drop on process kill, leaving the JobItem mirror stuck
+        active while the Task side has long-since completed) the
+        UPDATE lands untouched.
 
-        The reaper only calls this for the rows returned by
-        :meth:`find_orphan_active_jobs`, so the trigger bypass is
-        scoped to a known-bad data shape. Normal write paths (start,
-        cancel, finalize) still pay the full guard cost.
+        For non-message orphans the right portable bypass is to
+        INSERT a synthetic ``job_locks`` row referencing the job's
+        ``instance_id`` inside the same transaction, run the UPDATE,
+        then DELETE the synthetic lock row in the same transaction
+        so it never escapes. The lock row's presence satisfies the
+        guard's ``EXISTS (SELECT 1 FROM job_locks WHERE instance_id
+        = NEW.instance_id)`` check (the matching active JobItem
+        itself is the other direction of the witness pair). The
+        DELETE runs unconditionally so a prior failed attempt that
+        leaked the synthetic row still cleans up.
+
+        Avoided alternative:
+
+        ``ALTER TABLE … DISABLE TRIGGER`` is PG-only and raises a
+        SQLite ``OperationalError`` on the dev / test DB. It also
+        disables the guard globally for the statement window,
+        re-opening the leak vector the guard exists to prevent.
 
         Args:
             job_id: Target orphan ``JobItem.job_id``.
@@ -2262,37 +2308,86 @@ SET admission_state = 'queued',
             or ``None`` if the row no longer matches the orphan
             predicate (e.g. a concurrent finalize flipped it).
         """
-        # Drop the constraint trigger for this single statement.
-        # Wrapping in engine.begin() so the ALTER TABLE .. ENABLE
-        # always runs, even if the UPDATE raises.
+        sentinel_lock_id = f"orphan-reap-{job_id}"
+        acquired_at = datetime.now(timezone.utc).isoformat()
+
         with self.engine.begin() as conn:  # type: ignore[arg-type]
-            conn.exec_driver_sql(
-                "ALTER TABLE job_queue_items "
-                "DISABLE TRIGGER trg_job_queue_items_active_lock_guard"
+            # 1. Insert a synthetic job_locks row ONLY when the
+            # trigger will reject our UPDATE (``job_type !=
+            # 'message'``). The SELECT picks the live ``instance_id``
+            # off the orphan JobItem itself; for ``NULL``
+            # ``instance_id`` orphans we skip the INSERT because the
+            # trigger's own JOIN key would be NULL and reject us
+            # anyway — these rows are also message-typed in practice
+            # (the active_lock_guard body skips message jobs so the
+            # branch that needs a sentinel never fires for them).
+            #
+            # Use ``WHERE NOT EXISTS`` instead of ``ON CONFLICT``
+            # so the INSERT is portable across SQLite and
+            # PostgreSQL without dialect branching. Step 3 always
+            # DELETE's the sentinel so a prior half-applied attempt
+            # cannot accumulate across runs.
+            sentinel_params = {
+                "sentinel_lock_id": sentinel_lock_id,
+                "job_id": job_id,
+                "acquired_at": acquired_at,
+            }
+            conn.execute(
+                text(
+                    "INSERT INTO job_locks "
+                    "  (lock_id, project_id, queue_id, job_id, instance_id, "
+                    "   acquired_at, lock_slot) "
+                    "SELECT :sentinel_lock_id, project_id, queue_id, :job_id, "
+                    "       instance_id, :acquired_at, 0 "
+                    "FROM job_queue_items "
+                    "WHERE job_id = :job_id "
+                    "  AND job_type != 'message' "
+                    "  AND admission_state = 'active' "
+                    "  AND deleted_at IS NULL "
+                    "  AND instance_id IS NOT NULL "
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM job_locks "
+                    "    WHERE lock_id = :sentinel_lock_id"
+                    "  )"
+                ),
+                sentinel_params,
             )
-            try:
-                result = conn.execute(
-                    text(
-                        "UPDATE job_queue_items "
-                        "SET admission_state = :done_state, "
-                        "    terminal_reason = :terminal_reason "
-                        "WHERE job_id = :job_id "
-                        "  AND admission_state = :active_state "
-                        "  AND deleted_at IS NULL"
-                    ),
-                    {
-                        "done_state": AdmissionState.DONE.value,
-                        "active_state": AdmissionState.ACTIVE.value,
-                        "terminal_reason": terminal_reason,
-                        "job_id": job_id,
-                    },
-                )
-                rowcount = result.rowcount or 0
-            finally:
-                conn.exec_driver_sql(
-                    "ALTER TABLE job_queue_items "
-                    "ENABLE TRIGGER trg_job_queue_items_active_lock_guard"
-                )
+
+            # 2. UPDATE the orphan row to done. The trigger's
+            # DEFERRABLE INITIALLY DEFERRED timing means it doesn't
+            # fire until COMMIT — so the synthetic lock row inserted
+            # above is visible when it does.
+            result = conn.execute(
+                text(
+                    "UPDATE job_queue_items "
+                    "SET admission_state = :done_state, "
+                    "    terminal_reason = :terminal_reason "
+                    "WHERE job_id = :job_id "
+                    "  AND admission_state = :active_state "
+                    "  AND deleted_at IS NULL"
+                ),
+                {
+                    "done_state": AdmissionState.DONE.value,
+                    "active_state": AdmissionState.ACTIVE.value,
+                    "terminal_reason": terminal_reason,
+                    "job_id": job_id,
+                    "sentinel_lock_id": sentinel_lock_id,
+                    "acquired_at": acquired_at,
+                },
+            )
+            rowcount = result.rowcount or 0
+
+            # 3. Always DELETE the synthetic lock row, even if the
+            # UPDATE didn't match (e.g. a concurrent legitimate
+            # finalize flipped the row between finder and reaper).
+            # The DELETE runs inside the same transaction so COMMIT
+            # makes the bypass invisible.
+            conn.execute(
+                text(
+                    "DELETE FROM job_locks WHERE lock_id = :sentinel_lock_id"
+                ),
+                {"sentinel_lock_id": sentinel_lock_id},
+            )
 
         if rowcount == 0:
             return None

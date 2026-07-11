@@ -10,6 +10,13 @@ from sqlmodel import SQLModel
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.lock_repository import LockRepository
+# Importing the Instance model registers it on ``SQLModel.metadata``
+# so the ``instances`` table is created by ``create_all`` in the
+# session-scoped engine fixture. Tests that exercise
+# ``JobRepository.find_orphan_active_jobs`` (the orphan reaper, Phase 2
+# of System Cleanup) correlate against ``instances`` — they would
+# fail at compile time against an engine where the table is absent.
+from daemon.repositories.instance.models import Instance  # noqa: F401
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services import project_normalizer

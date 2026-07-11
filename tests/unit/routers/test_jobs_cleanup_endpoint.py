@@ -167,6 +167,7 @@ class TestCleanupNonTerminalJobsService:
         assert result == {
             "cancelled_queued": 7,
             "cancelled_active": 0,
+            "orphaned_reaped": 0,
             "total_processed": 7,
         }
 
@@ -197,6 +198,7 @@ class TestCleanupNonTerminalJobsService:
         assert result == {
             "cancelled_queued": 2,
             "cancelled_active": 2,
+            "orphaned_reaped": 0,
             "total_processed": 4,
         }
 
@@ -224,6 +226,7 @@ class TestCleanupNonTerminalJobsService:
         assert result == {
             "cancelled_queued": 0,
             "cancelled_active": 2,
+            "orphaned_reaped": 0,
             "total_processed": 2,
         }
 
@@ -254,6 +257,7 @@ class TestCleanupNonTerminalJobsService:
         assert result == {
             "cancelled_queued": 1,
             "cancelled_active": 2,
+            "orphaned_reaped": 0,
             "total_processed": 3,
         }
 
@@ -270,6 +274,10 @@ class TestCleanupNonTerminalJobsService:
         * ``force_finalize_orphan`` is called for each candidate.
         * The regular ``cancel_job`` loop is untouched (none of the
           orphans go through it).
+        * The returned dict carries ``orphaned_reaped`` so the FE
+          snackbar can surface the ghost-row drain — Phase-2 review
+          caught the case where the dict was missing the key and the
+          ``JobCleanupResponse`` schema silently fell back to ``0``.
         """
         from daemon.services.job_queue_service import JobQueueService
 
@@ -300,15 +308,19 @@ class TestCleanupNonTerminalJobsService:
         # Per-row reap ran for all three candidates; ``None`` is
         # counted as 0 (not reaped) by the service loop.
         assert repo.force_finalize_orphan.call_count == 3
-        # Wire-up uses ``asyncio.to_thread`` which calls the bound
-        # method directly — just check the call args.
+        # Wire-up uses ``asyncio.to_thread`` which invokes the bound
+        # method directly — just check the positional args.
         called_ids = [
             call.args[0] for call in repo.force_finalize_orphan.call_args_list
         ]
         assert called_ids == ["orphan-A", "orphan-B", "orphan-C"]
+        # The orphan reap counter must travel back in the response so
+        # the FE can show "reaped N orphan active" — encoding the
+        # earlier bug (#2) where the dict dropped the key.
         assert result == {
             "cancelled_queued": 0,
             "cancelled_active": 0,
+            "orphaned_reaped": 2,
             "total_processed": 0,
         }
 
@@ -339,10 +351,12 @@ class TestCleanupNonTerminalJobsService:
 
         result = await service.cleanup_non_terminal_jobs()
 
-        # Batch + active counters still report.
+        # Batch + active counters still report; orphaned_reaped drops
+        # out because the reap pass raised.
         assert result == {
             "cancelled_queued": 2,
             "cancelled_active": 0,
+            "orphaned_reaped": 0,
             "total_processed": 2,
         }
 
