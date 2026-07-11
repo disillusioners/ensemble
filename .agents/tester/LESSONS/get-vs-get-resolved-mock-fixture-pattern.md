@@ -10,7 +10,6 @@
 - `tests/test_tool_filter.py`
 - `tests/unit/test_worker_agent.py`
 - `tests/unit/test_devops_agent.py`
-- `tests/unit/test_openspace_skill_loading.py`
 
 **Rule for future AgentRegistry changes**:
 - When renaming or aliasing `AgentRegistry` methods, add a deprecation alias OR grep + update all test mock fixtures in a single follow-up PR.

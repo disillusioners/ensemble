@@ -403,6 +403,5 @@ Using `JSONBType` (a JSON array of floats) instead of `BYTEA` / `numpy` / `pickl
 
 ## Related Documentation
 
-- [`docs/features/openspace-skill-engine.md`](features/openspace-skill-engine.md) — external OpenSpace MCP (superseded by native skill evolution)
 - [`docs/AGENTS.md`](AGENTS.md) — agent system, `meta.json` schema, innate skills
 - [`docs/mcp-integration.md`](mcp-integration.md) — MCP client/server architecture

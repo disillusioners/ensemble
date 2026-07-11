@@ -1104,37 +1104,6 @@ Returns available built-in MCP server templates.
       "display_name": "Context7",
       "description": "Provides up-to-date library documentation",
       "config_schema": []
-    },
-    {
-      "name": "openspace",
-      "display_name": "OpenSpace",
-      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, fix_skill for repairing/refining skills, and upload_skill for publishing skills to the community.",
-      "config_schema": [
-        {
-          "key": "openspace_model",
-          "label": "LLM Model",
-          "type": "text",
-          "description": "LLM model identifier for OpenSpace agents",
-          "default": "",
-          "required": false
-        },
-        {
-          "key": "openspace_max_iterations",
-          "label": "Max Iterations",
-          "type": "number",
-          "description": "Maximum iterations per execute_task call",
-          "default": "",
-          "required": false
-        },
-        {
-          "key": "openspace_backend_scope",
-          "label": "Backend Scope",
-          "type": "text",
-          "description": "Comma-separated backend scope filter",
-          "default": "",
-          "required": false
-        }
-      ]
     }
   ]
 }

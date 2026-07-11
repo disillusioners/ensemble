@@ -21,7 +21,6 @@
 | Suite | Total | Passed | Failed | Time |
 |---|---|---|---|---|
 | `tests/test_safe_stdout.py` | **43** | **43** | 0 | 3.78s |
-| `tests/unit/mcp/test_openspace_builtin.py` | **79** | **79** | 0 | 0.69s |
 | `tests/unit/mcp/` (broader MCP) | **79** | **79** | 0 | 0.80s |
 | MCP-related sweep (safe_stdout + builtin + context7 + rag) | **332** | **332** | 0 | 5.09s |
 
@@ -47,8 +46,6 @@
 ### 4. Backward compatibility — ✅ PASS
 - webfetch.py: `command: "uvx"` — NOT wrapped ✓
 - context7.py: `command: "npx"` — NOT wrapped ✓
-- openspace.py STDIO: uses `daemon.mcp.safe_stdout` wrapper ✓
-- openspace.py HTTP mode: NO wrapper, unaffected ✓
 
 ### 5. detach/reconfigure guard — ✅ PASS
 - `__getattr__` raises `AttributeError` for `detach()` and `reconfigure()`

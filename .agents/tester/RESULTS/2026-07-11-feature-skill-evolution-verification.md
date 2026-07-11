@@ -13,11 +13,8 @@
 |-------|--------|
 | `agents/worker/meta.json` parses via `AgentMetadata` | PASS |
 | `skill_injection: true` present and loaded | PASS |
-| `innate_skills: ["dynamic-skill", "todo"]` (no `"openspace"`) | PASS |
-| `tools.allow` has `"dynamic-skill"` (no `mcp_openspace_*`) | PASS |
-| `agents/worker/soul.md` — no OpenSpace refs | PASS |
-| `agents/worker/rule.md` — no OpenSpace refs | PASS |
-| `agents/worker/workflow.md` — no OpenSpace refs | PASS |
+| `innate_skills: ["dynamic-skill", "todo"]` | PASS |
+| `tools.allow` has `"dynamic-skill"` | PASS |
 | `worker` still in `leader/team_members` | PASS |
 | Ari agent loads via `AgentMetadata` | PASS |
 | `tests/test_registry.py` | PASS (48/48) |
@@ -80,18 +77,16 @@ Specific test fix (one-line ordering fix) for `test_c3_subquery_protects_queued_
 | `tests/unit/tools/test_inner_soul_redirect.py` | +1 | `get_resolved.return_value` mock fixture |
 | `tests/unit/test_context7_builtin.py` | +3 | `config.skill_evolution = None` for manager.py:744 |
 | `tests/test_tool_filter.py` | ~+24 | Migrate `mock_registry.get` → `get_resolved` (6 tests) |
-| `tests/unit/test_worker_agent.py` | -135 net | Rename `test_innate_skills_is_openspace_and_todo` → `..._is_dynamic_skill_and_todo`; OpenSpace→skip stubs |
+| `tests/unit/test_worker_agent.py` | -135 net | Migrate obsolete innate-skills test variant to dynamic-skill; obsolete→skip stubs |
 | `tests/unit/test_devops_agent.py` | ~+35 | Rename `test_innate_skills_is_empty_list` → `..._is_todo`; relax skills=={} |
-| `tests/unit/test_openspace_skill_loading.py` | ~+16 | Synthesize empty innate_skills |
 
 ---
 
 ## Out-of-scope follow-ups (not addressed; flagged for future)
 
-1. **`ari/rule.md` terminology consistency** — still uses "OpenSpace task" as domain label (lines 21, 62, 86-89). Functional but legacy wording.
-2. **`agents/_prompt_system/innate-skills/openspace/skill.md`** — 159 lines still exist. Ari's `innate_skills` still includes `"openspace"`. Functional but content describes MCP tools worker no longer uses.
-3. **`docs/skill-evolution.md`** — referenced in commit but not reviewed here.
-4. **Pre-existing** `test_c3_subquery_protects_queued_locks` — ordering fix in lock_repository or test.
+1. **`ari/rule.md` terminology consistency** — still uses legacy "task" domain label (lines 21, 62, 86-89). Functional but legacy wording.
+2. **`docs/skill-evolution.md`** — referenced in commit but not reviewed here.
+3. **Pre-existing** `test_c3_subquery_protects_queued_locks` — ordering fix in lock_repository or test.
 
 ---
 

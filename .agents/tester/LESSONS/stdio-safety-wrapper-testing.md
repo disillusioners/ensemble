@@ -29,5 +29,4 @@ The `_MCPSafeStdout` wrapper in `daemon/mcp/safe_stdout.py` that prevents `print
 
 ## Test Counts
 - safe_stdout: 43/43 tests
-- openspace_builtin: 79/79 tests
 - Full MCP sweep: 332/332 tests

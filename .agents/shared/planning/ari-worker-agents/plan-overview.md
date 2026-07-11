@@ -1,3 +1,5 @@
+> ⚠️ Note: OpenSpace references in these planning docs are obsolete. Worker has been migrated to the native dynamic-skill system. Kept for architectural context.
+
 # Plan Overview: Ari & Worker Agents
 
 ## Objective

@@ -4,7 +4,7 @@ agents-ensemble supports the Model Context Protocol (MCP) for extending agent ca
 
 agents-ensemble uses MCP in two distinct modes:
 
-- **MCP Client Mode**: Agents consume tools from external MCP servers (webfetch, context7, openspace, custom servers)
+- **MCP Client Mode**: Agents consume tools from external MCP servers (webfetch, context7, custom servers)
 - **MCP Server Mode**: agents-ensemble exposes its knowledge base tools to external AI agents via an embedded FastMCP server
 
 ---
@@ -17,7 +17,7 @@ In client mode, agents-ensemble connects to external MCP servers and makes their
 
 ### Built-in Servers
 
-agents-ensemble ships with three pre-configured MCP servers:
+agents-ensemble ships with two pre-configured MCP servers:
 
 #### WebFetch
 
@@ -49,31 +49,6 @@ Provides up-to-date library documentation via `@upstash/context7-mcp`.
 | Command | `npx -y @upstash/context7-mcp` |
 | Configuration | None required |
 
-#### OpenSpace
-
-Provides the self-evolving OpenSpace skill engine via `python3 -m openspace.mcp_server`. Exposes `execute_task`, `search_skills`, `fix_skill`, and `upload_skill` tools.
-
-| Property | Value |
-|----------|-------|
-| Name | `openspace` |
-| Transport | STDIO (or streamable-http when `ENS_OPENSPACE_REMOTE_URL` is set) |
-| Command | `sys.executable -m daemon.mcp.safe_stdout openspace.mcp_server` |
-| Configuration | None required (all fields optional) |
-
-**STDIO protection:** the command is wrapped by the daemon's `daemon.mcp.safe_stdout` helper, which forwards JSON-RPC binary bytes through `sys.stdout.buffer` and redirects stray `print()` calls to `sys.stderr`. Without this wrapper, a single `print()` inside the OpenSpace process would corrupt the JSON-RPC stream. `webfetch` and `context7` use external CLIs and are deliberately not wrapped.
-
-**HTTP mode URL validation:** `ENS_OPENSPACE_REMOTE_URL` must start with `http://` or `https://`. URLs containing userinfo (`user:pass@host`) are rejected because the URL is persisted to the DB and surfaces in API responses. **SSRF protection** for the URL is enforced via the same loopback/private/link-local rules as other HTTP transports (see [Transport Types](#transport-types) below); set `MCP_ALLOW_LOCAL=false` for strict SSRF blocking.
-
-**Graceful degradation:** if the `openspace-ai` package is not installed, the daemon's `is_available()` pre-check on `BuiltinServerDefinition` returns `False` (via `importlib.util.find_spec()`), and the bootstrap + warmup-pool paths skip OpenSpace entirely with a single INFO log. See [Built-in Availability Pre-check](#built-in-availability-pre-check) below.
-
-**Configuration Options:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `openspace_model` | text | empty | LLM model identifier for OpenSpace agents (e.g. `gpt-4o`, `claude-3-5-sonnet`). Empty = OpenSpace default. |
-| `openspace_max_iterations` | number | empty | Maximum iterations per `execute_task` call. Empty = OpenSpace default. |
-| `openspace_backend_scope` | text | empty | Comma-separated backend scope filter (e.g. `cloud,local`). Empty = all backends. |
-
 ### Built-in Availability Pre-check
 
 A built-in with external Python dependencies may not be installed in every deployment. The `BuiltinServerDefinition` base class supports a graceful-degradation pattern via the `is_available()` pre-check:
@@ -92,8 +67,6 @@ def is_available(cls) -> bool:
     except (ImportError, ValueError):
         return False
 ```
-
-Subclasses with optional dependencies set `required_package` to the importable package name. `OpenSpaceServerDefinition` is the current consumer — it sets `required_package = "openspace-ai"`.
 
 **When `is_available()` returns `False`:**
 
@@ -190,10 +163,10 @@ The warmup pool eliminates the 5-15 second cold-start latency for STDIO-based MC
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Warmup Pool                             │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐│
-│  │ webfetch conn #1 │  │ context7 conn #1│  │ openspace conn #1││
-│  │ (ready)         │  │ (ready)         │  │ (ready)         ││
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘│
+│  ┌─────────────────┐  ┌─────────────────┐│
+│  │ webfetch conn #1 │  │ context7 conn #1││
+│  │ (ready)         │  │ (ready)         ││
+│  └─────────────────┘  └─────────────────┘│
 └─────────────────────────────────────────────────────────────┘
             │                    │
             ▼                    ▼
@@ -234,7 +207,6 @@ mcp_pool:
   servers:
     webfetch: 2      # Override for webfetch
     context7: 1      # Override for context7
-    openspace: 1     # Override for openspace
   health_check_interval: 60
   health_check_timeout: 5
 ```
@@ -246,7 +218,6 @@ Prevent specific built-in servers from being created:
 ```bash
 MCP_DISABLE_BUILT_IN_WEBFETCH=true
 MCP_DISABLE_BUILT_IN_CONTEXT7=true
-MCP_DISABLE_BUILT_IN_OPENSPACE=true
 ```
 
 ### Transport Types
@@ -520,43 +491,6 @@ Response:
       "display_name": "Context7",
       "description": "Provides up-to-date library documentation...",
       "config_schema": []
-    },
-    {
-      "name": "openspace",
-      "display_name": "OpenSpace",
-      "description": "OpenSpace self-evolving skill engine. Provides execute_task for running embedded OpenSpace agents, search_skills for finding reusable skills, fix_skill for repairing/refining skills, and upload_skill for publishing skills to the community.",
-      "config_schema": [
-        {
-          "key": "openspace_model",
-          "label": "LLM Model",
-          "type": "text",
-          "description": "LLM model identifier for OpenSpace agents...",
-          "default": "",
-          "required": false,
-          "section": "env",
-          "arg_format": "key_value"
-        },
-        {
-          "key": "openspace_max_iterations",
-          "label": "Max Iterations",
-          "type": "number",
-          "description": "Maximum iterations per execute_task call...",
-          "default": "",
-          "required": false,
-          "section": "env",
-          "arg_format": "key_value"
-        },
-        {
-          "key": "openspace_backend_scope",
-          "label": "Backend Scope",
-          "type": "text",
-          "description": "Comma-separated backend scope filter...",
-          "default": "",
-          "required": false,
-          "section": "env",
-          "arg_format": "key_value"
-        }
-      ]
     }
   ]
 }
@@ -712,7 +646,6 @@ Configuration field definition for built-in servers:
 | `MCP_ALLOW_LOOPBACK` | `true` | Backwards-compatible alias for `MCP_ALLOW_LOCAL` |
 | `MCP_DISABLE_BUILT_IN_WEBFETCH` | `false` | Disable WebFetch built-in server |
 | `MCP_DISABLE_BUILT_IN_CONTEXT7` | `false` | Disable Context7 built-in server |
-| `MCP_DISABLE_BUILT_IN_OPENSPACE` | `false` | Disable OpenSpace built-in server |
 | `MCP_POOL_ENABLED` | `true` | Enable warmup pool |
 | `MCP_POOL_DEFAULT_POOL_SIZE` | `1` | Default pool size per server |
 | `MCP_POOL_HEALTH_CHECK_INTERVAL` | `60` | Health check interval (seconds) |

@@ -17,7 +17,6 @@
 
 - [x] `tests/unit/test_ari_worker_integration.py` — 13 cross-agent tests, all passing
 - [x] Registry validation confirms both agents discoverable
-- [x] OpenSpace skill loads in Worker prompt composition
 - [x] Dispatch graph verified acyclic (Ari → {leader, worker} via job tools, no cycles)
 - [x] Neither agent has `instance` tools or `team_members` confirmed in tests
 - [x] Autonomy model (Ari TrueAuto, Worker SemiAuto) present in prompt content
@@ -41,7 +40,6 @@
 - Neither has `team_members` (no spawn authorization)
 - Leader does NOT list `ari` or `worker` in team_members (no circular dispatch)
 - Ari has `job` in tools.allow (dispatch capability)
-- Worker has `mcp_openspace_execute_task` in tools.allow (OpenSpace execution)
 - Worker does NOT have `job` (terminal executor — no re-dispatch)
 - Both agents compose prompts successfully with their innate skills
 
@@ -64,13 +62,12 @@
 | test_ari_agent.py | 27 | 27 | 0 |
 | **Total** | **66** | **66** | **0** |
 
-### Batch 2: DevOps + OpenSpace + Registry — Pre-existing failures only
+### Batch 2: DevOps + Registry — Pre-existing failures only
 | File | Total | Passed | Failed |
 |------|-------|--------|--------|
 | test_devops_agent.py | 62 | 58 | 4* |
-| test_openspace_skill_loading.py | 17 | 17 | 0 |
 | test_registry.py | 48 | 48 | 0 |
-| **Total** | **127** | **123** | **4** |
+| **Total** | **110** | **106** | **4** |
 
 *4 DevOps failures are pre-existing (broken since `baf006c5 feat: register todo innate skill for all agents`), NOT caused by Phase 3.
 

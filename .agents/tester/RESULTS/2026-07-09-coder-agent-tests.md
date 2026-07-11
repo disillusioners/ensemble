@@ -58,14 +58,13 @@ Commit: 19e72ec3
 - Zero collection/import errors introduced by coder agent
 
 ### All 18 Agent-Related Test Files — ✅ No Coder Regressions
-- 606 passed, 17 failed, 8 skipped
-- All 17 failures verified as PRE-EXISTING (reproduced identically at HEAD~1 before coder existed)
+- 606 passed, 16 failed, 8 skipped
+- All 16 failures verified as PRE-EXISTING (reproduced identically at HEAD~1 before coder existed)
 
 ## Pre-Existing Failures (NOT caused by coder)
 | File | Failures | Root Cause |
 |------|----------|------------|
 | test_devops_agent.py | 3 | DevOps meta.json changed (`innate_skills: ["todo"]` vs test asserting empty) |
-| test_openspace_skill_loading.py | 1 | Empty innate_skills fall-through edge case |
 | test_gaia_agent.py | 7 | Missing `agents/gaia/scripts/` directory |
 | test_tool_filter.py | 6 | `_apply_tool_filter` bug — doesn't remove tools outside allow-list |
 | test_jober_watch_integration.py | 1 | Flaky — port 8079 in use |

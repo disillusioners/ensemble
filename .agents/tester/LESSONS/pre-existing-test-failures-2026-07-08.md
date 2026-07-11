@@ -1,7 +1,7 @@
 # Pre-existing Test Failures (as of 2026-07-08)
 
 ## Context
-During OpenSpace MCP Phase 1 regression testing, ~60 test failures were found across the full suite (~8643 tests). ALL are pre-existing — unrelated to OpenSpace MCP integration work.
+During regression testing, ~60 test failures were found across the full suite (~8643 tests). ALL are pre-existing — unrelated to specific feature integration work.
 
 ## Flaky Tests (concurrency-related, pass in isolation)
 
@@ -12,7 +12,7 @@ During OpenSpace MCP Phase 1 regression testing, ~60 test failures were found ac
 ### test_atomic_dequeue.py
 - `test_dequeue_concurrent_drains_n_messages_with_n_workers` — Passes 5/5 in isolation, fails under parallel load. Concurrent drain race.
 
-## Pre-existing Failures (non-OpenSpace)
+## Pre-existing Failures
 
 ### job_queue subsystem
 - Multiple failures in `test_job_repository_atomic_transition.py` — concurrent race conditions
