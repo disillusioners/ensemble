@@ -375,7 +375,7 @@ class TestPromptCompositionBoth:
         )
 
     def test_worker_composes_prompt_with_innate_skills(self) -> None:
-        """Worker's innate_skills (openspace, todo) must load and appear in the
+        """Worker's innate_skills (dynamic-skill, todo) must load and appear in the
         composed system prompt.
 
         Mirrors the test_openspace_skill_loading.py end-to-end pipeline.
@@ -393,8 +393,8 @@ class TestPromptCompositionBoth:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Worker's documented innate_skills
-        expected_skills = {"openspace", "todo"}
+        # Worker's documented innate_skills (migrated from openspace to dynamic-skill)
+        expected_skills = {"dynamic-skill", "todo"}
         assert set(meta.get("innate_skills", [])) == expected_skills, (
             f"Precondition failed: Worker innate_skills should be {expected_skills}, "
             f"got {set(meta.get('innate_skills', []))}"
@@ -417,10 +417,10 @@ class TestPromptCompositionBoth:
 
         assert isinstance(system_prompt, str)
         assert len(system_prompt) > 0, "Composed system prompt should not be empty"
-        # The OpenSpace skill is what teaches Worker about the 4 MCP tools
-        assert "OpenSpace-Skill" in system_prompt, (
-            "Composed Worker prompt should contain the OpenSpace-Skill heading "
-            "(from the openspace innate skill)"
+        # The dynamic-skill skill teaches Worker about the 6 skill tools
+        assert "Dynamic Skill System" in system_prompt, (
+            "Composed Worker prompt should contain the Dynamic Skill System heading "
+            "(from the dynamic-skill innate skill)"
         )
 
 
