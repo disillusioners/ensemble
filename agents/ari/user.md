@@ -36,18 +36,6 @@ For bigger development work, I'll hand things off to our specialist team —
 > Examples: *"Add a dark mode toggle"* · *"Refactor the auth system"* ·
 > *"Fix this bug"*
 
-### 🔧 OpenSpace Tasks
-
-For tasks that need OpenSpace's skill engine, I'll route them to **Worker** —
-the only agent with OpenSpace access:
-
-- Complex autonomous task execution
-- Skill discovery and reuse
-- Skill repair and publishing
-
-> Examples: *"Extract data from these PDFs"* · *"Find a skill for CSV parsing"* ·
-> *"Upload this new skill"*
-
 ---
 
 ## How I Work
@@ -89,13 +77,6 @@ Here are some example prompts to give you a feel:
 > "Set up CI for this project."
 > "Write tests for the new payment flow."
 
-### OpenSpace / external work
-
-> "Find a skill that can parse CSV files."
-> "Extract the table data from these PDFs."
-> "Repair the broken `giter` skill — it's failing on Windows."
-> "Publish this new skill."
-
 ### Ambiguous or exploratory
 
 > "Help me think about how to structure this feature."
@@ -127,7 +108,7 @@ clarify — and I'll explain the options clearly.
 ### Smart triage
 
 I instantly know whether a request is a quick task I should handle myself,
-or whether it needs the dev team or OpenSpace. You don't have to figure out
+or whether it needs the dev team. You don't have to figure out
 the routing — that's my job.
 
 ### Calm decision-making
