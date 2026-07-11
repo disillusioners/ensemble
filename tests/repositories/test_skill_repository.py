@@ -954,12 +954,12 @@ class TestSkillTrigger:
     def test_list_triggers_project_filter(
         self, trigger_repo, project_id, other_project_id
     ):
-        """list() returns only rows where ``project_id IS NULL``.
+        """list() filters by ``project_id`` correctly.
 
-        Note: the current implementation always filters by
-        ``project_id IS NULL`` regardless of the ``project_id`` arg —
-        the docstring describes a future behavior. This test pins the
-        current behavior so the change is intentional and reviewable.
+        Passing ``project_id=<id>`` scopes the result to that project
+        (only the trigger with that exact project_id is returned).
+        Passing ``project_id=None`` returns only the global rows (where
+        ``project_id IS NULL``).
         """
         # Global triggers (project_id IS NULL).
         g1 = trigger_repo.create(
@@ -977,15 +977,15 @@ class TestSkillTrigger:
             project_id=None,
         )
 
-        # Project-scoped triggers (should NOT be returned).
-        trigger_repo.create(
+        # Project-scoped triggers. Only ``p1`` matches ``project_id``.
+        p1 = trigger_repo.create(
             name="p1",
             condition_type="keyword",
             condition_json={"k": "v"},
             action="a",
             project_id=project_id,
         )
-        trigger_repo.create(
+        p2 = trigger_repo.create(
             name="p2",
             condition_type="keyword",
             condition_json={"k": "v"},
@@ -993,11 +993,26 @@ class TestSkillTrigger:
             project_id=other_project_id,
         )
 
-        listed = trigger_repo.list(project_id=project_id, enabled_only=False)
-        listed_ids = {t.id for t in listed}
-        # Only the global ones are returned, regardless of the
-        # ``project_id`` arg passed in.
-        assert listed_ids == {g1.id, g2.id}
+        # ``project_id=project_id`` returns just the matching project-scoped row.
+        scoped = trigger_repo.list(
+            project_id=project_id, enabled_only=False
+        )
+        scoped_ids = {t.id for t in scoped}
+        assert scoped_ids == {p1.id}
+
+        # ``project_id=other_project_id`` returns that other scoped row.
+        other_scoped = trigger_repo.list(
+            project_id=other_project_id, enabled_only=False
+        )
+        other_ids = {t.id for t in other_scoped}
+        assert other_ids == {p2.id}
+
+        # ``project_id=None`` returns just the global rows.
+        globals_listed = trigger_repo.list(
+            project_id=None, enabled_only=False
+        )
+        globals_ids = {t.id for t in globals_listed}
+        assert globals_ids == {g1.id, g2.id}
 
     def test_update_trigger(self, trigger_repo, project_id):
         """update() changes trigger fields."""

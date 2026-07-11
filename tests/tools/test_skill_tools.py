@@ -19,12 +19,12 @@ Test classes
 * :class:`TestFactory` — ``create_skill_tools`` returns 6 tools with
   the expected names, and the ``"dynamic-skill"`` category is
   registered in the tool registry.
-* :class:`TestServicesMissing` — when the three service/dispatcher
+* :class:`TestServicesMissing` — when the four service/dispatcher
   attributes are explicitly ``None``, the four read/write tools
   return the expected soft-fail message, ``skill_fix`` returns its
   user-facing record message with the "dispatcher not yet available"
-  note, and ``skill_feedback`` returns the Phase 2 stub message that
-  mentions ``"Phase 4"``.
+  note, and ``skill_feedback`` returns the "metrics service not yet
+  available" soft-fail.
 * :class:`TestServicesAvailable` — when each service is wired up
   (mocked via :class:`AsyncMock` from :mod:`unittest.mock`), the four
   read/write tools dispatch to the right service method with the right
@@ -98,6 +98,7 @@ FIX_RECORDED_NEEDLE = "Skill fix request recorded"
 DISPATCHER_MISSING_NEEDLE = "dispatcher not yet available"
 FEEDBACK_RECORDED_NEEDLE = "recorded"
 FEEDBACK_PHASE4_NEEDLE = "Phase 4"
+METRICS_SERVICE_MISSING_NEEDLE = "Skill metrics service is not yet available"
 ERROR_PREFIX = "ERROR:"
 
 # Fixture instance id \u2014 mirrors the existing test_skill_evolution_tools
@@ -135,6 +136,7 @@ def skill_tools():
     manager._skill_search_service = None
     manager._skill_store_service = None
     manager._skill_job_dispatcher = None
+    manager._skill_metrics_service = None
 
     tools_list = create_skill_tools(manager, _FIXTURE_INSTANCE_ID)
     return {getattr(t, "name", None): t for t in tools_list}
@@ -240,12 +242,13 @@ class TestFactory:
 
 class TestServicesMissing:
     """When ``manager._skill_search_service``,
-    ``manager._skill_store_service``, and ``manager._skill_job_dispatcher``
-    are all ``None``, every tool returns the appropriate soft-fail
-    string. The 4 read/write tools return a "service not yet
-    available" message; ``skill_fix`` always records the request but
-    adds a "dispatcher not yet available" note; ``skill_feedback``
-    returns the Phase 2 stub message.
+    ``manager._skill_store_service``, ``manager._skill_job_dispatcher``,
+    and ``manager._skill_metrics_service`` are all ``None``, every tool
+    returns the appropriate soft-fail string. The 4 read/write tools
+    return a "service not yet available" message; ``skill_fix`` always
+    records the request but adds a "dispatcher not yet available"
+    note; ``skill_feedback`` returns the "metrics service not yet
+    available" message.
     """
 
     @pytest.mark.asyncio
@@ -331,37 +334,44 @@ class TestServicesMissing:
         assert "Rename 'Setup' to 'Installation'" in result
 
     @pytest.mark.asyncio
-    async def test_skill_feedback_returns_phase2_stub_message(
+    async def test_skill_feedback_returns_soft_fail_when_metrics_service_missing(
         self, skill_tools
     ):
-        """``skill_feedback`` returns the Phase 2 stub message which
-        mentions ``"recorded"`` and ``"Phase 4"`` (the future
-        ``SkillMetricsService``-based replacement).
+        """``skill_feedback`` returns the soft-fail message when the
+        Phase 4 ``_skill_metrics_service`` backend is not yet wired.
+
+        Originally (Phase 2) the tool was a stub that mentioned
+        ``"Phase 4"``. Since Phase 4 shipped the real implementation,
+        ``skill_feedback`` delegates straight to the metrics service
+        and emits a clear "service not yet available" message when the
+        backend is absent — no stub text remains.
         """
         tool = skill_tools["skill_feedback"]
         result = await tool.ainvoke({"skill_id": "sk-feedback-target"})
-        assert FEEDBACK_RECORDED_NEEDLE in result
-        assert FEEDBACK_PHASE4_NEEDLE in result
+        assert METRICS_SERVICE_MISSING_NEEDLE in result
 
     @pytest.mark.asyncio
-    async def test_skill_feedback_logs_to_logger(self, skill_tools, caplog):
-        """``skill_feedback`` emits an INFO log line so the feedback
-        is recoverable from the daemon log even before Phase 4
-        persists it.
+    async def test_skill_feedback_logs_nothing_on_soft_fail(
+        self, skill_tools, caplog
+    ):
+        """``skill_feedback`` emits no warning/error log when the
+        metrics service is simply missing — soft-fail is silent on
+        the logger side. Errors are only logged when the service is
+        present but its call raises (see ``test_skill_feedback_tool``).
         """
         import logging
 
         tool = skill_tools["skill_feedback"]
 
-        with caplog.at_level(logging.INFO, logger="daemon.tools.skill_tools"):
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.tools.skill_tools"
+        ):
             await tool.ainvoke({"skill_id": "sk-feedback-target"})
 
-        # Find the expected log line. We accept any matching record
-        # so a future copy edit on the prefix doesn't break the
-        # test, but the (Phase 2 stub) marker is part of the contract.
-        matches = [r for r in caplog.records if "Skill feedback" in r.getMessage()]
-        assert matches, "Expected a 'Skill feedback' log record"
-        assert any("Phase 2 stub" in r.getMessage() for r in matches)
+        warnings = [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warnings == []
 
 
 # =============================================================================
