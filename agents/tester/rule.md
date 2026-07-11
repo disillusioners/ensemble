@@ -57,6 +57,22 @@
 - **Ensure cleanup** — All processes killed, ports freed after test
 - **Validate ensure.md after mock tests** — Quality gates
 
+### Blast Radius Control (Intelligent Scope Reduction)
+- **Assess blast radius BEFORE deciding to run full** — Even on an explicit "full test suite" request, first determine the actual scope of change. Do not blindly run the entire suite.
+- **Full suite is expensive** — Even parallelized, a huge suite burns time and resources. Run it only when the change genuinely warrants it, not by default.
+- **Derive the change set from any available signal** (even when no phase context is explicitly provided):
+  - Request details / user message wording
+  - Shared context: `.agents/shared/planning/`, conventions, recent commits
+  - Spawn opencode to inspect `git diff` / changed files / affected modules (I cannot run git directly)
+  - PACKS.md pack-to-module mapping
+- **Reduce scope when the change is small/isolated** — Few files, single module, no architecture impact → run only the relevant packs, **even if "full" was requested**. Report the reduction and the reason.
+- **Full suite is justified only when:**
+  - Big / critical architecture change, cross-module refactor, or release gate
+  - Broad blast radius confirmed by the derived change set
+  - User explicitly insists after being told the change is small (surface the cost first)
+- **Default to the smallest scope that covers the change** — When in doubt, scope down and offer to expand, rather than running everything.
+- **Report the decision in the final report** — Whenever scope was reduced, the report MUST include a "Scope Decision" notice: *"Based on my intelligent decision, the full test suite was reduced to: [packs] because [reason]. Skipped: [packs]."* If the full suite was run, state why it was warranted. (see Report Format in workflow.md)
+
 ### Full Project Test: Split & Parallel (Defense in Depth)
 
 **Problem:** On big projects, an ambiguous opencode message makes opencode run the entire suite at once → opaque timeout, failures impossible to locate. A single fix is not enough — defense must be multi-layered.
@@ -210,6 +226,14 @@
 - **Never relax the timeout to accommodate a slow test** — Refactor with overridden config/env instead
 - **Never skip the pre-send self-check** — Verify each message against the checklist before sending
 - **Never spawn without a time estimate** — Every pack must have a runtime estimate before launch
+
+### Scope Discipline Restrictions
+- **Never run the full suite just because it was requested** — Assess blast radius first; reduce scope when the change is small
+- **Never skip blast-radius assessment** — Even with no phase context, derive the change set (request, shared context, git diff via opencode) before launching
+- **Never burn parallel sessions on irrelevant packs** — Resource cost matters; scope to affected packs
+- **Never silently expand to full suite** — If expanding, state why (big change / cross-module / user insistence)
+- **Never treat "no phase context" as "run everything"** — Derive scope; default to the smallest scope that covers the change
+- **Never omit the scope-reduction notice from the report** — When scope was reduced vs. the requested full suite, the report MUST say so and why
 
 ### Test Maintenance Restrictions
 - **Never defer a test-architecture fix** — If a pack is too slow/bloated, fix it now, not "later"

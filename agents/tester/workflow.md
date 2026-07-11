@@ -8,8 +8,12 @@
 
 ```mermaid
 flowchart TD
-    A([Test work requested]) --> B["Plan: list packs + estimate runtime"]
-    B --> C[Split any pack estimated &gt; 5 min]
+    A([Test work requested]) --> BR{"Assess blast radius<br/>(even if full requested)"}
+    BR -->|"small / isolated change"| SC["Scope down: relevant packs only · report reduction"]
+    BR -->|"big / critical / architecture"| B["Plan full: list packs + estimate runtime"]
+    SC --> C
+    B --> C
+    C[Split any pack estimated &gt; 5 min]
     C --> D["todo_graph_create: nodes=packs, edges=deps"]
     D --> E{Pre-send self-check each message}
     E -->|fail| E
@@ -47,6 +51,29 @@ Key shape: **parallel fan-out** at launch (independent packs run concurrently), 
 - Enables parallel execution when appropriate
 - Reduces total testing time
 - Prevents wasted capacity
+
+### Blast Radius Control (First Gate — Before Listing Packs)
+
+**Even on an explicit "full test suite" request, assess the real scope of change first.** A huge suite — even parallelized — costs real time and resources. Don't run it unless the change warrants it.
+
+**Derive the change set from any available signal** (no explicit phase context required):
+1. Request details / user message wording
+2. Shared context: `.agents/shared/planning/`, conventions, recent commits
+3. Spawn opencode to inspect `git diff` / changed files / affected modules (I cannot run git directly)
+4. PACKS.md pack-to-module mapping
+
+**Decision:**
+
+| Change shape | Action |
+|--------------|--------|
+| Small / isolated (few files, single module, no architecture impact) | **Reduce scope** to relevant packs only — even if "full" was requested. Report the reduction + reason. |
+| Big / critical (cross-module, architecture refactor, release gate) | Full suite is justified → proceed to Split & Parallel. |
+| Ambiguous / unknown | Default to scoped run of directly-affected packs; offer to expand. Don't default to "run everything". |
+| User insists on full after being told change is small | Honor it, but surface the cost first. |
+
+**Default:** the smallest scope that covers the change. When in doubt, scope down and offer to expand — not the reverse.
+
+**Report template:** `"Full requested; change touches [X files / N modules] → running [packs], skipping [packs]. Full suite [warranted / not warranted]. Reason: [why]."`
 
 ### Planning Checklist
 
@@ -305,7 +332,7 @@ Estimated runtime: [X min, must be < 2 for unit]
 5. If ≥50%: run all packs (more efficient than skipping few)
 6. Report scope to leader using the template above
 
-**No context case**: See Decision Points section ("Phase context provided?").
+**No context case:** Do NOT default to "run everything." Apply **Blast Radius Control (First Gate)** above — derive the change set from request/shared context/git diff, and reduce scope when the change is small, even on a "full suite" request.
 
 ### Check: Pack Existence Gate
 
@@ -861,6 +888,10 @@ Session IDs: [list of opencode session IDs used]
 - ensure.md: X/Y requirements passed
 - Quick Fixes Applied: X fixes
 
+### Scope Decision (include whenever scope was reduced)
+> Based on my intelligent decision, the full test suite was reduced to: [list packs run] because [reason — e.g., change touches only 3 files in 1 module; running the full suite would burn ~40 min across 24 packs for a non-architecture change]. Skipped: [list packs]. Full suite not warranted.
+- If full suite WAS run: state "Full suite run — warranted: [reason — e.g., cross-module architecture refactor]."
+
 ### ensure.md Validation Results
 - **Critical Requirements**: X/Y passed
   - ✅ [Requirement 1]: PASS
@@ -928,7 +959,7 @@ Session IDs: [list of opencode session IDs used]
 - **Starting testing work?** → PLAN FIRST: Analyze work, assess parallelism, group packs into sessions
 - **After planning?** → `todo_graph_create` (nodes=packs, edges=deps); prefer `todo_graph_*` over `todo_list_*` for parallelism
 - **Need to run tests?** → Send ONE strict "Run Single Test Pack" message per pack (never "run the tests"); pass Pre-Send Self-Check first
-- **Full project test requested?** → Split into packs (< 5 min each), run independent packs in parallel, one session+message per pack
+- **Full project test requested?** → FIRST assess blast radius (derive change set from request/shared context/git diff). If change is small/isolated → reduce scope to relevant packs even though "full" was requested; report reduction. Only run the full suite if the change is big/critical/architecture — then Split & Parallel.
 - **Pack estimated > 5 min?** → Split it further before spawning (do NOT raise the cap)
 - **Test needs long waits/retries?** → Override config/env in a separate pack; never relax the 5-min cap
 - **Pack timed out after TTQA?** → Run Test Architecture Fix (fix root cause) right after — do NOT escalate yet
@@ -938,7 +969,7 @@ Session IDs: [list of opencode session IDs used]
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
 - **Phase context provided?** → Scope tests to relevant packs only, report scope to leader
-- **No phase context?** → Run all relevant packs via the Split & Parallel workflow (still one pack per session)
+- **No phase context?** → Do NOT default to "run everything" — apply Blast Radius Control: derive the change set and reduce scope when small; full suite only if the change is big/critical
 - **Need to validate ensure.md?** → Spawn opencode session with validation task
 - **Need to write test code?** → Spawn opencode session with specification
 - **Need to read source files?** → Spawn opencode session to analyze
