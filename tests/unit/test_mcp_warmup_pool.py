@@ -108,10 +108,9 @@ class TestRegisterServer:
 class TestPerServerTimeout:
     """Tests for per-server ``tool_call_timeout`` override on McpWarmupPool.
 
-    Phase 2 of the OpenSpace MCP integration lets each built-in server request
-    its own ``tool_call_timeout`` (in seconds) at registration time. OpenSpace
-    sets this to 900s because ``execute_task`` may run long-lived agents; the
-    other builtins (context7, webfetch) inherit the pool-wide default.
+    Each built-in server may request its own ``tool_call_timeout`` (in
+    seconds) at registration time. Builtins that do not override the
+    pool-wide default still work — the override is opt-in.
 
     The implementation must:
     - Store the override in ``_tool_call_timeouts[server_name]`` when the
@@ -157,32 +156,13 @@ class TestPerServerTimeout:
 
     # --- builtin server definition wiring -----------------------------------
 
-    def test_register_openspace_uses_900s(self, pool):
-        """End-to-end: ``OpenSpaceServerDefinition.tool_call_timeout`` flows into
-        ``register_server`` and lands at ``_tool_call_timeouts["openspace"] == 900``.
-
-        This proves the property → register_server wiring. If the
-        ``OpenSpaceServerDefinition.tool_call_timeout`` override is removed,
-        the assertion below fails — guarding against accidental regression
-        in either the definition or the pool.
-        """
-        from daemon.mcp.builtin_servers.openspace import OpenSpaceServerDefinition
-
-        defn = OpenSpaceServerDefinition()
-        pool.register_server(
-            "openspace",
-            _make_config(),
-            tool_call_timeout=defn.tool_call_timeout,
-        )
-
-        assert pool._tool_call_timeouts["openspace"] == 900
-
     def test_webfetch_context7_have_none_timeout(self):
         """WebFetch and Context7 return ``None`` for ``tool_call_timeout``.
 
-        They inherit the base class default — this is the "Existing servers
-        unaffected" scenario (Phase 2 §4). Documents that only OpenSpace
-        currently overrides the default among the builtins.
+        They inherit the base class default — none of the current builtins
+        override the pool-wide default, so the override plumbing is
+        exercised by the explicit ``tool_call_timeout=...`` calls above
+        rather than by real production definitions.
         """
         from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
         from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition

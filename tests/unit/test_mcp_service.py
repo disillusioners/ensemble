@@ -280,21 +280,30 @@ class TestPreloadMcpTools:
 
     @pytest.mark.asyncio
     async def test_per_server_timeout_overrides_global_default(self, service, manager):
-        """Per-server override (OpenSpace=900) wins over global default (120)."""
-        server = _make_server(name="openspace", is_builtin=True)
-        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
-        service.get_schemas_for_server = AsyncMock(
-            return_value=[_make_schema("execute_task", "openspace")]
-        )
+        """Per-server override (test builtin=900) wins over global default (120)."""
+        # Use a test builtin defined inline so the override is test-controlled
+        # and doesn't depend on any specific production builtin being present.
+        override_definition = MagicMock()
+        override_definition.tool_call_timeout = 900
 
         with patch(
-            "daemon.services.mcp_service.create_lazy_mcp_tools",
-            return_value=[_make_tool(name="mcp_openspace_execute_task")],
-        ) as mock_create:
-            await service.preload_mcp_tools("inst-1")
+            "daemon.mcp.builtin_servers.get_registry",
+            return_value=MagicMock(get_by_name=MagicMock(return_value=override_definition)),
+        ):
+            server = _make_server(name="test-server-with-override", is_builtin=True)
+            manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+            service.get_schemas_for_server = AsyncMock(
+                return_value=[_make_schema("execute_task", "test-server-with-override")]
+            )
 
-        call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs["tool_call_timeout"] == 900
+            with patch(
+                "daemon.services.mcp_service.create_lazy_mcp_tools",
+                return_value=[_make_tool(name="mcp_test_server_with_override_execute_task")],
+            ) as mock_create:
+                await service.preload_mcp_tools("inst-1")
+
+            call_kwargs = mock_create.call_args.kwargs
+            assert call_kwargs["tool_call_timeout"] == 900
 
     @pytest.mark.asyncio
     async def test_zero_sentinel_preserved_through_preload(self, service, manager):
@@ -847,12 +856,6 @@ class TestSessionProviderHelpers:
     def test_get_per_server_timeout_returns_none_for_non_builtin(self, service):
         """Unknown / non-builtin server names return None (fall back to global)."""
         assert service._get_per_server_timeout("not-a-builtin") is None
-
-    def test_get_per_server_timeout_openspace_override(self, service):
-        """OpenSpace's 900s override is returned as-is (15min for execute_task)."""
-        # The OpenSpace definition is registered at import time in
-        # daemon/mcp/builtin_servers/__init__.py — no mocking needed.
-        assert service._get_per_server_timeout("openspace") == 900
 
     def test_get_per_server_timeout_builtin_no_override_returns_none(self, service):
         """Builtins without a tool_call_timeout override return None.

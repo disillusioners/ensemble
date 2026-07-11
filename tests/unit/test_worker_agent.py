@@ -1,14 +1,13 @@
 """Comprehensive tests for the Worker agent.
 
-Tests Worker agent discovery, loading, tool filtering, OpenSpace innate skill
-loading, and the no-spawn-authorization constraint. Mirrors the gold-standard
-pattern from test_devops_agent.py exactly (class-per-concern structure,
-fixture style, assertion patterns, imports).
+Tests Worker agent discovery, loading, tool filtering, innate skill
+loading, and the no-spawn-authorization constraint. Mirrors the
+gold-standard pattern from test_devops_agent.py exactly (class-per-concern
+structure, fixture style, assertion patterns, imports).
 
 All tests run in the unit test environment with langgraph mocks from
-conftest.py. Tests are spec-driven and do not require OpenSpace (the
-openspace-ai package) to be installed — they only inspect prompt
-composition and metadata.
+conftest.py. Tests are spec-driven and only inspect prompt composition
+and metadata.
 """
 
 import json
@@ -49,16 +48,6 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "help": ["tool_help"],
     "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
 }
-
-# The 4 OpenSpace MCP tool names that Worker must explicitly grant.
-# These are individual tool names (not categories) — they must appear
-# verbatim in tools.allow.
-OPENSPACE_TOOL_NAMES = [
-    "mcp_openspace_execute_task",
-    "mcp_openspace_search_skills",
-    "mcp_openspace_fix_skill",
-    "mcp_openspace_upload_skill",
-]
 
 
 # =============================================================================
@@ -175,7 +164,7 @@ class TestWorkerMetaJsonValidation:
     def test_innate_skills_is_dynamic_skill_and_todo(self) -> None:
         """Worker should have innate_skills == ['dynamic-skill', 'todo'].
 
-        Worker migrated from OpenSpace MCP to native dynamic-skill system
+        Worker uses the native dynamic-skill system for skill search /
         on commit de8ff83f. It must have dynamic-skill (for skill search /
         injection) and todo (for in-flight task tracking). No other
         innate skills should be declared.
@@ -238,19 +227,6 @@ class TestWorkerToolFilter:
         assert worker.tools.deny is None
         assert worker.tools.allow is not None
         assert len(worker.tools.allow) > 0
-
-    def test_worker_allows_all_openspace_tools(self) -> None:
-        """OBSOLETE: Worker migrated to dynamic-skill (commit de8ff83f).
-
-        The 4 OpenSpace MCP tools are no longer in worker's tools.allow.
-        See TestWorkerToolFilter::test_worker_has_dynamic_skill_tool for
-        the post-migration equivalent. This test is kept as a stub so
-        the migration is explicitly documented in the test suite.
-        """
-        import pytest
-        pytest.skip(
-            "Worker migrated from OpenSpace MCP to dynamic-skill in commit de8ff83f"
-        )
 
     def test_worker_has_basic_tools(self) -> None:
         """Worker should have bash, filesystem, time, self, help tools after filtering."""
@@ -407,36 +383,8 @@ class TestWorkerPromptComposition:
 
 
 # =============================================================================
-# 5. Dynamic-Skill Innate Skill Loading  (post OpenSpace migration)
+# 5. Dynamic-Skill Innate Skill Loading
 # =============================================================================
-
-
-class TestWorkerOpenSpaceSkillLoading:
-    """OBSOLETE: Worker migrated from OpenSpace to native dynamic-skill (de8ff83f).
-
-    The OpenSpace skill is no longer in Worker's innate_skills list. Worker
-    now uses the native dynamic-skill system (see TestWorkerDynamicSkillLoading
-    below for the post-migration equivalent). These test methods are kept as
-    skipping stubs so the migration is documented in the test suite.
-    """
-
-    def test_openspace_skill_loads_into_composed_prompt(self) -> None:
-        import pytest
-        pytest.skip(
-            "Worker migrated from OpenSpace to dynamic-skill (commit de8ff83f)"
-        )
-
-    def test_openspace_tool_names_appear_in_composed_prompt(self) -> None:
-        import pytest
-        pytest.skip(
-            "Worker migrated from OpenSpace to dynamic-skill (commit de8ff83f)"
-        )
-
-    def test_short_tool_names_appear_in_composed_prompt(self) -> None:
-        import pytest
-        pytest.skip(
-            "Worker migrated from OpenSpace to dynamic-skill (commit de8ff83f)"
-        )
 
 
 # =============================================================================

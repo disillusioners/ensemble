@@ -1,7 +1,7 @@
 """Phase 3 cross-agent integration tests for Ari + Worker.
 
 Verifies the cross-cutting contracts between the Ari (jober-hybrid) and
-Worker (OpenSpace orchestrator) agents added in Phases 1 and 2. These
+Worker agents added in Phases 1 and 2. These
 tests cover concerns that span both agents and the broader system:
 
 - Coexistence: both agents discoverable through AgentRegistry simultaneously
@@ -25,8 +25,7 @@ Mirrors the gold-standard pattern from test_devops_agent.py and the
 sister-agent patterns from test_worker_agent.py / test_ari_agent.py
 (class-per-concern structure, fixture style, assertion patterns,
 imports). All tests are spec-driven and run in the unit environment
-with langgraph/MCP mocks from conftest.py — no live OpenSpace or job
-queue required.
+with langgraph/MCP mocks from conftest.py — no live job queue required.
 """
 
 import json
@@ -156,9 +155,8 @@ class TestNoTeamMembers:
         """Worker meta.json must have NO team_members field, OR an empty list.
 
         Worker is a leaf executor — it receives jobs from Ari via the job
-        queue and executes them via OpenSpace MCP tools. It must NOT be
-        able to spawn any other agents. Empty/missing team_members is
-        the deny-by-default contract.
+        queue and executes them. It must NOT be able to spawn any other
+        agents. Empty/missing team_members is the deny-by-default contract.
         """
         meta_path = WORKER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
@@ -244,7 +242,7 @@ class TestDispatchGraphAcyclic:
     2. Routing topology: Leader's team_members must NOT list 'ari' or
        'worker'. Leader dispatches to its own knowledge team
        (developer, planner, etc.), never back to Ari (the user-facing
-       front door) or Worker (the OpenSpace executor).
+       front door) or Worker (the leaf executor).
 
     A cycle would create an infinite loop: Ari → Leader → ... → Ari.
     """
@@ -289,7 +287,7 @@ class TestDispatchGraphAcyclic:
         reviewer, etc.). Listing 'ari' or 'worker' would let Leader
         spawn an Ari instance — but Ari is the user-facing front door,
         not a worker that Leader should dispatch to. Listing 'worker'
-        would let Leader spawn the OpenSpace executor directly,
+        would let Leader spawn the leaf executor directly,
         bypassing Ari's triage logic. Both paths would create cycles.
         """
         meta_path = LEADER_AGENT_DIR / "meta.json"
@@ -325,10 +323,10 @@ class TestPromptCompositionBoth:
     """
 
     def test_ari_composes_prompt_with_innate_skills(self) -> None:
-        """Ari's innate_skills (job-orchestration, openspace, chart, todo)
-        must load and appear in the composed system prompt.
+        """Ari's innate_skills (job-orchestration, chart, todo) must load
+        and appear in the composed system prompt.
 
-        Mirrors the gold-standard pattern from test_openspace_skill_loading.py:
+        Mirrors the gold-standard pattern from the loader tests:
         read the actual meta.json, pass it to load_agent_skills(), then
         compose_system_prompt() and verify the skill content is present.
         """
@@ -343,7 +341,7 @@ class TestPromptCompositionBoth:
             meta = json.load(f)
 
         # Ari's documented innate_skills
-        expected_skills = {"job-orchestration", "openspace", "chart", "todo"}
+        expected_skills = {"job-orchestration", "chart", "todo"}
         assert set(meta.get("innate_skills", [])) == expected_skills, (
             f"Precondition failed: Ari innate_skills should be {expected_skills}, "
             f"got {set(meta.get('innate_skills', []))}"
@@ -368,18 +366,12 @@ class TestPromptCompositionBoth:
         # that the skill section actually made it into the final output.
         assert isinstance(system_prompt, str)
         assert len(system_prompt) > 0, "Composed system prompt should not be empty"
-        # OpenSpace is in both agents' skills; verify the heading marker
-        assert "OpenSpace-Skill" in system_prompt, (
-            "Composed Ari prompt should contain the OpenSpace-Skill heading "
-            "(from the openspace innate skill)"
-        )
 
     def test_worker_composes_prompt_with_innate_skills(self) -> None:
         """Worker's innate_skills (dynamic-skill, todo) must load and appear in the
         composed system prompt.
 
-        Mirrors the test_openspace_skill_loading.py end-to-end pipeline.
-        Worker is a smaller agent than Ari (2 innate_skills vs 4), so
+        Worker is a smaller agent than Ari (2 innate_skills vs 3), so
         this is a focused check that the loader handles a minimal
         innate_skills list correctly.
         """
@@ -393,7 +385,7 @@ class TestPromptCompositionBoth:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Worker's documented innate_skills (migrated from openspace to dynamic-skill)
+        # Worker's documented innate_skills
         expected_skills = {"dynamic-skill", "todo"}
         assert set(meta.get("innate_skills", [])) == expected_skills, (
             f"Precondition failed: Worker innate_skills should be {expected_skills}, "
@@ -418,8 +410,8 @@ class TestPromptCompositionBoth:
         assert isinstance(system_prompt, str)
         assert len(system_prompt) > 0, "Composed system prompt should not be empty"
         # The dynamic-skill skill teaches Worker about the 6 skill tools
-        assert "Dynamic Skill System" in system_prompt, (
-            "Composed Worker prompt should contain the Dynamic Skill System heading "
+        assert "Dynamic Skill" in system_prompt, (
+            "Composed Worker prompt should contain the Dynamic Skill heading "
             "(from the dynamic-skill innate skill)"
         )
 

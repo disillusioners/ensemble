@@ -1051,39 +1051,39 @@ class TestRedactSecretsUtility:
     - Env keys containing KEY, TOKEN, SECRET, or PASSWORD (case-
       insensitive substring match) have their values replaced with
       ``"[REDACTED]"``.
-    - Non-sensitive env keys (e.g. ``OPENSPACE_MODEL``,
-      ``OPENSPACE_MCP_TRANSPORT``) keep their original values.
+    - Non-sensitive env keys (e.g. ``CUSTOM_MODEL``,
+      ``CUSTOM_MCP_TRANSPORT``) keep their original values.
     - Top-level keys outside ``env`` are NOT touched.
     """
 
     def test_redacts_open_space_llm_api_key(self):
-        """OPENSPACE_LLM_API_KEY value → '[REDACTED]'."""
+        """CUSTOM_LLM_API_KEY value → '[REDACTED]'."""
         config = {
             "env": {
-                "OPENSPACE_LLM_API_KEY": "sk-llm-secret-12345",
-                "OPENSPACE_MODEL": "gpt-4o",
+                "CUSTOM_LLM_API_KEY": "sk-llm-secret-12345",
+                "CUSTOM_MODEL": "gpt-4o",
             }
         }
         result = redact_secrets(config)
 
-        assert result["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
-        assert result["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+        assert result["env"]["CUSTOM_LLM_API_KEY"] == "[REDACTED]"
+        assert result["env"]["CUSTOM_MODEL"] == "gpt-4o"
 
     def test_redacts_open_space_api_key(self):
-        """OPENSPACE_API_KEY value → '[REDACTED]'."""
+        """CUSTOM_API_KEY value → '[REDACTED]'."""
         config = {
             "env": {
-                "OPENSPACE_API_KEY": "sk-api-secret-67890",
-                "OPENSPACE_MCP_TRANSPORT": "stdio",
+                "CUSTOM_API_KEY": "sk-api-secret-67890",
+                "CUSTOM_MCP_TRANSPORT": "stdio",
             }
         }
         result = redact_secrets(config)
 
-        assert result["env"]["OPENSPACE_API_KEY"] == "[REDACTED]"
-        assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
+        assert result["env"]["CUSTOM_API_KEY"] == "[REDACTED]"
+        assert result["env"]["CUSTOM_MCP_TRANSPORT"] == "stdio"
 
     def test_redacts_open_space_llm_api_base(self):
-        """OPENSPACE_LLM_API_BASE value → '[REDACTED]'.
+        """CUSTOM_LLM_API_BASE value → '[REDACTED]'.
 
         The env-key matcher includes ``BASE`` in its marker list, so any
         ``*_API_BASE`` style endpoint URL is treated as sensitive even
@@ -1092,57 +1092,57 @@ class TestRedactSecretsUtility:
         """
         config = {
             "env": {
-                "OPENSPACE_LLM_API_BASE": "https://llm.internal/v1",
-                "OPENSPACE_MODEL": "gpt-4o",
+                "CUSTOM_LLM_API_BASE": "https://llm.internal/v1",
+                "CUSTOM_MODEL": "gpt-4o",
             }
         }
         result = redact_secrets(config)
 
-        assert result["env"]["OPENSPACE_LLM_API_BASE"] == "[REDACTED]"
-        assert result["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+        assert result["env"]["CUSTOM_LLM_API_BASE"] == "[REDACTED]"
+        assert result["env"]["CUSTOM_MODEL"] == "gpt-4o"
 
     def test_redacts_open_space_llm_extra_headers(self):
-        """OPENSPACE_LLM_EXTRA_HEADERS value → '[REDACTED]'.
+        """CUSTOM_LLM_EXTRA_HEADERS value → '[REDACTED]'.
 
         ``EXTRA_HEADERS`` typically carries an ``Authorization: Bearer …``
         token, so the marker list treats ``HEADERS`` as sensitive.
         """
         config = {
             "env": {
-                "OPENSPACE_LLM_EXTRA_HEADERS": '{"Authorization": "Bearer sk-xyz"}',
-                "OPENSPACE_MCP_TRANSPORT": "stdio",
+                "CUSTOM_LLM_EXTRA_HEADERS": '{"Authorization": "Bearer sk-xyz"}',
+                "CUSTOM_MCP_TRANSPORT": "stdio",
             }
         }
         result = redact_secrets(config)
 
-        assert result["env"]["OPENSPACE_LLM_EXTRA_HEADERS"] == "[REDACTED]"
-        assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
+        assert result["env"]["CUSTOM_LLM_EXTRA_HEADERS"] == "[REDACTED]"
+        assert result["env"]["CUSTOM_MCP_TRANSPORT"] == "stdio"
 
     def test_preserves_non_sensitive_env_keys(self):
-        """Non-sensitive env keys (OPENSPACE_MODEL, OPENSPACE_MCP_TRANSPORT)
+        """Non-sensitive env keys (CUSTOM_MODEL, CUSTOM_MCP_TRANSPORT)
         keep their values intact.
         """
         config = {
             "env": {
-                "OPENSPACE_MODEL": "claude-3-5-sonnet",
-                "OPENSPACE_MAX_ITERATIONS": "30",
-                "OPENSPACE_BACKEND_SCOPE": "cloud,local",
-                "OPENSPACE_MCP_TRANSPORT": "stdio",
+                "CUSTOM_MODEL": "claude-3-5-sonnet",
+                "CUSTOM_MAX_ITERATIONS": "30",
+                "CUSTOM_BACKEND_SCOPE": "cloud,local",
+                "CUSTOM_MCP_TRANSPORT": "stdio",
             }
         }
         result = redact_secrets(config)
 
-        assert result["env"]["OPENSPACE_MODEL"] == "claude-3-5-sonnet"
-        assert result["env"]["OPENSPACE_MAX_ITERATIONS"] == "30"
-        assert result["env"]["OPENSPACE_BACKEND_SCOPE"] == "cloud,local"
-        assert result["env"]["OPENSPACE_MCP_TRANSPORT"] == "stdio"
+        assert result["env"]["CUSTOM_MODEL"] == "claude-3-5-sonnet"
+        assert result["env"]["CUSTOM_MAX_ITERATIONS"] == "30"
+        assert result["env"]["CUSTOM_BACKEND_SCOPE"] == "cloud,local"
+        assert result["env"]["CUSTOM_MCP_TRANSPORT"] == "stdio"
 
     def test_does_not_mutate_original_config(self):
         """Calling ``redact_secrets`` must not mutate the original dict."""
         original = {
             "env": {
-                "OPENSPACE_LLM_API_KEY": "sk-original-secret",
-                "OPENSPACE_MODEL": "gpt-4o",
+                "CUSTOM_LLM_API_KEY": "sk-original-secret",
+                "CUSTOM_MODEL": "gpt-4o",
             },
             "transport": "stdio",
         }
@@ -1157,13 +1157,13 @@ class TestRedactSecretsUtility:
             f"vs snapshot {snapshot!r}"
         )
         # Stronger assertion: the secret value is still the original secret.
-        assert original["env"]["OPENSPACE_LLM_API_KEY"] == "sk-original-secret"
+        assert original["env"]["CUSTOM_LLM_API_KEY"] == "sk-original-secret"
 
     def test_returns_deep_copy(self):
         """Result is a deep copy — mutating it doesn't affect the input."""
         original = {
-            "env": {"OPENSPACE_MODEL": "gpt-4o"},
-            "args": ["-m", "openspace.mcp_server"],
+            "env": {"CUSTOM_MODEL": "gpt-4o"},
+            "args": ["-m", "my_custom_server"],
         }
         result = redact_secrets(original)
 
@@ -1222,17 +1222,17 @@ class TestRedactSecretsUtility:
     def test_does_not_touch_keys_outside_env(self):
         """Top-level keys outside ``env`` are returned verbatim."""
         config = {
-            "env": {"OPENSPACE_LLM_API_KEY": "sk-x"},
+            "env": {"CUSTOM_LLM_API_KEY": "sk-x"},
             "transport": "stdio",
             "command": "python3",
-            "args": ["-m", "openspace.mcp_server"],
+            "args": ["-m", "my_custom_server"],
         }
         result = redact_secrets(config)
 
         assert result["transport"] == "stdio"
         assert result["command"] == "python3"
-        assert result["args"] == ["-m", "openspace.mcp_server"]
-        assert result["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
+        assert result["args"] == ["-m", "my_custom_server"]
+        assert result["env"]["CUSTOM_LLM_API_KEY"] == "[REDACTED]"
 
     def test_empty_dict(self):
         """Empty config → empty result, no error."""
@@ -1252,10 +1252,10 @@ class TestRedactSecretsUtility:
             "config": {
                 "transport": "stdio",
                 "command": "python3",
-                "args": ["-m", "openspace.mcp_server"],
+                "args": ["-m", "my_custom_server"],
                 "env": {
-                    "OPENSPACE_LLM_API_KEY": secret,
-                    "OPENSPACE_MODEL": "gpt-4o",
+                    "CUSTOM_LLM_API_KEY": secret,
+                    "CUSTOM_MODEL": "gpt-4o",
                 },
             },
         }
@@ -1266,13 +1266,13 @@ class TestRedactSecretsUtility:
         body = response.json()
         # Secret value MUST NOT appear anywhere in the response.
         assert secret not in response.text, (
-            "API response leaked the OPENSPACE_LLM_API_KEY value; "
+            "API response leaked the CUSTOM_LLM_API_KEY value; "
             "redact_secrets must be applied in the response path."
         )
         # The key is still present, but its value is the redaction marker.
-        assert body["config"]["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
+        assert body["config"]["env"]["CUSTOM_LLM_API_KEY"] == "[REDACTED]"
         # Non-sensitive env keys are preserved.
-        assert body["config"]["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+        assert body["config"]["env"]["CUSTOM_MODEL"] == "gpt-4o"
 
     # =====================================================================
     # URL userinfo redaction (W1 defense-in-depth)
@@ -1385,8 +1385,8 @@ class TestRedactSecretsUtility:
             "transport": "streamable-http",
             "url": "http://alice:secret@openspace.example.com/mcp",
             "env": {
-                "OPENSPACE_LLM_API_KEY": "sk-llm-secret",
-                "OPENSPACE_MODEL": "gpt-4o",
+                "CUSTOM_LLM_API_KEY": "sk-llm-secret",
+                "CUSTOM_MODEL": "gpt-4o",
             },
         }
         result = redact_secrets(config)
@@ -1394,5 +1394,5 @@ class TestRedactSecretsUtility:
         # URL: userinfo gone
         assert result["url"] == "http://openspace.example.com/mcp"
         # env: secret gone, non-secret kept
-        assert result["env"]["OPENSPACE_LLM_API_KEY"] == "[REDACTED]"
-        assert result["env"]["OPENSPACE_MODEL"] == "gpt-4o"
+        assert result["env"]["CUSTOM_LLM_API_KEY"] == "[REDACTED]"
+        assert result["env"]["CUSTOM_MODEL"] == "gpt-4o"

@@ -339,7 +339,7 @@ class TestDevopsPromptComposition:
 
         DevOps declares innate_skills=['dynamic-skill', 'todo'] so both the
         dynamic-skill and todo skills ARE loaded. What we must verify is that
-        no other innate-skill content (opencode, openspace) leaks in via the
+        no other innate-skill content (opencode) leaks in via the
         centralized registry.
         """
         from daemon.loader import load_agent_skills, load_agent_prompts, compose_system_prompt
@@ -349,7 +349,7 @@ class TestDevopsPromptComposition:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Only dynamic-skill and todo should be loaded (no opencode/openspace)
+        # Only dynamic-skill and todo should be loaded (no opencode)
         skills = load_agent_skills(DEVOPS_AGENT_DIR, meta)
         loaded = set(skills.keys())
         forbidden = loaded - {"dynamic-skill", "todo"}

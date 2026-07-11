@@ -1807,7 +1807,7 @@ class _UnavailableTestBuiltin(TestBuiltinServerDefinition):
     """Test builtin that always reports ``is_available() == False``.
 
     Used to simulate "module missing" without touching the real
-    openspace package or other built-ins in the registry.
+    builtin registry.
     """
 
     @classmethod
@@ -1820,7 +1820,7 @@ def registry_with_unavailable_builtin():
     """Registry fixture: only an unavailable-test builtin is registered.
 
     Replaces the global registry's contents for the duration of the
-    test so other built-ins (webfetch, context7, openspace) don't
+    test so other built-ins (webfetch, context7) don't
     interfere. Restored on teardown.
     """
     from daemon.mcp.builtin_servers import _registry

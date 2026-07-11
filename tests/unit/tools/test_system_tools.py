@@ -200,20 +200,19 @@ class TestSystemEnv:
         env_tool = tool_by_name["system_env"]
         for name in _SECRET_ENV_VARS:
             # Some names are not in any tracked prefix list (e.g.
-            # LIGHTRAG_API_KEY matches the LIGHTRAG_ prefix; OPENSPACE_API_KEY
-            # matches the OPENSPACE_ prefix). Use the matching prefix.
+            # LIGHTRAG_API_KEY matches the LIGHTRAG_ prefix;
+            # DATABASE_URL_POSTGRES matches the explicit exact list).
+            # Use the matching prefix.
             for prefix in _TRACKED_ENV_PREFIXES:
                 if name == prefix or name.startswith(prefix):
                     break
             else:
-                # Fall back: at minimum, OPENSPACE_/LIGHTRAG_/POSTGRES_ cover them.
+                # Fall back: at minimum, LIGHTRAG_/POSTGRES_ cover them.
                 if name in _TRACKED_ENV_EXACT:
                     pass
                 else:
                     # Pick the most likely prefix by stripping the suffix.
-                    if name.startswith("OPENSPACE_"):
-                        pass  # OPENSPACE_ is in _TRACKED_ENV_PREFIXES
-                    elif name.startswith("LIGHTRAG_"):
+                    if name.startswith("LIGHTRAG_"):
                         pass  # LIGHTRAG_ is in _TRACKED_ENV_PREFIXES
                     elif name.startswith("POSTGRES_"):
                         pass  # POSTGRES_ is in _TRACKED_ENV_PREFIXES
@@ -789,7 +788,7 @@ class TestSecretMasking:
     def test_mask_env_value_nomask_returns_raw(self):
         """``nomask=True`` bypasses all masking."""
         assert _mask_env_value("OPENAI_API_KEY", "sk-x", nomask=True) == "sk-x"
-        assert _mask_env_value("OPENSPACE_API_KEY", "v", nomask=True) == "v"
+        assert _mask_env_value("CUSTOM_API_KEY", "v", nomask=True) == "v"
 
     def test_mask_env_value_explicit_secret_list(self):
         """Vars in :data:`_SECRET_ENV_VARS` are masked regardless of suffix."""

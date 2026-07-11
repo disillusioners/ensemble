@@ -30,8 +30,7 @@ LEADER_AGENT_DIR = Path(__file__).parent.parent.parent / "agents" / "leader"
 # Tool categories for testing (mirrors what the registry should contain).
 # Ari is jober-hybrid — it has the 'job' category but NOT the 'instance'
 # category. Direct execution capabilities are provided by 'bash' and
-# 'filesystem'. Worker-related OpenSpace is delegated, so no
-# mcp_openspace_* tools appear here.
+# 'filesystem'. Job delegation handles work that other agents own.
 TOOL_CATEGORIES: dict[str, list[str]] = {
     "bash": ["bash"],
     "filesystem": ["list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"],
@@ -57,15 +56,6 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "help": ["tool_help"],
     "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
 }
-
-# OpenSpace tool names that Ari must NOT have (delegated to Worker).
-# Ari routes OpenSpace work via job_create(agent_id="worker", ...).
-ARRI_MUST_NOT_HAVE_OPENSPACE_TOOLS = [
-    "mcp_openspace_execute_task",
-    "mcp_openspace_search_skills",
-    "mcp_openspace_fix_skill",
-    "mcp_openspace_upload_skill",
-]
 
 
 # =============================================================================
@@ -194,24 +184,6 @@ class TestAriMetaJsonValidation:
             f"Ari innate_skills must include 'job-orchestration' (jober pattern), got: {innate_skills}"
         )
 
-    def test_innate_skills_includes_openspace(self) -> None:
-        """Ari's innate_skills must include 'openspace'.
-
-        Although Ari does not directly invoke the OpenSpace MCP tools
-        (it delegates to Worker via job_create), the 'openspace' skill
-        still appears in innate_skills so the skill prompt loads into the
-        composed system prompt and Ari understands the OpenSpace routing
-        taxonomy (execute_task, search_skills, fix_skill, upload_skill).
-        """
-        meta_path = ARI_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        innate_skills = meta.get("innate_skills", [])
-        assert "openspace" in innate_skills, (
-            f"Ari innate_skills should include 'openspace', got: {innate_skills}"
-        )
-
     def test_innate_skills_includes_todo(self) -> None:
         """Ari's innate_skills must include 'todo'.
 
@@ -267,7 +239,7 @@ class TestAriToolFilter:
       - Has 'job' tool category (jober capability for delegation)
       - Has 'bash' + 'filesystem' tool categories (hybrid direct execution)
       - Does NOT have 'instance' tool category (no spawn_instance)
-      - Does NOT have mcp_openspace_* tools (delegates OpenSpace to Worker)
+      - Delegates specialized work to other agents via job_create
     """
 
     def test_ari_tool_filter_parsed_by_registry(self) -> None:
@@ -358,27 +330,7 @@ class TestAriToolFilter:
                 f"{tool} should NOT be in Ari allowed tools — Ari dispatches via job_*"
             )
 
-    def test_ari_has_no_openspace_mcp_tools(self) -> None:
-        """Ari must NOT have any mcp_openspace_* tools.
-
-        Ari delegates OpenSpace work to Worker via job_create, not
-        directly. The 4 OpenSpace tool names must be absent from
-        tools.allow — Ari only sees them referenced in the openspace
-        skill prompt (instructional context), not as granted tools.
-        """
-        meta_path = ARI_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        allow = meta.get("tools", {}).get("allow", [])
-        for tool_name in ARRI_MUST_NOT_HAVE_OPENSPACE_TOOLS:
-            assert tool_name not in allow, (
-                f"OpenSpace tool '{tool_name}' should NOT be in Ari tools.allow "
-                f"(Ari delegates OpenSpace to Worker via job_create). Got: {allow}"
-            )
-
-
-# =============================================================================
+    # =============================================================================
 # 4. Prompt Composition
 # =============================================================================
 
@@ -408,7 +360,7 @@ class TestAriPromptComposition:
         Two core invariants from the spec:
         1. TrueAuto is the default autonomy mode (decision-making posture)
         2. TASK TRIAGE is the routing decision tree (quick → direct,
-           dev → Leader, OpenSpace → Worker)
+           dev → Leader)
         """
         rule_path = ARI_AGENT_DIR / "rule.md"
         assert rule_path.exists(), f"rule.md not found at {rule_path}"
@@ -422,32 +374,29 @@ class TestAriPromptComposition:
             "rule.md should contain 'triage' decision tree"
         )
 
-    def test_workflow_md_contains_three_modes_and_escalation(self) -> None:
-        """workflow.md must describe Mode 1, Mode 2, Mode 3 + escalation/job_continue.
+    def test_workflow_md_contains_two_modes_and_delegation(self) -> None:
+        """workflow.md must describe Mode 1 + Mode 2 + delegation via job_create.
 
-        The 3 modes are the core architecture:
+        The 2 modes are the core architecture:
           - Mode 1: quick tasks done directly
-          - Mode 2: dev → Leader delegation
-          - Mode 3: OpenSpace → Worker delegation (with escalation)
-        The escalation path uses job_continue to grant/relay permission
-        for Worker breaking-change requests.
+          - Mode 2: dev → Leader delegation via job_create(watch=True)
+        Delegation uses ``job_create`` with the atomic watch pattern — the
+        dispatch surface, not escalation. The triage decision tree and the
+        Watch Job Discipline sections cover job lifecycle handling.
         """
         workflow_path = ARI_AGENT_DIR / "workflow.md"
         assert workflow_path.exists(), f"workflow.md not found at {workflow_path}"
         content = workflow_path.read_text(encoding="utf-8")
 
-        # All 3 modes must be present
-        for mode in ("Mode 1", "Mode 2", "Mode 3"):
+        # Both modes must be present
+        for mode in ("Mode 1", "Mode 2"):
             assert mode in content, (
-                f"workflow.md should define '{mode}' (3-mode architecture), got: missing"
+                f"workflow.md should define '{mode}' (2-mode architecture), got: missing"
             )
 
-        # Escalation path — either 'escalation' keyword or 'job_continue' (the
-        # mechanism used to grant Worker permission responses).
-        content_lower = content.lower()
-        has_escalation = "escalation" in content_lower or "job_continue" in content_lower
-        assert has_escalation, (
-            "workflow.md should describe escalation handling via job_continue"
+        # Delegation mechanism — job_create is the dispatch primitive.
+        assert "job_create" in content, (
+            "workflow.md should describe job_create as the delegation mechanism"
         )
 
     def test_user_md_exists(self) -> None:
