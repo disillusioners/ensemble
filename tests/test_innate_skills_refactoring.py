@@ -58,8 +58,8 @@ class TestInnateSkillsSystemPromptIdentity:
         test_cases = [
             ("developer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
             ("reviewer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
-            ("tester", ["opencode", "chart", "test-pack", "todo"], "OpenCode-Skill"),  # tester gets BOTH
-            ("tester", ["opencode", "chart", "test-pack", "todo"], "Test Pack Skill"),  # tester gets BOTH
+            ("tester", ["opencode", "test-pack", "todo"], "OpenCode-Skill"),  # tester gets BOTH (chart removed in bfda2a95)
+            ("tester", ["opencode", "test-pack", "todo"], "Test Pack Skill"),  # tester gets BOTH
             ("planner", ["opencode", "chart", "todo"], "OpenCode-Skill"),
             ("tidier", ["opencode", "chart", "todo"], "OpenCode-Skill"),
             ("approver", ["opencode", "chart", "todo"], "OpenCode-Skill"),
@@ -95,7 +95,7 @@ class TestInnateSkillsSystemPromptIdentity:
         cache = PromptCache()
         tester_meta = real_registry.get("tester")
         assert tester_meta is not None
-        assert tester_meta.innate_skills == ["opencode", "chart", "test-pack", "todo"]
+        assert tester_meta.innate_skills == ["opencode", "test-pack", "todo"]  # chart removed in bfda2a95
         
         prompt, _ = load_and_cache_prompt("tester", tester_meta.path, cache)
         
