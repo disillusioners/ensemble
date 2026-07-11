@@ -172,20 +172,21 @@ class TestWorkerMetaJsonValidation:
         assert "tools" in meta, "tools field should be present"
         assert isinstance(meta.get("tools"), dict), "tools should be a dict"
 
-    def test_innate_skills_is_openspace_and_todo(self) -> None:
-        """Worker should have innate_skills == ['openspace', 'todo'].
+    def test_innate_skills_is_dynamic_skill_and_todo(self) -> None:
+        """Worker should have innate_skills == ['dynamic-skill', 'todo'].
 
-        Worker is a delegated execution agent. It must have OpenSpace
-        (for skill discovery / task delegation) and Todo (for in-flight
-        task tracking). No other innate skills should be declared.
+        Worker migrated from OpenSpace MCP to native dynamic-skill system
+        on commit de8ff83f. It must have dynamic-skill (for skill search /
+        injection) and todo (for in-flight task tracking). No other
+        innate skills should be declared.
         """
         meta_path = WORKER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
         innate_skills = meta.get("innate_skills", [])
-        assert innate_skills == ["openspace", "todo"], (
-            f"Worker innate_skills should be ['openspace', 'todo'], got: {innate_skills}"
+        assert innate_skills == ["dynamic-skill", "todo"], (
+            f"Worker innate_skills should be ['dynamic-skill', 'todo'], got: {innate_skills}"
         )
 
     def test_tools_config_structure(self) -> None:
@@ -239,29 +240,17 @@ class TestWorkerToolFilter:
         assert len(worker.tools.allow) > 0
 
     def test_worker_allows_all_openspace_tools(self) -> None:
-        """All 4 OpenSpace MCP tools must be in tools.allow.
+        """OBSOLETE: Worker migrated to dynamic-skill (commit de8ff83f).
 
-        OpenSpace is instructional-only (see test_openspace_skill_loading.py)
-        — its skill prompt is loaded by load_agent_skills() but the 4
-        OpenSpace tools must be granted explicitly in the agent's
-        tools.allow. Worker must list all 4.
+        The 4 OpenSpace MCP tools are no longer in worker's tools.allow.
+        See TestWorkerToolFilter::test_worker_has_dynamic_skill_tool for
+        the post-migration equivalent. This test is kept as a stub so
+        the migration is explicitly documented in the test suite.
         """
-        from daemon.registry import AgentRegistry
-
-        agents_dir = WORKER_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-
-        worker = registry.get("worker")
-        assert worker is not None
-        assert worker.tools is not None
-        assert worker.tools.allow is not None
-
-        for tool_name in OPENSPACE_TOOL_NAMES:
-            assert tool_name in worker.tools.allow, (
-                f"OpenSpace tool '{tool_name}' should be in worker's tools.allow. "
-                f"Got: {worker.tools.allow}"
-            )
+        import pytest
+        pytest.skip(
+            "Worker migrated from OpenSpace MCP to dynamic-skill in commit de8ff83f"
+        )
 
     def test_worker_has_basic_tools(self) -> None:
         """Worker should have bash, filesystem, time, self, help tools after filtering."""
@@ -418,92 +407,36 @@ class TestWorkerPromptComposition:
 
 
 # =============================================================================
-# 5. OpenSpace Innate Skill Loading
+# 5. Dynamic-Skill Innate Skill Loading  (post OpenSpace migration)
 # =============================================================================
 
 
 class TestWorkerOpenSpaceSkillLoading:
-    """Tests for the OpenSpace innate skill loading into Worker's prompt.
+    """OBSOLETE: Worker migrated from OpenSpace to native dynamic-skill (de8ff83f).
 
-    Worker declares innate_skills=['openspace', 'todo']. The 'openspace'
-    skill prompt is loaded from agents/_prompt_system/innate-skills/openspace/
-    and injected into the composed system prompt so the agent sees the
-    4 OpenSpace tools (instructional, not auto-granted — the tools must
-    also be in tools.allow, verified in TestWorkerToolFilter).
+    The OpenSpace skill is no longer in Worker's innate_skills list. Worker
+    now uses the native dynamic-skill system (see TestWorkerDynamicSkillLoading
+    below for the post-migration equivalent). These test methods are kept as
+    skipping stubs so the migration is documented in the test suite.
     """
 
     def test_openspace_skill_loads_into_composed_prompt(self) -> None:
-        """With innate_skills=['openspace', 'todo'], the openspace skill loads
-        and is included in the composed system prompt."""
-        from daemon.loader import compose_system_prompt, load_agent_skills
-
-        meta_path = WORKER_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        skills = load_agent_skills(WORKER_AGENT_DIR, meta)
-
-        # The openspace skill must be loaded
-        assert "openspace" in skills, (
-            f"openspace skill should be loaded for Worker, got: {list(skills.keys())}"
-        )
-        assert isinstance(skills["openspace"], str)
-        assert len(skills["openspace"]) > 0, "openspace skill content should be non-empty"
-
-        # The composed prompt must include it
-        from daemon.loader import load_agent_prompts
-
-        prompts = load_agent_prompts(WORKER_AGENT_DIR)
-        system_prompt = compose_system_prompt(prompts, skills)
-
-        # The skill's H1 heading is the unique marker
-        assert "OpenSpace-Skill" in system_prompt, (
-            "Composed system prompt should contain the OpenSpace-Skill heading"
+        import pytest
+        pytest.skip(
+            "Worker migrated from OpenSpace to dynamic-skill (commit de8ff83f)"
         )
 
     def test_openspace_tool_names_appear_in_composed_prompt(self) -> None:
-        """All 4 OpenSpace tool names must appear in the composed system prompt.
-
-        This verifies the skill content (which documents the 4 tools) is
-        actually included. Without the openspace skill loaded, none of
-        these substrings would appear.
-        """
-        from daemon.loader import compose_system_prompt, load_agent_prompts, load_agent_skills
-
-        meta_path = WORKER_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        prompts = load_agent_prompts(WORKER_AGENT_DIR)
-        skills = load_agent_skills(WORKER_AGENT_DIR, meta)
-        system_prompt = compose_system_prompt(prompts, skills)
-
-        for tool_name in OPENSPACE_TOOL_NAMES:
-            assert tool_name in system_prompt, (
-                f"OpenSpace tool '{tool_name}' should appear in Worker's composed prompt. "
-                "This indicates the openspace skill content was not properly loaded."
-            )
+        import pytest
+        pytest.skip(
+            "Worker migrated from OpenSpace to dynamic-skill (commit de8ff83f)"
+        )
 
     def test_short_tool_names_appear_in_composed_prompt(self) -> None:
-        """Short tool names (execute_task, search_skills, fix_skill, upload_skill)
-        must appear in the composed prompt as substrings of the full mcp_*
-        names."""
-        from daemon.loader import compose_system_prompt, load_agent_prompts, load_agent_skills
-
-        meta_path = WORKER_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        prompts = load_agent_prompts(WORKER_AGENT_DIR)
-        skills = load_agent_skills(WORKER_AGENT_DIR, meta)
-        system_prompt = compose_system_prompt(prompts, skills)
-
-        short_names = ["execute_task", "search_skills", "fix_skill", "upload_skill"]
-        for short_name in short_names:
-            assert short_name in system_prompt, (
-                f"OpenSpace short tool name '{short_name}' should appear in Worker's "
-                f"composed prompt (as substring of mcp_openspace_{short_name})."
-            )
+        import pytest
+        pytest.skip(
+            "Worker migrated from OpenSpace to dynamic-skill (commit de8ff83f)"
+        )
 
 
 # =============================================================================

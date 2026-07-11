@@ -309,6 +309,9 @@ class TestContext7Bootstrap:
         config.job_system.idempotency_key_ttl_hours = 24
         config.job_system.job_retry_scheduler_enabled = None
 
+        # Skill Evolution: disabled in this fixture (manager reads config.skill_evolution)
+        config.skill_evolution = None
+
         return config
 
     @pytest.fixture

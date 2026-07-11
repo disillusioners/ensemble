@@ -149,15 +149,20 @@ class TestDevopsMetaJsonValidation:
         assert isinstance(meta.get("innate_skills"), list), "innate_skills should be a list"
         assert "tools" in meta, "tools field should be present"
 
-    def test_innate_skills_is_empty_list(self) -> None:
-        """DevOps should have empty innate_skills (giter pattern, no opencode delegation)."""
+    def test_innate_skills_is_todo(self) -> None:
+        """DevOps should have innate_skills == ['todo'].
+
+        DevOps is an infra/shell-ops specialist that does not delegate.
+        It declares only the 'todo' skill for in-flight task tracking —
+        no opencode delegation, no dynamic-skill injection.
+        """
         meta_path = DEVOPS_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
         innate_skills = meta.get("innate_skills", [])
-        assert innate_skills == [], (
-            f"DevOps should have empty innate_skills (no opencode skills), got: {innate_skills}"
+        assert innate_skills == ["todo"], (
+            f"DevOps should have innate_skills == ['todo'], got: {innate_skills}"
         )
 
     def test_capabilities_field_exists(self) -> None:
@@ -314,12 +319,11 @@ class TestDevopsPromptComposition:
         assert "docker" in system_prompt.lower() or "deployment" in system_prompt.lower()
 
     def test_no_opencode_skill_content_in_system_prompt(self) -> None:
-        """With empty innate_skills, no opencode skill files should be loaded.
+        """Verify no opencode/dynamic-skill skill files leak into the prompt.
 
-        The composed system prompt MAY mention OpenCode in agent text (e.g. as a
-        contrast in soul.md) — that is legitimate content, not skill injection.
-        What we must verify is that no skill file content was injected by virtue
-        of having `innate_skills` in meta.json.
+        DevOps declares innate_skills=['todo'] so the todo skill IS loaded.
+        What we must verify is that no other innate-skill content (opencode,
+        dynamic-skill, openspace) leaks in via the centralized registry.
         """
         from daemon.loader import load_agent_skills, load_agent_prompts, compose_system_prompt
 
@@ -328,11 +332,12 @@ class TestDevopsPromptComposition:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # With empty innate_skills, no skills should be loaded from the
-        # centralized innate-skills registry or per-agent skills/ directory.
+        # Only the todo skill should be loaded (no opencode/dynamic-skill/openspace)
         skills = load_agent_skills(DEVOPS_AGENT_DIR, meta)
-        assert skills == {}, (
-            f"No skills should be loaded (innate_skills is empty), got: {list(skills.keys())}"
+        loaded = set(skills.keys())
+        forbidden = loaded - {"todo"}
+        assert not forbidden, (
+            f"Only 'todo' skill should be loaded for DevOps, got extras: {forbidden}"
         )
 
         # Also verify that the soul.md does not contain "OpenCode_Skill" tool
@@ -342,7 +347,7 @@ class TestDevopsPromptComposition:
 
         # OpenCode_Skill is the legacy tool name used to inject opencode skill content.
         # The new approach uses external_opencode_* tool names from external_opencode.py.
-        # Neither should appear in the composed prompt for an agent with no innate skills.
+        # Neither should appear in the composed prompt for an agent with no opencode innate skills.
         assert "OpenCode_Skill" not in system_prompt, (
             "Legacy 'OpenCode_Skill' tool should not appear in DevOps system prompt"
         )
@@ -582,7 +587,7 @@ class TestDevopsToolConfiguration:
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
                 mock_agent_meta.innate_skills = []
-                mock_registry.return_value.get.return_value = mock_agent_meta
+                mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "devops")
                 tool_names = {t.name for t in result}

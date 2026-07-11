@@ -152,19 +152,25 @@ class TestOpenspaceSkillDiscovery:
 
         Verifies the truthy-check semantics: [] is treated as absent so legacy
         agents with empty arrays continue to work.
+
+        NOTE: DevOps meta was migrated to innate_skills=['todo'] for in-flight
+        task tracking. This test now exercises a synthesized empty-list meta
+        to verify the truthy-check guard independent of any agent's real
+        configuration.
         """
+        import pytest
         from daemon.loader import load_agent_skills
 
-        # Load the actual devops meta (which has innate_skills: [])
         meta_path = DEVOPS_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        assert meta.get("innate_skills") == [], (
-            f"Precondition: devops meta should have empty innate_skills, got {meta.get('innate_skills')}"
-        )
+        # Force an empty innate_skills list for this guard test (independent
+        # of DevOps's real config) — DevOps now declares ['todo'].
+        meta_for_test = dict(meta)
+        meta_for_test["innate_skills"] = []
 
-        skills = load_agent_skills(DEVOPS_AGENT_DIR, meta)
+        skills = load_agent_skills(DEVOPS_AGENT_DIR, meta_for_test)
         # No skills should be loaded via the centralized path
         assert "openspace" not in skills, (
             f"openspace should not be loaded with empty innate_skills, got: {list(skills.keys())}"
