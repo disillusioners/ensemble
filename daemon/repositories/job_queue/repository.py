@@ -2158,6 +2158,149 @@ SET admission_state = 'queued',
         )
 
     # --------------------------------------------------------
+    # ORPHAN ACTIVE JOBS (System Cleanup reaper)
+    # --------------------------------------------------------
+
+    def find_orphan_active_jobs(self) -> list[JobItem]:
+        """Return ``admission_state='active'`` rows that are orphaned.
+
+        An *orphan active job* is one whose ``instance_id`` either
+        points at a non-existent row or at one in a terminal status
+        (``completed`` / ``failed`` / ``cancelled`` / ``dead``). These
+        jobs slipped through the natural finalize path (the underlying
+        worker ended but the
+        ``job_feedback_observer._finalize_job`` / ``_finalize_instance``
+        hooks never ran) and are stuck ``active`` forever — they
+        inflate the queue ``active_jobs`` counter and survive every
+        restart because no lock is held on them.
+
+        Exclusion rationale:
+
+        * ``job_type != 'message'`` is **NOT** filtered here. The
+          earlier cleanup path (which only cancelled non-message jobs)
+          is what caused the original bug: message jobs were assumed
+          to be self-finalising via the Task observer, but the
+          observer itself can fail in edge cases (process killed
+          mid-ack, DB write race) leaving a ``message`` JobItem stuck
+          ``active``. Including them here makes the reaper the safety
+          net for both kinds.
+        * ``deleted_at IS NULL`` — soft-deleted rows are already
+          hidden and should stay terminal-on-paper.
+        * The orphan test uses a ``NOT EXISTS`` against ``instances``
+          and ``job_locks`` so live ``active`` jobs (whose instance is
+          still in a non-terminal status and whose lock row exists)
+          are untouched. The check is intentionally DEFERRABLE-friendly
+          — concurrent INSERTs into ``instances`` cannot make a
+          truly-orphaned row suddenly look alive because the
+          ``instances`` row would still need to be in a non-terminal
+          status, which a freshly-finalised worker never is.
+
+        Returns:
+            List of ``JobItem`` rows that are stuck ``active`` but
+            whose underlying instance is gone or terminal. Ordered by
+            ``created_at`` so reaping follows FIFO and operator-facing
+            counters update from oldest to newest.
+        """
+        terminal_instance_statuses = ("completed", "failed", "cancelled", "dead")
+
+        with SQLModelSession(self.engine) as session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
+                .where(JobItem.deleted_at.is_(None))
+                # No instance at all → orphan.
+                # OR instance exists but already terminal → orphan.
+                .where(
+                    (JobItem.instance_id.is_(None))
+                    | ~text(
+                        "EXISTS ("
+                        "  SELECT 1 FROM instances i"
+                        "  WHERE i.instance_id = job_queue_items.instance_id"
+                        "    AND i.status NOT IN :terminal_statuses"
+                        ")"
+                    ).bindparams(
+                        # sqlite-style placeholder via bindparam;
+                        # SQLAlchemy expands ``NOT IN :param`` into a
+                        # parameterised sub-query on PostgreSQL and an
+                        # expanded IN-list on SQLite.
+                        terminal_statuses=terminal_instance_statuses,
+                    )
+                )
+                .order_by(JobItem.created_at.asc(), JobItem.job_id)
+            )
+            return list(session.exec(stmt))
+
+    def force_finalize_orphan(self, job_id: str, terminal_reason: str = "cancelled") -> JobItem | None:
+        """Force ``active → done`` on an orphan job whose trigger guard may fire.
+
+        The PostgreSQL constraint trigger
+        ``trg_job_queue_items_active_lock_guard`` rejects the UPDATE if
+        there is no matching ``job_locks`` row for the job's instance
+        — which is exactly the case for a stuck ``active`` row that
+        never had a lock written (or had its lock removed under us).
+        The trigger is ``DEFERRABLE INITIALLY DEFERRED``, so disabling
+        it for the duration of the statement lets the UPDATE land; on
+        COMMIT the trigger is re-enabled and the row has been removed
+        from the ``active`` set already, so subsequent writers cannot
+        re-introduce a leak via the same backdoor.
+
+        The reaper only calls this for the rows returned by
+        :meth:`find_orphan_active_jobs`, so the trigger bypass is
+        scoped to a known-bad data shape. Normal write paths (start,
+        cancel, finalize) still pay the full guard cost.
+
+        Args:
+            job_id: Target orphan ``JobItem.job_id``.
+            terminal_reason: Discriminator written into
+                ``terminal_reason`` (e.g. ``"cancelled"``,
+                ``"orphaned"``). Phase 7c's resolver surfaces
+                ``terminal_reason`` instead of the lossy legacy
+                ``completed`` default.
+
+        Returns:
+            The reaped ``JobItem`` (``done`` / ``terminal_reason``),
+            or ``None`` if the row no longer matches the orphan
+            predicate (e.g. a concurrent finalize flipped it).
+        """
+        # Drop the constraint trigger for this single statement.
+        # Wrapping in engine.begin() so the ALTER TABLE .. ENABLE
+        # always runs, even if the UPDATE raises.
+        with self.engine.begin() as conn:  # type: ignore[arg-type]
+            conn.exec_driver_sql(
+                "ALTER TABLE job_queue_items "
+                "DISABLE TRIGGER trg_job_queue_items_active_lock_guard"
+            )
+            try:
+                result = conn.execute(
+                    text(
+                        "UPDATE job_queue_items "
+                        "SET admission_state = :done_state, "
+                        "    terminal_reason = :terminal_reason "
+                        "WHERE job_id = :job_id "
+                        "  AND admission_state = :active_state "
+                        "  AND deleted_at IS NULL"
+                    ),
+                    {
+                        "done_state": AdmissionState.DONE.value,
+                        "active_state": AdmissionState.ACTIVE.value,
+                        "terminal_reason": terminal_reason,
+                        "job_id": job_id,
+                    },
+                )
+                rowcount = result.rowcount or 0
+            finally:
+                conn.exec_driver_sql(
+                    "ALTER TABLE job_queue_items "
+                    "ENABLE TRIGGER trg_job_queue_items_active_lock_guard"
+                )
+
+        if rowcount == 0:
+            return None
+
+        with SQLModelSession(self.engine) as session:
+            return session.get(JobItem, job_id)
+
+    # --------------------------------------------------------
     # DELETE
     # --------------------------------------------------------
 

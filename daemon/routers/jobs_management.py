@@ -574,7 +574,7 @@ async def cleanup_jobs(
 ):
     """Cancel ALL non-terminal jobs ("system reset" for the job board).
 
-    Splits the work into two buckets so each side uses the right
+    Splits the work into three buckets so each side uses the right
     cancellation tool:
 
     * **queued (PENDING)** -- batch UPDATE: ``admission_state='queued'
@@ -586,6 +586,16 @@ async def cleanup_jobs(
       ``_finalize_terminal(Decision.NO_RETRY)`` -> ``notify_watchers``).
       Same semantics as a user-initiated single cancel -- reuse keeps
       the cleanup byte-for-byte identical to that path.
+    * **orphan active** -- rows whose underlying ``instances`` row is
+      already terminal (or missing) and whose ``job_locks`` row is
+      gone. These jobs slipped through the natural finalize path
+      (e.g. observer feedback dropped because the worker process was
+      killed mid-ack) and were inflating the active-job counter
+      forever. The reaper force-finalizes them with
+      ``terminal_reason='cancelled'`` so a single System Cleanup click
+      also drains the ghost rows. Reported as ``orphaned_reaped``
+      (separate from the two main counters) so existing callers that
+      only read ``total_processed`` see no behavioural change.
 
     Already-terminal jobs (``admission_state IN ('done', 'dead')``) and
     soft-deleted rows are left untouched.
@@ -595,7 +605,8 @@ async def cleanup_jobs(
 
         .. code-block:: json
 
-            {"cancelled_queued": N, "cancelled_active": N, "total_processed": N}
+            {"cancelled_queued": N, "cancelled_active": N,
+             "orphaned_reaped": N, "total_processed": N}
 
     Raises:
         503: When writes are paused for migration.

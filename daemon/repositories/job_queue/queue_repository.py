@@ -248,6 +248,10 @@ class JobQueueRepository:
             stmt = (
                 select(JobItem.admission_state, func.count(JobItem.job_id))
                 .where(JobItem.queue_id == queue_id)
+                # Exclude soft-deleted rows from the active/pending
+                # counters — deleted jobs are hidden in the FE by
+                # default and would otherwise inflate ``active_jobs``.
+                .where(JobItem.deleted_at.is_(None))
                 .group_by(JobItem.admission_state)
             )
             results = db_session.exec(stmt).all()

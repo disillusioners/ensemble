@@ -189,7 +189,16 @@ class JobCleanupResponse(BaseModel):
       * ``cancelled_active`` — number of PROCESSING (active) jobs
         whose per-row ``cancel_job`` cascade returned ``True`` (lock
         released + instance terminated).
-      * ``total_processed`` — sum of the two.
+      * ``orphaned_reaped`` — number of *ghost* active jobs whose
+        underlying instance is already terminal (or missing), so the
+        cancel cascade above has nothing to terminate. These jobs
+        slipped through the natural finalize path (e.g. observer
+        feedback dropped because the worker process died mid-ack) and
+        had to be force-finalized via the orphan reaper. Excluded from
+        ``total_processed`` so the contract for the existing two
+        counters is preserved.
+      * ``total_processed`` — sum of ``cancelled_queued`` +
+        ``cancelled_active``.
     """
 
     cancelled_queued: int = Field(
@@ -202,6 +211,14 @@ class JobCleanupResponse(BaseModel):
         ge=0,
         description=(
             "Number of active (PROCESSING) jobs whose cancel cascade completed"
+        ),
+    )
+    orphaned_reaped: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of orphan active jobs (instance terminal or missing) "
+            "that were force-finalized to clear the ghost active counter"
         ),
     )
     total_processed: int = Field(
@@ -234,6 +251,7 @@ class JobCleanupResponse(BaseModel):
             "example": {
                 "cancelled_queued": 12,
                 "cancelled_active": 3,
+                "orphaned_reaped": 1,
                 "total_processed": 15,
             }
         }

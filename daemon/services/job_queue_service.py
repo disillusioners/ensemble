@@ -1116,10 +1116,49 @@ class JobQueueService:
             if success:
                 cancelled_active += 1
 
+        # 3) Orphan reaper — the prior two paths intentionally exclude
+        # ``job_type='message'`` JobItems (they are mirrors of Task
+        # rows). If a worker finalized without dispatching the
+        # observer feedback (process killed mid-ack, DB write race),
+        # the JobItem stays ``admission_state='active'`` forever —
+        # no instance to terminate, no lock to release, but the queue
+        # counter is inflated and the FE list shows the job as
+        # completed (via the resolver) while the badge says ``active``.
+        # Reap those now so a System Cleanup button press also drains
+        # the ghost rows. The orphan-reaper is its own best-effort
+        # loop — failures here must not block the main counters.
+        orphaned_reaped = 0
+        try:
+            orphans = await asyncio.to_thread(
+                self._repository.find_orphan_active_jobs
+            )
+            for orphan in orphans:
+                try:
+                    reaped = await asyncio.to_thread(
+                        self._repository.force_finalize_orphan,
+                        orphan.job_id,
+                        "cancelled",
+                    )
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "cleanup_non_terminal_jobs: "
+                        "force_finalize_orphan(%s) failed: %s",
+                        orphan.job_id[:8], exc,
+                    )
+                    continue
+                if reaped is not None:
+                    orphaned_reaped += 1
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "cleanup_non_terminal_jobs: orphan reap pass failed: %s",
+                exc,
+            )
+
         total = cancelled_queued + cancelled_active
         logger.info(
-            "cleanup_non_terminal_jobs: cancelled_queued=%d cancelled_active=%d total=%d",
-            cancelled_queued, cancelled_active, total,
+            "cleanup_non_terminal_jobs: cancelled_queued=%d cancelled_active=%d "
+            "orphaned_reaped=%d total=%d",
+            cancelled_queued, cancelled_active, orphaned_reaped, total,
         )
         return {
             "cancelled_queued": cancelled_queued,

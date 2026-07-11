@@ -17,6 +17,7 @@ interface JobListResponse {
 export interface JobCleanupResult {
   cancelled_queued: number;
   cancelled_active: number;
+  orphaned_reaped?: number;
   total_processed: number;
 }
 

@@ -868,6 +868,14 @@ export class JobsComponent implements OnInit, OnDestroy {
    * filter is required here. The confirmation dialog makes the global
    * scope explicit.
    *
+   * The backend now also reaps *orphan* active jobs — rows whose
+   * underlying instance is already terminal but whose
+   * ``admission_state='active'`` was leaked (e.g. observer feedback
+   * dropped because the worker process died mid-ack). They surface
+   * as ``orphaned_reaped`` in the response and are surfaced in the
+   * success snackbar so the operator can see the ghost rows were
+   * drained without a second round-trip.
+   *
    * On success a success snackbar reports the cancelled counts and the
    * active view is refreshed; on error an error snackbar surfaces the
    * failure message. The ``cleanupInProgress`` signal is always reset
@@ -877,6 +885,44 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (this.cleanupInProgress()) {
       return;
     }
+
+    const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
+      width: '420px',
+      panelClass: 'dark-modal-panel',
+    });
+
+    dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      if (!confirmed) {
+        return;
+      }
+      this.cleanupInProgress.set(true);
+      this.jobService.cleanupAllJobs().subscribe({
+        next: (result) => {
+          this.cleanupInProgress.set(false);
+          const orphaned = result.orphaned_reaped ?? 0;
+          const orphanSuffix = orphaned > 0 ? `, reaped ${orphaned} orphan active` : '';
+          this.snackBar.open(
+            `Cancelled ${result.cancelled_queued} queued, ${result.cancelled_active} active${orphanSuffix} jobs`,
+            'Close',
+            { duration: 3000, panelClass: 'success-snackbar' }
+          );
+          this.onRefresh();
+        },
+        error: (err) => {
+          console.error('Failed to cleanup jobs:', err);
+          this.cleanupInProgress.set(false);
+          this.snackBar.open(
+            err?.message || 'Failed to cleanup jobs',
+            'Dismiss',
+            {
+              duration: 5000,
+              panelClass: 'error-snackbar'
+            }
+          );
+        },
+      });
+    });
+  }
 
     const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
       width: '420px',

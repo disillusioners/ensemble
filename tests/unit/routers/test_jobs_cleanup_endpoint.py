@@ -86,12 +86,49 @@ class TestCleanupEndpointRegistration:
         )
         assert cleanup_route.response_model is JobCleanupResponse
 
-    def test_job_cleanup_response_schema_has_three_counters(self):
-        """The response schema must carry exactly the three contract fields."""
+    def test_job_cleanup_response_schema_has_four_counters(self):
+        """The response schema must carry exactly the four contract fields.
+
+        Counter contract (Phase 2 — System Cleanup reaper):
+
+          * ``cancelled_queued``   — batch-UPDATE PENDING rows
+          * ``cancelled_active``   — per-row cancel cascade (PROCESSING)
+          * ``orphaned_reaped``    — force-finalized ghost active rows
+                                     (Phase 2 of the System Cleanup
+                                     button — instance gone but
+                                     ``admission_state='active'``).
+          * ``total_processed``    — sum of the first two only.
+
+        ``orphaned_reaped`` is kept OUT of the ``total_processed``
+        invariant so existing operator dashboards / tests that sum
+        only the first two counters continue to reconcile.
+        """
         from daemon.routers.schemas import JobCleanupResponse
 
         fields = set(JobCleanupResponse.model_fields.keys())
-        assert fields == {"cancelled_queued", "cancelled_active", "total_processed"}
+        assert fields == {
+            "cancelled_queued",
+            "cancelled_active",
+            "orphaned_reaped",
+            "total_processed",
+        }
+
+    def test_job_cleanup_response_total_excludes_orphaned_reaped(self):
+        """``total_processed`` must equal ``cancelled_queued + cancelled_active``
+        even when ``orphaned_reaped > 0`` — pinning that invariant means
+        future cleanup-pipeline changes cannot silently re-classify
+        ghost rows into the existing two-counter contract.
+        """
+        from daemon.routers.schemas import JobCleanupResponse
+
+        response = JobCleanupResponse(
+            cancelled_queued=4,
+            cancelled_active=2,
+            orphaned_reaped=7,
+            total_processed=6,
+        )
+        assert response.total_processed == 6
+        assert response.orphaned_reaped == 7
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +257,95 @@ class TestCleanupNonTerminalJobsService:
             "total_processed": 3,
         }
 
+    @pytest.mark.asyncio
+    async def test_cleanup_reaps_orphan_active_jobs(self):
+        """Orphan active rows (instance terminal/missing) are reaped via
+        ``force_finalize_orphan``. They surface as ``orphaned_reaped`` in
+        the response and are NOT counted into ``cancelled_active`` or
+        ``total_processed``.
+
+        Reap order assertions:
+
+        * ``find_orphan_active_jobs`` is called once.
+        * ``force_finalize_orphan`` is called for each candidate.
+        * The regular ``cancel_job`` loop is untouched (none of the
+          orphans go through it).
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=0)
+        # No live active jobs — the per-row cancel loop is empty.
+        repo.find_active_jobs = MagicMock(return_value=[])
+        # Two ghosts (e.g. killed-mid-ack workers whose instances are
+        # already terminal) and one None (missing instance_id).
+        orphan_a = SimpleNamespace(job_id="orphan-A")
+        orphan_b = SimpleNamespace(job_id="orphan-B")
+        orphan_c = SimpleNamespace(job_id="orphan-C")
+        repo.find_orphan_active_jobs = MagicMock(
+            return_value=[orphan_a, orphan_b, orphan_c]
+        )
+        repo.force_finalize_orphan = MagicMock(
+            side_effect=[
+                SimpleNamespace(job_id="orphan-A"),
+                None,  # row vanished mid-flight
+                SimpleNamespace(job_id="orphan-C"),
+            ]
+        )
+        service._repository = repo
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # Per-row reap ran for all three candidates; ``None`` is
+        # counted as 0 (not reaped) by the service loop.
+        assert repo.force_finalize_orphan.call_count == 3
+        # Wire-up uses ``asyncio.to_thread`` which calls the bound
+        # method directly — just check the call args.
+        called_ids = [
+            call.args[0] for call in repo.force_finalize_orphan.call_args_list
+        ]
+        assert called_ids == ["orphan-A", "orphan-B", "orphan-C"]
+        assert result == {
+            "cancelled_queued": 0,
+            "cancelled_active": 0,
+            "total_processed": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_cleanup_continues_when_orphan_reap_raises(self):
+        """Per-row reap failures (or a single ``find`` failure) MUST NOT
+        abort the cleanup. The main counters still return, and the
+        response simply omits the failed orphans from
+        ``orphaned_reaped``.
+
+        Implemented via ``try/except`` around the reap loop in the
+        service; this test pins that contract so a future refactor
+        (e.g. someone moves reap before the cancel loop) cannot
+        silently regress error isolation.
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=2)
+        repo.find_active_jobs = MagicMock(return_value=[])
+        # ``find_orphan_active_jobs`` itself raises — defensive outer
+        # block must swallow.
+        repo.find_orphan_active_jobs = MagicMock(
+            side_effect=RuntimeError("simulated reap finder failure")
+        )
+        service._repository = repo
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # Batch + active counters still report.
+        assert result == {
+            "cancelled_queued": 2,
+            "cancelled_active": 0,
+            "total_processed": 2,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Group 3 — Endpoint integration: POST /jobs/cleanup
@@ -279,9 +405,40 @@ class TestCleanupJobsEndpoint:
         assert body == {
             "cancelled_queued": 4,
             "cancelled_active": 2,
+            "orphaned_reaped": 0,
             "total_processed": 6,
         }
         service.cleanup_non_terminal_jobs.assert_awaited_once_with()
+
+    def test_cleanup_includes_orphaned_reaped_when_set(self, cleanup_client):
+        """``orphaned_reaped`` is surfaced in the response when the
+        reaper drained ghost active rows. ``total_processed`` stays
+        pinned to ``cancelled_queued + cancelled_active`` so dashboards
+        keyed off that single number do not silently jump when an
+        orphan sweep succeeds.
+        """
+        from daemon.routers.jobs_crud import get_job_queue_service
+
+        service = self._stub_service(
+            {
+                "cancelled_queued": 1,
+                "cancelled_active": 0,
+                "orphaned_reaped": 3,
+                "total_processed": 1,
+            }
+        )
+        get_job_queue_service.set_service(service)
+
+        response = cleanup_client.post("/jobs/cleanup")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "cancelled_queued": 1,
+            "cancelled_active": 0,
+            "orphaned_reaped": 3,
+            "total_processed": 1,
+        }
 
     def test_cleanup_returns_zeros_when_nothing_to_cancel(self, cleanup_client):
         """Empty job board -> all counters zero, still 200 (idempotent)."""
