@@ -241,6 +241,7 @@ For full configuration details, see [docs/setup.md](docs/setup.md).
 | [Architecture](docs/architecture.md) | System design and internals |
 | [Job Queue](docs/features/job-queue.md) | Priority scheduling and dead-letter queue |
 | [Configuration](docs/configuration/rag-configuration.md) | Configuration reference |
+| [Skill Evolution](docs/skill-evolution.md) | Native skill evolution system — skills that learn, adapt, and improve from real execution data |
 
 Full documentation is available in the [`docs/`](docs/) directory.
 

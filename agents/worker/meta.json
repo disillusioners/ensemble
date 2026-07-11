@@ -1,11 +1,12 @@
 {
   "id": "worker",
   "name": "Worker",
-  "description": "OpenSpace tool orchestrator — executes tasks via OpenSpace MCP tools (execute_task, search_skills, fix_skill, upload_skill). Receives work via job dispatch. SemiAuto: requests permission for breaking changes.",
+  "description": "Autonomous worker with dynamic skill injection — executes tasks with AI-selected skills",
   "icon": "🔧",
   "color": "accent-orange",
   "version": "1.0.0",
-  "innate_skills": ["openspace", "todo"],
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": true,
   "no_force_explore": true,
   "tools": {
     "allow": [
@@ -17,10 +18,7 @@
       "knowledge",
       "mcp",
       "context",
-      "mcp_openspace_execute_task",
-      "mcp_openspace_search_skills",
-      "mcp_openspace_fix_skill",
-      "mcp_openspace_upload_skill"
+      "dynamic-skill"
     ]
   }
 }

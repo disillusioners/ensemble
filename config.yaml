@@ -139,3 +139,38 @@ services:
 job_system:
   job_retry_scheduler_enabled: null  # null/empty = disabled. Set to true to enable background retry polling.
 
+# Skill Evolution System Settings
+# Field names mirror daemon/config.py:SkillEvolutionConfig exactly.
+# Any env var listed in .env.example (SKILL_EVOLUTION_*) overrides these.
+skill_evolution:
+  # Embedding configuration (powers skill retrieval + dedupe)
+  embedding_model: text-embedding-3-small
+  embedding_dimensions: 1536
+  embedding_api_key: null  # Falls back to llm.api_key if null
+  embedding_base_url: null  # Falls back to llm.base_url if null
+
+  # Evolution models
+  analysis_model: null  # Cheap model for Tier 2 analysis. Falls back to main llm.model if null.
+  evolution_model: null  # Model for Tier 3 evolution. Falls back to main llm.model if null.
+
+  # A/B testing thresholds
+  ab_sample_size: 10
+  ab_min_difference: 0.15  # Loser must be at least 15% worse than the champion to swap.
+  max_extensions: 3
+
+  # Skill injection (search → inject into agent prompt)
+  max_inject_skills: 2
+  min_score_full_inject: 0.7
+  min_score_low_match: 0.3  # Code default; raise to 0.4 for stricter low-match gating.
+  bm25_top_k: 10
+  llm_select_top_k: 5
+
+  # Triggers (when the system scans metrics / runs evolution)
+  default_task_count_threshold: 20  # Run metric scan every N tasks per skill.
+  default_daily_scan_hour: 3  # Daily scan at 3 AM (0-23, server local time).
+  metric_scan_interval_hours: 24.0  # How often the skill_metric_scan maintenance job runs.
+
+  # Capture thresholds (skill content must reach these to be captured)
+  capture_min_iterations: 5
+  capture_min_duration_seconds: 60
+

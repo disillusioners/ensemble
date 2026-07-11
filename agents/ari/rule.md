@@ -210,7 +210,7 @@ Want me to:
 | Task domain | Default agent_id | Why |
 |-------------|-----------------|-----|
 | Software development | **`leader`** | Leader coordinates developer/reviewer/tester team |
-| OpenSpace operations | **`worker`** | Worker is the only agent with `mcp_openspace_*` tools |
+| Dynamic-skill operations | **`worker`** | Worker uses native dynamic-skill tools (`skill_search`, `skill_list`, `skill_view`, `skill_create`, `skill_fix`, `skill_feedback`) with `skill_injection` enabled; no `mcp_openspace_*` tools |
 | Quick tasks | **(direct)** | No dispatch needed |
 
 Use these defaults unless the user specifies otherwise.
