@@ -8,28 +8,37 @@ to drain *ghost* active jobs — rows whose instance has already
 terminated but whose ``admission_state='active'`` was leaked by an
 observer-feedback drop (process killed mid-ack, DB write race).
 
-The first review round caught three breakages in the original
-implementation:
+Three review rounds shaped this test file:
 
-1. ``frontend/src/app/pages/jobs/jobs.component.ts`` shipped a
-   verbatim leftover copy of the old ``onSystemCleanup`` body at
-   class-body level — the file did not compile under
-   ``tsc -p tsconfig.app.json --noEmit``.
-2. ``JobQueueService.cleanup_non_terminal_jobs`` computed
-   ``orphaned_reaped`` and logged it but dropped it from the
-   returned dict — the FE snackbar always saw the schema default
-   ``0`` and the new counter was silently dead.
-3. ``JobRepository.find_orphan_active_jobs`` used ``~text(...)
-   .bindparams(p=tuple)`` without ``expanding=True``. SQLAlchemy
-   rendered the tuple as a single placeholder, which is invalid
-   SQL on both PG and SQLite. Compounding the failure, ``~``
-   cannot invert a ``TextClause`` at all — the method raised
-   ``AssertionError`` from SQLAlchemy's internals on every call.
+Round 1 (commit ``93b10484``):
+  The original implementation had three breakages:
+  1. ``frontend/src/app/pages/jobs/jobs.component.ts`` shipped a
+     verbatim leftover copy of the old ``onSystemCleanup`` body at
+     class-body level — the file did not compile under
+     ``tsc -p tsconfig.app.json --noEmit``.
+  2. ``JobQueueService.cleanup_non_terminal_jobs`` computed
+     ``orphaned_reaped`` and logged it but dropped it from the
+     returned dict.
+  3. ``JobRepository.find_orphan_active_jobs`` used
+     ``~text(...).bindparams(p=tuple)`` without
+     ``expanding=True``; SQLAlchemy raised ``AssertionError`` on
+     every real call.
 
-This test exercises the actual finder and reaper against the shared
-in-memory SQLite DB built from the full production schema (jobs +
-instances + job_locks), so the SQL is compiled and run for real —
-catching class #3 directly.
+Round 2 (commit ``e78bd932``):
+  Fixed all three breakages. ``force_finalize_orphan`` shipped an
+  elaborate synthetic-lock-row bypass under the assumption that
+  the deferred PG constraint triggers
+  ``trg_job_queue_items_active_lock_guard`` /
+  ``trg_job_locks_active_guard`` would reject the UPDATE — but
+  ``trg_job_queue_items_active_lock_guard`` only fires when
+  ``NEW.admission_state = 'active'``, so the reaper's
+  ``active → done`` UPDATE is not in scope.
+
+Round 3 (the current shape):
+  The synthetic-lock-row mechanism is removed entirely. The
+  reaper is a bare ``UPDATE … SET admission_state='done'`` which
+  is portable to both SQLite and PostgreSQL with no bypass — the
+  triggers do not fire. This file pins that contract.
 """
 
 from __future__ import annotations
@@ -241,14 +250,18 @@ class TestForceFinalizeOrphan:
         assert reaped.admission_state == AdmissionState.DONE.value
         assert reaped.terminal_reason == "cancelled"
 
-    def test_non_message_orphan_is_finalized_without_leaking_sentinel(
+    def test_non_message_orphan_is_finalized(
         self, repository: JobRepository, engine
     ):
-        """Non-message orphans take the synthetic-lock-row code path
-        (because ``trg_job_queue_items_active_lock_guard`` fires
-        for ``job_type != 'message'``). The bypass must round-trip
-        — reaped done, and the sentinel lock row removed so the
-        bypass is invisible to other readers."""
+        """A ``job_type='task'`` (non-message) orphan is reaped
+        with a bare UPDATE — no synthetic lock row, no trigger
+        bypass, ``done/cancelled`` is the post-condition, and no
+        spurious ``job_locks`` row is created.
+
+        Pin this contract so a future fix that re-introduces a
+        bypass for non-message orphans cannot silently write
+        sentinel rows.
+        """
         with Session(engine) as session:
             _make_instance(session, "inst-completed", status="completed")
             _make_job(
@@ -258,21 +271,25 @@ class TestForceFinalizeOrphan:
                 job_type="task",
             )
 
-        repository.force_finalize_orphan("ghost-task", "cancelled")
+        with Session(engine) as session:
+            reaped = repository.force_finalize_orphan("ghost-task", "cancelled")
+
+        assert reaped is not None
+        assert reaped.admission_state == AdmissionState.DONE.value
+        assert reaped.terminal_reason == "cancelled"
 
         with engine.begin() as conn:
-            sentinel_rows = conn.exec_driver_sql(
-                "SELECT lock_id FROM job_locks "
-                "WHERE lock_id LIKE 'orphan-reap-%'"
+            all_locks = conn.exec_driver_sql(
+                "SELECT lock_id FROM job_locks"
             ).fetchall()
-        assert sentinel_rows == [], (
-            f"synthetic lock row leaked across reap: {sentinel_rows}"
+        assert all_locks == [], (
+            f"reaper must not insert any job_locks rows, found: {all_locks}"
         )
 
     def test_null_instance_id_orphan_is_finalized(self, repository: JobRepository, engine):
-        """A ghost with ``instance_id IS NULL`` exercises the branch
-        where the synthetic-lock INSERT is skipped (no key for the
-        JOIN). The reap must still finalize the row."""
+        """A ghost with ``instance_id IS NULL`` reaps with the same
+        bare UPDATE — there is no FK key for the lock trigger's
+        JOIN anyway. The reap must still finalize the row."""
         with Session(engine) as session:
             _make_job(session, "ghost-null", instance_id=None, job_type="task")
 

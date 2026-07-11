@@ -2259,41 +2259,48 @@ SET admission_state = 'queued',
             return list(session.exec(stmt))
 
     def force_finalize_orphan(self, job_id: str, terminal_reason: str = "cancelled") -> JobItem | None:
-        """Force ``active → done`` on an orphan job.
+        """Force ``active → done`` on an orphan JobItem.
 
-        Three predicates decide what an orphan looks like; the
-        matching ``force_finalize_orphan`` must therefore be safe to
-        call regardless of how the row got stuck.
+        An *orphan* is an ``admission_state='active'`` row whose
+        underlying instance is already terminal (or missing) — i.e.
+        the row slipped through the natural finalize path (the
+        worker process died before observer feedback could write the
+        terminal transition). See :meth:`find_orphan_active_jobs`
+        for the full predicate.
 
-        Implementation choice:
+        Implementation choice
+        ----------------------
 
-        The PostgreSQL constraint trigger
-        ``trg_job_queue_items_active_lock_guard`` rejects the UPDATE
-        when ``admission_state='active' AND job_type != 'message'``
-        and there is no matching ``job_locks`` row. The trigger ONLY
-        fires for ``job_type != 'message'``; for ``message`` orphans
-        (the dominant failure mode in practice — observer feedback
-        can drop on process kill, leaving the JobItem mirror stuck
-        active while the Task side has long-since completed) the
-        UPDATE lands untouched.
+        Naïvely the reaper might worry that the deferred
+        PostgreSQL constraint triggers
+        ``trg_job_queue_items_active_lock_guard`` /
+        ``trg_job_locks_active_guard`` (installed by
+        ``daemon/manager.py::_ensure_postgres_columns``) would
+        reject the UPDATE. They do not:
 
-        For non-message orphans the right portable bypass is to
-        INSERT a synthetic ``job_locks`` row referencing the job's
-        ``instance_id`` inside the same transaction, run the UPDATE,
-        then DELETE the synthetic lock row in the same transaction
-        so it never escapes. The lock row's presence satisfies the
-        guard's ``EXISTS (SELECT 1 FROM job_locks WHERE instance_id
-        = NEW.instance_id)`` check (the matching active JobItem
-        itself is the other direction of the witness pair). The
-        DELETE runs unconditionally so a prior failed attempt that
-        leaked the synthetic row still cleans up.
+        * ``trg_job_queue_items_active_lock_guard`` body is
+          ``IF NEW.admission_state = 'active' AND ...`` — the
+          reaper sets ``NEW.admission_state = 'done'``, so the IF
+          is FALSE and the trigger returns NEW untouched. (For
+          ``job_type='message'`` the IF is FALSE on the first
+          conjunct anyway, so the trigger is a no-op for message
+          orphans as well.)
+        * ``trg_job_locks_active_guard`` only fires on INSERT/UPDATE
+          of ``job_locks``. The reaper never touches ``job_locks``
+          (a real orphan has no lock row to delete), so this
+          trigger cannot fire.
 
-        Avoided alternative:
-
-        ``ALTER TABLE … DISABLE TRIGGER`` is PG-only and raises a
-        SQLite ``OperationalError`` on the dev / test DB. It also
-        disables the guard globally for the statement window,
-        re-opening the leak vector the guard exists to prevent.
+        A bare ``UPDATE … SET admission_state='done'`` therefore
+        works against a real PG trigger suite without any bypass.
+        The early-round fix shipped an elaborate synthetic-lock-row
+        mechanism (INSERT sentinel → UPDATE → DELETE in one
+        transaction) on the assumption the trigger would reject us
+        — but the assumption is wrong and the synthesis is itself
+        broken: a DEFERRABLE INITIALLY DEFERRED trigger inspects
+        committed state, so on PG the sentinel INSERT would still
+        fail the ``trg_job_locks_active_guard`` check at COMMIT
+        (the matching active JobItem is already 'done' by then).
+        The whole branch is removed in this round.
 
         Args:
             job_id: Target orphan ``JobItem.job_id``.
@@ -2308,55 +2315,7 @@ SET admission_state = 'queued',
             or ``None`` if the row no longer matches the orphan
             predicate (e.g. a concurrent finalize flipped it).
         """
-        sentinel_lock_id = f"orphan-reap-{job_id}"
-        acquired_at = datetime.now(timezone.utc).isoformat()
-
         with self.engine.begin() as conn:  # type: ignore[arg-type]
-            # 1. Insert a synthetic job_locks row ONLY when the
-            # trigger will reject our UPDATE (``job_type !=
-            # 'message'``). The SELECT picks the live ``instance_id``
-            # off the orphan JobItem itself; for ``NULL``
-            # ``instance_id`` orphans we skip the INSERT because the
-            # trigger's own JOIN key would be NULL and reject us
-            # anyway — these rows are also message-typed in practice
-            # (the active_lock_guard body skips message jobs so the
-            # branch that needs a sentinel never fires for them).
-            #
-            # Use ``WHERE NOT EXISTS`` instead of ``ON CONFLICT``
-            # so the INSERT is portable across SQLite and
-            # PostgreSQL without dialect branching. Step 3 always
-            # DELETE's the sentinel so a prior half-applied attempt
-            # cannot accumulate across runs.
-            sentinel_params = {
-                "sentinel_lock_id": sentinel_lock_id,
-                "job_id": job_id,
-                "acquired_at": acquired_at,
-            }
-            conn.execute(
-                text(
-                    "INSERT INTO job_locks "
-                    "  (lock_id, project_id, queue_id, job_id, instance_id, "
-                    "   acquired_at, lock_slot) "
-                    "SELECT :sentinel_lock_id, project_id, queue_id, :job_id, "
-                    "       instance_id, :acquired_at, 0 "
-                    "FROM job_queue_items "
-                    "WHERE job_id = :job_id "
-                    "  AND job_type != 'message' "
-                    "  AND admission_state = 'active' "
-                    "  AND deleted_at IS NULL "
-                    "  AND instance_id IS NOT NULL "
-                    "  AND NOT EXISTS ("
-                    "    SELECT 1 FROM job_locks "
-                    "    WHERE lock_id = :sentinel_lock_id"
-                    "  )"
-                ),
-                sentinel_params,
-            )
-
-            # 2. UPDATE the orphan row to done. The trigger's
-            # DEFERRABLE INITIALLY DEFERRED timing means it doesn't
-            # fire until COMMIT — so the synthetic lock row inserted
-            # above is visible when it does.
             result = conn.execute(
                 text(
                     "UPDATE job_queue_items "
@@ -2371,23 +2330,9 @@ SET admission_state = 'queued',
                     "active_state": AdmissionState.ACTIVE.value,
                     "terminal_reason": terminal_reason,
                     "job_id": job_id,
-                    "sentinel_lock_id": sentinel_lock_id,
-                    "acquired_at": acquired_at,
                 },
             )
             rowcount = result.rowcount or 0
-
-            # 3. Always DELETE the synthetic lock row, even if the
-            # UPDATE didn't match (e.g. a concurrent legitimate
-            # finalize flipped the row between finder and reaper).
-            # The DELETE runs inside the same transaction so COMMIT
-            # makes the bypass invisible.
-            conn.execute(
-                text(
-                    "DELETE FROM job_locks WHERE lock_id = :sentinel_lock_id"
-                ),
-                {"sentinel_lock_id": sentinel_lock_id},
-            )
 
         if rowcount == 0:
             return None
