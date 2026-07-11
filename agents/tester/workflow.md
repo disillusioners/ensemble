@@ -38,7 +38,7 @@ flowchart TD
     U --> V([Report to user])
 ```
 
-Key shape: **parallel fan-out** at launch (independent packs run concurrently), **per-pack fix loops** (quick fix → re-run; TTQA → Architecture Fix → escalate), and **maintenance is mandatory** before escalation.
+Key shape: **blast-radius gate first** (scope down unless warranted), **parallel fan-out** at launch (independent packs run concurrently), **per-pack fix loops** (quick fix → re-run; TTQA → Architecture Fix → escalate), and **maintenance is mandatory** before escalation.
 
 ---
 
@@ -77,16 +77,8 @@ Key shape: **parallel fan-out** at launch (independent packs run concurrently), 
 
 ### Planning Checklist
 
-1. **Identify all work to do**
-   - List all test packs that need execution
-   - Note any dependencies between packs
-   - Identify ensure.md validations needed
-
-2. **Assess parallelism**
-   - **Independent?** → Can run in parallel (different modules, no shared state)
-   - **Dependent?** → Must run sequentially (shared resources, order matters)
-   - **Parallelizable?** → 2+ independent groups of packs
-
+1. **Identify all work to do** — list all test packs that need execution; note dependencies between packs; identify ensure.md validations needed
+2. **Assess parallelism** — independent? → parallel; dependent? → sequential; parallelizable? → 2+ independent groups
 3. **Determine execution strategy**
 
    | Scenario | Strategy |
@@ -96,23 +88,9 @@ Key shape: **parallel fan-out** at launch (independent packs run concurrently), 
    | 3+ independent packs (different modules) | Multiple sessions in parallel |
    | Mixed dependencies | Parallel + sequential |
 
-4. **Group packs into sessions**
-   - Group by: module, test type, or execution environment
-   - Keep unrelated packs in separate sessions
-   - Consider quick fix context (reuse same module)
-
-5. **Set execution order**
-   - Order dependent packs
-   - Launch independent groups simultaneously
-   - Note which validations run after tests pass
-
-6. **Materialize the plan as a todo graph** (do this right after planning)
-   - Call `todo_graph_create(nodes=<packs>, edges=<dependencies>)` — one node per pack.
-   - Prefer `todo_graph_*` over `todo_list_*` **because of parallelism**: the DAG expresses which packs run concurrently (no edge between them) vs. which must wait (edge = dependency). A flat list cannot represent fan-out/fan-in.
-   - Independent packs → sibling nodes with no edge (run in parallel).
-   - Dependent packs → edge from prerequisite to dependent (e.g., `api_mock_test` waits on `api_unit_test`).
-   - Add a final aggregation/ensure.md node with edges from every pack so it only goes ready once packs finish.
-   - As sessions launch/complete, keep the graph current with `todo_graph_update(node_id, status)` (`in_progress` → `done`). The response tells you the next-ready nodes.
+4. **Group packs into sessions** — by module, test type, or execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
+5. **Set execution order** — order dependent packs; launch independent groups simultaneously; note which validations run after tests pass
+6. **Materialize the plan as a todo graph** (right after planning) — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent (e.g., `api_mock_test` waits on `api_unit_test`). Add a final aggregation/ensure.md node with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
 
 ### Planning Rules
 - **Never skip planning** — Always analyze before spawning
@@ -130,11 +108,11 @@ Plan: Spawn 3 sessions in parallel (one per pack)
 Expected: 10 min total instead of 30 min sequential
 ```
 
-**Example 2: Phase-scoped testing with some skipped**
+**Example 2: Scoped testing (small change)**
 ```
 Context: Changes in auth/ module only
 Packs: auth_unit_test, api_unit_test, db_unit_test
-Plan: Run auth_unit_test only (others irrelevant)
+Blast radius: small, single module → run auth_unit_test only (others irrelevant)
 Sessions: 1 session for 1 pack
 ```
 
@@ -165,12 +143,41 @@ When starting with a new project:
 
 ## ensure.md Validation Workflow
 
-**Project-specific quality gates must pass before testing is complete**
+**Project-specific quality gates must pass before testing is complete.** The `.agents/tester/rules/ensure.md` file is **USER-DEFINED and READ-ONLY** — a project-specific file of custom quality requirements that MUST be validated (not standard tests).
 
-**Note:** The `.agents/tester/rules/ensure.md` file is **USER-DEFINED and READ-ONLY**. The tester agent can only read it, never modify it.
+### ensure.md Template (user-maintained)
 
-### What is ensure.md?
-A project-specific file containing custom quality requirements that MUST be validated. These are not standard tests, but project-specific validation rules.
+```markdown
+# Quality Requirements
+
+## Critical
+_MUST pass before testing is complete_
+
+- [ ] The `start.sh` script must run without any bug/error
+  - Validation: Run ./start.sh, check exit code is 0 and stderr is empty
+- [ ] No hardcoded secrets in source code
+  - Validation: Grep for API keys, passwords, tokens in source files
+- [ ] All environment variables documented in README
+  - Validation: Check README.md for env var documentation section
+
+## Important
+_Should pass, flag if failed_
+
+- [ ] All API endpoints return valid JSON responses
+  - Validation: Call each endpoint, verify response is valid JSON
+- [ ] Database migrations are reversible
+  - Validation: Run migration up, then down, verify clean state
+- [ ] Application starts within 5 seconds
+  - Validation: Measure startup time
+
+## Nice-to-have
+_Informational, report status only_
+
+- [ ] No compiler warnings in production build
+  - Validation: Run build with warnings-as-errors flag
+- [ ] All functions have documentation comments
+  - Validation: Check for docstrings/comments on all public functions
+```
 
 ### Phase 1: Review ensure.md
 1. Read `.agents/tester/rules/ensure.md` (I do this directly - read-only)
@@ -180,26 +187,6 @@ A project-specific file containing custom quality requirements that MUST be vali
 ### Phase 2: Create Validation Tasks
 For each requirement in ensure.md, create a validation task for opencode:
 
-**Example ensure.md:**
-```markdown
-# Quality Requirements
-
-## Critical
-- [ ] The `start.sh` script must run without any bug/error
-- [ ] All API endpoints must return valid JSON responses
-- [ ] No hardcoded secrets in source code
-
-## Important
-- [ ] Database migrations must be reversible
-- [ ] All environment variables documented in README
-- [ ] Application starts within 5 seconds
-
-## Nice-to-have
-- [ ] No compiler warnings in production build
-- [ ] All functions have documentation comments
-```
-
-**Task for opencode session:**
 ```
 Task: Validate ensure.md Requirements
 Context: [Project path, ensure.md requirements]
@@ -237,10 +224,8 @@ Expected Output:
 1. Analyze validation results
 2. Identify failing requirements
 3. Update `.agents/tester/RESULTS/[date]-ensure-validation.md`
-4. Update `.agents/tester/LESSONS/` with issues found (use descriptive filename like `ensure-validation-[date].md`)
-5. Report to user:
-   - ✅ All requirements passed
-   - ❌ List of failed requirements with details
+4. Update `.agents/tester/LESSONS/` with issues found (e.g., `ensure-validation-[date].md`)
+5. Report to user: ✅ all passed, or ❌ list of failed requirements with details
 
 ### When to Run ensure.md Validation
 - **After unit tests pass** — Validate quality gates
@@ -249,20 +234,20 @@ Expected Output:
 - **On user request** — Explicit validation request
 
 ### ensure.md Validation Priority
-1. **Critical requirements** — MUST pass before testing is complete
-2. **Important requirements** — Should pass, flag if failed
+1. **Critical** — MUST pass before testing is complete
+2. **Important** — Should pass, flag if failed
 3. **Nice-to-have** — Report status, but don't block
 
 ---
 
 ## Unit Test Workflow
 
-**I coordinate, opencode executes. When working on a phase, prefer running only relevant unit test packs.**
+**I coordinate, opencode executes. Scope to relevant packs per Blast Radius Control.**
 
 ### Step 1: Discover & Plan
 1. Read `.agents/tester/README.md` for context
 2. Read `.agents/tester/rules/ensure.md` for quality requirements
-3. **If phase context provided**: Scope to relevant test packs only
+3. **Derive the change set** (blast radius) — scope to relevant unit test packs
 4. **List the unit test packs to run** (one per module/scope). Estimate each pack's runtime; split any pack > 2 min (unit hard limit) into smaller packs.
 5. **Plan sessions**: one opencode session per pack; independent packs in parallel.
 6. Prepare the strict message (Step 2) per pack — never a single "run unit tests" message.
@@ -304,38 +289,26 @@ Estimated runtime: [X min, must be < 2 for unit]
 
 ## Test Pack Execution Workflow
 
-**All tests run through self-contained packs with timeout enforcement. When working on a phase, prefer running only relevant test packs.**
+**All tests run through self-contained packs with timeout enforcement (see test-pack skill). Scope per Blast Radius Control.**
 
-### ⚠️ Planning Step (Do This First!)
-
-1. **List all packs to run** — Based on phase context or full test request
+### Planning Step (Do This First!)
+1. **Derive the change set** (blast radius) → list packs to run
 2. **Assess parallelism** — Which packs are independent?
 3. **Group into sessions** — Related packs together, unrelated packs separate
 4. **Determine spawn order** — Sequential for dependent, parallel for independent
 
 **See Planning Phase (above) for full guidance.**
 
-### Phase-Scoped Testing (Productivity Optimization)
+### Scope from Phase Context
 
-**When leader provides phase context:**
+**When leader provides phase context (changed files/modules):**
+- Use it as the primary signal to derive the change set (see Blast Radius Control above)
+- Match changed file paths to pack names via naming convention (e.g., `src/auth/` → `auth_unit_test.sh`)
+- Run only the affected packs; report skipped packs: `"Running: [packs]. Skipped: [packs]. Reason: [no changed files in X modules]."`
 
-- **Input format**: Leader provides a list of changed file paths or module names
-- **Relevance heuristic**: Match file paths to pack names via naming convention (e.g., `src/auth/` → `auth_unit_test.sh`)
-- **Ambiguity handling**: If <50% of packs are relevant, run scoped only; if ≥50% are relevant, run all packs
-- **Scope reporting template**: `"Running: [packs]. Skipped: [packs]. Reason: [no changed files in X modules]."`
-
-**Decision flow:**
-1. Receive changed files from leader
-2. Match each file to test packs by naming convention
-3. Calculate relevance ratio (matched packs / total packs)
-4. If <50%: run only relevant packs, report skipped packs
-5. If ≥50%: run all packs (more efficient than skipping few)
-6. Report scope to leader using the template above
-
-**No context case:** Do NOT default to "run everything." Apply **Blast Radius Control (First Gate)** above — derive the change set from request/shared context/git diff, and reduce scope when the change is small, even on a "full suite" request.
+Scope is always driven by the actual change set — never auto-expand to all packs based on a pack-count ratio. If the change set is broad (cross-module), blast-radius warrants the full suite; otherwise stay scoped.
 
 ### Check: Pack Existence Gate
-
 1. **Check if test packs exist for this project.**
 2. **YES** → Proceed to Execute Test Pack
 3. **NO** → Proceed to Organize Tests into Packs, then Execute
@@ -404,12 +377,11 @@ ENV OVERRIDES (intentional, documented in MOCK_TESTS.md):
 Do **not** raise the 5-min cap to fit a slow test. Override the config/env instead.
 
 ### Execute Test Pack
-**If phase context provided:** Only run packs relevant to changed files. Report skipped packs.
 Send the **Run Single Test Pack** message above (one per opencode session). Run the Pre-Send Self-Check before each send.
 
 ### Full Project Test: Split & Parallel Workflow
 
-**When a full project test is requested** (no phase scope, or leader explicitly wants everything):
+**When blast-radius assessment determines the full suite is warranted** (big/critical change, broad blast radius, or user insists after being told the cost):
 
 1. **List every pack** from PACKS.md and estimate each pack's runtime.
 2. **Split any pack estimated > 5 min** into smaller packs until every pack is < 5 min.
@@ -430,14 +402,9 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 
 **When a test pack times out:**
 
-1. **Analyze timeout cause**
-   - Which specific test/scenario timed out?
-   - What is the expected vs actual duration?
-
-2. **Attempt TTQA optimizations** (see rule.md for canonical list)
-
+1. **Analyze timeout cause** — Which specific test/scenario timed out? Expected vs actual duration?
+2. **Attempt TTQA optimizations** (canonical list in rule.md)
 3. **Re-run test pack** with optimizations
-
 4. **If still timeout** → Proceed to Test Architecture Fix (NOT straight to escalation)
 
 ### Test Architecture Fix Workflow
@@ -529,18 +496,63 @@ Test pack cannot meet timeout requirement. Manual intervention required.
 
 **I design, opencode implements and executes**
 
+### Mock Test Specification Template
+
+When I design mock tests, I document in `.agents/tester/MOCK_TESTS.md`:
+
+```markdown
+## Mock Test: [Test Name]
+
+### Metadata
+- **Created**: [date]
+- **Script**: [path/to/script.ext]
+- **Language**: [Python/Go/Bash]
+- **Status**: [PLANNED/IMPLEMENTED/ACTIVE/DEPRECATED]
+
+### Configuration
+- **Timeout**: [X seconds]
+- **Service Port**: [port > 10000]
+- **Mock Ports**: [list of ports > 10000]
+- **Cleanup**: Kill processes on all ports before/after
+
+### What It Tests
+- [Feature/workflow being tested]
+- [Critical paths covered]
+
+### Mock Services Required
+- [External service 1]: Mock on port [X]
+- [External service 2]: Mock on port [Y]
+
+### Test Scenarios
+1. [Scenario 1]: [Expected behavior]
+2. [Scenario 2]: [Expected behavior]
+3. [Scenario 3]: [Expected behavior]
+
+### Success Criteria
+- [ ] All scenarios pass
+- [ ] Response times within [X ms]
+- [ ] No process leaks
+- [ ] All ports freed after test
+
+### Implementation Notes
+- [Special considerations]
+- [Dependencies]
+- [Known issues]
+
+### Last Run
+- **Date**: [timestamp]
+- **Session**: [opencode session ID]
+- **Result**: [PASS/FAIL]
+- **Quick Fixes**: [List any quick fixes applied]
+- **Report**: [link to RESULTS/ file]
+```
+
 ### Phase 1: Design Mock Test
 1. Identify feature/workflow to test
 2. Read `.agents/tester/MOCK_TESTS.md` for existing tests
 3. Read `.agents/tester/rules/ensure.md` for quality requirements
-4. Design mock test specification:
-   - What to test
-   - Required mock services
-   - Ports to use (> 10000)
-   - Timeout duration
-   - Test scenarios
-   - Expected results
-5. Document specification in `.agents/tester/MOCK_TESTS.md`
+4. Design mock test specification (what to test, required mock services, ports > 10000, timeout, scenarios, expected results)
+5. Document specification in `.agents/tester/MOCK_TESTS.md` (use template above)
 
 ### Phase 2: Create Mock Test Script
 **Task for opencode session:**
@@ -597,60 +609,23 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 
 ## Complete Testing Workflow
 
-**Full testing cycle from start to finish. When testing a phase, scope tests to changed code only.**
+**Full testing cycle. Scope per Blast Radius Control.** This is the orchestrator view — each step delegates to its detailed workflow above.
 
-### Step 0: Plan (Do This First!)
-1. **Identify all work** — List test packs, ensure.md validations, mock tests needed
-2. **Assess parallelism** — Which tasks are independent?
-3. **Group into sessions** — Related packs together, unrelated packs separate
-4. **Determine spawn order** — Sequential for dependent, parallel for independent
-5. **Create todo graph** — `todo_graph_create(nodes=<packs>, edges=<deps>)`; prefer `todo_graph_*` over `todo_list_*` because the DAG tracks parallel fan-out/fan-in. Update nodes as sessions complete.
+1. **Plan** — derive change set (blast radius) → list all work (packs, mock tests, ensure.md validations) → assess parallelism → group into sessions → `todo_graph_create` (see Planning Phase)
+2. **Setup** — read `.agents/tester/README.md` + `.agents/tester/rules/ensure.md`; initialize docs if needed
+3. **Scoped Unit Tests** — run Unit Test Workflow on packs in the change set; fix failures; document
+4. **Scoped Mock Tests** — run Mock Test Workflow on relevant features; fix failures; document
+5. **ensure.md Validation** — validate all requirements (always full — quality gates); fix failures; document
+6. **Final Report** — aggregate all results; write to `.agents/tester/RESULTS/` (see Report Format below); update docs; report to user
 
-### Step 1: Setup
-1. Read `.agents/tester/README.md`
-2. Read `.agents/tester/rules/ensure.md`
-3. Initialize documentation if needed
+```
+## Testing Complete
 
-### Step 2: Phase-Scoped Unit Tests
-1. **If phase context provided**: Identify relevant test packs
-2. Run unit test workflow (scoped or full based on context)
-3. Fix failures (quick fix or full workflow)
-4. Document results
-
-### Step 3: Phase-Scoped Mock Tests
-1. **If phase context provided**: Only mock tests relevant to phase
-2. Design mock test specifications
-3. Create mock test scripts
-4. Run mock tests
-5. Fix failures (quick fix or full workflow)
-6. Document results
-
-### Step 4: ensure.md Validation
-1. Validate requirements in ensure.md (always full - quality gates)
-2. Fix failures (quick fix or full workflow)
-3. Document results
-
-### Step 5: Final Report
-1. Aggregate all results (unit tests, mock tests, ensure.md)
-2. Write comprehensive report to `.agents/tester/RESULTS/`
-3. Update all documentation
-4. Report to user:
-   ```
-   ## Testing Complete
-   
-   ### Unit Tests: [PASS/FAIL]
-   - Details...
-   
-   ### Mock Tests: [PASS/FAIL]
-   - Details...
-   
-   ### ensure.md Validation: [PASS/FAIL]
-   - Critical: X/Y passed
-   - Important: X/Y passed
-   - Nice-to-have: X/Y passed
-   
-   ### Overall Status: [READY/NOT READY]
-   ```
+### Unit Tests: [PASS/FAIL]
+### Mock Tests: [PASS/FAIL]
+### ensure.md Validation: [PASS/FAIL] — Critical: X/Y | Important: X/Y | Nice-to-have: X/Y
+### Overall Status: [READY/NOT READY]
+```
 
 ---
 
@@ -749,6 +724,26 @@ Quick Fix Authorization:
 
 ## Task Preparation Guidelines
 
+### Task Preparation Checklist (before spawning)
+
+Before spawning an opencode instance, ensure the task has:
+
+- [ ] **Context**: Project background, relevant files, current state
+- [ ] **Objective**: Clear, specific goal
+- [ ] **Single pack named**: Exactly ONE pack path (never "run all tests" / `go test ./...`)
+- [ ] **Scope locked**: Message explicitly forbids running other packs/tests
+- [ ] **Command-level timeout**: 5-min wrapper included (`timeout 300 ...` / `subprocess timeout=300`)
+- [ ] **Script-internal timeout**: Confirmed (dual-layer)
+- [ ] **Time estimate**: Pack estimated < 5 min (split if not)
+- [ ] **Config/env overrides**: Documented if long-timeout case
+- [ ] **Requirements**: Detailed list of what must be done
+- [ ] **Constraints**: What to follow, what to avoid
+- [ ] **Quick Fix Authorization**: Yes/No with criteria
+- [ ] **Expected Output**: PASS/FAIL/TIMEOUT + details
+- [ ] **Success Criteria**: How to know task is complete
+- [ ] **ensure.md Requirements**: If validating quality gates
+- [ ] **Pre-Send Self-Check passed**: All above verified before sending
+
 ### Good Task Definition
 ```
 Context: [Project background, relevant files]
@@ -838,12 +833,11 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Testing process changes
 - Mock test setup changes
 
-### ensure.md (I write directly - validation results only)
+### ensure.md (user-maintained, read-only)
 - Read `.agents/tester/rules/ensure.md` (user-defined, read-only)
 - Write validation results to RESULTS/
-- **Create if missing** — Ask user for project-specific requirements
-- **Update when requirements change** — Add/remove/modify requirements
-- **Mark requirements as validated** — Update checkboxes after validation
+- **If missing** — Ask user for project-specific requirements
+- **Mark requirements as validated** — Update checkboxes after validation (validation results only; never modify the requirements themselves)
 
 ### MOCK_TESTS.md (I write directly)
 - New mock test specification
@@ -956,7 +950,7 @@ Session IDs: [list of opencode session IDs used]
 
 ## Decision Points
 
-- **Starting testing work?** → PLAN FIRST: Analyze work, assess parallelism, group packs into sessions
+- **Starting testing work?** → PLAN FIRST: derive change set (blast radius), assess parallelism, group packs into sessions
 - **After planning?** → `todo_graph_create` (nodes=packs, edges=deps); prefer `todo_graph_*` over `todo_list_*` for parallelism
 - **Need to run tests?** → Send ONE strict "Run Single Test Pack" message per pack (never "run the tests"); pass Pre-Send Self-Check first
 - **Full project test requested?** → FIRST assess blast radius (derive change set from request/shared context/git diff). If change is small/isolated → reduce scope to relevant packs even though "full" was requested; report reduction. Only run the full suite if the change is big/critical/architecture — then Split & Parallel.
@@ -968,7 +962,7 @@ Session IDs: [list of opencode session IDs used]
 - **Tempted to send `go test ./...` / `pytest tests/`?** → STOP. That is forbidden. Use the strict single-pack template.
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
-- **Phase context provided?** → Scope tests to relevant packs only, report scope to leader
+- **Phase context provided?** → Use it as the primary signal to derive the change set; scope to relevant packs; report scope to leader
 - **No phase context?** → Do NOT default to "run everything" — apply Blast Radius Control: derive the change set and reduce scope when small; full suite only if the change is big/critical
 - **Need to validate ensure.md?** → Spawn opencode session with validation task
 - **Need to write test code?** → Spawn opencode session with specification
@@ -979,7 +973,55 @@ Session IDs: [list of opencode session IDs used]
 - **Session reuse?** → Quick fixes #1 priority, then related tasks
 - **Multiple test targets?** → Prioritize: ensure.md (critical) > mock tests > unit tests > edge cases
 - **Flaky tests?** → Flag in LESSONS/, spawn opencode to investigate
-- **New testing knowledge?** — I write to `.agents/tester/` files directly
+- **New testing knowledge?** → I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
 - **ensure.md critical requirements failing?** → Testing is NOT complete until they pass
 - **Code changes made?** → **MANDATORY**: Commit all changes before sending report to leader
+
+---
+
+## PACKS.md Template
+
+Inventory of all test packs for the project:
+
+```markdown
+# Test Packs
+
+## Summary
+- Total: X packs
+- Unit: X | Integration: X | E2E: X | Mock: X
+
+## Unit Test Packs
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| [module]_unit_test | [path] | [modules tested] | [date] | PASS/FAIL |
+
+## Integration Test Packs
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| [module]_integration_test | [path] | [modules tested] | [date] | PASS/FAIL |
+
+## E2E Test Packs
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| [module]_e2e_test | [path] | [features tested] | [date] | PASS/FAIL |
+
+## Mock Test Packs
+
+| Pack | Location | Type | Last Run | Status |
+|------|----------|------|----------|--------|
+| [test_name] | [path] | [unit/integration/e2e] | [date] | PASS/FAIL |
+
+---
+
+## Updating PACKS.md
+
+Update after each test run:
+- **Last Run**: timestamp
+- **Status**: PASS/FAIL/TIMEOUT
+- Add new entry for new packs
+- Mark deprecated packs as DEPRECATED
+```

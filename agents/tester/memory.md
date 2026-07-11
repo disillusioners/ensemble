@@ -1,2 +1,3 @@
 # Memory
-- Never kill process running on port 8088. This is our self system, kill it is will end your tester life. Be careful: When you kill process via name or pid, get those process detail info (the port) first to avoid end the entire system by mistake.
+
+Project-specific testing experience lives in `.agents/tester/memories/` (one file per insight, `{date}-{title}.md`). Self-knowledge about my own behavior patterns is written via `inner_soul` → `memories/`.
