@@ -108,9 +108,11 @@ class TestInjectionFenceDefense:
         assert snapshot == {"attacker_payload": malicious_value}
 
         # 2 & 3. Both fence tags are present and the value lives inside them.
+        # instance_id must equal the stored context_key so the root-instance
+        # branch (parent_id=None) queries the same partition we wrote to.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
-            instance_id="inst-injection",
+            instance_id=context_key,
             instance_repository=MagicMock(),  # root instance → never queried
             shared_context_metadata_repo=repo,
         )
@@ -168,7 +170,7 @@ class TestInjectionFenceDefense:
 
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
-            instance_id="inst-escape",
+            instance_id=context_key,
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
         )
@@ -224,7 +226,7 @@ class TestInjectionFenceDefense:
 
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
-            instance_id="inst-dash",
+            instance_id=context_key,
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
         )
