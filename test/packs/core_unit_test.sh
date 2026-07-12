@@ -11,7 +11,10 @@ echo "=== Test Pack: core_unit_test ==="
 cd "$PROJECT_DIR"
 
 # Run with timeout - kill if hangs
-timeout 120s pytest \
+# Use .venv/bin/pytest explicitly because the system pytest in /opt/homebrew/bin
+# is broken on this host (ImportError: cannot import name '_console_main' from
+# '_pytest.config'). The project venv (Python 3.13.3, pytest 9.0.2) works.
+timeout 120s .venv/bin/pytest \
   tests/test_agents_api.py \
   tests/test_cancellation.py \
   tests/test_config.py \
