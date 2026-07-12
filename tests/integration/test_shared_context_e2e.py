@@ -109,18 +109,24 @@ class TestSharedContextE2E:
         root_id = "root-" + uuid.uuid4().hex[:8]
         parent_id = "parent-" + uuid.uuid4().hex[:8]
         child_id = "child-" + uuid.uuid4().hex[:8]
+        # Build the tree root first so ``get_tree_root_id`` can walk
+        # the full chain: parent_id → root_id (parent_id=None).
         instance_repo.create(
-            instance_id=parent_id,
+            instance_id=root_id,
             agent_id="developer",
             agent_dir="/tmp/test/developer",
             parent_id=None,
             project_id="default",
+            metadata={"title": "root"},
+        )
+        instance_repo.create(
+            instance_id=parent_id,
+            agent_id="developer",
+            agent_dir="/tmp/test/developer",
+            parent_id=root_id,
+            project_id="default",
             metadata={"title": "parent"},
         )
-        # Root the tree: set the parent's parent_id to the root via
-        # the update hook so ``get_tree_root_id(parent_id)`` returns
-        # root_id when walking up.
-        instance_repo.update(parent_id, parent_id=root_id)
 
         # Write KV via the real repo (same path the tool layer uses).
         kv_payload = {
