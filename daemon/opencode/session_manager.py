@@ -1212,38 +1212,6 @@ class OpenCodeSessionManager:
     # Convenience methods (mirrors of Go public methods not yet covered)
     # ─────────────────────────────────────────────────────────────────
 
-    def has_latest_error(self) -> bool:
-        """Return True if the latest response is an error dict.
-
-        Used by tools (``wait_for_result``, ``get_status``) to detect worker
-        failures that have already transitioned the session to IDLE — without
-        this check, callers cannot distinguish a successful IDLE from a
-        failed IDLE since both look identical from the state alone.
-
-        Note: this does NOT acquire the lock. ``_latest_response`` is an
-        attribute write (atomic in CPython), and the snapshot returned via
-        ``get_snapshot()`` is already treated as eventually consistent by
-        callers — a torn read here would still produce either an old or new
-        value, never a mix.
-        """
-        latest = self._latest_response
-        return isinstance(latest, dict) and "error" in latest
-
-    def get_latest_error(self) -> str | None:
-        """Return the error string from the latest error response, or None.
-
-        Returns the value of the ``"error"`` key in ``_latest_response`` when
-        the latest response is an error dict; ``None`` otherwise. Use with
-        ``has_latest_error()`` to safely access the error message.
-
-        See ``has_latest_error()`` for the locking contract.
-        """
-        latest = self._latest_response
-        if isinstance(latest, dict) and "error" in latest:
-            err = latest["error"]
-            return str(err) if err is not None else None
-        return None
-
     async def resume(self) -> Any:
         """Send the resume prompt to the session.
 

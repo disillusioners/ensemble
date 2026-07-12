@@ -199,12 +199,16 @@ def create_opencode_tools(
         if not rendered_messages:
             latest = data.get("latest_response")
             if latest:
-                rendered = (
-                    latest.get("result", latest)
-                    if isinstance(latest, dict)
-                    else latest
-                )
-                rendered_messages.append(str(rendered))
+                if isinstance(latest, dict) and "error" in latest:
+                    err_msg = latest.get("error") or "unknown error"
+                    rendered_messages.append(f"[ERROR] Worker request failed: {err_msg}")
+                else:
+                    rendered = (
+                        latest.get("result", latest)
+                        if isinstance(latest, dict)
+                        else latest
+                    )
+                    rendered_messages.append(str(rendered))
 
         if rendered_messages:
             # Header reflects how many messages we're showing so the
@@ -537,12 +541,13 @@ Special prompts (bypass BUSY check):
             # Without this, agents see a normal "Latest Response" line and assume
             # the operation succeeded — but the worker actually failed (e.g.
             # HTTP 500 from OpenCode API) and the state just happens to be IDLE.
+            # Fall back to "unknown error" when the stored error value is None/empty.
             if isinstance(response, dict) and "error" in response:
                 output = [
                     f"State: {state}",
                     f"Last Activity: {record.get('last_activity', '')}",
                     "",
-                    f"[ERROR] Worker request failed: {response.get('error')}",
+                    f"[ERROR] Worker request failed: {response.get('error') or 'unknown error'}",
                 ]
                 return "\n".join(output)
 
@@ -638,6 +643,13 @@ Returns:
                         return f"[ERROR] Worker request failed: {err_text}"
                     return f"[COMPLETED] Session completed.\n{_format_response(resp)}"
                 if state == "WAITING_FOR_INPUT":
+                    response_inner = data.get("latest_response")
+                    if (
+                        isinstance(response_inner, dict)
+                        and "error" in response_inner
+                    ):
+                        err_text = response_inner.get("error") or "unknown error"
+                        return f"[ERROR] Worker request failed: {err_text}"
                     questions = data.get("questions", [])
                     return (
                         "[WAITING_FOR_INPUT] Session needs input. "
@@ -790,11 +802,14 @@ Returns:
             still_running = []
             for sd, resp in results:
                 if resp.status == "ok":
-                    state = (resp.data or {}).get("state", "UNKNOWN")
+                    data = resp.data or {}
+                    state = data.get("state", "UNKNOWN")
+                    latest = data.get("latest_response")
+                    is_error = isinstance(latest, dict) and "error" in latest
                     if state == "IDLE":
-                        completed.append((sd, resp))
+                        completed.append((sd, resp, is_error))
                     elif state == "WAITING_FOR_INPUT":
-                        waiting.append((sd, resp))
+                        waiting.append((sd, resp, is_error))
                     else:
                         still_running.append(sd)
 
@@ -804,10 +819,12 @@ Returns:
                 total = len(session_data)
                 lines = [f"[SUMMARY] {n_done}/{total} done, {n_waiting} waiting for input", ""]
                 for sd in session_data:
-                    if any(c[0] == sd for c in completed):
-                        marker = "✓"
-                    elif any(w[0] == sd for w in waiting):
-                        marker = "?"
+                    completed_match = next((c for c in completed if c[0] == sd), None)
+                    waiting_match = next((w for w in waiting if w[0] == sd), None)
+                    if completed_match is not None:
+                        marker = "✗" if completed_match[2] else "✓"
+                    elif waiting_match is not None:
+                        marker = "!" if waiting_match[2] else "?"
                     else:
                         marker = "..."
                     lines.append(f"  {marker} {sd['project']}:{sd['session_name']}")
@@ -816,22 +833,32 @@ Returns:
                     lines.append("─" * 60)
                     lines.append("  COMPLETED RESPONSES")
                     lines.append("─" * 60)
-                    for sd, resp in completed:
+                    for sd, resp, is_error in completed:
                         lines.append(f"\n[{sd['project']}:{sd['session_name']}]")
-                        lines.append(_format_response(resp))
+                        if is_error:
+                            latest = (resp.data or {}).get("latest_response")
+                            err_msg = latest.get("error") or "unknown error"
+                            lines.append(f"✗ [ERROR] Worker request failed: {err_msg}")
+                        else:
+                            lines.append(_format_response(resp))
                 if waiting:
                     lines.append("")
                     lines.append("─" * 60)
                     lines.append("  WAITING FOR INPUT")
                     lines.append("─" * 60)
-                    for sd, resp in waiting:
+                    for sd, resp, is_error in waiting:
                         lines.append(f"\n[{sd['project']}:{sd['session_name']}]")
-                        questions = (resp.data or {}).get("questions", [])
-                        lines.append(
-                            f"[WAITING_FOR_INPUT] Use "
-                            f"external_opencode_answer_question(request_id, answers) to reply."
-                            f"{_format_questions_block(questions)}"
-                        )
+                        if is_error:
+                            latest = (resp.data or {}).get("latest_response")
+                            err_msg = (latest or {}).get("error") or "unknown error"
+                            lines.append(f"✗ [ERROR] Worker request failed: {err_msg}")
+                        else:
+                            questions = (resp.data or {}).get("questions", [])
+                            lines.append(
+                                f"[WAITING_FOR_INPUT] Use "
+                                f"external_opencode_answer_question(request_id, answers) to reply."
+                                f"{_format_questions_block(questions)}"
+                            )
                 return "\n".join(lines)
 
             if idle_events:

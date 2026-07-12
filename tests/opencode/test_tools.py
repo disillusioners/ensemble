@@ -611,6 +611,158 @@ class TestGetStatusExecution:
         assert "[ERROR]" in result
         assert "API Error 500" in result
 
+    @pytest.mark.asyncio
+    async def test_get_status_with_error_none_uses_fallback_message(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When latest_response has ``{"error": None}``, get_status falls back to
+        ``unknown error`` rather than rendering literal ``None``.
+
+        Regression: the previous check ``response.get('error')`` returned
+        ``None`` for an explicit-null error, so the agent saw
+        ``[ERROR] Worker request failed: None`` and could mistake the
+        literal string ``None`` for a real error message. Now the
+        ``or "unknown error"`` substitution kicks in.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-empty-error",
+                "state": "IDLE",
+                "last_activity": "2026-06-07T00:00:00Z",
+            }
+        )
+        none_error_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"error": None},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=none_error_response,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(t for t in tools if t.name == "external_opencode_get_status")
+
+            result = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert "[ERROR]" in result
+        assert "unknown error" in result
+        # Critical: must not render the literal string "None" in place of
+        # the error message — that confused agents into thinking the
+        # error was the string "None".
+        assert "None" not in result
+
+    @pytest.mark.asyncio
+    async def test_get_status_returns_latest_error_without_stale_leak(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """A stale-error sequence: consecutive ``get_status`` calls
+        consistently reflect the current ``latest_response`` value with
+        no leftover state between calls.
+
+        This test exercises the dispatcher side of the contract: every
+        ``get_status`` call issues a fresh ``GET_STATUS`` round-trip and
+        renders whatever the dispatcher returns at that instant — there
+        must be no in-memory cache that would let a prior error "leak"
+        into a subsequent call. The dispatcher mock returns three
+        different payloads in sequence (error → success → error). The
+        first error must not contaminate the success call, and the
+        second error must replace the first cleanly.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-evolving",
+                "state": "IDLE",
+                "last_activity": "2026-06-07T00:00:00Z",
+            }
+        )
+
+        # Three consecutive dispatcher payloads: error → success → error.
+        # The success response must NOT contain any [ERROR] marker (proving
+        # the first error did not leak), and the final error response must
+        # only mention the second error string (proving the first error
+        # was cleanly replaced).
+        error_resp1 = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"error": "first error"},
+            },
+        )
+        success_resp = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": "all good",
+            },
+        )
+        error_resp2 = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"error": "second error"},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            side_effect=[error_resp1, success_resp, error_resp2],
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(t for t in tools if t.name == "external_opencode_get_status")
+
+            # Call 1: dispatcher returns "first error" — result must surface it.
+            result1 = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+            # Call 2: dispatcher returns a clean success — no error leakage
+            # from call 1 should appear here.
+            result2 = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+            # Call 3: dispatcher returns "second error" — result must reflect
+            # only the current payload, not any residue from call 1.
+            result3 = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result1, str)
+        assert isinstance(result2, str)
+        assert isinstance(result3, str)
+
+        # Call 1: surfaces the first error
+        assert "[ERROR]" in result1
+        assert "first error" in result1
+
+        # Call 2: NO error marker — the first error must NOT leak into a
+        # clean success response.
+        assert "[ERROR]" not in result2
+        # Call 2 should instead show the success response verbatim.
+        assert "all good" in result2
+        # The first error's text must be entirely absent from call 2.
+        assert "first error" not in result2
+
+        # Call 3: surfaces the second error AND must NOT mention the first
+        # (i.e. errors are not concatenated — the dispatcher payload is
+        # the sole source of truth per call).
+        assert "[ERROR]" in result3
+        assert "second error" in result3
+        assert "first error" not in result3
+
 
 class TestAnswerQuestionExecution:
     """End-to-end test of ``external_opencode_answer_question``."""
@@ -1402,6 +1554,62 @@ class TestWaitForResultExecution:
         assert result.startswith("[COMPLETED]")
         assert "[ERROR]" not in result
 
+    @pytest.mark.asyncio
+    async def test_wait_for_result_with_waiting_input_and_error_returns_error(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When session is WAITING_FOR_INPUT AND ``latest_response`` has an
+        error, ``wait_for_result`` returns ``[ERROR]`` (NOT
+        ``[WAITING_FOR_INPUT]``).
+
+        Bug fix: previously the WAITING_FOR_INPUT branch returned
+        immediately on pending questions, masking the underlying worker
+        failure. An agent would see ``[WAITING_FOR_INPUT]`` and try to
+        ``external_opencode_answer_question`` — but the session was
+        already failed. Now we surface the error first and only return
+        WAITING_FOR_INPUT when no error is present.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-failed-with-question"}
+        )
+        error_with_question_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "WAITING_FOR_INPUT",
+                "latest_response": {"error": "API Error 500: bad gateway"},
+                "questions": [
+                    {"id": "req-1", "questions": ["Approve?"]},
+                ],
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=error_with_question_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        # Error wins over the WAITING_FOR_INPUT branch — the agent
+        # should not be lured into calling answer_question on a
+        # session whose worker already failed.
+        assert result.startswith("[ERROR]")
+        assert "[WAITING_FOR_INPUT]" not in result
+        assert "API Error 500" in result
+
 
 # =============================================================================
 # wait_any execution tests
@@ -1697,6 +1905,122 @@ class TestWaitAnyExecution:
 
         assert isinstance(result, str)
         assert result.startswith("[TIMEOUT]")
+
+    @pytest.mark.asyncio
+    async def test_wait_any_marks_errored_session_with_error_marker(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When a session is IDLE with ``latest_response = {"error": ...}``,
+        ``wait_any`` renders it with ``✗ [ERROR]`` (NOT ``✓ [OK]``).
+
+        Bug fix: previously every IDLE session in the wait_any summary
+        was marked ``✓`` even when the worker had failed with HTTP 500
+        — misleading the agent into thinking the operation succeeded.
+        Now errored sessions use ``✗`` and the worker-failure message
+        is inlined in the COMPLETED RESPONSES section so the caller
+        sees the failure without a follow-up ``get_status`` call.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-failed"}
+        )
+        error_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"error": "API Error 500: connection refused"},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=error_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [{"project": "p1", "session_name": "s1"}],
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+        # Error marker (✗), not success marker (✓). The session must
+        # not be confused with a clean completion.
+        assert "✗" in result
+        assert "✓" not in result
+        # Inlined worker-failure message in the COMPLETED RESPONSES
+        # section so the caller can act on the error immediately.
+        assert "[ERROR] Worker request failed" in result
+        assert "API Error 500" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_any_marks_errored_waiting_session_with_bang_marker(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When a session is ``WAITING_FOR_INPUT`` AND its
+        ``latest_response = {"error": ...}`` (i.e. the worker failed even
+        though the dispatcher still has it parked waiting), ``wait_any``
+        renders the summary line with the ``!`` marker (NOT ``?``) and
+        surfaces the worker-failure message in the WAITING FOR INPUT
+        section in place of the question prompt.
+
+        Mirrors ``test_wait_any_marks_errored_session_with_error_marker``
+        for the WAITING branch: a worker failure must never be hidden
+        behind a normal "waiting for input" indicator — the agent caller
+        must see ``✗ [ERROR]`` regardless of whether the session is IDLE
+        or WAITING_FOR_INPUT.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-waiting-failed"}
+        )
+        error_waiting_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "WAITING_FOR_INPUT",
+                "latest_response": {"error": "worker crashed before prompt"},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=error_waiting_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [{"project": "p1", "session_name": "s1"}],
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+        # The summary line must use ``!`` for the errored waiting session
+        # — NOT ``?`` (which is reserved for a genuine pending question).
+        assert "!" in result
+        assert "?" not in result
+        # The body must render the worker-failure message in place of
+        # the normal waiting-for-input prompt. Using the same exact
+        # prefix as the COMPLETED branch keeps the agent caller-facing
+        # surface uniform.
+        assert "✗ [ERROR] Worker request failed:" in result
+        assert "[WAITING_FOR_INPUT]" not in result
+        # The error string from the dispatcher must be inlined so the
+        # caller can act on it without a follow-up ``get_status`` call.
+        assert "worker crashed before prompt" in result
 
 
 # =============================================================================
