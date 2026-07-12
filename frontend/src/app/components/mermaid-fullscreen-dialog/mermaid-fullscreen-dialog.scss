@@ -114,26 +114,33 @@ $accent-rose: #f43f5e;
 }
 
 .chart-stage {
-  // `width: fit-content` shrink-wraps the stage to the SVG's intrinsic
-  // size, which gives `margin: auto` leftover horizontal space to
-  // distribute — that's what actually centers small charts. Without
-  // `fit-content`, a block element fills 100% of the body and `auto`
-  // margins collapse to 0. When the SVG is wider than the body,
-  // `max-width: 100%` caps it so it still scrolls left-anchored
-  // instead of overflowing.
-  width: fit-content;
-  max-width: 100%;
-  margin: auto;
+  // `width: 100%` (not `fit-content`) gives the stage a definite
+  // containing-block width so Mermaid's inline `<svg width="100%">`
+  // resolves against a known size. Without it, `fit-content` and the
+  // SVG's percentage width form a circular dependency and collapse the
+  // stage to 0×0. `text-align: center` then centers the inline-block
+  // SVG horizontally; small charts sit centered, large charts get
+  // capped by the SVG's own `max-width: 100%` and scroll inside the
+  // body's `overflow: auto`.
+  width: 100%;
+  text-align: center;
+}
 
-  // Mermaid emits an inline <svg>. We cap the width to the viewport
-  // (`max-width: 100%`) but deliberately omit `max-height: 100%` so
-  // large charts can scroll to their full intrinsic height.
-  ::ng-deep svg {
-    max-width: 100%;
-    height: auto;
-    width: auto;
-    display: block;
-  }
+// `::ng-deep` is required because the SVG is injected via [innerHTML]
+// (`bypassSecurityTrustHtml`) — it carries no `_ngcontent-xxx` attribute
+// so a top-level selector would never match under emulated view
+// encapsulation.
+::ng-deep .chart-stage svg {
+  // Mermaid emits an inline <svg> with `width="100%"` as an HTML
+  // attribute (i.e. `width: 100%` in the user-agent stylesheet).
+  // CSS `width: auto` reverts the SVG to its intrinsic size derived
+  // from the viewBox, so narrow charts render at their true width
+  // and `max-width: 100%` caps wider ones to the dialog body.
+  max-width: 100%;
+  height: auto;
+  width: auto;
+  display: inline-block;
+  vertical-align: top;
 }
 
 .source-block {
