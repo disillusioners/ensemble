@@ -599,6 +599,243 @@ class TestMessageBodySharedContextInjection:
             "completion reports must not flip the shared_context_injected flag"
         )
 
+    async def test_internal_error_report_skips_injection(self):
+        """Internal error reports (``internal_error_report:*``) skip injection.
+
+        Mirrors ``test_completion_report_skips_injection`` for the second
+        of the three ``is_completion_report`` prefixes in
+        ``_process_message_with_tracking``. Error reports are internal
+        pings, so the shared-context block must NOT be prepended AND
+        the ``shared_context_injected`` flag must NOT flip — otherwise
+        the real first user message would silently miss the metadata.
+        """
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        manager = _make_manager(
+            shared_context_kvs={"k": "v"},
+        )
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_resolved = MagicMock(return_value=None)
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            await svc._process_message_with_tracking(
+                instance_id="inst-1",
+                message="error report body",
+                message_id="msg-1",
+                is_retry=False,
+                message_source="internal_error_report:some-error",
+            )
+
+        user_text = _captured_user_message_text(captured)
+        assert "# Shared Context" not in user_text
+        assert "error report body" in user_text
+
+        sc_flag_writes = [
+            call for call in manager._instance_repository.set_metadata.call_args_list
+            if call.args[1] == "shared_context_injected"
+        ]
+        assert sc_flag_writes == [], (
+            "internal_error_report must not flip the shared_context_injected flag"
+        )
+
+    async def test_internal_agent_job_event_skips_injection(self):
+        """Internal agent job events (``internal_agent:job_event:*``) skip injection.
+
+        Mirrors ``test_completion_report_skips_injection`` for the third
+        of the three ``is_completion_report`` prefixes in
+        ``_process_message_with_tracking``. Job events are internal pings
+        from the scheduler, not user-facing requests, so the shared-
+        context block must NOT be prepended AND the
+        ``shared_context_injected`` flag must NOT flip — leaving the
+        flag unset means the real first user message still gets the
+        block.
+        """
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        manager = _make_manager(
+            shared_context_kvs={"k": "v"},
+        )
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_resolved = MagicMock(return_value=None)
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            await svc._process_message_with_tracking(
+                instance_id="inst-1",
+                message="job event body",
+                message_id="msg-1",
+                is_retry=False,
+                message_source="internal_agent:job_event:some-event",
+            )
+
+        user_text = _captured_user_message_text(captured)
+        assert "# Shared Context" not in user_text
+        assert "job event body" in user_text
+
+        sc_flag_writes = [
+            call for call in manager._instance_repository.set_metadata.call_args_list
+            if call.args[1] == "shared_context_injected"
+        ]
+        assert sc_flag_writes == [], (
+            "internal_agent:job_event must not flip the shared_context_injected flag"
+        )
+
+    async def test_32k_payload_does_not_set_flag_at_hook_level(self):
+        """Shared-context metadata exceeding 32k cap must not inject AND must not flip the flag.
+
+        Pins the no-flip-on-cap contract from the production code path: when
+        ``_format_shared_context_kv_block`` returns ``None`` (over 32k cap),
+        ``format_shared_context_for_message_body`` returns ``""``, so the
+        hook's ``if sc_block:`` block is skipped and the flag stays unset.
+        Without this, a one-time over-cap payload would silently poison the
+        flag and prevent all future messages from receiving the metadata
+        even after it shrinks below the cap.
+        """
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        # 35k chars — well over the 32k cap after ``json.dumps`` with
+        # ``ensure_ascii=True``. Single key keeps the test deterministic.
+        large_payload = {"huge": "x" * 35_000}
+        manager = _make_manager(
+            shared_context_kvs=large_payload,
+            shared_context_injected=False,  # first-message state
+        )
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_resolved = MagicMock(return_value=None)
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            await svc._process_message_with_tracking(
+                instance_id="inst-1",
+                message="leader request body",
+                message_id="msg-1",
+                is_retry=False,
+                message_source="agent:leader",
+            )
+
+        # Tightened: prove we actually reached the body.
+        assert captured.get("graph_input") is not None, (
+            "test must reach the body — if not, the assertions below are silent"
+        )
+        user_text = _captured_user_message_text(captured)
+        # No block injected.
+        assert "# Shared Context" not in user_text
+        # Leader's request still delivered.
+        assert "leader request body" in user_text
+
+        # Flag MUST NOT flip on over-cap (mirrors no-flip-on-empty /
+        # no-flip-on-exception). Otherwise a transient oversized payload
+        # would silently block all future metadata injection.
+        sc_flag_writes = [
+            call for call in manager._instance_repository.set_metadata.call_args_list
+            if call.args[1] == "shared_context_injected"
+        ]
+        assert sc_flag_writes == [], (
+            "shared_context_injected flag must not flip on 32k cap — "
+            "a transient oversized payload would otherwise block future metadata"
+        )
+
+    async def test_project_injected_shared_context_failed_retry(self):
+        """When project injection succeeds but shared-context fails, the two paths are independent.
+
+        Pins the independence contract: project context proceeds to inject
+        + flip its flag; shared-context degrades to no-op (no block, no
+        flag flip). The next message will re-attempt the shared-context
+        lookup, so a transient failure doesn't permanently lock out
+        metadata injection.
+        """
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        # Shared-context side FAILS — repo raises. Project side SUCCEEDS —
+        # wires below.
+        manager = _make_manager(
+            raise_on_get_kvs=RuntimeError("simulated shared-context failure"),
+            shared_context_injected=False,
+            project_injected=False,
+        )
+
+        # Wire project-context injection to succeed.
+        matched_project = MagicMock()
+        matched_project.name = "test-project"
+        matched_project.project_id = "proj-matched"
+        manager._project_repository = MagicMock()
+        manager._project_repository.match_by_keywords = MagicMock(
+            return_value=matched_project
+        )
+
+        with patch(
+            "daemon.services.instance_messaging.extract_project_keywords",
+            return_value=["test", "project"],
+            create=True,
+        ):
+            fake_project_context = "## Related Project\ntest-project\n"
+
+            def _fake_format(*_args, **_kwargs):
+                return fake_project_context
+
+            with patch(
+                "daemon.manager.format_project_context",
+                _fake_format,
+                create=True,
+            ):
+                with patch("daemon.registry.get_registry") as mock_get_registry:
+                    registry = MagicMock()
+                    registry.get_resolved = MagicMock(return_value=None)
+                    mock_get_registry.return_value = registry
+
+                    svc = _make_service(manager)
+                    manager.get_instance.return_value = graph
+
+                    await svc._process_message_with_tracking(
+                        instance_id="inst-1",
+                        message="leader request body",
+                        message_id="msg-1",
+                        is_retry=False,
+                        message_source="agent:leader",
+                    )
+
+        user_text = _captured_user_message_text(captured)
+        # Project block IS injected (project side succeeded).
+        assert "## Related Project" in user_text, (
+            f"project block missing; rendered was: {user_text!r}"
+        )
+        # Shared-context block is NOT injected (shared-context side failed).
+        assert "# Shared Context" not in user_text
+        # Leader's request still delivered.
+        assert "leader request body" in user_text
+
+        # project_injected flag DID flip.
+        project_flag_writes = [
+            call for call in manager._instance_repository.set_metadata.call_args_list
+            if call.args[1] == "project_injected"
+        ]
+        assert len(project_flag_writes) == 1, (
+            f"project_injected flag must flip exactly once when project side succeeds; saw {project_flag_writes!r}"
+        )
+        assert project_flag_writes[0].args[2] is True
+
+        # shared_context_injected flag did NOT flip (shared-context side failed).
+        sc_flag_writes = [
+            call for call in manager._instance_repository.set_metadata.call_args_list
+            if call.args[1] == "shared_context_injected"
+        ]
+        assert sc_flag_writes == [], (
+            f"shared_context_injected flag must not flip when shared-context side fails; saw {sc_flag_writes!r}"
+        )
+
     async def test_retry_skips_injection(self):
         """``is_retry=True`` short-circuits the injection gate.
 

@@ -245,11 +245,12 @@ def _format_shared_context_kv_block(kvs: dict[str, Any]) -> str | None:
     # against fence escape.
     metadata_json = json.dumps(kvs, indent=2, ensure_ascii=True)
 
-    # Replace & FIRST (order matters: ``&`` → ``\u0026`` must happen
-    # before the ``<`` / ``>`` replacements; otherwise the inserted
-    # escape sequences would themselves contain ``\`` characters
-    # whose subsequent ``>`` replacements would produce the wrong
-    # final glyphs).
+    # Replace ``&`` first as a defensive style convention. The
+    # replacement is order-independent in practice — the escape
+    # sequences ``\u0026`` / ``\u003c`` / ``\u003e`` contain no
+    # ``&``, ``<``, or ``>`` glyphs, so reordering would not change
+    # the output. Keeping ``&`` first reads as the natural defensive
+    # order to a future maintainer.
     metadata_json = (
         metadata_json
         .replace("&", "\\u0026")
