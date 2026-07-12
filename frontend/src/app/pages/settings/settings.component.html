@@ -1,0 +1,50 @@
+<div class="settings-container">
+  <h1>Settings</h1>
+
+  <section class="setting-section">
+    <h2>Language Preference</h2>
+    <p class="setting-description">
+      Set your preferred language. All agents will be instructed to respond in this language.
+      A language check will verify responses and prompt agents to correct if needed.
+    </p>
+
+    <mat-form-field appearance="outline" class="language-select">
+      <mat-label>Preferred Language</mat-label>
+      <mat-select
+        [value]="selectedLanguage()"
+        (selectionChange)="onLanguageChange($event.value)"
+      >
+        @for (lang of languages; track lang) {
+          <mat-option [value]="lang">{{ lang }}</mat-option>
+        }
+        <mat-option [value]="customOptionValue">Other (custom)</mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    @if (isCustom()) {
+      <div class="custom-language-row">
+        <mat-form-field appearance="outline" class="custom-input">
+          <mat-label>Custom Language</mat-label>
+          <input
+            matInput
+            [value]="customLanguage()"
+            (input)="onCustomLanguageChange($event)"
+            placeholder="e.g., Thai, Swedish, Polish"
+          />
+        </mat-form-field>
+        <button
+          mat-raised-button
+          color="primary"
+          (click)="saveCustom()"
+          [disabled]="saving()"
+        >
+          Save
+        </button>
+      </div>
+    }
+
+    @if (saving()) {
+      <span class="saving-indicator">Saving...</span>
+    }
+  </section>
+</div>

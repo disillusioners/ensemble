@@ -1,0 +1,105 @@
+// Color variables (dark theme)
+$bg-primary: #0f172a;
+$bg-card: #1e293b;
+$border-color: #334155;
+$text-primary: #f1f5f9;
+$text-secondary: #94a3b8;
+$accent-cyan: #10a7f7;
+
+:host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: $bg-primary;
+  color: $text-primary;
+}
+
+.settings-container {
+  flex: 1;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+
+  h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: 600;
+    color: $text-primary;
+  }
+}
+
+.setting-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  padding: 1.5rem;
+
+  h2 {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: $text-primary;
+  }
+}
+
+.setting-description {
+  margin: 0;
+  color: $text-secondary;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+.language-select {
+  width: 100%;
+  max-width: 360px;
+}
+
+.custom-language-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+
+  .custom-input {
+    flex: 1 1 240px;
+    min-width: 0;
+  }
+
+  button {
+    flex: 0 0 auto;
+    margin-top: 0.25rem;
+  }
+}
+
+.saving-indicator {
+  color: $accent-cyan;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+// Material form-field tweaks — match the dark theme palette
+::ng-deep .language-select .mat-mdc-text-field-wrapper,
+::ng-deep .custom-input .mat-mdc-text-field-wrapper {
+  background-color: $bg-primary;
+}
+
+// Snackbar theming — applied via the global overlay container since snackbars
+// are not scoped to this component. Without these rules, error/success feedback
+// would be unstyled on the Settings page.
+::ng-deep .error-snackbar {
+  --mdc-snackbar-container-color: #f44336;
+  --mdc-snackbar-supporting-text-color: white;
+}
+::ng-deep .success-snackbar {
+  --mdc-snackbar-container-color: #4caf50;
+  --mdc-snackbar-supporting-text-color: white;
+}

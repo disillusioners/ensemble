@@ -17,6 +17,7 @@ from .dlq import router as dlq_router
 from .mcp_servers import router as mcp_servers_router
 from .notifications import router as notifications_router
 from .migration import router as migration_router
+from .settings import router as settings_router
 
 __all__ = [
     "agents_router",
@@ -36,4 +37,5 @@ __all__ = [
     "mcp_servers_router",
     "notifications_router",
     "migration_router",
+    "settings_router",
 ]

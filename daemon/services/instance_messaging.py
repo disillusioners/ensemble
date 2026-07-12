@@ -14,6 +14,7 @@ from sqlmodel import Session
 
 from ..cancellation import CancellationToken
 from ..compaction import ContextCompactor, CompactionContext, get_model_context_limit
+from ..language_detection import _normalize_content
 from ..loader import estimate_messages_tokens
 from ..persistence import get_instance_messages
 from ..repositories.event.models import Event, EventKind
@@ -1904,6 +1905,27 @@ class InstanceMessagingService:
         # per-process _original_timestamps map growing without bound.
         _emitted_tool_result_ids: set[str] = set()
 
+        # C1 FIX (Phase 2 — User Language Preference): When language_check is
+        # active, the agent node's final AIMessage would otherwise be dispatched
+        # to the source BEFORE language_check runs and rewrites it, causing users
+        # to see a wrong-language response followed by a corrected one. Defer
+        # the final-message dispatch until the astream loop completes normally.
+        # Retries naturally overwrite this buffer, so only the corrected (final)
+        # message is ever sent to the external source.
+        # W4 FIX: Read the flag from the compiled graph object (captures the
+        # build-time config snapshot) rather than live config, which could be
+        # mutated between graph build and message processing.
+        language_check_active = bool(getattr(graph, 'language_check_active', False))
+        _deferred_final_message: Any = None
+        # C2 FIX: Track IDs of messages buffered for post-loop SSE re-emission.
+        # The SSE emission loop iterates ``all_state_messages`` unconditionally
+        # and would otherwise deliver the wrong-language AIMessage to the
+        # frontend before language_check has had a chance to rewrite it. Using
+        # the set keyed by msg.id lets us skip the *exact* buffered message
+        # during the streaming loop and re-emit only the final (corrected)
+        # version after ``astream`` completes.
+        _deferred_msg_ids: set[str] = set()
+
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
         # if CancelledError is raised during _maybe_compact_context
@@ -1943,17 +1965,31 @@ class InstanceMessagingService:
                                         if msg_id:
                                             _dispatched_msg_ids.add(msg_id)
 
-                                        # W2: Handle list content (e.g., [{"type": "text", "text": "..."}])
-                                        content = getattr(msg, 'content', None)
-                                        if isinstance(content, list):
-                                            text_parts = [
-                                                b.get("text", "")
-                                                for b in content
-                                                if isinstance(b, dict) and b.get("text")
-                                            ]
-                                            content = " ".join(text_parts)
+                                        # W2: Normalize multimodal content to a string via the
+                                        # shared helper so list/None/str handling stays in
+                                        # lockstep with the language check node
+                                        # (daemon.language_detection._normalize_content).
+                                        content = _normalize_content(getattr(msg, 'content', None))
 
                                         if content and content.strip():
+                                            # C1 FIX (Phase 2): If language_check is active AND this
+                                            # is a final response (no tool_calls → will route through
+                                            # language_check next), buffer it instead of dispatching
+                                            # immediately. Retries overwrite the buffer so only the
+                                            # corrected final message is sent. The msg_id is already
+                                            # in _dispatched_msg_ids above, so state accumulation won't
+                                            # re-trigger anything; the deferred dispatch after the
+                                            # astream loop is the only external send.
+                                            has_tool_calls = bool(getattr(msg, 'tool_calls', None))
+                                            if language_check_active and not has_tool_calls:
+                                                _deferred_final_message = msg
+                                                # C2 FIX: Track the buffered message's id so
+                                                # the SSE emission loop can skip the same
+                                                # message — it will be re-emitted after the
+                                                # astream loop completes (post language_check).
+                                                if msg_id:
+                                                    _deferred_msg_ids.add(msg_id)
+                                                continue
                                             try:
                                                 await self._manager.source_dispatcher.dispatch_message(
                                                     source=dispatch_source,
@@ -2032,6 +2068,16 @@ class InstanceMessagingService:
                                 continue
                             
                             msg_id = getattr(m, 'id', None)
+                            # C2 FIX: Skip messages buffered for deferred SSE emission.
+                            # When language_check is active, the buffered AI message
+                            # may be rewritten/retried during the astream loop. The
+                            # post-loop block re-emits the *final* version via SSE,
+                            # so emitting here would deliver a wrong-language message
+                            # to the frontend first. Fall back to ``message_id`` for
+                            # consistency with the dispatcher's id resolution.
+                            msg_id_check = msg_id or getattr(m, 'message_id', None)
+                            if msg_id_check and msg_id_check in _deferred_msg_ids:
+                                continue
                             msg_serialized = serialize_message(m, tool_outputs)
                             msg_serialized["instance_id"] = instance_id
                             
@@ -2060,17 +2106,11 @@ class InstanceMessagingService:
                         for msg in reversed(all_state_messages):
                             if hasattr(msg, 'type') and msg.type == 'ai':
                                 if hasattr(msg, 'content'):
-                                    content = msg.content
-                                    # Handle list content (e.g., [{"type": "text", "text": "..."}])
-                                    if isinstance(content, list):
-                                        text_parts = [
-                                            b.get("text", "")
-                                            for b in content
-                                            if isinstance(b, dict) and b.get("text")
-                                        ]
-                                        final_content = " ".join(text_parts)
-                                    else:
-                                        final_content = content or ""
+                                    # Normalize multimodal content (str | list | None) via
+                                    # the shared _normalize_content helper for parity with
+                                    # the language check node and the progressive
+                                    # dispatch loop above.
+                                    final_content = _normalize_content(msg.content)
                                 last_ai_message = msg
                                 break
 
@@ -2098,6 +2138,78 @@ class InstanceMessagingService:
                     self._manager._graph_tasks.pop(instance_id, None)
                     self._manager.release_context_usage_cache(instance_id)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
+
+        # C1 FIX (Phase 2): Dispatch the deferred final message AFTER the astream
+        # loop completes normally. This code only runs on successful completion —
+        # asyncio.CancelledError is re-raised above and skips this block, so a
+        # cancelled response is never sent to the external source.
+        if _deferred_final_message is not None:
+            # Normalize multimodal content (str | list | None) via the shared
+            # _normalize_content helper for parity with the language check
+            # node and the progressive dispatch loop above.
+            deferred_content = _normalize_content(getattr(_deferred_final_message, 'content', ''))
+            if (
+                deferred_content
+                and deferred_content.strip()
+                and dispatch_source
+                and self._manager.source_dispatcher
+            ):
+                try:
+                    await self._manager.source_dispatcher.dispatch_message(
+                        source=dispatch_source,
+                        content=deferred_content,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Deferred dispatch failed for message {message_id[:8]}...: {e}"
+                    )
+
+            # C2 FIX: Also re-emit the deferred message via SSE so the frontend
+            # sees the *final* (post-language_check) version. The in-loop SSE
+            # emission skipped this message via ``_deferred_msg_ids``; we now
+            # flush it here using the same serialization pattern as the loop.
+            try:
+                # Reconstruct tool_outputs from the final accumulated state,
+                # mirroring the in-loop logic so any inline tool_call output
+                # matches what the frontend would have seen inline.
+                deferred_tool_outputs: dict[str, str] = {}
+                for mm in all_state_messages:
+                    if isinstance(mm, ToolMessage):
+                        tc_id, content_str = _stringify_tool_message_content(mm)
+                        if tc_id:
+                            deferred_tool_outputs[tc_id] = content_str
+
+                deferred_serialized = serialize_message(
+                    _deferred_final_message,
+                    deferred_tool_outputs,
+                )
+                deferred_serialized["instance_id"] = instance_id
+
+                # Preserve original created_at from first emission, same as loop.
+                deferred_msg_id = getattr(_deferred_final_message, 'id', None)
+                deferred_ts_key = (
+                    f"{instance_id}:{deferred_msg_id}" if deferred_msg_id else None
+                )
+                if deferred_ts_key and deferred_ts_key in self._manager._original_timestamps:
+                    deferred_serialized["created_at"] = (
+                        self._manager._original_timestamps[deferred_ts_key]
+                    )
+                elif deferred_ts_key:
+                    self._manager._original_timestamps[deferred_ts_key] = (
+                        deferred_serialized["created_at"]
+                    )
+
+                deferred_event_type = _get_message_event_type(deferred_serialized)
+                await self._manager._live_hub.stream_message(
+                    instance_id=instance_id,
+                    message=deferred_serialized,
+                    event_type=deferred_event_type,
+                    checkpoint_id=f"seq_{event_index}",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Deferred SSE dispatch failed for message {message_id[:8]}...: {e}"
+                )
 
         # Parse <think/> tags from final content
         content, thinking_extracted = parse_think_tags(final_content)

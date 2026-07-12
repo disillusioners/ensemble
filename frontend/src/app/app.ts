@@ -50,7 +50,8 @@ export class App implements OnInit {
   readonly databaseMenuVisible = signal(false);
 
   readonly settingsMenuItems = signal<SettingsMenuItem[]>([
-    { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' }
+    { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' },
+    { label: 'Settings', icon: 'language', route: '/settings' }
   ]);
 
   ngOnInit(): void {

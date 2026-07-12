@@ -512,6 +512,17 @@ class SkillEvolutionConfig(BaseSettings):
     capture_min_duration_seconds: int = Field(default=60)
 
 
+class LanguageConfig(BaseSettings):
+    """Language check configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="LANGUAGE_")
+
+    check_enabled: bool = Field(
+        default=False,
+        description="Enable language check node — adds up to 3× LLM cost per turn when wrong language detected. Set to true to enable."
+    )
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -528,6 +539,7 @@ class Config(BaseSettings):
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
+    language: LanguageConfig = Field(default_factory=LanguageConfig)
 
 
 def load_config(config_path: str | None = None) -> Config:

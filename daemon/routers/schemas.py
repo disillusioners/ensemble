@@ -690,3 +690,21 @@ class ProjectHistorySearchResponse(BaseModel):
             }
         }
     }
+
+
+class LanguagePreferenceResponse(BaseModel):
+    """Response for the current language preference."""
+
+    language: str = Field(..., description="Current language preference")
+
+
+class LanguagePreferenceUpdate(BaseModel):
+    """Request body for updating the language preference."""
+
+    language: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r'^[A-Za-z\u00C0-\u017F \-()]+$',
+        description="Preferred language name — letters, spaces, hyphens, and parentheses only",
+    )
