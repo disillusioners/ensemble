@@ -742,3 +742,69 @@ $cyan: #06b6d4;
     pointer-events: auto;
   }
 }
+
+// Pending injection card - shown when a user message is queued for an
+// already-running instance. Sits at the bottom of the scroll area,
+// above the composer (the composer is rendered by the parent chat
+// component, not here). Uses the amber theme so it's visually
+// distinct from user/assistant bubbles but still on-brand.
+.pending-injection-card {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  background-color: rgba($amber, 0.1);
+  border: 2px dashed $amber;
+  max-width: 70%;
+  // Subtle pulse to signal "waiting to be consumed by the agent".
+  animation: pending-injection-pulse 2s ease-in-out infinite;
+}
+
+.pending-injection-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.375rem;
+  color: $amber;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.pending-injection-icon {
+  font-size: 0.875rem;
+  // The ⚡ glyph should be bright amber regardless of inherited color
+  // so the badge is the strongest visual cue.
+  filter: drop-shadow(0 0 4px rgba($amber, 0.4));
+}
+
+.pending-injection-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.pending-injection-content {
+  color: $text-secondary;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  // Italic + muted to make it clear this is a preview, not a sent message.
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+@keyframes pending-injection-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+// Honor users who prefer reduced motion — disable the pulse but keep
+// the visual styling so the card is still distinguishable.
+@media (prefers-reduced-motion: reduce) {
+  .pending-injection-card {
+    animation: none;
+  }
+}

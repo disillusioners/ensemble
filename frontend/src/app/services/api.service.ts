@@ -212,4 +212,20 @@ export class ApiService {
     return this.http.delete<DeleteResponse>(`${this.API_BASE}/sources/${sourceId}/mappings/${encodeURIComponent(mappingId)}`);
   }
 
+  // Injection slot (Phase 2 / Task 6 fallback). Returns the backend's
+  // current view of the per-instance RAM injection slot so the chat UI
+  // can reconcile on initial load and SSE reconnect. ``pending=false`` is
+  // a valid steady state (no injection queued) — not an error.
+  getPendingInjection(instanceId: string): Observable<{
+    pending: boolean;
+    content: string | null;
+    timestamp: string | null;
+  }> {
+    return this.http.get<{
+      pending: boolean;
+      content: string | null;
+      timestamp: string | null;
+    }>(`${this.API_BASE}/instances/${instanceId}/injection`);
+  }
+
 }

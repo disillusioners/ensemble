@@ -66,7 +66,31 @@
       </svg>
     </button>
     
-    @if (isInstanceRunning()) {
+    @if (canInject()) {
+        <div class="injection-actions">
+            <button
+                type="button"
+                [disabled]="!canSend()"
+                class="send-button"
+                [style.backgroundColor]="canSend() ? color() : '#343541'"
+                [style.color]="canSend() ? 'white' : '#6e6e80'"
+                [style.cursor]="canSend() ? 'pointer' : 'not-allowed'"
+                (click)="handleSubmit()"
+                title="Send to running instance"
+                aria-label="Send to running instance"
+            >
+                <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+            </button>
+            <button type="button" class="pause-button" (click)="pauseInstance.emit()" title="Pause" aria-label="Pause">
+                <svg class="pause-icon" fill="currentColor" viewBox="0 0 24 24">
+                    <rect x="6" y="5" width="4" height="14" rx="1" />
+                    <rect x="14" y="5" width="4" height="14" rx="1" />
+                </svg>
+            </button>
+        </div>
+    } @else if (isInstanceRunning()) {
         <button type="button" class="pause-button" (click)="pauseInstance.emit()" title="Pause" aria-label="Pause">
             <svg class="pause-icon" fill="currentColor" viewBox="0 0 24 24">
                 <rect x="6" y="5" width="4" height="14" rx="1" />

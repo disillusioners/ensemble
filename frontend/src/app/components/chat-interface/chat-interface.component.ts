@@ -19,6 +19,7 @@ import {
   MermaidActionsService,
   MermaidCopyResult,
 } from '../../services/mermaid-actions.service';
+import { SseService } from '../../services/sse.service';
 
 interface MermaidChartContext {
   /** Bubble that owns this chart — used to look up the source message. */
@@ -63,6 +64,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   private readonly mermaidActions = inject(MermaidActionsService);
   private readonly ngZone = inject(NgZone);
   private readonly document = inject(DOCUMENT);
+  private readonly sseService = inject(SseService);
 
   private shouldScroll = signal(false);
   isNearBottom = signal(true);
@@ -197,6 +199,17 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
 
   get agentColor(): string {
     return this.agent ? this.agentColorMap[this.agent.id] || '#10a7f7' : '#10a7f7';
+  }
+
+  /**
+   * Expose the SSE-tracked pending injection (queued user message) so the
+   * template can render a "Pending injection" card at the bottom of the
+   * scroll area. Kept as a regular getter (not a signal) so the template
+   * invokes it as ``pendingInjection()`` — matches the existing
+   * ``agentColor`` getter pattern.
+   */
+  get pendingInjection() {
+    return this.sseService.pendingInjection;
   }
 
   formatToolArgs(args: string | Record<string, unknown>): string {

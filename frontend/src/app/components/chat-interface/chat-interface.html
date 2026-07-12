@@ -139,6 +139,17 @@
 
       <!-- Auto-scroll anchor -->
       <div #messagesEnd></div>
+
+      <!-- Pending injection card - shown when an injected message is queued -->
+      @if (pendingInjection()) {
+        <div class="pending-injection-card" role="status" aria-live="polite">
+          <div class="pending-injection-badge">
+            <span class="pending-injection-icon">⚡</span>
+            <span class="pending-injection-label">Pending injection</span>
+          </div>
+          <div class="pending-injection-content">{{ pendingInjection()?.content }}</div>
+        </div>
+      }
       </div>
     </div>
 

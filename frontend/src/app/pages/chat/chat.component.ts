@@ -313,6 +313,15 @@ export class ChatComponent implements OnInit, OnDestroy {
       complete: () => {
         // Connect SSE after API messages are loaded
         this.sseService.connect(instanceId);
+        // Explicit pending-injection sync on instance load/switch. The
+        // SseService.connect() call above also calls fetchPendingInjection
+        // internally on its non-early-return path, but that path skips the
+        // sync when SSE is already connected to the same instance (rare,
+        // but possible on a duplicate route change). Calling it here makes
+        // the chat component's intent explicit and covers that edge case.
+        // The REST endpoint is idempotent — a second call is harmless and
+        // the signal overwrites converge to the same value either way.
+        this.sseService.fetchPendingInjection(instanceId);
       }
     });
 
@@ -410,6 +419,12 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.isSending.set(true);
     
     this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
+      // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
+      // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
+      // default in Angular's HttpClient. We treat both as success from the
+      // UI's perspective — clear the input, rely on `injection_pending`
+      // SSE event (and the chat-interface pendingInjection card driven
+      // off the SseService signal) to reflect the injection's queued state.
       next: (_response) => {
         // Clear input only on success — error recovery keeps input populated
         this.messageInputRef?.clearInput();

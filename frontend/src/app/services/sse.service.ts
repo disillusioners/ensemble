@@ -1,10 +1,25 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
+import { ApiService } from './api.service';
 
 export interface SubTask {
   id: string;
   text: string;
   status: 'pending' | 'done';
+}
+
+/**
+ * Pending user-message injection payload. The backend writes this to the
+ * per-instance RAM slot when a send_message hits a RUNNING / WAITING_CHILDREN
+ * instance (Phase 2 / Task 3) and clears it on consumption / pause. The SSE
+ * ``injection_pending`` event carries the same shape inside the ``message``
+ * field; the GET fallback endpoint returns it as a flat object.
+ */
+export interface InjectionEvent {
+  instance_id: string;
+  event_type: string;
+  content: string | null;
+  timestamp: string;
 }
 
 export interface TodoNode {
@@ -57,12 +72,19 @@ export class SseService {
   // at a time, so we keep one signal and overwrite it from todo_update.
   todos = signal<TodoNode[]>([]);
 
+  // Pending user-message injection for the connected instance. Set by the
+  // ``injection_pending`` SSE event and the GET /api/instances/{id}/injection
+  // fallback, cleared by ``injection_consumed`` / ``injection_cleared``. The
+  // chat component binds to this signal to surface the "queued" indicator
+  // and pre-fill the composer for cancellation / edit.
+  pendingInjection = signal<InjectionEvent | null>(null);
+
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
   // races ahead of its tool_call is not lost. Cleared on disconnect.
   private pendingToolOutputs = new Map<string, string>();
 
-  constructor(private ngZone: NgZone) {}
+  constructor(private ngZone: NgZone, private api: ApiService) {}
 
   /**
    * Append or update a message in the list with deduplication by message_id.
@@ -156,6 +178,13 @@ export class SseService {
     this.currentInstanceId = instanceId;
     this.clearEvents();
     this.connectInternal();
+
+    // Reconcile pending injection state from the REST fallback. SSE may
+    // have missed events during a disconnect window (e.g. the user
+    // navigated away while an injection was queued); this catches the
+    // backend's current truth before any pending event arrives. The GET
+    // endpoint is idempotent — no subscription, no polling loop.
+    this.fetchPendingInjection(instanceId);
   }
 
   private connectInternal(): void {
@@ -340,6 +369,52 @@ export class SseService {
       });
     });
 
+    // Injection lifecycle events. ``injection_pending`` carries the full
+    // content + timestamp inside the ``message`` field (the SSE envelope
+    // wraps it). ``injection_consumed`` and ``injection_cleared`` clear the
+    // slot — both are no-ops on the signal side, so we share the same
+    // handler shape. See daemon/routers/messages.py:_emit_injection_sse.
+    eventSource.addEventListener('injection_pending', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const message = data.message ?? {};
+          this.pendingInjection.set({
+            instance_id: data.instance_id as string,
+            event_type: data.event_type as string,
+            content: (message.content as string | null) ?? null,
+            timestamp: (message.timestamp as string) ?? '',
+          });
+        } catch (err) {
+          console.error('[SSE] Failed to parse injection_pending:', err);
+        }
+      });
+    });
+
+    eventSource.addEventListener('injection_consumed', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          console.log('[SSE] injection_consumed event:', data);
+          this.pendingInjection.set(null);
+        } catch (err) {
+          console.error('[SSE] Failed to parse injection_consumed:', err);
+        }
+      });
+    });
+
+    eventSource.addEventListener('injection_cleared', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          console.log('[SSE] injection_cleared event:', data);
+          this.pendingInjection.set(null);
+        } catch (err) {
+          console.error('[SSE] Failed to parse injection_cleared:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -396,6 +471,35 @@ export class SseService {
   }
 
   /**
+   * Fetch the current pending injection for ``instanceId`` via the REST
+   * fallback endpoint and seed the ``pendingInjection`` signal. Called
+   * from ``connect()`` to reconcile state on initial chat load and after
+   * SSE reconnection — SSE itself drives real-time updates via the
+   * ``injection_pending`` / ``injection_consumed`` / ``injection_cleared``
+   * event listeners. Errors are logged and swallowed: a missing or
+   * 404'd endpoint must not break the chat UI.
+   */
+  fetchPendingInjection(instanceId: string): void {
+    this.api.getPendingInjection(instanceId).subscribe({
+      next: (resp) => {
+        if (resp.pending && resp.content !== null) {
+          this.pendingInjection.set({
+            instance_id: instanceId,
+            event_type: 'injection_pending',
+            content: resp.content,
+            timestamp: resp.timestamp ?? '',
+          });
+        } else {
+          this.pendingInjection.set(null);
+        }
+      },
+      error: (err) => {
+        console.error('[SSE] Failed to fetch pending injection:', err);
+      },
+    });
+  }
+
+  /**
    * Clears all event-related state.
    *
    * Note: ``todos`` is intentionally NOT cleared here. The todos signal is
@@ -413,6 +517,7 @@ export class SseService {
     this.statusChange.set(null);
     this.instanceCreatedQueue.set([]);
     this.contextUsage.set(null);
+    this.pendingInjection.set(null);
     this.pendingToolOutputs.clear();
   }
 }

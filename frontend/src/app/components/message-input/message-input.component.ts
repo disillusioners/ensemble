@@ -48,6 +48,18 @@ export class MessageInputComponent {
   });
 
   /**
+   * Returns true when a message can be INJECTED into an active instance
+   * (running or waiting_children). Excludes 'queued' since a queued instance
+   * hasn't started yet — use isInstanceRunning() for that case.
+   *
+   * When true, the UI shows text input + send + pause buttons simultaneously.
+   */
+  readonly canInject = computed(() => {
+    const status = this.instanceStatus();
+    return status === 'running' || status === 'waiting_children';
+  });
+
+  /**
    * Returns true when the instance is paused and should show a Resume button.
    */
   readonly isInstancePaused = computed(() => {
@@ -123,8 +135,12 @@ export class MessageInputComponent {
     const keyboardEvent = event as KeyboardEvent;
     if (keyboardEvent.shiftKey) return; // Allow newline
     event.preventDefault();
-    // When instance is paused, Enter should resume with the message
-    // instead of attempting a normal send
+    // Priority:
+    // 1. PAUSED → resume with the message
+    // 2. RUNNING/WAITING_CHILDREN (canInject) → inject into active stream
+    // 3. Otherwise (IDLE/other) → normal send
+    // Both cases 2 and 3 flow through handleSubmit; the parent component
+    // routes to the appropriate endpoint based on instance state.
     if (this.isInstancePaused()) {
       this.handleResume();
     } else {
