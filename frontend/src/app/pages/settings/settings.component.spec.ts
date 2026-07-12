@@ -94,7 +94,6 @@ class TestableSettingsComponent {
   readonly customLanguage = signal<string>('');
   readonly isCustom = signal<boolean>(false);
   readonly saving = signal<boolean>(false);
-  readonly loaded = signal<boolean>(false);
 
   constructor(
     private settingsService: MockSettingsService,
@@ -120,6 +119,13 @@ class TestableSettingsComponent {
   }
 
   private loadFromApi(): void {
+    let hadCachedValue = false;
+    try {
+      hadCachedValue = localStorage.getItem(STORAGE_KEY) !== null;
+    } catch {
+      hadCachedValue = false;
+    }
+
     this.settingsService.getLanguagePreference().subscribe({
       next: (pref: { language: string }) => {
         const lang = pref?.language;
@@ -127,13 +133,11 @@ class TestableSettingsComponent {
           this.applyPreference(lang);
           this.persistToStorage(lang);
         }
-        this.loaded.set(true);
       },
       error: () => {
-        if (!this.loaded() && !this.selectedLanguage()) {
+        if (!hadCachedValue) {
           this.selectedLanguage.set('English');
         }
-        this.loaded.set(true);
         this.snackBar.open('Failed to load language preference', 'Dismiss', {
           duration: 5000,
           panelClass: 'error-snackbar',
@@ -184,9 +188,13 @@ class TestableSettingsComponent {
   }
 
   private save(language: string): void {
+    const previousSelectedLanguage = this.selectedLanguage();
+    const previousCustomLanguage = this.customLanguage();
+
     this.saving.set(true);
     this.settingsService.setLanguagePreference(language).subscribe({
       next: () => {
+        this.applyPreference(language);
         this.persistToStorage(language);
         this.saving.set(false);
         this.snackBar.open(`Language preference set to ${language}`, 'Close', {
@@ -195,6 +203,8 @@ class TestableSettingsComponent {
         });
       },
       error: () => {
+        this.selectedLanguage.set(previousSelectedLanguage);
+        this.customLanguage.set(previousCustomLanguage);
         this.saving.set(false);
         this.snackBar.open('Failed to save language preference', 'Dismiss', {
           duration: 5000,
@@ -224,7 +234,6 @@ describe('SettingsComponent', () => {
       expect(component.isCustom()).toBe(false);
       expect(component.customLanguage()).toBe('');
       expect(component.saving()).toBe(false);
-      expect(component.loaded()).toBe(false);
     });
 
     it('should call getLanguagePreference on ngOnInit', () => {
@@ -270,12 +279,6 @@ describe('SettingsComponent', () => {
       expect(component.isCustom()).toBe(false);
     });
 
-    it('should mark as loaded after API success', () => {
-      service.getLanguagePreference.mockReturnValue(of({ language: 'German' }));
-      component.ngOnInit();
-      expect(component.loaded()).toBe(true);
-    });
-
     it('should persist the loaded value to localStorage', () => {
       service.getLanguagePreference.mockReturnValue(of({ language: 'Japanese' }));
       component.ngOnInit();
@@ -307,16 +310,12 @@ describe('SettingsComponent', () => {
   describe('localStorage caching — synchronous init', () => {
     it('should load from localStorage before API completes', () => {
       localStorageData[STORAGE_KEY] = 'French';
-      // Use a deferred observable that doesn't emit synchronously.
-      let apiResolved = false;
-      service.getLanguagePreference.mockImplementation(() => of({ language: 'English' }).pipe());
+      // Use a deferred observable that never emits synchronously — simulates
+      // a pending API call. The localStorage value should still be reflected
+      // in selectedLanguage immediately after ngOnInit.
       service.getLanguagePreference.mockReturnValue({
-        subscribe: (observer: any) => {
-          // Don't emit — simulate pending API call
-          if (apiResolved) {
-            observer.next({ language: 'English' });
-            observer.complete();
-          }
+        subscribe: (_observer: unknown) => {
+          // intentionally never emits
         },
       });
 
@@ -495,6 +494,24 @@ describe('SettingsComponent', () => {
       component.onLanguageChange('French');
       expect(component.saving()).toBe(false);
     });
+
+    // W1: state sync on save success
+    it('should sync selectedLanguage to the saved value on success', () => {
+      service.setLanguagePreference.mockReturnValue(of({ language: 'French' }));
+      expect(component.selectedLanguage()).toBe('English');
+      component.onLanguageChange('French');
+      expect(component.selectedLanguage()).toBe('French');
+    });
+
+    // W1: revert on save failure
+    it('should revert selectedLanguage to the previous value on failure', () => {
+      // Start with English (loaded via API in beforeEach).
+      expect(component.selectedLanguage()).toBe('English');
+      service.setLanguagePreference.mockReturnValue(throwError(() => new Error('Save failed')));
+      component.onLanguageChange('French');
+      // Save was rejected, so the dropdown model should be restored.
+      expect(component.selectedLanguage()).toBe('English');
+    });
   });
 
   describe('saveCustom flow', () => {
@@ -542,6 +559,21 @@ describe('SettingsComponent', () => {
       component.customLanguage.set('  Thai  ');
       component.saveCustom();
       expect(MockMatSnackBar.lastOpen?.message).toBe('Language preference set to Thai');
+    });
+
+    // Regression: dropping a raw custom value into selectedLanguage left the
+    // mat-select with no matching <mat-option> and rendered unhighlighted.
+    // After a successful custom save, selectedLanguage must hold the
+    // CUSTOM_OPTION_VALUE sentinel (matching the "Other (custom)" option)
+    // and customLanguage must hold the actual typed text.
+    it('should sync selectedLanguage to CUSTOM_OPTION_VALUE after custom save', () => {
+      service.setLanguagePreference.mockReturnValue(of({ language: 'Swedish' }));
+      component.isCustom.set(true);
+      component.customLanguage.set('Swedish');
+      component.saveCustom();
+      expect(component.selectedLanguage()).toBe(CUSTOM_OPTION_VALUE);
+      expect(component.customLanguage()).toBe('Swedish');
+      expect(component.isCustom()).toBe(true);
     });
   });
 

@@ -1,179 +1,107 @@
-import { Observable, of } from 'rxjs';
-import type { LanguagePreference } from './settings.service';
-
-// Mock HttpClient that tracks requests
-class MockHttpClient {
-  private requests: { method: string; url: string; body?: any }[] = [];
-
-  get<T>(url: string, options?: any): Observable<T> {
-    this.requests.push({ method: 'GET', url });
-    return of(null) as Observable<T>;
-  }
-
-  post<T>(url: string, body: any, options?: any): Observable<T> {
-    this.requests.push({ method: 'POST', url, body });
-    return of(null) as Observable<T>;
-  }
-
-  put<T>(url: string, body: any, options?: any): Observable<T> {
-    this.requests.push({ method: 'PUT', url, body });
-    return of(null) as Observable<T>;
-  }
-
-  delete<T>(url: string, options?: any): Observable<T> {
-    this.requests.push({ method: 'DELETE', url });
-    return of(null) as Observable<T>;
-  }
-
-  getRequests(): { method: string; url: string; body?: any }[] {
-    return this.requests;
-  }
-
-  clearRequests(): void {
-    this.requests = [];
-  }
-}
-
-// Testable SettingsService (mirrors actual service for testing)
-class TestableSettingsService {
-  private readonly API_BASE = '/api/settings/language';
-
-  constructor(private http: MockHttpClient) {}
-
-  getLanguagePreference(): Observable<LanguagePreference> {
-    return this.http.get<LanguagePreference>(this.API_BASE);
-  }
-
-  setLanguagePreference(language: string): Observable<LanguagePreference> {
-    return this.http.put<LanguagePreference>(this.API_BASE, { language });
-  }
-}
+import { TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import {
+  HttpTestingController,
+  provideHttpClientTesting,
+} from '@angular/common/http/testing';
+import { SettingsService, LanguagePreference } from './settings.service';
 
 describe('SettingsService', () => {
-  let httpMock: MockHttpClient;
-  let service: TestableSettingsService;
+  let service: SettingsService;
+  let httpTesting: HttpTestingController;
 
   beforeEach(() => {
-    httpMock = new MockHttpClient();
-    service = new TestableSettingsService(httpMock);
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting()],
+    });
+    service = TestBed.inject(SettingsService);
+    httpTesting = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => {
+    // Verify that no unmatched requests are outstanding after each test.
+    httpTesting.verify();
   });
 
   describe('getLanguagePreference', () => {
-    it('should make GET request to /api/settings/language', () => {
-      httpMock.get = jest.fn().mockReturnValue(of({ language: 'English' }));
-
-      service.getLanguagePreference().subscribe();
-
-      expect(httpMock.get).toHaveBeenCalledWith('/api/settings/language');
-    });
-
-    it('should return Observable<LanguagePreference> from response', (done) => {
-      const preference: LanguagePreference = { language: 'Spanish' };
-
-      httpMock.get = jest.fn().mockReturnValue(of(preference));
+    it('should send GET to /api/settings/language and return the response', (done) => {
+      const mockResponse: LanguagePreference = { language: 'English' };
 
       service.getLanguagePreference().subscribe({
         next: (result) => {
-          expect(result).toEqual(preference);
+          expect(result).toEqual(mockResponse);
+          expect(result.language).toBe('English');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne('/api/settings/language');
+      expect(req.request.method).toBe('GET');
+      expect(req.request.body).toBeNull();
+      req.flush(mockResponse);
+    });
+
+    it('should propagate backend errors', (done) => {
+      service.getLanguagePreference().subscribe({
+        next: () => done.fail('expected error'),
+        error: (err) => {
+          expect(err.status).toBe(500);
+          done();
+        },
+      });
+
+      const req = httpTesting.expectOne('/api/settings/language');
+      expect(req.request.method).toBe('GET');
+      req.flush('Server error', { status: 500, statusText: 'Server Error' });
+    });
+  });
+
+  describe('setLanguagePreference', () => {
+    it("should send PUT to /api/settings/language with body { language: 'Spanish' }", (done) => {
+      const mockResponse: LanguagePreference = { language: 'Spanish' };
+
+      service.setLanguagePreference('Spanish').subscribe({
+        next: (result) => {
+          expect(result).toEqual(mockResponse);
           expect(result.language).toBe('Spanish');
           done();
         },
         error: done.fail,
       });
+
+      const req = httpTesting.expectOne('/api/settings/language');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({ language: 'Spanish' });
+      req.flush(mockResponse);
     });
 
-    it('should handle predefined language values', (done) => {
-      const preference: LanguagePreference = { language: 'French' };
+    it('should send the exact language string in the PUT body', (done) => {
+      const customLanguage = 'Thai';
 
-      httpMock.get = jest.fn().mockReturnValue(of(preference));
-
-      service.getLanguagePreference().subscribe({
-        next: (result) => {
-          expect(result.language).toBe('French');
-          done();
-        },
+      service.setLanguagePreference(customLanguage).subscribe({
+        next: () => done(),
         error: done.fail,
       });
+
+      const req = httpTesting.expectOne('/api/settings/language');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({ language: customLanguage });
+      req.flush({ language: customLanguage });
     });
 
-    it('should handle custom (non-predefined) language values', (done) => {
-      const preference: LanguagePreference = { language: 'Thai' };
-
-      httpMock.get = jest.fn().mockReturnValue(of(preference));
-
-      service.getLanguagePreference().subscribe({
-        next: (result) => {
-          expect(result.language).toBe('Thai');
+    it('should propagate backend errors on PUT', (done) => {
+      service.setLanguagePreference('Spanish').subscribe({
+        next: () => done.fail('expected error'),
+        error: (err) => {
+          expect(err.status).toBe(400);
           done();
         },
-        error: done.fail,
       });
-    });
-  });
 
-  describe('setLanguagePreference', () => {
-    it('should make PUT request to /api/settings/language', () => {
-      httpMock.put = jest.fn().mockReturnValue(of({ language: 'French' }));
-
-      service.setLanguagePreference('French').subscribe();
-
-      expect(httpMock.put).toHaveBeenCalledWith('/api/settings/language', { language: 'French' });
-    });
-
-    it('should send correct body format with French', () => {
-      httpMock.put = jest.fn().mockReturnValue(of({ language: 'French' }));
-
-      service.setLanguagePreference('French').subscribe();
-
-      expect(httpMock.put).toHaveBeenCalledWith('/api/settings/language', {
-        language: 'French',
-      });
-    });
-
-    it('should send custom language in body', () => {
-      httpMock.put = jest.fn().mockReturnValue(of({ language: 'Thai' }));
-
-      service.setLanguagePreference('Thai').subscribe();
-
-      expect(httpMock.put).toHaveBeenCalledWith('/api/settings/language', {
-        language: 'Thai',
-      });
-    });
-
-    it('should return LanguagePreference from observable', (done) => {
-      const response: LanguagePreference = { language: 'German' };
-      httpMock.put = jest.fn().mockReturnValue(of(response));
-
-      service.setLanguagePreference('German').subscribe({
-        next: (result) => {
-          expect(result).toEqual(response);
-          expect(result.language).toBe('German');
-          done();
-        },
-        error: done.fail,
-      });
-    });
-
-    it('should handle empty string language', () => {
-      httpMock.put = jest.fn().mockReturnValue(of({ language: '' }));
-
-      service.setLanguagePreference('').subscribe();
-
-      expect(httpMock.put).toHaveBeenCalledWith('/api/settings/language', { language: '' });
-    });
-
-    it('should handle long language names', (done) => {
-      const longName = 'a'.repeat(128);
-      const response: LanguagePreference = { language: longName };
-      httpMock.put = jest.fn().mockReturnValue(of(response));
-
-      service.setLanguagePreference(longName).subscribe({
-        next: (result) => {
-          expect(result.language).toBe(longName);
-          done();
-        },
-        error: done.fail,
-      });
+      const req = httpTesting.expectOne('/api/settings/language');
+      expect(req.request.method).toBe('PUT');
+      req.flush('Bad request', { status: 400, statusText: 'Bad Request' });
     });
   });
 });

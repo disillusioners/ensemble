@@ -98,3 +98,15 @@ $accent-violet: #8b5cf6;
 ::ng-deep .custom-input .mat-mdc-text-field-wrapper {
   background-color: $bg-primary;
 }
+
+// Snackbar theming — applied via the global overlay container since snackbars
+// are not scoped to this component. Without these rules, error/success feedback
+// would be unstyled on the Settings page.
+::ng-deep .error-snackbar {
+  --mdc-snackbar-container-color: #f44336;
+  --mdc-snackbar-supporting-text-color: white;
+}
+::ng-deep .success-snackbar {
+  --mdc-snackbar-container-color: #4caf50;
+  --mdc-snackbar-supporting-text-color: white;
+}

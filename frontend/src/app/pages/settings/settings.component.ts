@@ -53,7 +53,6 @@ export class SettingsComponent implements OnInit {
   readonly customLanguage = signal<string>('');
   readonly isCustom = signal<boolean>(false);
   readonly saving = signal<boolean>(false);
-  readonly loaded = signal<boolean>(false);
 
   ngOnInit(): void {
     this.loadFromStorage();
@@ -74,6 +73,15 @@ export class SettingsComponent implements OnInit {
   }
 
   private loadFromApi(): void {
+    // Capture whether localStorage had a cached value so we can decide on a clean
+    // fallback if the API errors out.
+    let hadCachedValue = false;
+    try {
+      hadCachedValue = localStorage.getItem(STORAGE_KEY) !== null;
+    } catch {
+      hadCachedValue = false;
+    }
+
     this.settingsService.getLanguagePreference().subscribe({
       next: (pref) => {
         const lang = pref?.language;
@@ -81,15 +89,14 @@ export class SettingsComponent implements OnInit {
           this.applyPreference(lang);
           this.persistToStorage(lang);
         }
-        this.loaded.set(true);
       },
       error: () => {
-        // Keep the localStorage value (already loaded) if present.
-        // If neither localStorage nor API gave us a value, default to English.
-        if (!this.loaded() && !this.selectedLanguage()) {
+        // If the API fails AND there was no localStorage cached value, fall back to
+        // the default language. Otherwise the selectedLanguage signal already reflects
+        // the localStorage value loaded earlier in ngOnInit.
+        if (!hadCachedValue) {
           this.selectedLanguage.set(DEFAULT_LANGUAGE);
         }
-        this.loaded.set(true);
         this.snackBar.open('Failed to load language preference', 'Dismiss', {
           duration: 5000,
           panelClass: 'error-snackbar',
@@ -145,9 +152,21 @@ export class SettingsComponent implements OnInit {
   }
 
   private save(language: string): void {
+    // Capture the previous UI state so we can revert on failure.
+    const previousSelectedLanguage = this.selectedLanguage();
+    const previousCustomLanguage = this.customLanguage();
+
     this.saving.set(true);
     this.settingsService.setLanguagePreference(language).subscribe({
       next: () => {
+        // Sync the model to the newly saved language via the centralized
+        // applyPreference helper so the dropdown reflects predefined vs
+        // custom mode correctly. For custom saves, this sets
+        // selectedLanguage to CUSTOM_OPTION_VALUE (matching an actual
+        // <mat-option>) and stores the typed text in customLanguage;
+        // without this, mat-select renders with no selection highlighted
+        // because the raw custom string has no matching option.
+        this.applyPreference(language);
         this.persistToStorage(language);
         this.saving.set(false);
         this.snackBar.open(`Language preference set to ${language}`, 'Close', {
@@ -156,7 +175,9 @@ export class SettingsComponent implements OnInit {
         });
       },
       error: () => {
-        // Do NOT touch localStorage on failure — keep the last known good value.
+        // Revert UI to last known good state since the backend rejected the change.
+        this.selectedLanguage.set(previousSelectedLanguage);
+        this.customLanguage.set(previousCustomLanguage);
         this.saving.set(false);
         this.snackBar.open('Failed to save language preference', 'Dismiss', {
           duration: 5000,
