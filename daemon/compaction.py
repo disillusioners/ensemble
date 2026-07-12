@@ -46,18 +46,18 @@ logger = logging.getLogger(__name__)
 
 def _extract_text_from_content(content: str | list) -> str:
     """Extract text from message content, handling multimodal lists.
-    
+
     Args:
         content: Message content, either a string or a multimodal list
                  (e.g., [{'type': 'text', 'text': '...'}, {'type': 'image_url', ...}]).
-    
+
     Returns:
         Extracted text string. For multimodal content, joins all text blocks.
         Skips image_url blocks entirely.
     """
     if isinstance(content, str):
         return content
-    
+
     if isinstance(content, list):
         text_parts: list[str] = []
         for block in content:
@@ -67,8 +67,57 @@ def _extract_text_from_content(content: str | list) -> str:
                     text_parts.append(block.get("text", ""))
                 # Skip image_url and other non-text blocks
         return "".join(text_parts)
-    
+
     return str(content) if content is not None else ""
+
+
+def _is_injected_message(msg: BaseMessage) -> bool:
+    """Phase 1 / C3: detect a user-injected message by ``additional_kwargs``.
+
+    Mirrors the ``language_check_reminder`` skip pattern at graph.py:493.
+    An injected message was deliberately placed into the conversation by
+    the user via the injection slot (Phase 1 / C2) and MUST survive any
+    compaction pass — both proactive (this module) and reactive
+    (graph.py:641-684). Summarizing it would erase user intent.
+
+    Args:
+        msg: Candidate ``BaseMessage`` (typically ``HumanMessage``).
+
+    Returns:
+        ``True`` when the message is flagged as injected, ``False`` otherwise.
+    """
+    additional_kwargs = getattr(msg, "additional_kwargs", None)
+    if not additional_kwargs:
+        return False
+    return bool(additional_kwargs.get("injected_message"))
+
+
+def _partition_injected_messages(
+    messages: list[BaseMessage],
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    """Split a message list into ``(non_injected, injected)`` order.
+
+    The returned ``non_injected`` list preserves the relative order of
+    the non-injected messages from the input. The ``injected`` list
+    preserves the original order of injected messages so they can be
+    re-inserted at the end of the replacement list in their original
+    sequence. Order of injected messages relative to each other matters
+    less than their overall chronological position (preserved here).
+
+    Args:
+        messages: Source message list (in conversation order).
+
+    Returns:
+        Tuple ``(non_injected, injected)``.
+    """
+    non_injected: list[BaseMessage] = []
+    injected: list[BaseMessage] = []
+    for msg in messages:
+        if _is_injected_message(msg):
+            injected.append(msg)
+        else:
+            non_injected.append(msg)
+    return non_injected, injected
 
 
 # Context window sizes for known models (in tokens)
@@ -547,10 +596,10 @@ class ContextCompactor:
     
     async def compact_state(self, context: CompactionContext) -> CompactionResult | None:
         """Compact conversation history if it exceeds context window threshold.
-        
+
         Args:
             context: CompactionContext with messages and configuration.
-            
+
         Returns:
             CompactionResult if compaction occurred, None if not needed.
         """
@@ -558,19 +607,42 @@ class ContextCompactor:
         if context.last_compacted_at and self._is_recently_compacted(context.last_compacted_at):
             logger.debug("Skipping compaction: recently compacted")
             return None
-        
-        # 2. Eligibility: minimum messages check
-        if len(context.messages) < context.config.min_messages_before_compaction:
+
+        # C3 / Phase 1: Partition injected messages out of the candidate
+        # list. These messages are user-injected HumanMessages that MUST
+        # survive compaction — they are deliberate user intent, not
+        # summarizable history. We filter once up-front and re-attach
+        # them to the result below.
+        regular_messages, injected_messages = _partition_injected_messages(
+            context.messages
+        )
+
+        # If every message is an injection, there is nothing to compact
+        # (the injected messages will be left in place by the unchanged
+        # conversation state). Bail early.
+        if not regular_messages:
             logger.debug(
-                f"Skipping compaction: {len(context.messages)} messages "
-                f"(minimum: {context.config.min_messages_before_compaction})"
+                "Skipping compaction: every message carries "
+                "injected_message flag (n=%d)",
+                len(context.messages),
             )
             return None
-        
-        # 3. Token calculation
-        history_tokens = estimate_messages_tokens(context.messages)
+
+        # 2. Eligibility: minimum messages check (against the non-injected
+        # subset so an injection-heavy conversation doesn't get spuriously
+        # compacted away).
+        if len(regular_messages) < context.config.min_messages_before_compaction:
+            logger.debug(
+                f"Skipping compaction: {len(regular_messages)} non-injected messages "
+                f"(minimum: {context.config.min_messages_before_compaction}, "
+                f"injected={len(injected_messages)})"
+            )
+            return None
+
+        # 3. Token calculation (regular messages only)
+        history_tokens = estimate_messages_tokens(regular_messages)
         total_tokens = history_tokens + context.system_prompt_tokens
-        
+
         # 4. Context window and threshold check
         context_window = get_model_context_limit(context.model_name, context.config)
         if total_tokens <= context_window * context.config.threshold:
@@ -579,15 +651,16 @@ class ContextCompactor:
                 f"<= threshold {int(context_window * context.config.threshold)}"
             )
             return None
-        
+
         logger.info(
             f"Compaction triggered: {total_tokens} tokens "
-            f"(threshold: {int(context_window * context.config.threshold)})"
+            f"(threshold: {int(context_window * context.config.threshold)}, "
+            f"regular={len(regular_messages)}, injected={len(injected_messages)})"
         )
-        
-        # 5. Boundary groups
-        groups = identify_boundary_groups(context.messages)
-        
+
+        # 5. Boundary groups (regular messages only)
+        groups = identify_boundary_groups(regular_messages)
+
         # 6. Select compactable vs preserved
         compactable, preserved, actual_window = select_compactable_groups(
             groups,
@@ -598,43 +671,47 @@ class ContextCompactor:
             estimate_messages_tokens,
             config_threshold=context.config.threshold,
         )
-        
+
         timestamp = datetime.now(timezone.utc).isoformat()
-        
+
         if not compactable:
             # Emergency path: even preserved groups exceed threshold
             preserved_msgs = [msg for g in preserved for msg in g.messages]
             preserved_tokens = estimate_messages_tokens(preserved_msgs) + context.system_prompt_tokens
-            
+
             if preserved_tokens <= context_window * context.config.threshold:
                 return None
-            
+
             logger.warning(
                 f"Emergency truncation: {preserved_tokens} tokens exceed threshold "
                 f"with only {len(preserved)} preserved groups"
             )
-            
+
             truncated_msgs = emergency_truncate(
                 preserved_msgs,
                 max_tokens=int(context_window * context.config.target_ratio),
                 estimate_fn=estimate_messages_tokens,
             )
-            
+
             # W6: Assign new IDs to truncated messages to avoid conflict with RemoveMessage
             for truncated_msg in truncated_msgs:
                 if hasattr(truncated_msg, 'id') and truncated_msg.id:
                     truncated_msg.id = f"truncated-{uuid.uuid4()}"
-            
+
             replacement = []
             for group in groups:
                 for msg in group.messages:
                     if msg.id:
                         replacement.append(RemoveMessage(id=msg.id))
             replacement.extend(truncated_msgs)
-            
+            # C3: re-attach injected messages verbatim at the end so
+            # they survive emergency truncation. They were never in
+            # ``regular_messages`` so no RemoveMessage applies.
+            replacement.extend(injected_messages)
+
             non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
             tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
-            
+
             return CompactionResult(
                 replacement_messages=replacement,
                 tokens_before=total_tokens,
@@ -645,21 +722,29 @@ class ContextCompactor:
                 compaction_type="emergency_truncation",
                 compacted_at=timestamp,
             )
-        
+
         # 7. Summarization path
         try:
             summaries = await self._summarize_chunked(compactable, context)
-            
+
             # C2: _summarize_chunked always returns a single-element list
             summary = summaries[0]
-            
+
             replacement = self._build_replacement_messages(compactable, preserved, summary)
+            # C3: re-attach injected messages at the end of the
+            # replacement list. They are appended AFTER the preserved
+            # tail and the summary so their chronological position is
+            # honored (the add_messages reducer handles interleaving
+            # correctly by ``id``).
+            replacement.extend(injected_messages)
             compaction_type = "chunked_summarization" if len(summaries) > 1 else "summarization"
-        
+
         except Exception as e:
             logger.warning(f"Summarization failed, falling back to truncation: {e}")
             replacement, compaction_type = self._truncate_fallback(compactable, preserved, context)
-            
+            # C3: same re-attach on the truncation fallback path
+            replacement.extend(injected_messages)
+
             # Include error info in result
             non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
             tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
@@ -674,14 +759,15 @@ class ContextCompactor:
                 summarization_error=str(e),
                 compacted_at=timestamp,
             )
-        
+
         # 8. Build result
         non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
         tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
 
         logger.info(
             f"Compaction complete: {total_tokens} -> {tokens_after} tokens "
-            f"(saved {total_tokens - tokens_after}), type={compaction_type}"
+            f"(saved {total_tokens - tokens_after}), type={compaction_type}, "
+            f"injected_preserved={len(injected_messages)}"
         )
 
         return CompactionResult(

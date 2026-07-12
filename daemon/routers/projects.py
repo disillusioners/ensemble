@@ -810,20 +810,28 @@ async def delete_project(
                 
                 # Clean up in-memory state using those IDs
                 for instance_id in instance_ids:
-                    # Cancel active requests
+                    # Cancel active requests — kept inline because the
+                    # request-registry cancellation reason differs from the
+                    # other cleanup paths (project delete vs USER_STOPPED /
+                    # SESSION_TERMINATED). ``_cleanup_instance_state``
+                    # intentionally does NOT cancel LLM requests for this
+                    # reason; see manager.py for the design note.
                     if hasattr(manager, '_request_registry') and manager._request_registry:
                         manager._request_registry.cancel_by_instance(instance_id)
-                    
-                    # Cancel and remove graph task
-                    task = manager._graph_tasks.pop(instance_id, None)
-                    manager.release_context_usage_cache(instance_id)
-                    if task and not task.done():
-                        task.cancel()
-                    
-                    # Remove from instances dict
+
+                    # Centralized per-instance state cleanup (graph task,
+                    # pending injection, context usage cache). The helper
+                    # pops the graph task and returns it but does NOT
+                    # cancel it, so we cancel below.
+                    cleared = manager._cleanup_instance_state(instance_id)
+                    graph_task = cleared.get("graph_task") if cleared else None
+                    if graph_task is not None and not graph_task.done():
+                        graph_task.cancel()
+
+                    # Remove from instances dict (not handled by the helper)
                     if instance_id in manager.instances:
                         del manager.instances[instance_id]
-                    
+
                     logger.info(f"Cleaned up in-memory state for instance {instance_id[:8]}...")
             except Exception as e:
                 logger.warning(f"Failed to clean up in-memory state for project {project_id}: {e}")

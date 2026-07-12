@@ -886,6 +886,11 @@ class InstanceLifecycleService:
         # Build graph with checkpointer
         # Import from manager to pick up test patches
         from ..manager import build_instance_graph
+        # Phase 1 / C1: thread the injection_slot handle + live_hub
+        # reference through the factory closure so the agent_node can
+        # consume pending user messages and (Phase 2) emit SSE events
+        # without coupling to module-level singletons.
+        from ..graph import InjectionSlot
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -896,6 +901,8 @@ class InstanceLifecycleService:
             graph_config=config,
             user_language=user_language,
             language_check_enabled=self._config.language.check_enabled,
+            injection_slot=InjectionSlot(self._manager),
+            live_hub=self._manager._live_hub,
         )
 
         # Save metadata to DB using instance repository
@@ -1117,6 +1124,13 @@ class InstanceLifecycleService:
 
         # 1. Cancel active requests for this instance.
         self._manager._request_registry.cancel_by_instance(instance_id)
+
+        # W1: Clear any pending user message injection. The injected
+        # HumanMessage itself is checkpoint-persisted (C2) so a terminated
+        # instance can still resume with the user turn intact; only the
+        # RAM slot needs to be dropped here. ``clear_injection`` is a
+        # no-op when no injection exists.
+        self._manager.clear_injection(instance_id)
 
         # 1.5. Cancel any running graph task for this instance, bounded-await
         # unwind. The graph task may take a few seconds to honor cancellation
@@ -1480,6 +1494,23 @@ class InstanceLifecycleService:
                 if graph_task and not graph_task.done():
                     graph_task.cancel()
                     logger.info(f"Cancelled graph task for instance {node_id[:8]}...")
+
+                # 2.5. W1: Drop the per-instance user message injection slot.
+                # The injected HumanMessage itself is checkpoint-persisted
+                # (C2) so an injected user turn survives the pause/resume
+                # cycle and is re-rendered on resume. We only drop the RAM
+                # slot here because the agent that was about to consume it
+                # is being torn down.
+                #
+                # ``clear_injection`` returns the cleared entry (or None)
+                # — stored so Phase 2 can forward it to SSE without
+                # re-querying the manager.
+                cleared_injection = self._manager.clear_injection(node_id)
+                if cleared_injection is not None:
+                    logger.info(
+                        f"Cleared pending injection for paused instance "
+                        f"{node_id[:8]}... (len={len(cleared_injection.get('content', ''))})"
+                    )
 
 # 3. Capture agent_id for the post-commit SSE emit.
                 paused_instances_data.append(
@@ -1894,6 +1925,9 @@ class InstanceLifecycleService:
         # Build graph with checkpointer (will restore state from checkpoints)
         # Import from manager to pick up test patches
         from ..manager import build_instance_graph
+        # Phase 1 / C1: thread injection_slot + live_hub via factory
+        # closure (see _spawn_instance_internal for the same wiring).
+        from ..graph import InjectionSlot
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -1904,6 +1938,8 @@ class InstanceLifecycleService:
             graph_config=config,
             user_language=user_language,
             language_check_enabled=self._config.language.check_enabled,
+            injection_slot=InjectionSlot(self._manager),
+            live_hub=self._manager._live_hub,
         )
 
         # Store in instances dict
@@ -1997,6 +2033,15 @@ class InstanceLifecycleService:
         """
         # Clear in-memory instances
         self._manager.instances.clear()
+
+        # W1: Bulk-clear the RAM injection slot alongside ``instances``.
+        # ``clear_all`` is a destructive operator call (admin/reset path),
+        # so any in-flight injection that hasn't been checkpoint-persisted
+        # yet is intentionally discarded — the caller accepts that loss.
+        # Note: this is bulk (``.clear()``) rather than per-instance because
+        # no SSE consumer survives a full reset.
+        if hasattr(self._manager, "_pending_injections"):
+            self._manager._pending_injections.clear()
 
         # Clear database instances
         return self._manager._instance_repository.delete_all()

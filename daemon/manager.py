@@ -713,6 +713,14 @@ class InstanceManager:
         
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
+
+        # NEW: RAM injection slot for user message injection feature
+        # (Phase 1). Maps instance_id → {"content": str, "timestamp": str}.
+        # Single-slot replace semantics — a second set() overwrites the first.
+        # RAM-only: no DB persistence. The injected HumanMessage IS persisted
+        # to checkpoint via C2 (agent_node returns both [injected, response]).
+        # Threaded into the LangGraph agent node via factory closure (C1).
+        self._pending_injections: dict[str, dict[str, str]] = {}
         
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
@@ -1737,6 +1745,179 @@ class InstanceManager:
             except Exception as e:
                 logger.warning(f"Stale completion cleanup failed: {e}")
 
+    # =========================================================================
+    # Phase 1 / User Message Injection: RAM slot helpers (W1, S1)
+    # =========================================================================
+    # The injection slot is a RAM-only single-slot per instance used to hold a
+    # pending user message that the LangGraph agent_node will pull + clear on
+    # its next LLM invocation. See:
+    #   * .agents/shared/planning/user-msg-injection/phase1-plan.md
+    #
+    # Threading contract (Phase 2 depends on this surface):
+    #   * set_injection(iid, content)  — store; single-slot replace
+    #   * get_injection(iid)            — peek; does NOT clear
+    #   * clear_injection(iid)          — pop; returns cleared dict (for SSE)
+    #   * _cleanup_instance_state(iid)  — centralized cleanup used by all
+    #                                     lifecycle paths (W1).
+    #
+    # The slot is RAM-only; the injected HumanMessage itself IS persisted to
+    # the LangGraph checkpoint via the agent_node returning BOTH messages
+    # (C2) so crash recovery still preserves the user turn.
+
+    _INJECTION_TTL_SECONDS = 3600  # 1h — orphaned sweep window (S1)
+
+    def set_injection(self, instance_id: str, content: str) -> dict[str, str]:
+        """Store a pending user message in the RAM injection slot.
+
+        Single-slot replace semantics: a second ``set_injection`` for the
+        same ``instance_id`` overwrites the first. There is no queue.
+
+        Args:
+            instance_id: Target instance.
+            content: The user message text to inject on the next LLM call.
+
+        Returns:
+            The stored entry as ``{"content": str, "timestamp": str}``.
+        """
+        entry = {
+            "content": content,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._pending_injections[instance_id] = entry
+        logger.info(
+            f"[Injection] Stored pending message for instance "
+            f"{instance_id[:8]}... (len={len(content)})"
+        )
+        return entry
+
+    def get_injection(self, instance_id: str) -> dict[str, str] | None:
+        """Return the currently pending injection for ``instance_id``, or None.
+
+        Does NOT clear the slot — consumption is a separate step so the
+        caller can decide when to clear (typically right before the LLM call
+        completes, after capturing the message for the return value).
+
+        Args:
+            instance_id: Target instance.
+
+        Returns:
+            The stored ``{"content", "timestamp"}`` dict, or ``None`` when no
+            pending injection exists.
+        """
+        return self._pending_injections.get(instance_id)
+
+    def clear_injection(self, instance_id: str) -> dict[str, str] | None:
+        """Pop and return the pending injection for ``instance_id``, or None.
+
+        Safe to call when no injection exists (returns ``None``). Used by
+        lifecycle pause/terminate/clear paths (W1) and by the agent_node's
+        consume step in :func:`daemon.graph.create_agent_node`.
+
+        Returns:
+            The cleared ``{"content", "timestamp"}`` dict, or ``None``.
+        """
+        return self._pending_injections.pop(instance_id, None)
+
+    def _cleanup_instance_state(self, instance_id: str) -> dict | None:
+        """Centralized per-instance in-memory state cleanup (W1).
+
+        Pops from ``_graph_tasks`` and ``_pending_injections``, and releases
+        the per-instance context usage cache, in a single call. Use this from
+        any new cleanup path so the three resources cannot drift out of sync.
+
+        The returned dict carries the cleared values so callers (e.g. the
+        pause-cascade path) can forward them to SSE without needing a second
+        round-trip through the manager. Shape::
+
+            {
+                "graph_task": asyncio.Task | None,
+                "cleared_injection": dict | None,
+                "context_usage_cleared": bool,
+            }
+
+        Note: ``_request_registry`` cancellation is intentionally NOT handled
+        here — the cancellation reason differs per call site
+        (USER_STOPPED vs SESSION_TERMINATED, etc.), so call sites keep that
+        call inline with the appropriate reason. Centralizing it here would
+        require threading a reason arg through every cleanup path without
+        adding value, and the dict above does not include a cancellation
+        handle because :meth:`RequestRegistry.cancel_by_instance` is
+        fire-and-forget (it emits a ``CancellationToken`` signal).
+
+        Args:
+            instance_id: Target instance.
+
+        Returns:
+            Cleared items dict (see above) for caller-side forwarding.
+        """
+        task = self._graph_tasks.pop(instance_id, None)
+        cleared_injection = self._pending_injections.pop(instance_id, None)
+        self.release_context_usage_cache(instance_id)
+        # Note: request_registry.cancel_by_instance() is called separately
+        # by the lifecycle callers because the cancellation reason differs
+        # per call site (USER_STOPPED vs SESSION_TERMINATED). Centralizing
+        # that here would require a reason arg and propagate churn without
+        # value — leave the call site to keep its existing reason.
+        return {
+            "graph_task": task,
+            "cleared_injection": cleared_injection,
+            "context_usage_cleared": True,
+        }
+
+    def _cleanup_stale_injections(self, ttl_seconds: int | None = None) -> int:
+        """Drop injection slots older than ``ttl_seconds`` (S1).
+
+        Runs once per :meth:`_cleanup_cached_instances` cycle (every ~10
+        minutes). Sweeps injections that escaped per-instance cleanup —
+        typical cause is an instance stuck in ``WAITING_CHILDREN`` that
+        never advanced to a clean terminate/pause. The 1-hour window is
+        long enough that an active in-progress injection is never swept
+        out from under the agent_node, but short enough that stranded
+        entries don't accumulate across the daemon lifetime.
+
+        Args:
+            ttl_seconds: Override for tests; defaults to
+                :data:`_INJECTION_TTL_SECONDS` (1h).
+
+        Returns:
+            Number of stale entries removed.
+        """
+        ttl = ttl_seconds if ttl_seconds is not None else self._INJECTION_TTL_SECONDS
+        if ttl <= 0:
+            return 0
+        now = datetime.now(timezone.utc)
+        stale: list[str] = []
+        for iid, entry in self._pending_injections.items():
+            ts_raw = entry.get("timestamp")
+            if not ts_raw:
+                stale.append(iid)
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                # Unparseable — treat as stale so it can't accumulate
+                # forever. Logs at debug to avoid noise.
+                logger.debug(
+                    f"Injection TTL sweep: unparseable timestamp for "
+                    f"instance {iid[:8]}..., treating as stale"
+                )
+                stale.append(iid)
+                continue
+            if (now - ts).total_seconds() > ttl:
+                stale.append(iid)
+
+        for iid in stale:
+            self._pending_injections.pop(iid, None)
+
+        if stale:
+            logger.info(
+                f"Injection TTL sweep: dropped {len(stale)} stale slot(s) "
+                f"(>{ttl}s old)"
+            )
+        return len(stale)
+
     def _release_cached_instance(self, instance_id: str) -> None:
         """Release in-memory graph for a cached/non-active instance after TTL expires.
 
@@ -1747,21 +1928,15 @@ class InstanceManager:
         Args:
             instance_id: The ID of the cached instance to release.
         """
+        # W1: Centralized per-instance state cleanup pulls the graph task,
+        # any pending injection, and the context-usage cache entry in one go.
+        self._cleanup_instance_state(instance_id)
+
         # Remove from instances dict if present
         if instance_id in self.instances:
             del self.instances[instance_id]
             logger.info(f"Released in-memory graph for cached instance {instance_id[:8]}...")
-        
-        # Cancel any lingering graph task
-        task = self._graph_tasks.pop(instance_id, None)
-        if task is not None and not task.done():
-            task.cancel()
-            logger.debug(f"Cancelled lingering graph task for {instance_id[:8]}...")
 
-        # Drop the per-instance context-usage dedup entry (same lifetime
-        # as _graph_tasks). See release_context_usage_cache() for rationale.
-        self.release_context_usage_cache(instance_id)
-        
         # Cancel any active requests (shouldn't exist for paused instance but safety first)
         # Using SESSION_TERMINATED since this is a TTL-based eviction - the session
         # is being terminated due to inactivity/paused duration exceeding the limit
@@ -2062,6 +2237,16 @@ class InstanceManager:
                             logger.info(f"Evicted {evicted} idle opencode session managers")
                     except Exception as e:
                         logger.warning(f"Failed to evict idle opencode sessions: {e}")
+
+                # S1: TTL sweep orphaned injection slots. Runs in the same
+                # 10-minute cadence as the cached-instance cleanup so
+                # stranded ``_pending_injections`` entries (typical cause:
+                # WAITING_CHILDREN instance that never advanced) can't
+                # accumulate over a long-lived daemon.
+                try:
+                    self._cleanup_stale_injections()
+                except Exception as e:
+                    logger.warning(f"Injection TTL sweep failed: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:

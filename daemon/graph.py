@@ -33,6 +33,59 @@ from .response_validation import LLMResponseValidationError
 from .language_detection import detect_wrong_language
 
 
+# ============================================================================
+# Phase 1 / User Message Injection: lightweight handle (C1)
+# ============================================================================
+# The agent_node pulls a pending user-injection from this handle on every
+# invocation and clears it immediately before invoking the LLM (C2). The
+# handle intentionally wraps only the two methods that :func:`create_agent_node`
+# needs (``get`` / ``clear``) — it does NOT pass the full ``InstanceManager``
+# to the agent_node closure, so the graph can be tested with a plain mock
+# (see ``tests/test_injection_graph.py``) without spinning up the daemon.
+#
+# Phase 2 will extend this same handle with ``set()`` for the API path; for
+# now the ``set`` side lives on ``InstanceManager`` because no agent-node
+# code path needs to write.
+
+class InjectionSlot:
+    """Lightweight, mock-friendly handle around InstanceManager injection slot.
+
+    Threaded into :func:`build_instance_graph` and :func:`create_agent_node`
+    via factory closure (C1), mirroring the existing ``compactor`` /
+    ``graph_ref`` closure parameters. Backed by ``InstanceManager`` so the
+    underlying dict is the single source of truth across all paths.
+
+    Args:
+        manager: The owning :class:`InstanceManager`. Tests may pass any
+            object exposing ``get_injection`` and ``clear_injection``
+            methods; the type is intentionally broad.
+
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    def get(self, instance_id: str) -> dict | None:
+        """Peek the pending injection without clearing it.
+
+        Returns ``None`` when no injection exists for this instance.
+        """
+        getter = getattr(self._manager, "get_injection", None)
+        if getter is None:
+            return None
+        return getter(instance_id)
+
+    def clear(self, instance_id: str) -> dict | None:
+        """Pop and return the pending injection (or ``None``).
+
+        Idempotent: calling when no injection exists is a no-op.
+        """
+        clearer = getattr(self._manager, "clear_injection", None)
+        if clearer is None:
+            return None
+        return clearer(instance_id)
+
+
 class ThinkingChatOpenAI(ChatOpenAI):
     """Custom ChatOpenAI that captures reasoning_content from OpenAI-compatible APIs.
 
@@ -583,9 +636,11 @@ def create_agent_node(
     llm_config=None,
     retry_config=None,
     llm_standard=None,
+    injection_slot: InjectionSlot | None = None,
+    live_hub: Any = None,
 ):
     """Create the agent node function with optional reactive compaction.
-    
+
     Args:
         llm_with_tools: LLM already bound with tools (vision model if configured).
         system_prompt: System prompt to prepend to messages.
@@ -596,8 +651,20 @@ def create_agent_node(
         retry_config: Optional retry configuration for logging.
         llm_standard: Optional standard LLM bound with tools (for non-vision calls).
             When provided, vision model is used when images are present.
+        injection_slot: Optional :class:`InjectionSlot` handle (C1) that
+            exposes ``get(instance_id) → dict|None`` and
+            ``clear(instance_id) → dict|None``. When supplied, the agent
+            node peeks + clears a pending user message on every LLM
+            invocation and threads the resulting ``HumanMessage`` into
+            the conversation. ``None`` disables injection entirely
+            (backward compatible).
+        live_hub: Optional ``LiveEventHub`` reference threaded for the
+            Phase 2 SSE emission path (``stream_message(... event_type=
+            "injection_consumed" ...)``). In Phase 1 the handle is wired
+            but only a log-only stub runs so the structural call site is
+            exercised; ``None`` skips the stub entirely.
     """
-    
+
     async def agent_node(state, config=None):
         messages = state['messages']
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
@@ -605,7 +672,61 @@ def create_agent_node(
         timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
         instance_id = (config or {}).get('configurable', {}).get('thread_id', 'unknown')
         instance_short = instance_id.split('-')[0] if '-' in instance_id else instance_id
-        
+
+        # ── Phase 1 / C2: pull + clear the pending user-injection ─────────
+        # Pull happens BEFORE the LLM call so the injected HumanMessage is
+        # part of the request. Clear happens BEFORE the LLM call too —
+        # not after — so a transient LLM failure cannot leave the slot
+        # stale: either the LLM sees the injection, or the slot survives
+        # to be retried on the next agent turn.
+        #
+        # Reference is captured in ``injected_msg`` so the reactive
+        # compaction handler (C3) can re-append it after a checkpoint
+        # re-read, and so the return value (C2) persists BOTH messages.
+        injected_msg: HumanMessage | None = None
+        if injection_slot is not None:
+            pending = injection_slot.get(instance_id)
+            if pending is not None:
+                content = pending.get("content", "")
+                injected_msg = HumanMessage(
+                    content=content,
+                    additional_kwargs={"injected_message": True},
+                )
+                full_messages.append(injected_msg)
+                cleared = injection_slot.clear(instance_id)
+                # Defensive: if the slot was empty on clear (extremely
+                # unlikely race — another consumer popped it between our
+                # get and clear), log and continue. ``injected_msg`` is
+                # already in full_messages and will be returned.
+                if cleared is None:
+                    logger.warning(
+                        f"[Injection] Slot disappeared between get+clear "
+                        f"for instance {instance_short} — continuing"
+                    )
+                logger.info(
+                    f"[Injection] Pulled pending message for "
+                    f"{instance_short} (len={len(content)})"
+                )
+
+                # Phase 1 SSE placeholder: live_hub is threaded through
+                # closure so Phase 2 only needs to plug in the actual
+                # ``stream_message(...)`` call. We log-only here so the
+                # structural call site is exercised; failures are
+                # swallowed because the LLM call must not be blocked by
+                # a downstream SSE error.
+                if live_hub is not None:
+                    try:
+                        logger.debug(
+                            f"[Injection] Phase 1 stub: live_hub present "
+                            f"for {instance_short} (Phase 2 will emit "
+                            f"injection_consumed SSE)"
+                        )
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.warning(
+                            f"[Injection] live_hub stub failed for "
+                            f"{instance_short}: {e}"
+                        )
+
         # Check if vision model is being used (images present in user message)
         model_vision = llm_config.get("model_vision") if llm_config else None
         has_images = False
@@ -618,18 +739,18 @@ def create_agent_node(
                         break
             if has_images:
                 break
-        
+
         # Select the appropriate LLM:
         # - Images present: use vision model (llm_with_tools which has vision model)
         # - No images: use standard model if available
         use_vision_model = has_images and model_vision and llm_standard is not None
         current_llm = llm_with_tools if use_vision_model else (llm_standard or llm_with_tools)
-        
+
         model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
         vision_log = f", vision={model_vision}" if model_vision and has_images else ""
         call_type = "VISION" if use_vision_model else "STANDARD"
         logger.info(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
-        
+
         try:
             # Use run_in_executor to avoid blocking the event loop.
             # This allows SSE streaming to continue while LLM processes.
@@ -642,16 +763,16 @@ def create_agent_node(
             if compactor is None or graph_ref is None or graph_ref[0] is None:
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
                 raise
-            
+
             logger.info(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
-            
+
             graph = graph_ref[0]
             thread_config = config or {}
-            
+
             current_state = await graph.aget_state(thread_config)
             current_messages = current_state.values.get('messages', [])
             compacted_at_val = current_state.values.get('compacted_at')
-            
+
             from .compaction import CompactionContext
             ctx = CompactionContext(
                 messages=current_messages,
@@ -661,20 +782,36 @@ def create_agent_node(
                 llm_config=compactor.llm_config,
                 last_compacted_at=compacted_at_val,
             )
-            
+
             result = await compactor.compact_state(ctx)
             if result is None or result.replacement_messages is None:
                 logger.warning('Reactive compaction returned no result, re-raising')
                 raise
-            
+
             await graph.aupdate_state(thread_config, {'messages': result.replacement_messages}, as_node='agent')
             if result.compacted_at:
                 await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
-            
+
             logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
-            
+
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
+
+            # C3: Reactive compaction re-append — the injected message
+            # lives only in the local ``full_messages`` list above (it
+            # has NOT been persisted to the checkpoint via
+            # ``add_messages`` yet). ``graph.aget_state`` reads from
+            # checkpoint, so without this re-append the LLM retry would
+            # lose the user's injected message. We re-append in-place
+            # so the retry sees it exactly as the first attempt did.
+            if injected_msg is not None:
+                compact_messages.append(injected_msg)
+                logger.debug(
+                    f'[LLM] Reactive compaction: re-appended injected '
+                    f'message for {instance_short} '
+                    f'(len={len(injected_msg.content or "")})'
+                )
+
             # Use run_in_executor to avoid blocking the event loop after compaction
             # Continue with the same LLM that was being used (may be vision or standard)
             loop = asyncio.get_running_loop()
@@ -682,7 +819,7 @@ def create_agent_node(
                 None,
                 lambda: current_llm.invoke(compact_messages)
             )
-        except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError, 
+        except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
             transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
             timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
@@ -692,7 +829,7 @@ def create_agent_node(
         except Exception as e:
             logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {_truncate_error(e)}")
             raise
-        
+
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_names = [tc.get('name', getattr(tc, 'name', '?')) for tc in response.tool_calls]
             # Get first tool's arguments for display
@@ -704,8 +841,16 @@ def create_agent_node(
             logger.info(f'[LLM] Response: {response.content[:80]}...')
         else:
             logger.info('[LLM] Response: empty')
+
+        # C2: Persist BOTH the injected HumanMessage and the LLM response
+        # so the ``add_messages`` reducer writes them to the checkpoint
+        # together. When no injection was consumed, fall back to the
+        # existing single-message return so the surface is identical to
+        # the pre-Phase-1 behavior.
+        if injected_msg is not None:
+            return {'messages': [injected_msg, response]}
         return {'messages': [response]}
-    
+
     return agent_node
 
 
@@ -812,6 +957,8 @@ def build_instance_graph(
     graph_config=None,
     user_language: str = "English",
     language_check_enabled: bool = True,
+    injection_slot: InjectionSlot | None = None,
+    live_hub: Any = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -825,6 +972,25 @@ def build_instance_graph(
     user's preferred language. If the language is wrong, a reminder
     HumanMessage is injected and the agent re-runs (up to
     LANGUAGE_CHECK_MAX_RETRIES times).
+
+    Args:
+        tools: Tool list bound to the agent LLM.
+        checkpointer: LangGraph checkpointer for state persistence.
+        llm_config: LLM configuration dict (provider, model, etc.).
+        system_prompt: System prompt prepended to every agent turn.
+        retry_config: Optional retry/backoff configuration.
+        compactor: Optional ``ContextCompactor`` (C3) threaded to the
+            agent_node for reactive compaction on context overflow.
+        graph_config: Optional LangGraph config (``thread_id``, etc.).
+        user_language: User-preferred language for the language-check node.
+        language_check_enabled: Whether to enable the language-check node.
+        injection_slot: Optional :class:`InjectionSlot` handle (Phase 1
+            / C1) that lets the agent_node pull a pending user message
+            into the conversation before each LLM call. ``None``
+            disables injection (backward-compatible default).
+        live_hub: Optional ``LiveEventHub`` reference (Phase 1 / C1)
+            threaded for Phase 2 SSE emission (placeholder only in
+            Phase 1).
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
@@ -850,7 +1016,10 @@ def build_instance_graph(
 
     graph = StateGraph(SessionState)
 
-    # Add nodes - pass both vision and standard LLM
+    # Add nodes - pass both vision and standard LLM. Phase 1 / C1 also
+    # threads ``injection_slot`` and ``live_hub`` into the agent-node
+    # closure so the graph can consume pending user injections without
+    # importing InstanceManager (preserves test isolation).
     graph.add_node("agent", create_agent_node(
         llm_with_tools,
         system_prompt,
@@ -860,6 +1029,8 @@ def build_instance_graph(
         llm_config=llm_config_with_headers,
         retry_config=retry_config,
         llm_standard=llm_standard,
+        injection_slot=injection_slot,
+        live_hub=live_hub,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)
