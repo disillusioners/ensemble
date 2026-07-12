@@ -8,7 +8,7 @@
   "no_force_explore": true,
   "innate_skills": ["todo"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "shared_context"]
   },
   "team_members": ["explorer"]
 }

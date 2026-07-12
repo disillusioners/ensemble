@@ -8,7 +8,7 @@
   "system": true,
   "innate_skills": ["todo"],
   "tools": {
-    "allow": ["instance", "self", "help", "mother", "knowledge", "mcp", "context"]
+    "allow": ["instance", "self", "help", "mother", "knowledge", "mcp", "context", "shared_context"]
   },
   "team_members": ["explorer"]
 }

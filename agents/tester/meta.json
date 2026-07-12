@@ -6,7 +6,7 @@
   "color": "accent-green",
   "innate_skills": ["opencode", "test-pack", "todo"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "db"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "shared_context", "db"]
   },
   "team_members": ["explorer"]
 }

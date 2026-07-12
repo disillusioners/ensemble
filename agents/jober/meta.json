@@ -8,7 +8,7 @@
   "innate_skills": ["job-orchestration", "todo"],
   "no_force_explore": true,
   "tools": {
-    "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context"]
+    "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context", "shared_context"]
   },
   "team_members": ["explorer"]
 }
