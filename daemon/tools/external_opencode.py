@@ -684,7 +684,7 @@ Returns:
                         # collect the task frame.
                         try:
                             await wait_task
-                        except BaseException:
+                        except Exception:  # Let CancelledError propagate (BaseException, not Exception) — needed for pause/resume
                             pass
             else:
                 await asyncio.sleep(POLL_INTERVAL_S)
