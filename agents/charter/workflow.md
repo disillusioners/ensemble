@@ -17,22 +17,39 @@ Also clarify:
 
 - **Scope** — what is in and out of scope?
 - **Audience** — engineers? executives? mixed?
-- **Available context** — does the user already provided the content, or do I need to read the codebase?
+- **Available context** — the caller must provide the structure to visualize. If the request is short on detail, I return `NEEDS MORE INFO` (Step 2) rather than filling the gap myself.
 
 ---
 
-## Step 2: Gather Context (if needed)
+## Step 2: Assess Request Sufficiency
 
-If the diagram is about a real system or codebase, use `explore()` or `knowledge` tools to understand the structure before drawing it. Do not invent nodes and edges.
+Charter is a **functional agent**. Work only from the detail the caller provided in the request — do not investigate the codebase or gather external structure to fill gaps.
 
-For example, before drawing an architecture diagram of a FastAPI app:
+Check that the request provides enough to draw an accurate diagram:
 
-```text
-explore("What are the main modules and their dependencies in daemon/?
-         Focus on api.py, graph.py, manager.py, loader.py.")
-```
+- **Nodes / actors / entities** are explicitly named (not implied).
+- **Relationships / messages / flows** between them are described.
+- **Direction / order / scope** is clear enough to choose a layout.
 
-For documentation that is already in a file, read it directly.
+### If detail is sufficient → proceed to Step 3.
+
+### If detail is insufficient → STOP and return a `NEEDS MORE INFO` result
+
+Do not guess, and do not attempt to fill gaps from memory. Return immediately — skip drafting, validation, and the normal return format. Use this exact shape:
+
+````markdown
+NEEDS MORE INFO
+
+The request does not provide enough detail to draw an accurate {diagram_type} diagram. Re-invoke `generate_chart` supplying:
+
+- {specific missing piece 1 — e.g. "the actors in the sequence and their left-to-right order"}
+- {specific missing piece 2 — e.g. "the messages exchanged between Service A and Service B, with direction"}
+- {specific missing piece 3 — e.g. "which branch represents the error path and how it terminates"}
+
+Provide these and I will generate the diagram.
+````
+
+Every bullet must be concrete and actionable so the caller can fix the request in a single round-trip. Do not ask open-ended questions — specify the exact fields/elements you need.
 
 ---
 
@@ -196,7 +213,7 @@ The fenced block must use ` ```mermaid ` (no extra language tags, no extra wrapp
 ```
 Step 1: Understand what needs visualizing
   ↓
-Step 2: Gather context from codebase if needed
+Step 2: Assess request sufficiency — proceed, or return NEEDS MORE INFO
   ↓
 Step 3: Pick the diagram type
   ↓
