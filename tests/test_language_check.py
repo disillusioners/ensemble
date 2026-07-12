@@ -595,7 +595,7 @@ class TestLanguageCheckNodeErrorHandling:
         # Use ValueError — one of the types in the narrow except clause
         # (ValueError, TypeError, AttributeError, re.error).
         with patch(
-            "daemon.language_detection.detect_wrong_language",
+            "daemon.graph.detect_wrong_language",
             side_effect=ValueError("detection blew up"),
         ):
             # Should not raise
@@ -608,7 +608,7 @@ class TestLanguageCheckNodeErrorHandling:
         node = create_language_check_node("English")
         state = _make_state([HumanMessage(content="p"), _wrong_lang_ai()])
         with patch(
-            "daemon.language_detection.detect_wrong_language",
+            "daemon.graph.detect_wrong_language",
             side_effect=ValueError("bad regex"),
         ):
             result = await node(state)
@@ -620,7 +620,7 @@ class TestLanguageCheckNodeErrorHandling:
         node = create_language_check_node("English")
         state = _make_state([HumanMessage(content="p"), _wrong_lang_ai()])
         with patch(
-            "daemon.language_detection.detect_wrong_language",
+            "daemon.graph.detect_wrong_language",
             side_effect=TypeError("wrong arg"),
         ):
             result = await node(state)
@@ -633,7 +633,7 @@ class TestLanguageCheckNodeErrorHandling:
         node = create_language_check_node("English")
         state = _make_state([HumanMessage(content="p"), _wrong_lang_ai()])
         with patch(
-            "daemon.language_detection.detect_wrong_language",
+            "daemon.graph.detect_wrong_language",
             side_effect=re_module.error("bad regex pattern"),
         ):
             result = await node(state)
@@ -822,25 +822,25 @@ class TestAppendUserLanguage:
         assert "Base prompt." in result
 
     def test_appends_in_correct_format(self):
-        """Section format: '## User Language Preference\\n\\nUser prefer language: X\\n'."""
+        """Section format: '## User Language Preference\\n\\nUser prefers language: X\\n'."""
         result = append_user_language("prompt", "Spanish")
         assert "## User Language Preference" in result
-        assert "User prefer language: Spanish" in result
+        assert "User prefers language: Spanish" in result
 
     def test_empty_string_defaults_to_english(self):
         """Empty language string falls back to English."""
         result = append_user_language("prompt", "")
-        assert "User prefer language: English" in result
+        assert "User prefers language: English" in result
 
     def test_none_defaults_to_english(self):
         """None language falls back to English (falsy branch)."""
         result = append_user_language("prompt", None)
-        assert "User prefer language: English" in result
+        assert "User prefers language: English" in result
 
     def test_chinese_language_preserved(self):
         """Non-English language values pass through unchanged."""
         result = append_user_language("prompt", "Chinese")
-        assert "User prefer language: Chinese" in result
+        assert "User prefers language: Chinese" in result
 
     def test_section_separated_from_base(self):
         """Section is separated from base prompt by '---' separator (matches other injectors)."""
@@ -858,8 +858,8 @@ class TestAppendUserLanguage:
         twice = append_user_language(once, "Spanish")
         # Two sections, one for each language
         assert twice.count("## User Language Preference") == 2
-        assert "User prefer language: English" in twice
-        assert "User prefer language: Spanish" in twice
+        assert "User prefers language: English" in twice
+        assert "User prefers language: Spanish" in twice
 
 
 # ────────────────────────────────────────────────────────────────────────────

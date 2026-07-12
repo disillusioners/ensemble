@@ -245,7 +245,7 @@ def append_user_language(system_prompt: str, language: str) -> str:
     """
     if not language:
         language = "English"
-    language_section = f"\n---\n\n## User Language Preference\n\nUser prefer language: {language}\n"
+    language_section = f"\n---\n\n## User Language Preference\n\nUser prefers language: {language}\n"
     return system_prompt + language_section
 
 

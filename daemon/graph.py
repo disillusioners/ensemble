@@ -30,6 +30,7 @@ from .llm_error_classifier import (
     _truncate_error,
 )
 from .response_validation import LLMResponseValidationError
+from .language_detection import detect_wrong_language
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -442,8 +443,9 @@ def nudge_node(state):
 # returns a wrapper that translates END -> "end_candidate" so the graph routes
 # to the language_check node when language_check_enabled=True.
 LANGUAGE_REMINDER_TEMPLATE = (
-    "You are using wrong language, prefer user language is {language}. "
-    "Please respond again with the correct language: {language}."
+    "You are responding in the wrong language. "
+    "The user's preferred language is {language}. "
+    "Please respond again in {language}."
 )
 
 LANGUAGE_CHECK_MAX_RETRIES = 2
@@ -477,29 +479,26 @@ def create_language_check_node(user_language: str):
 
         count = state.get("language_check_count", 0)
 
-        # S5 FIX: Reset counter when a new HumanMessage is detected.
-        # A reminder-injected HumanMessage is marked via additional_kwargs
-        # so we don't reset on our own re-injections.
-        for msg in reversed(messages[:-1]):
-            msg_type = getattr(msg, 'type', None)
-            if msg_type == 'human':
-                if not getattr(msg, 'additional_kwargs', {}).get('language_check_reminder', False):
-                    count = 0  # New user message, reset counter
-                break
-
-        # C4 FIX: Detect skip via message history scan.
-        # If the agent invoked `language_skip_check` since the last user
-        # message, allow the response without detection.
+        # Combined scan: counter reset (S5) + skip detection (C4).
+        # Both original loops scan the same range and break on the first
+        # HumanMessage, so they can be safely merged into a single pass.
+        # On hitting a skip tool we DO NOT break — we keep scanning so the
+        # HumanMessage boundary still resets `count` consistently.
         skip = False
         for msg in reversed(messages[:-1]):
             msg_type = getattr(msg, 'type', None)
+            if msg_type == 'human':
+                # A reminder-injected HumanMessage is marked via
+                # additional_kwargs so we don't reset on our own re-injections.
+                if not getattr(msg, 'additional_kwargs', {}).get('language_check_reminder', False):
+                    count = 0  # New user message, reset counter
+                break  # Stop scanning past the last HumanMessage
             if msg_type == 'tool':
                 tool_name = getattr(msg, 'name', None)
                 if tool_name == 'language_skip_check':
                     skip = True
-                    break
-            elif msg_type == 'human':
-                break  # Don't look past the last user message
+                    # Don't break — continue scanning in case there's a
+                    # HumanMessage before this we still need to account for
 
         # Max retries — prevent infinite loop.
         if count >= LANGUAGE_CHECK_MAX_RETRIES:
@@ -517,7 +516,6 @@ def create_language_check_node(user_language: str):
 
         # W4 FIX: Wrap detection in try/except — never crash the graph.
         try:
-            from .language_detection import detect_wrong_language
             if detect_wrong_language(content, user_language):
                 reminder = HumanMessage(
                     content=LANGUAGE_REMINDER_TEMPLATE.format(language=user_language),

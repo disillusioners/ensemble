@@ -14,6 +14,7 @@ from sqlmodel import Session
 
 from ..cancellation import CancellationToken
 from ..compaction import ContextCompactor, CompactionContext, get_model_context_limit
+from ..language_detection import _normalize_content
 from ..loader import estimate_messages_tokens
 from ..persistence import get_instance_messages
 from ..repositories.event.models import Event, EventKind
@@ -1964,15 +1965,11 @@ class InstanceMessagingService:
                                         if msg_id:
                                             _dispatched_msg_ids.add(msg_id)
 
-                                        # W2: Handle list content (e.g., [{"type": "text", "text": "..."}])
-                                        content = getattr(msg, 'content', None)
-                                        if isinstance(content, list):
-                                            text_parts = [
-                                                b.get("text", "")
-                                                for b in content
-                                                if isinstance(b, dict) and b.get("text")
-                                            ]
-                                            content = " ".join(text_parts)
+                                        # W2: Normalize multimodal content to a string via the
+                                        # shared helper so list/None/str handling stays in
+                                        # lockstep with the language check node
+                                        # (daemon.language_detection._normalize_content).
+                                        content = _normalize_content(getattr(msg, 'content', None))
 
                                         if content and content.strip():
                                             # C1 FIX (Phase 2): If language_check is active AND this
@@ -2109,17 +2106,11 @@ class InstanceMessagingService:
                         for msg in reversed(all_state_messages):
                             if hasattr(msg, 'type') and msg.type == 'ai':
                                 if hasattr(msg, 'content'):
-                                    content = msg.content
-                                    # Handle list content (e.g., [{"type": "text", "text": "..."}])
-                                    if isinstance(content, list):
-                                        text_parts = [
-                                            b.get("text", "")
-                                            for b in content
-                                            if isinstance(b, dict) and b.get("text")
-                                        ]
-                                        final_content = " ".join(text_parts)
-                                    else:
-                                        final_content = content or ""
+                                    # Normalize multimodal content (str | list | None) via
+                                    # the shared _normalize_content helper for parity with
+                                    # the language check node and the progressive
+                                    # dispatch loop above.
+                                    final_content = _normalize_content(msg.content)
                                 last_ai_message = msg
                                 break
 
@@ -2153,13 +2144,10 @@ class InstanceMessagingService:
         # asyncio.CancelledError is re-raised above and skips this block, so a
         # cancelled response is never sent to the external source.
         if _deferred_final_message is not None:
-            deferred_content = getattr(_deferred_final_message, 'content', '') or ""
-            if isinstance(deferred_content, list):
-                deferred_content = " ".join(
-                    b.get("text", "")
-                    for b in deferred_content
-                    if isinstance(b, dict) and b.get("text")
-                )
+            # Normalize multimodal content (str | list | None) via the shared
+            # _normalize_content helper for parity with the language check
+            # node and the progressive dispatch loop above.
+            deferred_content = _normalize_content(getattr(_deferred_final_message, 'content', ''))
             if (
                 deferred_content
                 and deferred_content.strip()
