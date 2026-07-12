@@ -1,6 +1,7 @@
 """Instance lifecycle service for managing instance creation and termination."""
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -258,7 +259,6 @@ def append_shared_context_metadata(
         # Format the metadata section — pretty JSON keeps the block
         # legible for the LLM and matches the indentation style of the
         # surrounding markdown sections.
-        import json
         metadata_json = json.dumps(kvs, indent=2, ensure_ascii=False)
         context_section = (
             f"\n\n---\n\n# Shared Context\n\n## Metadata KV\n\n"

@@ -99,7 +99,7 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
         Returns:
             JSON string of ``{meta_key: meta_value}`` representing the
             current state after the requested operations. On error, a
-            JSON object ``{"error": "..."}``.
+            JSON object ``{"_error": "..."}``.
         """
         # Resolve context_key lazily inside the tool body — never at
         # factory time, so an unfilled manager does not break import
@@ -126,7 +126,7 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
                 current_instance_id,
                 e,
             )
-            return json.dumps({"error": f"shared_context_metadata_repo unavailable: {e}"})
+            return json.dumps({"_error": f"shared_context_metadata_repo unavailable: {e}"})
 
         try:
             # Apply precedence: clear_all wins and finalises the state.
@@ -149,6 +149,6 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
                 context_key,
                 e,
             )
-            return json.dumps({"error": str(e)})
+            return json.dumps({"_error": str(e)})
 
     return [shared_context_metadata]

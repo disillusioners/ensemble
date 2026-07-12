@@ -669,11 +669,12 @@ class InstanceManager:
         # ── Shared Context Metadata repository (shared singleton) ──
         # One repository at the manager level, bound to the shared
         # engine (C3 — same singleton rationale as ``_infra_repository``).
-        # Tables are created by the MigrationRunner via a dedicated
-        # migration, so ``create_tables=False`` here (matches the
-        # ``_infra_repository`` wiring immediately above). The model
-        # was imported at module level so it is registered with
-        # ``SQLModel.metadata`` before ``create_all()`` runs.
+        # Table is created by ``SQLModel.metadata.create_all()`` at
+        # startup — no migration file required. ``create_tables=False``
+        # here matches the ``_infra_repository`` wiring immediately
+        # above. The model was imported at module level so it is
+        # registered with ``SQLModel.metadata`` before ``create_all()``
+        # runs.
         self._shared_context_metadata_repo = create_shared_context_metadata_repository(
             engine=self._engine,
             create_tables=False,

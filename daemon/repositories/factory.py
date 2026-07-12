@@ -637,8 +637,9 @@ def create_shared_context_metadata_repository(
             around this engine; no per-call engine creation.
         create_tables: If True, create the table on the bound
             engine if it does not already exist. Defaults to
-            ``False`` because the project relies on the
-            ``MigrationRunner`` to install tables on first use.
+            ``False`` because the table is created by
+            ``SQLModel.metadata.create_all()`` at startup —
+            no migration file required.
 
     Returns:
         Configured :class:`SharedContextMetadataRepository` instance.

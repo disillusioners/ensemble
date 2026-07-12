@@ -74,6 +74,9 @@ class TestSetKV:
     async def test_setting_kv_pairs(self, tool, manager):
         """Passing ``set_kv`` calls ``repo.set_many`` with the resolved context_key."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
+        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+            "some_key": "some_value"
+        }
 
         result = await tool.ainvoke({"set_kv": {"topic": "auth", "priority": 2}})
 
@@ -84,7 +87,7 @@ class TestSetKV:
         )
         # The tool returns the post-op snapshot as JSON.
         snapshot = json.loads(result)
-        assert isinstance(snapshot, dict)
+        assert snapshot == {"some_key": "some_value"}
 
 
 # ─── DELETE paths ─────────────────────────────────────────────────────────────
@@ -97,8 +100,11 @@ class TestDeleteKeys:
     async def test_deleting_kv_pairs(self, tool, manager):
         """Passing ``delete_keys`` calls ``repo.delete_many`` with the resolved key."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
+        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+            "some_key": "some_value"
+        }
 
-        await tool.ainvoke({"delete_keys": ["old_decision", "stale_flag"]})
+        result = await tool.ainvoke({"delete_keys": ["old_decision", "stale_flag"]})
 
         manager.shared_context_metadata_repo.delete_many.assert_called_once_with(
             "root-1",
@@ -106,6 +112,9 @@ class TestDeleteKeys:
         )
         # set_many must NOT be touched when only delete_keys is supplied.
         manager.shared_context_metadata_repo.set_many.assert_not_called()
+
+        snapshot = json.loads(result)
+        assert snapshot == {"some_key": "some_value"}
 
 
 class TestClearAll:
@@ -115,8 +124,11 @@ class TestClearAll:
     async def test_clear_all(self, tool, manager):
         """``clear_all=True`` calls ``repo.delete_all`` with the resolved key."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
+        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+            "some_key": "some_value"
+        }
 
-        await tool.ainvoke({"clear_all": True})
+        result = await tool.ainvoke({"clear_all": True})
 
         manager.shared_context_metadata_repo.delete_all.assert_called_once_with(
             "root-1",
@@ -124,6 +136,9 @@ class TestClearAll:
         # The clear_all branch must not also call delete_many / set_many.
         manager.shared_context_metadata_repo.delete_many.assert_not_called()
         manager.shared_context_metadata_repo.set_many.assert_not_called()
+
+        snapshot = json.loads(result)
+        assert snapshot == {"some_key": "some_value"}
 
 
 # ─── READ path ────────────────────────────────────────────────────────────────
@@ -165,8 +180,11 @@ class TestContextKeyResolution:
     async def test_context_key_resolution_from_instance_id(self, tool, manager):
         """The tool asks the instance repo for the tree-root id of ``current_instance_id``."""
         manager._instance_repository.get_tree_root_id.return_value = "tree-root-42"
+        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+            "some_key": "some_value"
+        }
 
-        await tool.ainvoke({"set_kv": {"k": "v"}})
+        result = await tool.ainvoke({"set_kv": {"k": "v"}})
 
         # Resolver called with the current instance id captured at factory time.
         manager._instance_repository.get_tree_root_id.assert_called_once_with(
@@ -178,12 +196,18 @@ class TestContextKeyResolution:
             {"k": "v"},
         )
 
+        snapshot = json.loads(result)
+        assert snapshot == {"some_key": "some_value"}
+
     @pytest.mark.asyncio
     async def test_context_key_fallback_when_root_id_empty(self, tool, manager):
         """When ``get_tree_root_id`` returns falsy, ``current_instance_id`` is used."""
         manager._instance_repository.get_tree_root_id.return_value = None
+        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+            "some_key": "some_value"
+        }
 
-        await tool.ainvoke({"set_kv": {"k": "v"}})
+        result = await tool.ainvoke({"set_kv": {"k": "v"}})
 
         # Still attempted the lookup, but fell back to the current id.
         manager._instance_repository.get_tree_root_id.assert_called_once_with(
@@ -193,3 +217,6 @@ class TestContextKeyResolution:
             "inst-current",
             {"k": "v"},
         )
+
+        snapshot = json.loads(result)
+        assert snapshot == {"some_key": "some_value"}
