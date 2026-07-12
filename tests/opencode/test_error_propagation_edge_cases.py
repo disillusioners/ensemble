@@ -408,3 +408,139 @@ class TestErrorResultHasNoSuccessTokens:
         assert ERROR_PAYLOAD_TEXT in result
         assert "[COMPLETED]" not in result
         assert "[RESUMED]" not in result
+
+
+# =============================================================================
+# 6. _format_timeout surfaces error dicts (F8 gap)
+#
+# Round 2 added the error-detection branch in ``_format_timeout``
+# (daemon/tools/external_opencode.py, lines ~199-204): when
+# ``latest_response`` is ``{"error": "..."}`` the rendered timeout
+# message contains ``[ERROR] Worker request failed: <msg>`` rather
+# than the raw result text. ``_format_timeout`` is a closure-local
+# nested function and is NOT directly importable, so these tests
+# exercise it through the only reachable surface — the
+# ``external_opencode_wait_for_result`` tool — by forcing the
+# poll loop to exhaust ``WAIT_TIMEOUT_S`` while the mocked dispatcher
+# keeps returning BUSY with the error payload.
+# =============================================================================
+
+
+class TestFormatTimeoutErrorDetection:
+    """_format_timeout must surface worker HTTP 500 errors on TIMEOUT path."""
+
+    @pytest.mark.asyncio
+    async def test_format_timeout_surfaces_error_dict(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Timeout while ``latest_response={"error": "..."}`` renders [ERROR].
+
+        The poll loop never observes ``IDLE``/``WAITING_FOR_INPUT``
+        (mocked dispatcher always returns BUSY), ``asyncio.sleep`` is a
+        no-op, and ``WAIT_TIMEOUT_S`` is patched to 0.05s so the loop
+        exhausts the deadline quickly. ``_format_timeout`` is then
+        called with the BUSY response whose ``latest_response`` carries
+        the error dict, and the rendered message must wrap the error
+        inside a ``[ERROR] Worker request failed:`` block instead of
+        the normal result text.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value=_make_session_record("session-timeout-error")
+        )
+
+        busy_error_resp = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "BUSY",
+                "latest_response": {"error": "API Error 500: server down"},
+            },
+        )
+
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_error_resp,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-timeout-error",
+            })
+
+        assert isinstance(result, str)
+        # Timeout wrapper is preserved.
+        assert result.startswith("[TIMEOUT]")
+        # _format_timeout surfaced the worker error inside the timeout block.
+        assert "[ERROR]" in result
+        assert "API Error 500" in result
+        assert "server down" in result
+        # Full prefix from the error-detection branch.
+        assert "[ERROR] Worker request failed: API Error 500: server down" in result
+        # No false-positive success markers.
+        assert "[COMPLETED]" not in result
+
+    @pytest.mark.asyncio
+    async def test_format_timeout_with_error_none_uses_fallback(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """``latest_response={"error": None}`` renders the ``unknown error`` fallback.
+
+        Guards the ``latest.get("error") or "unknown error"`` short-circuit:
+        a worker that crashes with no message attached should still produce
+        a useful marker for the agent rather than leaking a Python ``None``
+        string into the rendered output.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value=_make_session_record("session-timeout-none")
+        )
+
+        busy_none_resp = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "BUSY",
+                "latest_response": {"error": None},
+            },
+        )
+
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_none_resp,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-timeout-none",
+            })
+
+        assert isinstance(result, str)
+        # Timeout wrapper is preserved.
+        assert result.startswith("[TIMEOUT]")
+        # Fallback string replaces the literal None.
+        assert "[ERROR]" in result
+        assert "unknown error" in result
+        assert "[ERROR] Worker request failed: unknown error" in result
+        # The literal Python None must not leak into the rendered message.
+        assert "None" not in result
