@@ -690,3 +690,11 @@ class ProjectHistorySearchResponse(BaseModel):
             }
         }
     }
+
+
+class LanguagePreferenceResponse(BaseModel):
+    language: str
+
+
+class LanguagePreferenceUpdate(BaseModel):
+    language: str = Field(..., min_length=1, max_length=100, description="Preferred language name (e.g., 'English', 'Spanish', 'Chinese')")

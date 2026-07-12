@@ -1,0 +1,44 @@
+"""Settings API endpoints."""
+import logging
+from fastapi import APIRouter, HTTPException
+
+from daemon.repositories import SQLModelProjectRepository
+from daemon.services.language_utils import get_language_preference, LANGUAGE_METADATA_KEY, DEFAULT_LANGUAGE
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
+from .schemas import LanguagePreferenceResponse, LanguagePreferenceUpdate
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/settings", tags=["settings"])
+
+_project_repo: SQLModelProjectRepository | None = None
+
+
+def get_project_repository() -> SQLModelProjectRepository:
+    if _project_repo is None:
+        raise HTTPException(status_code=503, detail={"error": "Project repository not initialized"})
+    return _project_repo
+
+
+def set_project_repository(repo: SQLModelProjectRepository) -> None:
+    global _project_repo
+    _project_repo = repo
+
+
+@router.get("/language", response_model=LanguagePreferenceResponse)
+async def get_language():
+    """Get the current language preference."""
+    language = get_language_preference(_project_repo)
+    return LanguagePreferenceResponse(language=language)
+
+
+@router.put("/language", response_model=LanguagePreferenceResponse)
+async def set_language(request: LanguagePreferenceUpdate):
+    """Set the language preference."""
+    if not request.language or not request.language.strip():
+        raise HTTPException(status_code=422, detail="language must be a non-empty string")
+    repo = get_project_repository()  # raises 503 if not initialized
+    if SYSTEM_DEFAULT_PROJECT_ID is None:
+        raise HTTPException(status_code=503, detail="System default project not initialized")
+    repo.set_metadata(SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, request.language.strip())
+    return LanguagePreferenceResponse(language=request.language.strip())

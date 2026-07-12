@@ -67,6 +67,7 @@ from daemon.routers import (
     mcp_servers_router,
     notifications_router,
     migration_router,
+    settings_router,       # /api/settings (Phase 1: user language preference)
 )
 
 from daemon.mcp import (
@@ -598,7 +599,11 @@ async def lifespan(app: FastAPI):
     # Set project repository for projects router injection
     from daemon.routers.projects import set_project_repository
     set_project_repository(manager._project_repository)
-    
+
+    # Set project repository for settings router injection (Phase 1: user language preference)
+    from daemon.routers.settings import set_project_repository as set_settings_project_repo
+    set_settings_project_repo(manager._project_repository)
+
     # Also set project repository for queues router (has its own dependency injection)
     from daemon.routers.queues import set_project_repository as set_queues_project_repository
     set_queues_project_repository(manager._project_repository)
@@ -1344,6 +1349,7 @@ def create_app() -> FastAPI:
     api_router.include_router(notifications_router)   # /api/notifications
     api_router.include_router(migration_router)       # /api/migration
     api_router.include_router(database_router)        # /api/database
+    api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
 
     app.include_router(api_router)
 
