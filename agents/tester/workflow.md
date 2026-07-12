@@ -145,98 +145,114 @@ When starting with a new project:
 
 **Project-specific quality gates must pass before testing is complete.** The `.agents/tester/rules/ensure.md` file is **USER-DEFINED and READ-ONLY** — a project-specific file of custom quality requirements that MUST be validated (not standard tests).
 
+### ensure.md is pack-mapped, scoped, and timeout-capped
+- **Pack-mapped**: each requirement references a pack in PACKS.md (or a static check). Resolve requirement → pack before validating. If a requirement has no pack, create an ad-hoc pack for it.
+- **Scoped by blast radius**: validate only the **Core** requirements relevant to the change set. Run the **Release Gate** only when blast-radius determines the change is big/critical/architecture.
+- **Run as packs**: every validation runs as a pack with the dual-layer 5-min timeout — NEVER a bare, unbounded `pytest` command. Even the release-gate full suite runs via packs (parallel, each ≤ 5 min).
+- **Quarantine-aware**: tests in QUARANTINE.md are skipped; they do not fail a requirement.
+- **No `pytest -x`**: use `--tb=short -q` and review all failures.
+
+### Contradiction Handling (my rules win; notify the user)
+ensure.md is user-written and project-specific (read-only). When a requirement's METHOD contradicts my optimization rules, I honor the user's INTENT but validate MY way, and I notify the user to update ensure.md.
+
+**A requirement contradicts my rules if it mandates:**
+- A bare/unbounded `pytest` / `go test` / `npm test` command (no pack, no `timeout` wrapper)
+- `pytest -x` (stop-on-first-failure) for a suite run
+- A full-suite run for what is a scoped (blast-radius) change
+- Raw test file paths instead of packs
+- Sequential runs where packs are independent (should be parallel)
+- Anything exceeding the 5-min cap without an override
+
+**When a contradiction is found:**
+1. **Honor the intent, validate my way** — run the validation as a scoped pack with the dual-layer timeout. Do NOT skip it; do NOT run the bare/contradicting command.
+2. **Record the contradiction** — requirement text, the rule it contradicts, how I validated it instead.
+3. **Notify the user in the final report** — include an "ensure.md Improvement Notices" section: each contradiction + a suggested pack-mapped rewrite. The user owns ensure.md; I surface the issue, I never modify the file.
+
 ### ensure.md Template (user-maintained)
+
+ensure.md is split into **Core** (always-on, fast, pack-mapped) and **Release Gate** (slow, big/critical changes only):
 
 ```markdown
 # Quality Requirements
 
-## Critical
-_MUST pass before testing is complete_
+## How to use this file
+- Pack-mapped (reference packs, not bare pytest); scoped by blast radius;
+  run as packs with the 5-min timeout; quarantine-aware; no `-x`.
 
-- [ ] The `start.sh` script must run without any bug/error
-  - Validation: Run ./start.sh, check exit code is 0 and stderr is empty
-- [ ] No hardcoded secrets in source code
-  - Validation: Grep for API keys, passwords, tokens in source files
-- [ ] All environment variables documented in README
-  - Validation: Check README.md for env var documentation section
+## Core (always-on, fast, pack-mapped)
+### Critical
+- [ ] No regressions in changed packs — every pack in the change set PASS
+  - Validation: run scoped packs (PACKS.md)
+- [ ] <Integrity requirement> — pack `<pack_name>` PASS
+  - Validation: `timeout 300 bash <pack>`
+- [ ] <Static check> — e.g. dev.sh flag
+  - Validation: grep (fast, no pytest)
+### Important
+- [ ] <requirement> — Validation: grep / static check
+### Nice-to-have
+- [ ] <requirement> — Validation: import check
 
-## Important
-_Should pass, flag if failed_
-
-- [ ] All API endpoints return valid JSON responses
-  - Validation: Call each endpoint, verify response is valid JSON
-- [ ] Database migrations are reversible
-  - Validation: Run migration up, then down, verify clean state
-- [ ] Application starts within 5 seconds
-  - Validation: Measure startup time
-
-## Nice-to-have
-_Informational, report status only_
-
-- [ ] No compiler warnings in production build
-  - Validation: Run build with warnings-as-errors flag
-- [ ] All functions have documentation comments
-  - Validation: Check for docstrings/comments on all public functions
+## Release Gate (slow — big/critical/architecture changes ONLY)
+### Critical (release-gate)
+- [ ] Full non-integration suite green (excluding QUARANTINE.md)
+  - Validation: run ALL non-integration packs (parallel, ≤ 5 min each); NOT bare `pytest tests/`
+- [ ] E2E: <scenario>
+  - Validation: `timeout 300 pytest tests/e2e/... -m integration` (requires ./dev.sh) — or mock-test pack
 ```
 
-### Phase 1: Review ensure.md
+### Phase 1: Review, Scope & Detect Contradictions
 1. Read `.agents/tester/rules/ensure.md` (I do this directly - read-only)
-2. Parse each requirement into a testable task
-3. Prioritize requirements (critical → important → nice-to-have)
+2. **Derive the change set** (blast radius) → determine which requirements are in-scope (relevant to the change) vs slow/full-suite (run only on big/critical changes)
+3. **Detect contradictions** — for each requirement, check if its METHOD contradicts my rules (see Contradiction Handling above). Record any found.
+4. Parse each in-scope requirement into a testable task; resolve each to its pack (PACKS.md). For a contradicting requirement, validate MY way (scoped pack + timeout) instead of the literal method.
+5. Prioritize requirements (critical → important → nice-to-have)
 
-### Phase 2: Create Validation Tasks
-For each requirement in ensure.md, create a validation task for opencode:
+### Phase 2: Create Validation Tasks (pack-mapped)
+For each in-scope requirement, create a validation task for opencode — run the mapped pack (or static check) with the dual-layer timeout:
 
 ```
-Task: Validate ensure.md Requirements
-Context: [Project path, ensure.md requirements]
+Task: Validate ensure.md Requirement (pack-mapped)
+Context: [Project path, requirement, mapped pack]
+Requirement: [requirement text]
+Pack: [pack path from PACKS.md]   # exactly ONE pack (or "static check" for grep/file checks)
+Constraints:
+- Run ONLY this pack (or static check). Wrap with `timeout 300`.
+- Quarantined tests (QUARANTINE.md) are skipped — do not let them fail this requirement.
+- No `pytest -x` for suite runs.
 Requirements:
-- Validate each requirement in ensure.md
-- For each requirement:
-  - Execute validation logic
-  - Report: PASS/FAIL with evidence
-  - If FAIL: include error details, logs, evidence
-  - If FAIL and quick-fixable: fix and re-validate
-- Return: Full validation report
-
-ensure.md Requirements:
-1. [Requirement 1]: [Validation approach]
-2. [Requirement 2]: [Validation approach]
-...
-
+- Execute the validation with the timeout wrapper.
+- Report: PASS/FAIL with evidence.
+- If FAIL: include error details, logs, evidence.
+- If FAIL and quick-fixable: fix and re-validate.
 Quick Fix Authorization: YES
-- You may fix issues that meet quick fix criteria
-- After fixing, re-validate the requirement
-- Report what you fixed
-
 Expected Output:
-- Status for each requirement (PASS/FAIL)
-- Evidence for each validation
-- List of quick fixes applied (if any)
+- Status (PASS/FAIL) + evidence + quick fixes applied (if any)
 ```
 
 ### Phase 3: Execute Validation
-1. Spawn opencode session with validation task
+1. Spawn opencode session(s) per requirement — independent requirements in parallel (one pack per session)
 2. Monitor execution
 3. Receive validation results
 
 ### Phase 4: Report & Document
 1. Analyze validation results
 2. Identify failing requirements
-3. Update `.agents/tester/RESULTS/[date]-ensure-validation.md`
+3. Update `.agents/tester/RESULTS/[date]-ensure-validation.md` (note Core vs Release Gate coverage)
 4. Update `.agents/tester/LESSONS/` with issues found (e.g., `ensure-validation-[date].md`)
 5. Report to user: ✅ all passed, or ❌ list of failed requirements with details
 
 ### When to Run ensure.md Validation
-- **After unit tests pass** — Validate quality gates
+- **After unit tests pass** — Validate in-scope quality gates (blast-radius scoped)
 - **After mock tests pass** — Final quality check
-- **Before marking testing complete** — Must pass all critical requirements
+- **Before marking testing complete** — Must pass all in-scope critical requirements
+- **Slow/full-suite requirements only** — when blast-radius determines a big/critical/architecture change
 - **On user request** — Explicit validation request
 
 ### ensure.md Validation Priority
-1. **Critical** — MUST pass before testing is complete
+1. **Critical** — MUST pass before testing is complete (scoped to the change set)
 2. **Important** — Should pass, flag if failed
 3. **Nice-to-have** — Report status, but don't block
+4. **Slow/full-suite requirements** — Only on big/critical changes (E2E + full suite via packs)
 
 ---
 
@@ -914,6 +930,9 @@ Session IDs: [list of opencode session IDs used]
 - **Nice-to-have Requirements**: X/Y passed
   - ✅ [Requirement 4]: PASS
 
+### ensure.md Improvement Notices (include when contradictions found)
+- ⚠️ Requirement "[text]" contradicts rule "[rule]" — validated via [pack] instead. Suggested rewrite: "[pack-mapped version]". ensure.md is user-owned; please update.
+
 ### Quick Fixes Applied (if any)
 - [Instance ID]: Fixed [issue] in [file:line]
   - Root cause: [why it failed]
@@ -995,6 +1014,7 @@ Session IDs: [list of opencode session IDs used]
 - **New testing knowledge?** → I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
 - **ensure.md critical requirements failing?** → Testing is NOT complete until they pass
+- **ensure.md requirement contradicts my rules?** → Honor the intent, validate my way (scoped pack + dual-layer timeout), and add an Improvement Notice to the report for the user to update ensure.md
 - **Code changes made?** → **MANDATORY**: Commit all changes before sending report to leader
 
 ---

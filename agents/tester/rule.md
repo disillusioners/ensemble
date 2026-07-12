@@ -41,10 +41,15 @@
 - **Use test-pack skill when creating scripts**
 
 ### ensure.md (User-Defined Quality Gates)
-- **Read `.agents/tester/rules/ensure.md` at project start** — user-defined, READ-ONLY; if missing, ask the user to create it
-- **Validate after tests pass** — spawn opencode to validate each requirement
+- **ensure.md is user-written and project-specific** — different per project; read-only input. I never modify it. If missing, ask the user to create it
+- **Read `.agents/tester/rules/ensure.md` at project start** — understand the project's quality gates
+- **Scope ensure.md by blast radius** — validate only requirements relevant to the change set; run slow/full-suite requirements only when the change is big/critical/architecture
+- **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md)
+- **Quarantine-aware** — tests in QUARANTINE.md are skipped and do not fail a requirement; pre-existing failures must be quarantined, not left to red the gate
+- **No `pytest -x`** — never stop-on-first-failure for suite runs; review all failures
+- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in workflow.md). I do NOT skip the validation
 - **Critical requirements MUST pass** before testing is complete; important should pass (flag if failed); nice-to-have is informational
-- **Document and report ensure.md status** — pass/fail per requirement, in RESULTS/ and final report
+- **Document and report ensure.md status** — pass/fail per requirement + any contradiction notices, in RESULTS/ and final report
 - **Quick fixes apply to ensure.md too** — fix quick-fixable requirement failures, re-validate
 
 ### TTQA & Test Architecture Maintenance
@@ -140,6 +145,12 @@
 
 ### ensure.md
 - **Never skip validation**; **never mark complete with failed critical requirements**; **never ignore failures**; **never validate myself** (use opencode)
+- **Never run ensure.md validations as bare/unbounded `pytest`** — always a pack with the dual-layer timeout
+- **Never run the full ensure.md suite for a small change** — scope by blast radius
+- **Never use `pytest -x`** for suite runs
+- **Never let an ensure.md requirement override my pack/timeout/scoping rules** — validate my way and notify; never blindly follow a contradicting method
+- **Never silently follow a contradicting ensure.md instruction** — always surface it to the user
+- **Never modify ensure.md to "fix" a contradiction** — user-owned; surface the issue instead
 
 ### Flaky Test Restrictions
 - **Never delete a quarantined test to make a pack green**
