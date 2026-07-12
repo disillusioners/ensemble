@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from ..metadata import AgentMetadata
     from ..repositories.instance.repository import SQLModelInstanceRepository
     from ..repositories.project.repository import SQLModelProjectRepository
+    from ..repositories.shared_context.repository import SharedContextMetadataRepository
     from .job_queue_service import JobQueueService
 
 
@@ -201,6 +202,75 @@ def append_context_key(
 
     context_section = f"\n---\n\n## Context Key\n\nCONTEXT_KEY: {root_id}\n"
     return system_prompt + context_section
+
+
+def append_shared_context_metadata(
+    system_prompt: str,
+    instance_id: str,
+    instance_repository: "SQLModelInstanceRepository",
+    shared_context_metadata_repo: "SharedContextMetadataRepository",
+    parent_id: Optional[str] = None,
+) -> str:
+    """Inject shared context metadata KV into the system prompt.
+
+    Looks up the root ``context_key`` for this instance (root = own
+    ``instance_id``; child = ``get_tree_root_id(parent_id)`` with a
+    fallback to ``parent_id``) and appends the JSON-encoded metadata
+    KV block under ``## Shared Context → Metadata KV``.
+
+    Mirrors :func:`append_context_key` for tree-root resolution but
+    reads from :class:`SharedContextMetadataRepository` instead of
+    writing a single ID. Failure paths return the prompt unchanged so
+    a transient repo error never breaks instance execution.
+
+    Args:
+        system_prompt: The base system prompt to append to.
+        instance_id: The instance ID to resolve the context key for.
+        instance_repository: Repository for tree operations
+            (``get_tree_root_id``).
+        shared_context_metadata_repo: Repository that stores the
+            ``context_key → {meta_key: meta_value}`` rows.
+        parent_id: Optional parent instance ID. When provided the root
+            is resolved via the parent (mirrors ``append_context_key``).
+
+    Returns:
+        The system prompt with the ``## Shared Context`` section
+        appended, or the original prompt when there are no rows or
+        the lookup fails.
+    """
+    try:
+        # Resolve context_key (same logic as append_context_key)
+        if parent_id is None:
+            # This IS a root instance
+            context_key = instance_id
+        else:
+            # This is a child instance — find root via parent
+            context_key = instance_repository.get_tree_root_id(parent_id)
+            if context_key is None:
+                context_key = parent_id  # Fallback to parent_id
+
+        # Fetch all KV pairs for this context
+        kvs = shared_context_metadata_repo.get_all_as_dict(context_key)
+
+        if not kvs:
+            return system_prompt  # No metadata to inject
+
+        # Format the metadata section — pretty JSON keeps the block
+        # legible for the LLM and matches the indentation style of the
+        # surrounding markdown sections.
+        import json
+        metadata_json = json.dumps(kvs, indent=2, ensure_ascii=False)
+        context_section = (
+            f"\n\n---\n\n# Shared Context\n\n## Metadata KV\n\n"
+            f"{metadata_json}\n\n---\n"
+        )
+
+        return system_prompt + context_section
+    except Exception as e:
+        # Never break agent execution on a metadata lookup failure —
+        # log and return the unchanged prompt.
+        logger.warning(f"Failed to inject shared context metadata: {e}")
+        return system_prompt
 
 
 def append_current_time(system_prompt: str, now: datetime | None = None) -> str:
@@ -558,6 +628,16 @@ class InstanceLifecycleService:
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=parent_id)
+
+        # Append shared context metadata KV (post-cache; does not invalidate PromptCache).
+        # Injected BEFORE current_time so time stamps render below the metadata block.
+        system_prompt = append_shared_context_metadata(
+            system_prompt,
+            instance_id,
+            instance_repository,
+            self._manager.shared_context_metadata_repo,
+            parent_id=parent_id,
+        )
 
         # Append current time so the agent has temporal context for the conversation
         system_prompt = append_current_time(system_prompt)
@@ -1521,6 +1601,17 @@ class InstanceLifecycleService:
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)
+
+        # Append shared context metadata KV (post-cache; does not invalidate PromptCache).
+        # Uses meta.parent_id so the restored instance sees the same context
+        # metadata it had before the daemon restart.
+        system_prompt = append_shared_context_metadata(
+            system_prompt,
+            instance_id,
+            instance_repository,
+            self._manager.shared_context_metadata_repo,
+            parent_id=meta.parent_id,
+        )
 
         # Append current time so the agent has temporal context for the conversation
         system_prompt = append_current_time(system_prompt)

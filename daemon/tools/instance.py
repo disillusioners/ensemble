@@ -116,6 +116,7 @@ from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
+from .shared_context_tools import create_shared_context_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools
 from .system import create_system_tools
@@ -1037,6 +1038,13 @@ Returns:
     # equivalent tools for external agent systems.
     context_tool_list = create_context_tools(manager, current_instance_id)
     tools.extend(context_tool_list)
+
+    # ── Shared context metadata tools (KV upsert/delete/clear) ──
+    # Always available — internal agents store and read lightweight metadata
+    # (e.g., "last_seen", "topic", "user_locale") keyed by the context_key
+    # partition. Auto-resolves context_key from the caller via closure.
+    shared_context_tool_list = create_shared_context_tools(manager, current_instance_id)
+    tools.extend(shared_context_tool_list)
 
     # ── System tools (read-only env / config / health snapshots) ──
     # Always available — internal agents use these for fast triage of
