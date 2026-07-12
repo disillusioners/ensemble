@@ -109,32 +109,27 @@ $accent-rose: #f43f5e;
   min-height: 0;
   overflow: auto;
   padding: 1.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   background-color: $bg-primary;
 }
 
 .chart-stage {
-  // The body is a flex row container; without `flex: 1` and
-  // `min-width/min-height: 0` the chart-stage collapses to 0×0 because
-  // it has no intrinsic size (the mermaid SVG only carries `width: 100%`
-  // and cannot size its own parent). Stretching it inside the body
-  // gives the SVG a definite box to fill.
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  // `width: fit-content` shrink-wraps the stage to the SVG's intrinsic
+  // size, which gives `margin: auto` leftover horizontal space to
+  // distribute — that's what actually centers small charts. Without
+  // `fit-content`, a block element fills 100% of the body and `auto`
+  // margins collapse to 0. When the SVG is wider than the body,
+  // `max-width: 100%` caps it so it still scrolls left-anchored
+  // instead of overflowing.
+  width: fit-content;
   max-width: 100%;
-  max-height: 100%;
+  margin: auto;
 
-  // Mermaid emits an inline <svg>. Let it scale up to fill the stage
-  // without overflowing.
+  // Mermaid emits an inline <svg>. We cap the width to the viewport
+  // (`max-width: 100%`) but deliberately omit `max-height: 100%` so
+  // large charts can scroll to their full intrinsic height.
   ::ng-deep svg {
     max-width: 100%;
-    max-height: 100%;
     height: auto;
     width: auto;
     display: block;
