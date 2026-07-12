@@ -1649,29 +1649,39 @@ class InstanceMessagingService:
             )
             
             if is_completion_report:
-                # Skip project injection for completion/error reports
+                # Skip project/shared-context injection for completion/error reports
                 pass
             else:
-                # Check if project was already injected (using metadata flag).
+                # ── Single read of the instance row (reused for both gates below) ──
                 # Wrap the sync DB read in ``asyncio.to_thread`` (see deadlock
-                # analysis in experience docs).
+                # analysis in experience docs). Both the project-context and
+                # shared-context gates read the same row, so one fetch covers
+                # both — avoids the double round-trip a previous revision paid.
                 instance_meta = await asyncio.to_thread(
                     self._manager._instance_repository.get, instance_id
                 )
-                project_already_injected = (
-                    instance_meta and 
-                    instance_meta.instance_metadata and 
-                    instance_meta.instance_metadata.get("project_injected")
+                # Snapshot for repeated gate checks (``instance_meta`` may be
+                # detached after the next ``to_thread`` round-trip that writes
+                # back to it via ``set_metadata``).
+                instance_metadata = (
+                    instance_meta.instance_metadata
+                    if instance_meta is not None and instance_meta.instance_metadata
+                    else None
                 )
-                
+
+                # ── Project context injection (existing logic) ─────────────────
+                project_already_injected = bool(
+                    instance_metadata and instance_metadata.get("project_injected")
+                )
+
                 if not project_already_injected:
                     # First injection → attempt project injection
                     existing_project_id = None
-                    if instance_meta and instance_meta.instance_metadata:
-                        existing_project_id = instance_meta.instance_metadata.get("project_id")
-                    
+                    if instance_metadata:
+                        existing_project_id = instance_metadata.get("project_id")
+
                     injection_succeeded = False
-                    
+
                     if existing_project_id:
                         # project_id exists (inherited from parent) → inject context using stored project_id.
                         # Wrap the sync project_repo DB read in ``asyncio.to_thread``.
@@ -1737,6 +1747,101 @@ class InstanceMessagingService:
                         await asyncio.to_thread(
                             self._manager._instance_repository.set_metadata,
                             instance_id, "project_injected", True,
+                        )
+
+                # ── Shared context metadata injection (Option C) ──────
+                # Prepends the latest ``shared_context_metadata`` KV snapshot
+                # to the leader→child message body, closing the message-body
+                # injection gap that left the child unable to see metadata
+                # written AFTER spawn/restore (the system-prompt injection
+                # is static — built once and never refreshed).
+                #
+                # Order matters: this block runs AFTER the project-context
+                # injection above because both blocks ``prepend`` to
+                # ``message`` (so the LATER prepend ends up at the LEFT in
+                # the final string). The final rendered layout is
+                # ``[shared context] / --- / [project context] / --- /
+                # [leader's request]`` — the explicit ``[shared context]
+                # / separator / request`` layout the feature spec calls
+                # out, with the shared-context block visually above the
+                # project-context block.
+                #
+                # Once-per-instance contract: mirrors ``project_injected``
+                # — only flips ``shared_context_injected`` when injection
+                # actually succeeded (i.e. ``sc_block`` is non-empty).
+                # That way metadata written by the leader BETWEEN message
+                # 1 (when KV was empty) and message 2 still gets injected
+                # on message 2; the empty case is NOT treated as a "we
+                # tried, give up" terminal state. The cost is at most
+                # one extra repo lookup per message until metadata
+                # appears — cheap, and consistent with how
+                # ``project_injected`` handles a never-matched message.
+                #
+                # Gate skipped for completion reports / external code
+                # paths where ``is_completion_report`` is True (handled
+                # implicitly by being inside the ``else:`` branch above)
+                # and for retries (the outer ``if not is_retry:`` at the
+                # top of the block covers this).
+                sc_already_injected = bool(
+                    instance_metadata and instance_metadata.get("shared_context_injected")
+                )
+                if not sc_already_injected:
+                    # Resolve ``parent_id`` for tree-root lookup. Root
+                    # instances pass ``parent_id=None``; children pass
+                    # their stored ``parent_id`` so the formatter can
+                    # walk up via ``get_tree_root_id``. ``getattr`` with
+                    # a ``None`` default keeps tests that build
+                    # ``instance_meta`` from ``SimpleNamespace`` (without
+                    # a ``parent_id`` attribute) compatible — the
+                    # production ORM models always have it.
+                    sc_parent_id = (
+                        getattr(instance_meta, "parent_id", None)
+                        if instance_meta is not None
+                        else None
+                    )
+                    # Local import keeps the message-delivery path's
+                    # module-load cost unchanged for callers that never
+                    # reach this branch (retries, completion reports).
+                    from .instance_lifecycle import (
+                        format_shared_context_for_message_body,
+                    )
+                    # ``format_shared_context_for_message_body`` is sync
+                    # — it touches the SQLite repo. Wrap in
+                    # ``asyncio.to_thread`` so SQLite StaticPool /
+                    # WAL-write contention cannot block the event loop
+                    # (same dead-lock-avoidance pattern used elsewhere
+                    # in this method).
+                    sc_block = await asyncio.to_thread(
+                        format_shared_context_for_message_body,
+                        instance_id,
+                        self._manager._instance_repository,
+                        self._manager.shared_context_metadata_repo,
+                        sc_parent_id,
+                    )
+                    if sc_block:
+                        message = sc_block + message
+                        logger.debug(
+                            f"Shared context metadata injected into message body "
+                            f"for instance {instance_id[:8]}..."
+                        )
+                        # Flip the flag ONLY when injection actually
+                        # changed the message. This mirrors
+                        # ``project_injected`` (only flips when
+                        # ``injection_succeeded``) so a subsequent
+                        # message can pick up late-arriving metadata.
+                        await asyncio.to_thread(
+                            self._manager._instance_repository.set_metadata,
+                            instance_id, "shared_context_injected", True,
+                        )
+                    else:
+                        # No block (no KV for this context, or 32k cap,
+                        # or exception). Skip without flipping the flag
+                        # — the next message will retry the lookup. This
+                        # case is logged inside the formatter itself.
+                        logger.debug(
+                            f"Shared context metadata injection skipped "
+                            f"(empty/empty KV or graceful-degradation path) "
+                            f"for instance {instance_id[:8]}..."
                         )
 
             # ── Skill Injection (Phase 3: dynamic skill evolution) ──
