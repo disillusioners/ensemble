@@ -8,7 +8,7 @@
   "llm_model": "quick",
   "innate_skills": ["todo"],
   "tools": {
-    "allow": ["rag", "filesystem", "help", "time", "mcp", "context"]
+    "allow": ["rag", "filesystem", "help", "time", "mcp", "context", "shared_context"]
   },
   "team_members": []
 }

@@ -19,6 +19,8 @@ from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
 from .db_connection.repository import DbConnectionRepository
 from .infra.repository import SQLModelInfraRepository
+from .shared_context.repository import SharedContextMetadataRepository
+from .shared_context.models import SharedContextMetadata
 from .skill.repository import (
     SkillABTestRepository,
     SkillEmbeddingRepository,
@@ -613,6 +615,41 @@ def create_infra_repository(
     return SQLModelInfraRepository(engine)
 
 
+def create_shared_context_metadata_repository(
+    engine: Engine,
+    create_tables: bool = False,
+) -> SharedContextMetadataRepository:
+    """Create a SharedContextMetadataRepository bound to ``engine``.
+
+    Persistence layer for the ``shared_context_metadata`` table
+    (Phase 1 of the Shared Context Metadata KV system). One table:
+
+    * ``shared_context_metadata`` — generic ``(context_key,
+      meta_key) → meta_value`` KV store with a composite
+      ``UniqueConstraint`` enforcing no duplicate keys within a
+      context. The ``meta_value`` column is typed via
+      :class:`~daemon.repositories.infra.types.JSONBType` so the
+      same schema works on both SQLite and PostgreSQL.
+
+    Args:
+        engine: Shared engine instance (recommended for avoiding
+            lock contention). The repository is a thin wrapper
+            around this engine; no per-call engine creation.
+        create_tables: If True, create the table on the bound
+            engine if it does not already exist. Defaults to
+            ``False`` because the table is created by
+            ``SQLModel.metadata.create_all()`` at startup —
+            no migration file required.
+
+    Returns:
+        Configured :class:`SharedContextMetadataRepository` instance.
+    """
+    if create_tables:
+        SharedContextMetadata.__table__.create(engine)
+
+    return SharedContextMetadataRepository(engine)
+
+
 def create_skill_repository(
     config: DatabaseConfig | None = None,
     engine: Engine | None = None,
@@ -853,6 +890,7 @@ __all__ = [
     "create_job_queue_repository",
     "create_mcp_server_repository",
     "create_infra_repository",
+    "create_shared_context_metadata_repository",
     "create_skill_repository",
     "create_skill_lineage_repository",
     "create_skill_usage_repository",

@@ -24,6 +24,12 @@
 ## Key Test Files
 - `tests/test_deadlock_fix.py` — Deadlock fix verification (asyncio.to_thread wrapping)
 - `tests/conftest.py` — Root test fixtures
+- `tests/unit/test_shared_context_metadata_repo.py` — SharedContextMetadataRepository (bounds, atomic, CRUD)
+- `tests/unit/test_shared_context_injection.py` — append_shared_context_metadata (32k cap, fences, JSON)
+- `tests/unit/test_shared_context_tool.py` — shared_context_metadata tool factory + 8 scenarios
+- `tests/unit/test_shared_context_concurrency.py` — concurrent upsert race-free (NEW)
+- `tests/unit/test_shared_context_prompt_injection.py` — data-fence defense (NEW)
+- `tests/integration/test_shared_context_e2e.py` — real-repo E2E (SKIP if no OPENAI_API_KEY)
 
 ## Test Command
 ```bash

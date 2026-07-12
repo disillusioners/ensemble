@@ -6,6 +6,6 @@
   "color": "accent-gray",
   "version": "1.0.0",
   "innate_skills": ["todo"],
-  "tools": {"allow": ["knowledge", "mcp", "context"]},
+  "tools": {"allow": ["knowledge", "mcp", "context", "shared_context"]},
   "team_members": ["explorer"]
 }
