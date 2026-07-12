@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,6 +43,21 @@ class SharedContextMetadataRepository:
     as :class:`daemon.repositories.db_connection.repository.DbConnectionRepository`.
     All operations are scoped by ``context_key``; ``meta_key`` is
     unique within a context.
+
+    Concurrency: every method that opens a ``Session`` block holds
+    :attr:`_set_many_lock` — a process-level ``threading.RLock`` — so
+    that DB-bound calls serialise on the bound ``Engine``. The lock
+    is re-entrant (``RLock``) because :meth:`get_all_as_dict` delegates
+    to :meth:`get_all`; without re-entry, the inner ``get_all`` would
+    deadlock against the outer ``get_all_as_dict`` acquisition. Under
+    a SQLite ``StaticPool`` (the test backend) ``Session(self.engine)``
+    hands the same connection to multiple threads, so without the lock
+    concurrent writers and readers corrupt the prepared statement cache
+    and raise ``sqlite3.InterfaceError`` /
+    ``IndexError: tuple index out of range``. The lock wraps ONLY the
+    ``with Session(...)`` block — argument validation, early returns,
+    and the in-memory dict comprehension after ``get_all`` stay
+    outside the critical section to keep hold time minimal.
     """
 
     def __init__(self, engine: Engine):
@@ -53,6 +69,10 @@ class SharedContextMetadataRepository:
                 repositories to avoid lock contention.
         """
         self.engine = engine
+        # Re-entrant DB-bound serialisation — see class docstring for
+        # the StaticPool race that motivates this lock and the reason
+        # it must be an ``RLock`` (not a plain ``Lock``).
+        self._set_many_lock = threading.RLock()
 
     def _get_dialect_insert(self, session: Session):
         """Return the dialect-specific insert callable for upsert support.
@@ -88,11 +108,17 @@ class SharedContextMetadataRepository:
             List of :class:`SharedContextMetadata` rows. Empty list if
             no rows match.
         """
-        with Session(self.engine) as session:
-            stmt = select(SharedContextMetadata).where(
-                SharedContextMetadata.context_key == context_key
-            )
-            return list(session.exec(stmt))
+        # Hold ``_set_many_lock`` so a concurrent ``set_many`` cannot
+        # interleave a reader's ``Session`` block with a writer's still-
+        # open ``Session`` on the StaticPool shared connection. The lock
+        # is ``RLock`` so the inner call from ``get_all_as_dict`` below
+        # re-enters safely.
+        with self._set_many_lock:
+            with Session(self.engine) as session:
+                stmt = select(SharedContextMetadata).where(
+                    SharedContextMetadata.context_key == context_key
+                )
+                return list(session.exec(stmt))
 
     def get_many(
         self,
@@ -129,8 +155,13 @@ class SharedContextMetadataRepository:
             Dict mapping meta_key → meta_value. Empty dict if no
             rows exist for the context.
         """
-        records = self.get_all(context_key)
-        return {r.meta_key: r.meta_value for r in records}
+        # Hold ``_set_many_lock`` so the underlying ``get_all`` reads
+        # cannot interleave with a concurrent ``set_many`` writer on the
+        # StaticPool shared connection. ``RLock`` re-entry is safe when
+        # ``get_all`` re-acquires the same lock below.
+        with self._set_many_lock:
+            records = self.get_all(context_key)
+            return {r.meta_key: r.meta_value for r in records}
 
     # ==================== WRITE ====================
 
@@ -176,53 +207,68 @@ class SharedContextMetadataRepository:
                 serialized ``meta_value`` exceeds 4096 chars, or the
                 batch contains more than 100 pairs. No DB operations
                 are performed when a bounds check fails.
+
+        Thread-safety:
+            The whole body runs under :attr:`_set_many_lock` so
+            concurrent ``set_many`` callers serialise on the bound
+            ``Engine``. Under a SQLite ``StaticPool`` (the test
+            backend) ``Session(self.engine)`` hands the same
+            connection to multiple threads, so without the lock two
+            writers holding the same session corrupt the prepared
+            statement cache and raise
+            ``sqlite3.InterfaceError: Error binding parameter ...``.
+            Bounds checks run INSIDE the lock too — the early return
+            for empty ``kvs`` is a fast-path that does not touch the
+            session, so it acquires and releases the lock
+            harmlessly.
         """
-        if not kvs:
-            return []
+        with self._set_many_lock:
+            if not kvs:
+                return []
 
-        # P0-1 bounds enforcement — reject the entire call before any
-        # DB operation (atomic, all-or-nothing).
-        if len(kvs) > 100:
-            raise ValueError(f"Too many KV pairs: {len(kvs)} > 100")
-        for key, value in kvs.items():
-            if len(key) > 128:
-                raise ValueError(f"meta_key too long: {len(key)} > 128")
-            serialized_len = len(json.dumps(value))
-            if serialized_len > 4096:
-                raise ValueError(
-                    f"meta_value too large for key '{key}': {serialized_len} > 4096"
-                )
-
-        with Session(self.engine) as session:
-            now = datetime.now(timezone.utc).isoformat()
-            insert_fn = self._get_dialect_insert(session)
-
-            # P0-2 atomic upsert — one INSERT ... ON CONFLICT per key,
-            # so concurrent writers cannot lose updates via a stale
-            # SELECT → INSERT/UPDATE race.
+            # P0-1 bounds enforcement — reject the entire call before any
+            # DB operation (atomic, all-or-nothing).
+            if len(kvs) > 100:
+                raise ValueError(f"Too many KV pairs: {len(kvs)} > 100")
             for key, value in kvs.items():
-                stmt = insert_fn(SharedContextMetadata).values(
-                    context_key=context_key,
-                    meta_key=key,
-                    meta_value=value,
-                    created_at=now,
-                    updated_at=now,
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=['context_key', 'meta_key'],
-                    set_={'meta_value': value, 'updated_at': now},
-                )
-                session.execute(stmt)
+                if len(key) > 128:
+                    raise ValueError(f"meta_key too long: {len(key)} > 128")
+                serialized_len = len(json.dumps(value))
+                if serialized_len > 4096:
+                    raise ValueError(
+                        f"meta_value too large for key '{key}': {serialized_len} > 4096"
+                    )
 
-            session.commit()
+            with Session(self.engine) as session:
+                now = datetime.now(timezone.utc).isoformat()
+                insert_fn = self._get_dialect_insert(session)
 
-            # Read back the persisted state so callers see the
-            # assigned id and final updated_at.
-            stmt = select(SharedContextMetadata).where(
-                SharedContextMetadata.context_key == context_key,
-                SharedContextMetadata.meta_key.in_(list(kvs.keys())),
-            )
-            return list(session.exec(stmt))
+                # P0-2 atomic upsert — one INSERT ... ON CONFLICT per key,
+                # so concurrent writers cannot lose updates via a stale
+                # SELECT → INSERT/UPDATE race.
+                for key, value in kvs.items():
+                    stmt = insert_fn(SharedContextMetadata).values(
+                        context_key=context_key,
+                        meta_key=key,
+                        meta_value=value,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['context_key', 'meta_key'],
+                        set_={'meta_value': value, 'updated_at': now},
+                    )
+                    session.execute(stmt)
+
+                session.commit()
+
+                # Read back the persisted state so callers see the
+                # assigned id and final updated_at.
+                stmt = select(SharedContextMetadata).where(
+                    SharedContextMetadata.context_key == context_key,
+                    SharedContextMetadata.meta_key.in_(list(kvs.keys())),
+                )
+                return list(session.exec(stmt))
 
     # ==================== DELETE ====================
 

@@ -252,4 +252,12 @@ class TestInjectionFenceDefense:
         header_pos = result.index("# Shared Context")
         leading_sep_end = result.index("\n\n---\n\n") + len("\n\n---\n\n")
         opening_fence_pos = result.index("<shared_context_metadata>")
-        assert leading_sep_end < header_pos < opening_fence_pos
+        # NOTE: The leading ``\n\n---\n\n`` separator is rendered immediately
+        # before the ``# Shared Context`` header with no intervening whitespace,
+        # so ``leading_sep_end == header_pos`` in the current output. The strict
+        # ``<`` is over-specified; ``<=`` preserves the intent (header comes
+        # after the leading separator and before the opening fence) without
+        # coupling the assertion to the exact rendered separator format. The
+        # security goal — that user-controlled ``---`` lives only inside the
+        # JSON body and the structural fences remain intact — is unchanged.
+        assert leading_sep_end <= header_pos < opening_fence_pos

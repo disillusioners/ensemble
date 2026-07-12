@@ -259,10 +259,38 @@ def append_shared_context_metadata(
         # Format the metadata section — pretty JSON keeps the block
         # legible for the LLM and matches the indentation style of the
         # surrounding markdown sections.
-        metadata_json = json.dumps(kvs, indent=2, ensure_ascii=False)
+        #
+        # ``ensure_ascii=True`` is required here: it escapes non-ASCII
+        # characters to ``\uXXXX`` form, keeping the embedded payload
+        # ASCII-safe. It does NOT escape ``<``, ``>``, or ``&`` — those
+        # round-trip verbatim into the JSON body under either
+        # ``ensure_ascii`` value. The explicit ``&`` / ``<`` / ``>``
+        # replacement below is the actual gate against fence-escape:
+        # without it, a metadata value like
+        # ``</shared_context_metadata>`` would close the fence
+        # prematurely and let attacker-controlled data overflow into
+        # instruction context. Both layers (ensure_ascii=True AND the
+        # explicit < / > / & replacement) are required — neither alone
+        # is sufficient.
+        metadata_json = json.dumps(kvs, indent=2, ensure_ascii=True)
+
+        # C1 layer 1: HTML-safe escaping to prevent fence escape.
+        # Replace & FIRST (order matters: & -> \u0026 must happen before
+        # the < / > replacements, otherwise the ``\`` inserted later
+        # would itself contain ``&`` for multi-char escape sequences
+        # and we'd re-escape them, producing ``\u005Cu0026`` instead of
+        # the intended ``\u0026``).
+        metadata_json = (
+            metadata_json
+            .replace("&", "\\u0026")
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+        )
 
         # C1 layer 3: cap total injection size. A runaway metadata KV
         # set must never break the prompt chain — skip and warn.
+        # Measured AFTER HTML escaping so the cap reflects the true
+        # length of the fence-protected payload that will be appended.
         if len(metadata_json) > 32_000:
             logger.warning(
                 f"Shared context metadata too large to inject "
