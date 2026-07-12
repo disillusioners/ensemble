@@ -697,4 +697,10 @@ class LanguagePreferenceResponse(BaseModel):
 
 
 class LanguagePreferenceUpdate(BaseModel):
-    language: str = Field(..., min_length=1, max_length=100, description="Preferred language name (e.g., 'English', 'Spanish', 'Chinese')")
+    language: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r'^[A-Za-z\u00C0-\u017F \-()]+$',
+        description="Preferred language name — letters and spaces only",
+    )

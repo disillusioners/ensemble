@@ -1,5 +1,6 @@
 """Settings API endpoints."""
 import logging
+import re
 from fastapi import APIRouter, HTTPException
 
 from daemon.repositories import SQLModelProjectRepository
@@ -37,8 +38,17 @@ async def set_language(request: LanguagePreferenceUpdate):
     """Set the language preference."""
     if not request.language or not request.language.strip():
         raise HTTPException(status_code=422, detail="language must be a non-empty string")
+    # Defense-in-depth: strip control characters (newlines, tabs, etc.) so that
+    # any payload that slips past the schema's regex cannot inject text into
+    # downstream system prompts (see C1 prompt-injection fix).
+    cleaned_language = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", request.language).strip()
+    if not cleaned_language:
+        raise HTTPException(
+            status_code=422,
+            detail="Language must contain at least one non-whitespace character",
+        )
     repo = get_project_repository()  # raises 503 if not initialized
     if SYSTEM_DEFAULT_PROJECT_ID is None:
         raise HTTPException(status_code=503, detail="System default project not initialized")
-    repo.set_metadata(SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, request.language.strip())
-    return LanguagePreferenceResponse(language=request.language.strip())
+    repo.set_metadata(SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, cleaned_language)
+    return LanguagePreferenceResponse(language=cleaned_language)

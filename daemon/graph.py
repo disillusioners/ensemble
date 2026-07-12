@@ -15,6 +15,7 @@ from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from typing import Any, ClassVar, Mapping, cast
 import asyncio
 import logging
+import re
 import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
@@ -531,7 +532,7 @@ def create_language_check_node(user_language: str):
                     "language_check_retry": True,
                     "language_check_count": count + 1,
                 }
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError, re.error) as e:
             logger.warning(f"[LanguageCheck] Detection error, allowing response: {e}")
             return {"language_check_retry": False, "language_check_count": 0}
 
@@ -905,6 +906,9 @@ def build_instance_graph(
     graph.add_edge("nudge", "agent")
     
     compiled = graph.compile(checkpointer=checkpointer)
+
+    # W4 FIX: Store language_check_active flag on compiled graph for streaming code to read
+    compiled.language_check_active = language_check_enabled
 
     # Late bind graph reference
     graph_ref[0] = compiled

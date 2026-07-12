@@ -21,6 +21,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall
 from langgraph.graph import END
 
+from pydantic import ValidationError
+
 from daemon.config import Config, LanguageConfig
 from daemon.graph import (
     LANGUAGE_CHECK_MAX_RETRIES,
@@ -40,6 +42,7 @@ from daemon.language_detection import (
     spanish_word_count,
     strip_code_blocks,
 )
+from daemon.routers.schemas import LanguagePreferenceUpdate
 from daemon.services.instance_lifecycle import append_user_language
 from daemon.tools.language_tools import (
     create_language_tools,
@@ -581,7 +584,7 @@ class TestLanguageCheckNodeErrorHandling:
     """Detection errors must not crash the graph (W4 fix)."""
 
     async def test_detection_error_does_not_crash(self):
-        """If detect_wrong_language raises, the node allows the response through."""
+        """If detect_wrong_language raises a caught exception type, the node allows the response through (W6 narrow-except fix)."""
         node = create_language_check_node("English")
         state = _make_state(
             [
@@ -589,11 +592,50 @@ class TestLanguageCheckNodeErrorHandling:
                 _wrong_lang_ai(),
             ]
         )
+        # Use ValueError — one of the types in the narrow except clause
+        # (ValueError, TypeError, AttributeError, re.error).
         with patch(
             "daemon.language_detection.detect_wrong_language",
-            side_effect=RuntimeError("detection blew up"),
+            side_effect=ValueError("detection blew up"),
         ):
             # Should not raise
+            result = await node(state)
+        assert result["language_check_retry"] is False
+        assert result["language_check_count"] == 0
+
+    async def test_detection_value_error_caught(self):
+        """ValueError from detection is caught by narrow except (W6 fix)."""
+        node = create_language_check_node("English")
+        state = _make_state([HumanMessage(content="p"), _wrong_lang_ai()])
+        with patch(
+            "daemon.language_detection.detect_wrong_language",
+            side_effect=ValueError("bad regex"),
+        ):
+            result = await node(state)
+        assert result["language_check_retry"] is False
+        assert result["language_check_count"] == 0
+
+    async def test_detection_type_error_caught(self):
+        """TypeError from detection is caught by narrow except (W6 fix)."""
+        node = create_language_check_node("English")
+        state = _make_state([HumanMessage(content="p"), _wrong_lang_ai()])
+        with patch(
+            "daemon.language_detection.detect_wrong_language",
+            side_effect=TypeError("wrong arg"),
+        ):
+            result = await node(state)
+        assert result["language_check_retry"] is False
+        assert result["language_check_count"] == 0
+
+    async def test_detection_re_error_caught(self):
+        """re.error from detection is caught by narrow except (W6 fix)."""
+        import re as re_module
+        node = create_language_check_node("English")
+        state = _make_state([HumanMessage(content="p"), _wrong_lang_ai()])
+        with patch(
+            "daemon.language_detection.detect_wrong_language",
+            side_effect=re_module.error("bad regex pattern"),
+        ):
             result = await node(state)
         assert result["language_check_retry"] is False
         assert result["language_check_count"] == 0
@@ -735,12 +777,12 @@ class TestCreateLanguageTools:
 
 
 class TestLanguageConfig:
-    """Tests for LanguageConfig and Config.language wiring."""
+    """Tests for LanguageConfig and Config.language wiring (C3 fix: opt-in)."""
 
-    def test_default_check_enabled_is_true(self):
-        """LanguageConfig() defaults to check_enabled=True."""
+    def test_default_check_enabled_is_false(self):
+        """LanguageConfig() defaults to check_enabled=False (opt-in)."""
         cfg = LanguageConfig()
-        assert cfg.check_enabled is True
+        assert cfg.check_enabled is False
 
     def test_explicit_true(self):
         """LanguageConfig(check_enabled=True) works."""
@@ -757,10 +799,10 @@ class TestLanguageConfig:
         cfg = Config()
         assert isinstance(cfg.language, LanguageConfig)
 
-    def test_config_default_check_enabled_true(self):
-        """Config().language.check_enabled is True by default."""
+    def test_config_default_check_enabled_false(self):
+        """Config().language.check_enabled is False by default (opt-in)."""
         cfg = Config()
-        assert cfg.language.check_enabled is True
+        assert cfg.language.check_enabled is False
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -818,6 +860,146 @@ class TestAppendUserLanguage:
         assert twice.count("## User Language Preference") == 2
         assert "User prefer language: English" in twice
         assert "User prefer language: Spanish" in twice
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 7. Language Preference Schema Validation Tests (C1 fix)
+# ────────────────────────────────────────────────────────────────────────────
+# Pattern: ^[A-Za-z\u00C0-\u017F\s\-()]+$
+# Allows: ASCII letters, Latin Extended-A/B (ñ, é, ü), space, hyphen, parens.
+# Rejects: digits, punctuation (except -/()/), control chars NOT in \s, CJK.
+
+
+class TestLanguagePreferenceUpdateSchema:
+    """Tests for the LanguagePreferenceUpdate Pydantic schema (C1 prompt-injection fix).
+
+    The schema restricts ``language`` to a safe character set so that values
+    cannot smuggle prompt-injection payloads (newlines, role directives,
+    markdown headers, code fences, etc.) into the downstream system prompt.
+    """
+
+    # ── Valid names are accepted ─────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "language_name",
+        [
+            "English",
+            "Spanish",
+            "French (Canadian)",
+            "Español",
+            "Português",
+            "Deutsch",
+            "Chinese (Simplified)",
+            "Polski",
+            "Türkçe",
+        ],
+    )
+    def test_valid_language_names_accepted(self, language_name: str):
+        """Common language names and Latin Extended diacritics are accepted."""
+        payload = LanguagePreferenceUpdate(language=language_name)
+        assert payload.language == language_name
+
+    def test_simple_ascii_name_accepted(self):
+        """Plain ASCII language name is accepted."""
+        payload = LanguagePreferenceUpdate(language="English")
+        assert payload.language == "English"
+
+    def test_parens_and_hyphens_accepted(self):
+        """Parentheses and hyphens are explicitly allowed characters."""
+        payload = LanguagePreferenceUpdate(language="French (Canadian)")
+        assert payload.language == "French (Canadian)"
+
+    def test_multibyte_diacritic_accepted(self):
+        """Latin Extended characters (e.g. 'Español' with ñ = U+00F1) are accepted."""
+        payload = LanguagePreferenceUpdate(language="Español")
+        assert payload.language == "Español"
+
+    # ── Injection attempts are rejected ──────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "injection_payload",
+        [
+            # Markdown / role-style headers (# is not in the allowed set).
+            "English\n\n## Override",
+            # Non-allowed punctuation characters.
+            "English!",
+            "English<script>",
+            "English 123",
+            "English$",
+            "English;system",
+            "English\"quoted\"",
+            # CJK characters are NOT in the allowed Latin Extended range.
+            "中文",
+            "こんにちは",
+            "한국어",
+        ],
+    )
+    def test_injection_payloads_rejected(self, injection_payload: str):
+        """Prompt-injection payloads fail schema validation with ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            LanguagePreferenceUpdate(language=injection_payload)
+        # Confirm the field error mentions 'language'
+        errors = exc_info.value.errors()
+        assert any(
+            err.get("loc") == ("language",) or err.get("loc", ())[-1] == "language"
+            for err in errors
+        ), f"Expected 'language' field error, got {errors}"
+
+    def test_markdown_header_injection_rejected(self):
+        """Markdown '## Override' suffix is rejected (contains '#')."""
+        with pytest.raises(ValidationError):
+            LanguagePreferenceUpdate(language="English\n\n## Override")
+
+    def test_cjk_rejected(self):
+        """CJK characters (中文) are NOT in the allowed Latin Extended range."""
+        with pytest.raises(ValidationError):
+            LanguagePreferenceUpdate(language="中文")
+
+    # ── Length constraints ───────────────────────────────────────────────
+
+    def test_empty_string_rejected(self):
+        """Empty string violates min_length=1."""
+        with pytest.raises(ValidationError):
+            LanguagePreferenceUpdate(language="")
+
+    def test_over_100_chars_rejected(self):
+        """A 101+ char language name violates max_length=100."""
+        long_name = "A" * 101
+        with pytest.raises(ValidationError):
+            LanguagePreferenceUpdate(language=long_name)
+
+    def test_exactly_100_chars_accepted(self):
+        """A 100-char language name is allowed (boundary)."""
+        ok_name = "A" * 100
+        payload = LanguagePreferenceUpdate(language=ok_name)
+        assert len(payload.language) == 100
+
+    # ── Settings.py defense-in-depth (control char strip → 422) ─────────
+
+    def test_cleaned_language_handler_strips_control_chars_and_accepts_safe_text(self):
+        """The settings handler strips control chars and accepts safe surrounding text.
+
+        We exercise the regex directly (the HTTP layer is covered by
+        tests/test_settings_api.py). Pure control chars would produce an
+        empty string after re.sub → 422.
+        """
+        import re
+
+        # Simulate the handler's defense-in-depth strip.
+        dangerous = "English\x00\x01\x02"
+        cleaned = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", dangerous).strip()
+        assert cleaned == "English"
+        assert "\x00" not in cleaned
+        assert "\x01" not in cleaned
+
+    def test_pure_control_chars_yield_empty_after_strip(self):
+        """Pure control characters produce an empty string after stripping (→ 422)."""
+        import re
+
+        dangerous = "\x00\x01\x1f"
+        cleaned = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", dangerous).strip()
+        assert cleaned == ""
+        # The handler will raise 422 on empty cleaned value.
 
 
 # ────────────────────────────────────────────────────────────────────────────

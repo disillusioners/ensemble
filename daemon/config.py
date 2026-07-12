@@ -517,7 +517,10 @@ class LanguageConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LANGUAGE_")
 
-    check_enabled: bool = Field(default=True, description="Enable language preference checking on agent responses")
+    check_enabled: bool = Field(
+        default=False,
+        description="Enable language check node — adds up to 3× LLM cost per turn when wrong language detected. Set to true to enable."
+    )
 
 
 class Config(BaseSettings):
