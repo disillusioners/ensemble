@@ -306,6 +306,10 @@ def mock_config():
     config.mcp_pool.health_check_timeout = 5
     config.mcp_pool.tool_call_timeout = 120
 
+    from daemon.config import SkillEvolutionConfig
+    config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
+    config.language = MagicMock()
+
     return config
 
 
@@ -1916,3 +1920,106 @@ class TestWarmupPoolSkipsUnavailable:
         assert not pool.is_pooled_server("test-builtin"), (
             "Unavailable builtin must NOT be registered with warmup pool"
         )
+
+
+# =============================================================================
+# Group 13: Orphaned Builtin Cleanup Tests
+# =============================================================================
+
+
+class TestOrphanedBuiltinCleanup:
+    """Tests for ``_deactivate_orphaned_builtin_servers``.
+
+    Regression guard: when a builtin definition is removed from the
+    registry (e.g. ``openspace`` was deleted along with its integration),
+    the active DB row it left behind must be deactivated on the next
+    bootstrap so the warmup pool / schema discovery don't try to spawn
+    a process for a now-removed builtin.
+    """
+
+    def test_orphaned_active_builtin_is_deactivated(
+        self, instance_manager_with_repo, bootstrap_repo
+    ):
+        """Active builtin row whose name left the registry → deactivated."""
+        manager = instance_manager_with_repo
+
+        # Pre-seed a stale builtin row that is NOT in the registry.
+        # ``registry_with_test_def`` registers ``test-builtin`` but we did
+        # not request that fixture here, so the registry contains only
+        # the real production builtins (webfetch, context7) — neither
+        # matches ``ghost-builtin``.
+        orphan = bootstrap_repo.create_mcp_server(
+            name="ghost-builtin",
+            description="removed from codebase",
+            config={"transport": "stdio", "command": "python3", "args": ["-m", "ghost"]},
+            is_builtin=True,
+        )
+        assert orphan.is_active is True
+
+        manager._deactivate_orphaned_builtin_servers({"test-builtin", "context7"})
+
+        refreshed = bootstrap_repo.get_mcp_server_by_name("ghost-builtin")
+        assert refreshed is not None
+        assert refreshed.is_active is False, "orphaned builtin must be deactivated"
+
+    def test_registered_builtin_left_active(
+        self, instance_manager_with_repo, registry_with_test_def, bootstrap_repo
+    ):
+        """Builtin whose name IS in the registry must stay active."""
+        manager = instance_manager_with_repo
+
+        # Bootstrap normally creates the test-builtin row as active.
+        manager._bootstrap_builtin_servers()
+        before = bootstrap_repo.get_mcp_server_by_name("test-builtin")
+        assert before is not None and before.is_active is True
+
+        # Cleanup pass with the test-builtin still registered → no change.
+        manager._deactivate_orphaned_builtin_servers({"test-builtin"})
+
+        after = bootstrap_repo.get_mcp_server_by_name("test-builtin")
+        assert after is not None
+        assert after.is_active is True, "registered builtin must stay active"
+
+    def test_user_created_server_never_deactivated(
+        self, instance_manager_with_repo, bootstrap_repo
+    ):
+        """A user-created (is_builtin=False) server named like a removed
+        builtin must never be touched by the cleanup sweep."""
+        manager = instance_manager_with_repo
+
+        user_server = bootstrap_repo.create_mcp_server(
+            name="ghost-user",
+            description="operator re-added as custom server",
+            config={"transport": "stdio", "command": "python3", "args": []},
+            is_builtin=False,
+        )
+        original_id = user_server.id
+        assert user_server.is_active is True
+
+        manager._deactivate_orphaned_builtin_servers(set())
+
+        refreshed = bootstrap_repo.get_mcp_server(original_id)
+        assert refreshed is not None
+        assert refreshed.is_active is True, (
+            "user-created servers must never be deactivated by orphan sweep"
+        )
+
+    def test_sweep_idempotent(
+        self, instance_manager_with_repo, bootstrap_repo
+    ):
+        """Running cleanup twice must not error or resurrect the row."""
+        manager = instance_manager_with_repo
+
+        orphan = bootstrap_repo.create_mcp_server(
+            name="ghost-builtin",
+            description="removed",
+            config={"transport": "stdio", "command": "python3", "args": []},
+            is_builtin=True,
+        )
+
+        manager._deactivate_orphaned_builtin_servers(set())
+        manager._deactivate_orphaned_builtin_servers(set())
+
+        refreshed = bootstrap_repo.get_mcp_server(orphan.id)
+        assert refreshed is not None
+        assert refreshed.is_active is False

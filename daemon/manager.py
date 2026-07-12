@@ -1065,8 +1065,10 @@ class InstanceManager:
         """
         registry = get_mcp_registry()
         definitions = registry.get_all()
+        registered_names = {d.name for d in definitions}
         if not definitions:
             logger.info("No built-in MCP servers registered")
+            self._deactivate_orphaned_builtin_servers(registered_names)
             return
 
         logger.info(f"Bootstrapping {len(definitions)} built-in MCP servers...")
@@ -1150,7 +1152,49 @@ class InstanceManager:
                 logger.error(f"Failed to bootstrap built-in MCP server '{definition.name}': {e}")
                 continue  # Fault-tolerant: continue with other servers
 
+        self._deactivate_orphaned_builtin_servers(registered_names)
+
         logger.info("Built-in MCP server bootstrap complete")
+
+    def _deactivate_orphaned_builtin_servers(self, registered_names: set[str]) -> None:
+        """Deactivate built-in MCP server DB rows no longer in the registry.
+
+        When a builtin server definition is removed from the codebase
+        (e.g. ``openspace`` was deleted alongside its integration), the
+        bootstrap loop above never visits it, leaving a stale ``is_active=True``
+        row that the warmup pool and schema discovery then try to spawn.
+        This sweep deactivates those orphans so the rest of the system
+        treats them like any other inactive server.
+
+        Idempotent: only touches rows that are both ``is_builtin=True`` and
+        still active. User-created servers (``is_builtin=False``) are never
+        touched, so an operator re-adding a builtin name as a custom server
+        is safe.
+
+        Args:
+            registered_names: Names of builtins currently registered in the
+                ``BuiltinServerRegistry``.
+        """
+        try:
+            all_builtin_rows = self._mcp_server_repository.list_mcp_servers(
+                is_active=True, is_builtin=True, limit=500
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to scan for orphaned built-in MCP servers: {e}"
+            )
+            return
+
+        orphaned = [
+            row for row in all_builtin_rows
+            if row.name not in registered_names
+        ]
+        for row in orphaned:
+            self._mcp_server_repository.update_mcp_server(row.id, is_active=False)
+            logger.info(
+                f"Deactivated orphaned built-in MCP server "
+                f"'{row.name}' (definition removed from registry)"
+            )
 
     def _bootstrap_infra_types(self) -> None:
         """Seed default infra asset type definitions on daemon startup.
