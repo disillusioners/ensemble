@@ -3,14 +3,14 @@
 Persistence layer for the ``shared_context_metadata`` table.
 
 The repository is intentionally narrow: a thin CRUD layer on top of
-:class:`SharedContextMetadata`. It deliberately avoids raw-SQL
-upserts (``INSERT ... ON CONFLICT DO UPDATE``) and instead uses the
-SQLModel ORM ``select → mutate → add`` loop inside a single
-transaction. This keeps the upsert path portable across SQLite and
-PostgreSQL without per-dialect forks (the dialect-aware upsert
-helpers in :class:`SQLModelProjectRepository` exist because the
-project repository has a hot write path; this repository's writes
-are infrequent and the ORM path is sufficient).
+:class:`SharedContextMetadata`. The write path uses dialect-aware
+``INSERT ... ON CONFLICT DO UPDATE`` via SQLAlchemy's
+``sqlite.insert`` / ``postgresql.insert`` (same pattern as
+:class:`SQLModelProjectRepository.set_metadata_record`) so concurrent
+writers cannot race a stale ``SELECT → INSERT/UPDATE`` loop. Each
+supported dialect's insert callable exposes ``on_conflict_do_update``;
+:meth:`_get_dialect_insert` selects the right one at runtime based on
+the bound engine.
 
 All public methods are synchronous and use ``Session(self.engine)``
 blocks. The shared engine singleton is provided by the manager; do
@@ -19,11 +19,13 @@ not instantiate a new engine per call.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -51,6 +53,28 @@ class SharedContextMetadataRepository:
                 repositories to avoid lock contention.
         """
         self.engine = engine
+
+    def _get_dialect_insert(self, session: Session):
+        """Return the dialect-specific insert callable for upsert support.
+
+        Generic ``sqlalchemy.insert()`` does not expose
+        ``on_conflict_do_update()`` — that method is dialect-specific.
+        This helper returns the dialect-specific insert callable so the
+        caller can chain ``on_conflict_do_update`` for both SQLite and
+        PostgreSQL. Mirrors
+        :meth:`SQLModelProjectRepository._get_dialect_insert`.
+
+        Args:
+            session: SQLAlchemy Session whose bound engine determines dialect.
+
+        Returns:
+            Dialect-specific insert callable. Both the SQLite and
+            PostgreSQL dialect inserts support ``on_conflict_do_update``.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            return pg_insert
+        return sqlite_insert
 
     # ==================== READ ====================
 
@@ -115,61 +139,90 @@ class SharedContextMetadataRepository:
         context_key: str,
         kvs: dict[str, Any],
     ) -> list[SharedContextMetadata]:
-        """Upsert a batch of ``(meta_key → meta_value)`` pairs.
+        """Upsert a batch of ``(meta_key → meta_value)`` pairs atomically.
 
-        Loops through ``kvs``, looks up the existing row per key, and
-        either updates ``meta_value`` + ``updated_at`` in place or
-        inserts a new row. A single ``commit()`` covers the entire
-        batch so callers either see all rows persisted or none.
+        Bounds enforcement (P0-1):
+            * ``meta_key`` length must be <= 128 characters.
+            * Serialized ``meta_value`` length must be <= 4096 characters.
+            * Batch size must be <= 100 ``(meta_key, meta_value)`` pairs.
 
-        The portable ORM upsert loop is intentional — it works on
-        both SQLite and PostgreSQL without dialect-specific
-        ``ON CONFLICT`` syntax.
+            All bounds checks run BEFORE any DB operation. If any pair
+            or the batch as a whole violates a limit, a ``ValueError``
+            is raised and the entire call is rejected (no partial
+            writes — atomic, all-or-nothing).
+
+        Atomic upsert (P0-2):
+            Each pair is written via a dialect-aware
+            ``INSERT ... ON CONFLICT (context_key, meta_key) DO UPDATE``
+            so concurrent writers cannot interleave a stale
+            ``SELECT → INSERT/UPDATE`` and lose updates. The composite
+            ``UniqueConstraint`` on ``(context_key, meta_key)`` is the
+            conflict target. SQLite uses ``sqlite.insert``; PostgreSQL
+            uses ``postgresql.insert`` (selected at runtime by
+            :meth:`_get_dialect_insert`).
 
         Args:
             context_key: The caller-supplied partition identifier.
             kvs: Mapping of ``meta_key → meta_value`` to upsert.
 
         Returns:
-            List of :class:`SharedContextMetadata` instances in the
-            state they were persisted (i.e. the result of the upsert
-            for each input key, in iteration order).
+            List of :class:`SharedContextMetadata` instances reflecting
+            the persisted state for each input key. Returned rows are
+            fetched from the database after the upsert so callers see
+            the assigned ``id`` and final ``updated_at`` timestamp.
+
+        Raises:
+            ValueError: If any ``meta_key`` exceeds 128 chars, any
+                serialized ``meta_value`` exceeds 4096 chars, or the
+                batch contains more than 100 pairs. No DB operations
+                are performed when a bounds check fails.
         """
         if not kvs:
             return []
 
-        results: list[SharedContextMetadata] = []
+        # P0-1 bounds enforcement — reject the entire call before any
+        # DB operation (atomic, all-or-nothing).
+        if len(kvs) > 100:
+            raise ValueError(f"Too many KV pairs: {len(kvs)} > 100")
+        for key, value in kvs.items():
+            if len(key) > 128:
+                raise ValueError(f"meta_key too long: {len(key)} > 128")
+            serialized_len = len(json.dumps(value))
+            if serialized_len > 4096:
+                raise ValueError(
+                    f"meta_value too large for key '{key}': {serialized_len} > 4096"
+                )
+
         with Session(self.engine) as session:
             now = datetime.now(timezone.utc).isoformat()
-            for key, value in kvs.items():
-                existing = session.exec(
-                    select(SharedContextMetadata).where(
-                        SharedContextMetadata.context_key == context_key,
-                        SharedContextMetadata.meta_key == key,
-                    )
-                ).first()
+            insert_fn = self._get_dialect_insert(session)
 
-                if existing is not None:
-                    existing.meta_value = value
-                    existing.updated_at = now
-                    session.add(existing)
-                    results.append(existing)
-                else:
-                    record = SharedContextMetadata(
-                        context_key=context_key,
-                        meta_key=key,
-                        meta_value=value,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    session.add(record)
-                    results.append(record)
+            # P0-2 atomic upsert — one INSERT ... ON CONFLICT per key,
+            # so concurrent writers cannot lose updates via a stale
+            # SELECT → INSERT/UPDATE race.
+            for key, value in kvs.items():
+                stmt = insert_fn(SharedContextMetadata).values(
+                    context_key=context_key,
+                    meta_key=key,
+                    meta_value=value,
+                    created_at=now,
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['context_key', 'meta_key'],
+                    set_={'meta_value': value, 'updated_at': now},
+                )
+                session.execute(stmt)
 
             session.commit()
-            for record in results:
-                session.refresh(record)
 
-        return results
+            # Read back the persisted state so callers see the
+            # assigned id and final updated_at.
+            stmt = select(SharedContextMetadata).where(
+                SharedContextMetadata.context_key == context_key,
+                SharedContextMetadata.meta_key.in_(list(kvs.keys())),
+            )
+            return list(session.exec(stmt))
 
     # ==================== DELETE ====================
 

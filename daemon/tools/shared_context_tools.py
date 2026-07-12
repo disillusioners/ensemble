@@ -126,7 +126,7 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
                 current_instance_id,
                 e,
             )
-            return json.dumps({"_error": f"shared_context_metadata_repo unavailable: {e}"})
+            return json.dumps({"_error": "metadata operation failed; see server logs"})
 
         try:
             # Apply precedence: clear_all wins and finalises the state.
@@ -149,6 +149,6 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
                 context_key,
                 e,
             )
-            return json.dumps({"_error": str(e)})
+            return json.dumps({"_error": "metadata operation failed; see server logs"})
 
     return [shared_context_metadata]

@@ -220,3 +220,33 @@ class TestContextKeyResolution:
 
         snapshot = json.loads(result)
         assert snapshot == {"some_key": "some_value"}
+
+
+# ─── Error sanitization ────────────────────────────────────────────────────────
+
+
+class TestErrorSanitization:
+    """Error responses must NOT leak exception text to the agent.
+
+    The tool sanitizes any exception raised by the repo layer to a
+    fixed message ("metadata operation failed; see server logs") so
+    a misconfigured DB or a transient error never surfaces raw
+    driver / SQL text into the agent's tool output.
+    """
+
+    @pytest.mark.asyncio
+    async def test_error_response_does_not_leak_exception_text(self, tool, manager):
+        """When ``set_many`` raises, the response value is the sanitized message."""
+        manager._instance_repository.get_tree_root_id.return_value = "root-1"
+        # Inject an exception containing secret text that must NOT appear in the response.
+        secret = "SECRET_INTERNAL_DETAIL_DO_NOT_LEAK"
+        manager.shared_context_metadata_repo.set_many.side_effect = RuntimeError(secret)
+
+        result = await tool.ainvoke({"set_kv": {"k": "v"}})
+
+        # The sanitized message is present.
+        assert "metadata operation failed; see server logs" in result
+        # The raw exception text is NOT present.
+        assert secret not in result
+        # The _error key is present.
+        assert "_error" in result
