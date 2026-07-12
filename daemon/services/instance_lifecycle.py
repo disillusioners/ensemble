@@ -1455,6 +1455,14 @@ class InstanceLifecycleService:
         # UPDATE.
         paused_instances_data: list[tuple[str, str | None, int]] = []
         skipped_ids: list[str] = []
+        # Phase 2 / Task 8: capture cleared-injection entries per node so the
+        # ``injection_cleared`` SSE event can fire POST-DB-COMMIT alongside
+        # the existing ``status_change`` SSE (line ~1549). Pre-commit emit
+        # would race with the DB status transition; post-commit matches the
+        # status_change ordering. ``node_id → {"content", "timestamp"}`` is
+        # the same dict shape ``set_injection`` returns; the SSE payload
+        # builds a uniform envelope at emit time.
+        cleared_injections_by_node: dict[str, dict[str, str]] = {}
 
         for node_id in tree_ids:
             try:
@@ -1503,14 +1511,20 @@ class InstanceLifecycleService:
                 # is being torn down.
                 #
                 # ``clear_injection`` returns the cleared entry (or None)
-                # — stored so Phase 2 can forward it to SSE without
-                # re-querying the manager.
+                # — captured into ``cleared_injections_by_node`` so the
+                # Phase 2 SSE emit can fire POST-COMMIT (consistent with
+                # the status_change SSE below) without re-querying the
+                # manager. We emit the cleared event AFTER the DB commit
+                # so a listener that races the transition observes the
+                # cleared slot alongside the paused status, not before
+                # it (race-safe ordering with ``stream_status_change``).
                 cleared_injection = self._manager.clear_injection(node_id)
                 if cleared_injection is not None:
                     logger.info(
                         f"Cleared pending injection for paused instance "
                         f"{node_id[:8]}... (len={len(cleared_injection.get('content', ''))})"
                     )
+                    cleared_injections_by_node[node_id] = cleared_injection
 
 # 3. Capture agent_id for the post-commit SSE emit.
                 paused_instances_data.append(
@@ -1557,6 +1571,34 @@ class InstanceLifecycleService:
                     f"pause_instance_cascade: status_change SSE emit failed "
                     f"for {node_id[:8]}...: {e}"
                 )
+
+            # Phase 2 / Task 8 (W5): emit ``injection_cleared`` POST-COMMIT
+            # alongside the status_change for any node whose RAM slot was
+            # cleared in the pre-DB loop. Reuses ``stream_message`` with a
+            # custom ``event_type`` (no new method on the hub). The
+            # ``content`` is the OLD pending user message so listeners can
+            # close the pending→cleared lifecycle pair. ``None`` content
+            # means the slot was empty for this node — no emit.
+            cleared_entry = cleared_injections_by_node.get(node_id)
+            if cleared_entry is not None:
+                try:
+                    await self._manager._live_hub.stream_message(
+                        node_id,
+                        message={
+                            "instance_id": node_id,
+                            "event_type": "injection_cleared",
+                            "content": cleared_entry.get("content"),
+                            "timestamp": cleared_entry.get("timestamp"),
+                        },
+                        event_type="injection_cleared",
+                    )
+                except Exception as e:
+                    # Log + swallow — pause must not fail on SSE outage.
+                    logger.warning(
+                        f"pause_instance_cascade: injection_cleared SSE "
+                        f"emit failed for {node_id[:8]}...: "
+                        f"{type(e).__name__}: {e}"
+                    )
 
         # NOTE: Unlike terminate_instance, we do NOT:
         # - Remove from instances dict (instance stays in memory, resumable)

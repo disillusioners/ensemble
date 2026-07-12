@@ -708,23 +708,39 @@ def create_agent_node(
                     f"{instance_short} (len={len(content)})"
                 )
 
-                # Phase 1 SSE placeholder: live_hub is threaded through
-                # closure so Phase 2 only needs to plug in the actual
-                # ``stream_message(...)`` call. We log-only here so the
-                # structural call site is exercised; failures are
-                # swallowed because the LLM call must not be blocked by
-                # a downstream SSE error.
+                # Phase 2 / Task 7 (W5): finalize the SSE emission at the
+                # consumption point. The Phase 1 placeholder exercised the
+                # call site so the structural wiring is already proven; this
+                # is the real ``stream_message(..., event_type=...)`` call.
+                # W5 contract: NO new method on ``LiveEventHub`` — we reuse
+                # the existing ``stream_message`` with a custom ``event_type``
+                # so the frontend (Phase 3) sees ``event_type="injection_consumed"``
+                # under the same payload shape the API uses.
+                #
+                # The clear returned the entry that was just consumed; we
+                # re-emit content + timestamp so the SSE listener sees the
+                # exact text the LLM was about to see.
                 if live_hub is not None:
                     try:
-                        logger.debug(
-                            f"[Injection] Phase 1 stub: live_hub present "
-                            f"for {instance_short} (Phase 2 will emit "
-                            f"injection_consumed SSE)"
+                        await live_hub.stream_message(
+                            instance_id,
+                            message={
+                                "instance_id": instance_id,
+                                "event_type": "injection_consumed",
+                                "content": cleared.get("content") if cleared else content,
+                                "timestamp": cleared.get("timestamp") if cleared else None,
+                            },
+                            event_type="injection_consumed",
                         )
                     except Exception as e:  # pragma: no cover - defensive
+                        # LLM call must not be blocked by an SSE outage —
+                        # log and continue. The injection is already
+                        # consumed locally (checkpoint persist + injected_msg
+                        # in full_messages); the SSE event is best-effort.
                         logger.warning(
-                            f"[Injection] live_hub stub failed for "
-                            f"{instance_short}: {e}"
+                            f"[Injection] injection_consumed SSE emit "
+                            f"failed for {instance_short}: "
+                            f"{type(e).__name__}: {e}"
                         )
 
         # Check if vision model is being used (images present in user message)

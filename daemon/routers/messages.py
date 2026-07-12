@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
@@ -31,17 +31,118 @@ router = APIRouter(prefix="/instances", tags=["instances-messages"])
 # this router does not carry its own status map.
 
 
+# Statuses that route through the RAM injection slot (Phase 2 / Task 3).
+# RUNNING — the agent is in an active LLM turn; set injection so the
+# agent_node picks it up on its next pull-and-clear step.
+# WAITING_CHILDREN — parent is parked waiting for child completion
+# reports; the slot survives until the next agent turn resumes.
+_INJECTION_ELIGIBLE_STATUSES = frozenset({
+    InstanceStatus.RUNNING.value,
+    InstanceStatus.WAITING_CHILDREN.value,
+})
+
+
 def _get_manager(request: Request) -> Any:
     """Get the InstanceManager from app state."""
     return request.app.state.manager
 
 
+def _get_live_hub(request: Request) -> LiveEventHub | None:
+    """Get the LiveEventHub from app state, or None if not initialized.
+
+    Phase 2 / W5: injection events reuse ``LiveEventHub.stream_message``
+    with custom ``event_type`` — no new method on the hub. ``None`` is
+    returned for safety when the app is constructed without a hub (tests,
+    half-initialized bootstrap); callers skip the SSE emit in that case
+    so the injection path still succeeds.
+    """
+    return getattr(request.app.state, "live_hub", None)
+
+
+def _build_injection_payload(
+    instance_id: str,
+    event_type: str,
+    content: str | None,
+    timestamp: str | None,
+) -> dict[str, Any]:
+    """Build the SSE payload for an injection event.
+
+    The shape mirrors the Phase 2 contract documented in
+    ``.agents/shared/planning/user-msg-injection/phase2-plan.md``:
+
+        {
+            "instance_id": str,
+            "event_type": str,
+            "content": str | None,
+            "timestamp": str | None,
+        }
+
+    ``stream_message`` wraps this dict under ``event["message"]`` when
+    it serializes the SSE frame, so Phase 3 frontend reads the same
+    shape via ``event.message.{instance_id,event_type,content,timestamp}``.
+    """
+    return {
+        "instance_id": instance_id,
+        "event_type": event_type,
+        "content": content,
+        "timestamp": timestamp,
+    }
+
+
+async def _emit_injection_sse(
+    live_hub: LiveEventHub | None,
+    instance_id: str,
+    event_type: str,
+    content: str | None,
+    timestamp: str | None,
+) -> None:
+    """Fire-and-forget SSE emit for an injection lifecycle event.
+
+    W5 contract: reuses ``stream_message`` with a custom ``event_type``.
+    No new method is added to ``LiveEventHub``. If no SSE connection is
+    registered for this instance, ``stream_message`` silently drops the
+    event — callers do not need to gate on connection counts.
+
+    Failure mode: SSE errors are logged at WARNING and swallowed because
+    the API contract has already been honored (injection is stored, or
+    the slot is cleared). The LLM turn must not be blocked by SSE.
+    """
+    if live_hub is None:
+        return
+    payload = _build_injection_payload(instance_id, event_type, content, timestamp)
+    try:
+        await live_hub.stream_message(
+            instance_id,
+            message=payload,
+            event_type=event_type,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(
+            f"[Injection] SSE emit failed for {event_type} on "
+            f"{instance_id[:8]}...: {type(e).__name__}: {e}"
+        )
+
+
 # 1. POST /instances/{instance_id}/messages - Send message
 @router.post("/{instance_id}/messages")
-async def send_message(instance_id: str, message: MessageCreate, request: Request) -> dict:
+async def send_message(
+    instance_id: str,
+    message: MessageCreate,
+    request: Request,
+    response: Response,
+) -> dict:
     """Send a message to an instance (async via queue).
-    
-    If the instance is PAUSED, automatically resumes it with the user's message.
+
+    Routing table (Phase 2 / Task 3, C4):
+        * RUNNING / WAITING_CHILDREN → set RAM injection slot, emit
+          ``injection_pending`` SSE, return **202 Accepted**.
+        * PAUSED → existing auto-resume behavior (**NO CHANGE — C4**):
+          cascade-resume + resume_processing_job, return 200.
+        * IDLE / terminal → existing enqueue_message path (**NO CHANGE**):
+          return 200.
+
+    Empty / whitespace-only content is rejected with 400 (S4) before
+    any routing decision is made.
     """
     manager = _get_manager(request)
     if manager.is_write_paused:
@@ -58,7 +159,21 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
                 message=f"Instance not found: {instance_id}",
             ).model_dump(),
         )
-    
+
+    # S4: Empty content validation. Applies to ALL paths (injection,
+    # PAUSED auto-resume, IDLE/terminal enqueue) so a frontend typo
+    # never produces a wasted turn. Positioned BEFORE the PAUSED branch
+    # so the behavior is uniform; the PAUSED branch's auto-resume logic
+    # is otherwise unchanged.
+    if not message.content or not message.content.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message="Message content cannot be empty",
+            ).model_dump(),
+        )
+
     # Validate images
     if message.images and not manager.config.llm.model_vision:
         raise HTTPException(
@@ -69,9 +184,18 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
                         "Set OPENAI_MODEL_VISION environment variable or model_vision in config.yaml.",
             ).model_dump(),
         )
-    
+
+    # Capture status once — used in the routing decision below.
+    current_status = instance_info.get("status")
+
     # --- PAUSED INSTANCE: Skip enqueue, go straight to resume ---
-    if instance_info.get("status") == InstanceStatus.PAUSED.value:
+    # C4: This branch is intentionally UNCHANGED. The existing auto-resume
+    # flow (``resume_instance_cascade`` + ``resume_processing_job``) is a
+    # load-bearing code path that supports vision image propagation and
+    # must not return 409. PAUSED continues to return 200 with the same
+    # payload shape so the frontend's existing pause→resume UX is
+    # unaffected by the injection work in Phase 2.
+    if current_status == InstanceStatus.PAUSED.value:
         logger.info(f"Instance {instance_id[:8]}... is PAUSED, auto-resuming with user message")
         
         # Cascade resume (same pattern as resume endpoint)
@@ -123,8 +247,67 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
                 "resume_results": resume_results,
             },
         }
-    
-    # --- NORMAL PATH: Not paused, enqueue message ---
+
+    # --- INJECTION PATH (Phase 2 / Tasks 3, 5): RUNNING / WAITING_CHILDREN ---
+    # The agent is in an active turn (RUNNING) or parked waiting for child
+    # completion reports (WAITING_CHILDREN). The injection slot is RAM-only
+    # (Phase 1 W1) — the agent_node pulls + clears the slot on its next
+    # invocation and threads the resulting HumanMessage into the LLM call.
+    #
+    # Replacement semantics (Task 5): if the slot already holds content,
+    # we emit ``injection_cleared`` for the OLD content BEFORE overwriting
+    # so the SSE stream reflects a consistent cleared→pending sequence.
+    # Skipping the cleared emit would lose the old content from any
+    # listener that joined mid-stream.
+    if current_status in _INJECTION_ELIGIBLE_STATUSES:
+        live_hub = _get_live_hub(request)
+
+        existing = manager.get_injection(instance_id)
+        if existing is not None:
+            logger.info(
+                f"[Injection] Replacing pending message for "
+                f"{instance_id[:8]}... (old_len="
+                f"{len(existing.get('content', ''))})"
+            )
+            await _emit_injection_sse(
+                live_hub,
+                instance_id,
+                event_type="injection_cleared",
+                content=existing.get("content"),
+                timestamp=existing.get("timestamp"),
+            )
+
+        # W5: stream_message with custom event_type — no new method
+        # added to LiveEventHub.
+        entry = manager.set_injection(instance_id, message.content)
+
+        await _emit_injection_sse(
+            live_hub,
+            instance_id,
+            event_type="injection_pending",
+            content=entry.get("content"),
+            timestamp=entry.get("timestamp"),
+        )
+
+        # 202 Accepted (NEW) signals to the frontend that the request is
+        # acknowledged but the user turn will be absorbed asynchronously
+        # by the agent_node on its next pull, NOT through the job queue.
+        # 200 is reserved for PAUSED auto-resume and IDLE/terminal enqueue.
+        response.status_code = 202
+        return {
+            "status": "injected",
+            "instance_id": instance_id,
+            "content": entry.get("content"),
+            "timestamp": entry.get("timestamp"),
+        }
+
+    # --- NORMAL PATH: IDLE / terminal → existing enqueue_message ---
+    # Phase 2 note: IDLE / WAITING / QUEUED / COMPLETED / ERROR / FAILED
+    # / TERMINATED all fall through to this branch as before. The state
+    # routing above only diverts RUNNING / WAITING_CHILDREN to the
+    # injection slot. Anything that does not match an injection-eligible
+    # status continues to flow through ``enqueue_message_job`` so the
+    # legacy message-queue semantics are preserved.
     # Phase 5 (cutover): the public message-Job path is the only path.
     # Every HTTP POST /messages NORMAL branch creates a JobItem mirror
     # alongside the Task row so the WorkResolver facade can read both
@@ -164,8 +347,56 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
     
     response_data["auto_resumed"] = False
     response_data["resume_info"] = None
-    
+
     return response_data
+
+
+# 1b. GET /instances/{instance_id}/injection - Pending injection status
+# Phase 2 / Task 6: Fallback query endpoint for the frontend to reconcile
+# pending injection state when SSE events were missed (e.g. mid-stream
+# reconnect, dropped events during a long-lived connection). Reads the
+# same RAM slot that ``send_message`` writes to and that the agent_node
+# pulls+clears from. Returns ``pending=False`` when the slot is empty —
+# the absence of an injection is a valid steady state, not an error.
+@router.get("/{instance_id}/injection")
+async def get_pending_injection(instance_id: str, request: Request) -> dict:
+    """Return the pending injection for ``instance_id``, if any.
+
+    Response shape::
+
+        {
+            "instance_id": str,
+            "pending": bool,
+            "content": str | None,
+            "timestamp": str | None,
+        }
+
+    ``pending=False`` is returned when no injection is stored (the common
+    case for IDLE/terminal instances and for RUNNING instances whose
+    agent_node has already consumed the previous injection).
+    """
+    manager = _get_manager(request)
+
+    # Verify the instance exists so a typo'd ID surfaces as 404 rather
+    # than a confusing ``pending=False`` for a non-existent instance.
+    try:
+        await manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}",
+            ).model_dump(),
+        )
+
+    entry = manager.get_injection(instance_id)
+    return {
+        "instance_id": instance_id,
+        "pending": entry is not None,
+        "content": entry.get("content") if entry is not None else None,
+        "timestamp": entry.get("timestamp") if entry is not None else None,
+    }
 
 
 # 2. GET /instances/{instance_id}/messages/{message_id} - Get message status
