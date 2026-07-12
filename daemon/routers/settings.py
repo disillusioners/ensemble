@@ -1,4 +1,5 @@
 """Settings API endpoints."""
+import asyncio
 import logging
 import re
 from fastapi import APIRouter, HTTPException
@@ -29,7 +30,9 @@ def set_project_repository(repo: SQLModelProjectRepository) -> None:
 @router.get("/language", response_model=LanguagePreferenceResponse)
 async def get_language():
     """Get the current language preference."""
-    language = get_language_preference(_project_repo)
+    # ``get_language_preference`` does a sync SQLAlchemy session read; off the
+    # event loop so it cannot block other in-flight requests.
+    language = await asyncio.to_thread(get_language_preference, _project_repo)
     return LanguagePreferenceResponse(language=language)
 
 
@@ -50,5 +53,9 @@ async def set_language(request: LanguagePreferenceUpdate):
     repo = get_project_repository()  # raises 503 if not initialized
     if SYSTEM_DEFAULT_PROJECT_ID is None:
         raise HTTPException(status_code=503, detail="System default project not initialized")
-    repo.set_metadata(SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, cleaned_language)
+    # ``repo.set_metadata`` opens a sync SQLAlchemy session and commits; off the
+    # event loop so it cannot block other in-flight requests.
+    await asyncio.to_thread(
+        repo.set_metadata, SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, cleaned_language
+    )
     return LanguagePreferenceResponse(language=cleaned_language)
