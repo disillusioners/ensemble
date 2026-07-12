@@ -231,3 +231,8 @@ external_opencode_resume_session(project="<PROJECT>", session_name="<SESSION_NAM
 ```
 
 **Session is busy**: Wait with `external_opencode_wait_for_result()` or abort with `external_opencode_abort_session()`.
+
+## Quick Rules
+
+- **Do NOT set `model=` on `external_opencode_send_message` unless the user explicitly requests a specific model.** The remote session uses its configured default; overriding it unprompted changes cost/quality tradeoffs the user did not ask for.
+- Same for `agent=` — leave the default `"orchestrator"` unless the user names a specific remote agent.
