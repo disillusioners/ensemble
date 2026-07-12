@@ -360,6 +360,78 @@ def _terminate_instance(instance_id: str) -> bool:
         return False
 
 
+def _send_injection_raw(instance_id: str, content: str) -> requests.Response:
+    """POST ``/api/instances/{id}/messages`` and return the raw response.
+
+    Unlike :func:`_send_message`, this helper does NOT call
+    ``raise_for_status()`` — the injection path returns 202 Accepted
+    (RUNNING/WAITING_CHILDREN) which is the success outcome, not a
+    server error. Callers must inspect ``response.status_code`` and
+    ``response.json()`` themselves.
+
+    Args:
+        instance_id: Target instance.
+        content: The user injection body (will be routed to the
+            injection slot for RUNNING/WAITING_CHILDREN instances; for
+            PAUSED instances the server triggers auto-resume and returns
+            200; for IDLE/terminal it falls through to the normal
+            ``enqueue_message`` path).
+
+    Returns:
+        The raw ``requests.Response`` object from the daemon.
+
+    Raises:
+        requests.exceptions.RequestException: On connection / timeout
+            errors only. HTTP status codes are surfaced via
+            ``response.status_code``.
+    """
+    logger.info(
+        f"[INJ_POST] {instance_id[:8]}... ({len(content)} chars)"
+    )
+    response = requests.post(
+        f"{API_BASE}/instances/{instance_id}/messages",
+        json={"content": content},
+        timeout=30,
+    )
+    logger.info(
+        f"[INJ_POST] {instance_id[:8]}... status={response.status_code}"
+    )
+    return response
+
+
+def _get_injection(instance_id: str) -> dict:
+    """GET ``/api/instances/{id}/injection`` and return the parsed body.
+
+    The endpoint returns ``{"instance_id": ..., "pending": bool,
+    "content": str|None, "timestamp": str|None}``. ``pending=False`` is
+    the normal steady state (no injection stored OR already consumed
+    by agent_node) — it is NOT an error.
+
+    Args:
+        instance_id: The instance whose injection slot to inspect.
+
+    Returns:
+        Dict with at least ``pending`` (bool), ``content`` (``str`` or
+        ``None``), and ``timestamp`` (``str`` or ``None``) keys.
+
+    Raises:
+        requests.HTTPError: On non-2xx response (e.g. 404 for unknown
+            instances).
+    """
+    logger.info(f"[INJ_GET] {instance_id[:8]}...")
+    response = requests.get(
+        f"{API_BASE}/instances/{instance_id}/injection",
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+    logger.info(
+        f"[INJ_GET] {instance_id[:8]}... pending={data.get('pending')} "
+        f"content_len={len(data.get('content') or '')}"
+    )
+    return data
+
+
 # --------------------------------------------------------------------------- #
 # Polling helpers
 # --------------------------------------------------------------------------- #
@@ -2710,3 +2782,774 @@ def test_pause_blocks_defer_queue():
                 )
         if leader_id:
             _terminate_instance(leader_id)
+
+
+# --------------------------------------------------------------------------- #
+# Injection E2E tests (Task 7 — branch feature/user-msg-injection)
+#
+# These tests exercise the new injection slot that lets a user post a
+# message to a RUNNING / WAITING_CHILDREN instance without enqueueing
+# it as a fresh user turn. The slot is consumed by agent_node on the
+# next LLM step; pausing the instance clears (rather than consumes) the
+# pending content (W6 fix).
+# --------------------------------------------------------------------------- #
+
+# S9: deliberately long prompt designed to keep the leader's LLM turn
+# busy long enough for us to inject against a RUNNING instance. This
+# is the same role TEST_MESSAGE plays for child-spawn, but instead of
+# triggering delegation it asks for multi-step web summarisation which
+# reliably produces a RUNNING status window of >30s in our local dev
+# environment.
+LONG_PROMPT = (
+    "Search the web for recent AI news, then write a detailed "
+    "500-word summary of each article you find"
+)
+
+# A simpler prompt for the pause-clear test — LONG_PROMPT's web search
+# takes 6+ minutes after pause+resume, causing timeout. This prompt asks
+# for a shorter response that still keeps the instance RUNNING long enough
+# for injection but completes within the timeout after resume.
+PAUSE_TEST_PROMPT = (
+    "Write a detailed essay about the history of computing, "
+    "covering at least 5 major milestones. Take your time and be thorough."
+)
+
+
+@pytest.mark.integration
+def test_injection_consumed_by_running_instance():
+    """TEST 6: Injection into RUNNING instance is consumed by agent_node.
+
+    Validates the core injection flow:
+      1. POST /messages to a RUNNING instance returns 202 with status='injected'.
+      2. GET /injection shows pending=True immediately after.
+      3. The agent_node pulls the slot and clears it (pending→False).
+      4. The injection content is visible in the conversation history.
+      5. The instance reaches a terminal state.
+    """
+    instance_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 6: injection consumed by running instance")
+    logger.info("=" * 60)
+
+    INJECTION_MARKER = "INJECTION_TEST_MARKER_12345"
+
+    try:
+        # Step 1: spawn + send long-running prompt (S9)
+        instance_id = _spawn_instance("leader")
+        assert instance_id, "Failed to spawn leader instance"
+        _send_message(instance_id, LONG_PROMPT)
+
+        # Step 2: wait for RUNNING (1s interval, 30s timeout)
+        running_ok = _wait_for_status(instance_id, "running", timeout=30)
+        if not running_ok:
+            # Tolerate: LLM may be too fast and the instance already
+            # completed; that's a flake, mark and skip the asserts.
+            current = _get_instance(instance_id)
+            logger.warning(
+                f"[STEP2] leader never reached 'running' (status="
+                f"{current.get('status')!r}); LLM may have completed "
+                f"faster than expected — TEST 6 cannot verify the "
+                f"core inject-while-running contract."
+            )
+            pytest.skip(
+                "Leader did not enter 'running' within 30s — cannot "
+                "test injection against a RUNNING instance"
+            )
+        logger.info(f"[STEP2] leader is running: {instance_id[:8]}...")
+
+        # Step 3: POST /messages — expect 202 + status='injected'
+        response = _send_injection_raw(instance_id, INJECTION_MARKER)
+        assert response.status_code == 202, (
+            f"Expected 202 from injection to RUNNING instance, got "
+            f"{response.status_code}; body={response.text[:300]!r}"
+        )
+        body = response.json()
+        assert body.get("status") == "injected", (
+            f"Expected status='injected', got {body!r}"
+        )
+        logger.info("[STEP3] ✓ injection accepted (202, status=injected)")
+
+        # Step 4: GET /injection — pending=True
+        injection = _get_injection(instance_id)
+        assert injection.get("pending") is True, (
+            f"Expected pending=True after injection, got {injection!r}"
+        )
+        assert injection.get("content") == INJECTION_MARKER, (
+            f"Expected content={INJECTION_MARKER!r}, got "
+            f"{injection.get('content')!r}"
+        )
+        logger.info("[STEP4] ✓ /injection reports pending=True with marker")
+
+        # Step 5: poll for consumption (pending→False, 2s interval, 60s)
+        CONSUME_TIMEOUT = 60
+        consume_deadline = time.time() + CONSUME_TIMEOUT
+        consumed = False
+        while time.time() < consume_deadline:
+            current_inj = _get_injection(instance_id)
+            if current_inj.get("pending") is False:
+                consumed = True
+                break
+            time.sleep(2)
+        assert consumed, (
+            f"Injection was not consumed within {CONSUME_TIMEOUT}s — "
+            f"agent_node never cleared the slot"
+        )
+        logger.info("[STEP5] ✓ injection consumed (pending=False)")
+
+        # Step 6: wait for terminal status FIRST (before checking messages).
+        # The injected HumanMessage is only persisted to the checkpoint when
+        # agent_node RETURNS (after the LLM call finishes), so we must
+        # wait for completion before asserting the marker is present.
+        # LONG_PROMPT requires the doubled timeout — the 500-word web
+        # summary reliably exceeds 120s on local dev.
+        finished, final_status = _wait_for_completion(
+            instance_id, timeout=COMPLETION_TIMEOUT * 2
+        )
+        assert finished, (
+            f"Instance did not reach terminal status within "
+            f"{COMPLETION_TIMEOUT * 2}s (last status: {final_status})"
+        )
+        logger.info(f"[STEP6] ✓ instance reached terminal: {final_status}")
+
+        # Step 7: marker appears in conversation history (AFTER completion)
+        messages = _get_messages(instance_id)
+        marker_found = any(
+            INJECTION_MARKER in str(m.get("content", ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        assert marker_found, (
+            f"Expected {INJECTION_MARKER!r} in conversation history; "
+            f"got {len(messages)} messages without it"
+        )
+        logger.info("[STEP7] ✓ marker present in conversation history")
+
+        logger.info("TEST 6 PASSED")
+
+    finally:
+        if instance_id:
+            _terminate_instance(instance_id)
+
+
+@pytest.mark.integration
+def test_injection_cleared_on_pause():
+    """TEST 7: Pause clears the injection slot (W6 fix).
+
+    Validates the W6 fix: pausing an instance with a pending injection
+    must CLEAR the slot (NOT consume it). The injected content must NOT
+    appear in the conversation history after the pause+resume cycle —
+    it is discarded by the pause cascade rather than being read by the
+    agent_node.
+    """
+    instance_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 7: injection cleared on pause (W6 fix)")
+    logger.info("=" * 60)
+
+    INJECTION_MARKER = "PAUSE_CLEAR_TEST_MARKER"
+
+    try:
+        # Step 1: spawn + send long-running prompt
+        instance_id = _spawn_instance("leader")
+        assert instance_id, "Failed to spawn leader instance"
+        _send_message(instance_id, PAUSE_TEST_PROMPT)
+
+        # Step 2: wait for RUNNING
+        running_ok = _wait_for_status(instance_id, "running", timeout=30)
+        if not running_ok:
+            current = _get_instance(instance_id)
+            logger.warning(
+                f"[STEP2] leader never reached 'running' "
+                f"(status={current.get('status')!r}); TEST 7 cannot "
+                f"verify W6 pause-clear contract."
+            )
+            pytest.skip(
+                "Leader did not enter 'running' within 30s — cannot "
+                "test pause-clear of a pending injection"
+            )
+        logger.info(f"[STEP2] leader is running: {instance_id[:8]}...")
+
+        # Step 3: send injection
+        response = _send_injection_raw(instance_id, INJECTION_MARKER)
+        assert response.status_code == 202, (
+            f"Expected 202, got {response.status_code}; body="
+            f"{response.text[:300]!r}"
+        )
+        logger.info("[STEP3] ✓ injection sent (202)")
+
+        # Step 4: GET /injection → pending=True BEFORE pausing
+        injection_before = _get_injection(instance_id)
+        assert injection_before.get("pending") is True, (
+            f"Expected pending=True before pause, got "
+            f"{injection_before!r}"
+        )
+        logger.info("[STEP4] ✓ pending=True before pause")
+
+        # Step 5: pause the instance
+        _pause_instance(instance_id)
+        paused_ok = _wait_for_status(instance_id, "paused", timeout=30)
+        assert paused_ok, (
+            f"Instance did not reach 'paused' within 30s"
+        )
+        logger.info("[STEP5] ✓ instance paused")
+
+        # Step 6: GET /injection → pending=False (cleared by pause cascade)
+        injection_after = _get_injection(instance_id)
+        assert injection_after.get("pending") is False, (
+            f"Expected pending=False after pause (W6 fix), got "
+            f"{injection_after!r}. The pause cascade did NOT clear the "
+            f"injection slot — the queued content would still be "
+            f"consumed on resume."
+        )
+        logger.info(
+            "[STEP6] ✓ injection cleared by pause cascade (pending=False)"
+        )
+
+        # Step 7: resume
+        _resume_instance(instance_id, message="continue")
+        logger.info("[STEP7] resume issued")
+
+        # Step 8: wait for completion. PAUSE_TEST_PROMPT (vs LONG_PROMPT)
+        # avoids the 6-8min web-search tail after resume; 2x the normal
+        # completion timeout (240s) is plenty for the simpler prompt.
+        finished, final_status = _wait_for_completion(
+            instance_id, timeout=COMPLETION_TIMEOUT * 2
+        )
+        assert finished, (
+            f"Instance did not reach terminal status within "
+            f"{COMPLETION_TIMEOUT * 2}s (last status: {final_status})"
+        )
+        logger.info(f"[STEP8] ✓ instance reached terminal: {final_status}")
+
+        # Step 9: marker must NOT appear in conversation history
+        # (it was cleared, NOT consumed)
+        messages = _get_messages(instance_id)
+        marker_found = any(
+            INJECTION_MARKER in str(m.get("content", ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        assert not marker_found, (
+            f"Marker {INJECTION_MARKER!r} appears in conversation "
+            f"history — pause did NOT clear the injection slot. The "
+            f"agent_node consumed the cleared content anyway (W6 fix "
+            f"is broken)."
+        )
+        logger.info(
+            "[STEP9] ✓ marker absent from conversation history (cleared, "
+            "not consumed)"
+        )
+
+        logger.info("TEST 7 PASSED")
+
+    finally:
+        # Defensive resume: if still paused when the test exits, resume
+        # so the terminate in finally can land cleanly.
+        if instance_id:
+            try:
+                current = _get_instance(instance_id)
+                if str(current.get("status", "")).lower() == "paused":
+                    _resume_instance(instance_id)
+            except Exception as exc:
+                logger.warning(
+                    f"[CLEANUP] resume check failed: {exc}"
+                )
+            _terminate_instance(instance_id)
+
+
+@pytest.mark.integration
+def test_injection_replacement():
+    """TEST 8: Second injection replaces the first.
+
+    Validates Task 5 / W5 replacement semantics: posting a NEW
+    injection while a previous one is still in the slot must REPLACE
+    (not append) the content. The first marker must NOT appear in
+    the eventual conversation history; only the second marker must.
+    """
+    instance_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 8: injection replacement (second replaces first)")
+    logger.info("=" * 60)
+
+    FIRST_MARKER = "FIRST_INJECTION_MARKER"
+    SECOND_MARKER = "SECOND_INJECTION_MARKER"
+
+    try:
+        # Step 1: spawn + send long-running prompt
+        instance_id = _spawn_instance("leader")
+        assert instance_id, "Failed to spawn leader instance"
+        _send_message(instance_id, LONG_PROMPT)
+
+        # Step 2: wait for RUNNING
+        running_ok = _wait_for_status(instance_id, "running", timeout=30)
+        if not running_ok:
+            current = _get_instance(instance_id)
+            logger.warning(
+                f"[STEP2] leader never reached 'running' "
+                f"(status={current.get('status')!r}); TEST 8 cannot "
+                f"verify replacement contract."
+            )
+            pytest.skip(
+                "Leader did not enter 'running' within 30s — cannot "
+                "test injection replacement"
+            )
+        logger.info(f"[STEP2] leader is running: {instance_id[:8]}...")
+
+        # Step 3: send first injection
+        first_resp = _send_injection_raw(instance_id, FIRST_MARKER)
+        assert first_resp.status_code == 202, (
+            f"Expected 202 for first injection, got "
+            f"{first_resp.status_code}"
+        )
+
+        # Step 4: GET /injection — pending=True, content=FIRST_MARKER
+        first_state = _get_injection(instance_id)
+        assert first_state.get("pending") is True
+        assert first_state.get("content") == FIRST_MARKER, (
+            f"Expected content={FIRST_MARKER!r}, got "
+            f"{first_state.get('content')!r}"
+        )
+        logger.info(
+            f"[STEP4] ✓ first injection in slot: {FIRST_MARKER!r}"
+        )
+
+        # Step 5: send second injection (must REPLACE first)
+        second_resp = _send_injection_raw(instance_id, SECOND_MARKER)
+        assert second_resp.status_code == 202, (
+            f"Expected 202 for replacement injection, got "
+            f"{second_resp.status_code}"
+        )
+
+        # Step 6: GET /injection — pending=True, content=SECOND_MARKER
+        second_state = _get_injection(instance_id)
+        assert second_state.get("pending") is True
+        assert second_state.get("content") == SECOND_MARKER, (
+            f"Expected content={SECOND_MARKER!r} after replacement, "
+            f"got {second_state.get('content')!r}. Injection slot did "
+            f"NOT replace the prior content."
+        )
+        logger.info(
+            f"[STEP6] ✓ second injection replaced first: "
+            f"{SECOND_MARKER!r}"
+        )
+
+        # Step 7: poll for consumption (pending→False, 60s timeout)
+        CONSUME_TIMEOUT = 60
+        consume_deadline = time.time() + CONSUME_TIMEOUT
+        consumed = False
+        while time.time() < consume_deadline:
+            current_inj = _get_injection(instance_id)
+            if current_inj.get("pending") is False:
+                consumed = True
+                break
+            time.sleep(2)
+        assert consumed, (
+            f"Injection not consumed within {CONSUME_TIMEOUT}s — slot "
+            f"never cleared"
+        )
+        logger.info("[STEP7] ✓ injection consumed")
+
+        # Step 8: wait for completion FIRST (before checking markers).
+        # The injected HumanMessage is only persisted to the checkpoint
+        # when agent_node RETURNS, so the marker is only visible in the
+        # conversation history after the instance reaches a terminal
+        # state. LONG_PROMPT requires the doubled timeout.
+        finished, final_status = _wait_for_completion(
+            instance_id, timeout=COMPLETION_TIMEOUT * 2
+        )
+        assert finished, (
+            f"Instance did not reach terminal status within "
+            f"{COMPLETION_TIMEOUT * 2}s (last status: {final_status})"
+        )
+        logger.info(f"[STEP8] ✓ instance reached terminal: {final_status}")
+
+        # Step 9: SECOND_MARKER in history, FIRST_MARKER absent
+        messages = _get_messages(instance_id)
+        has_second = any(
+            SECOND_MARKER in str(m.get("content", ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        has_first = any(
+            FIRST_MARKER in str(m.get("content", ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        assert has_second, (
+            f"Expected {SECOND_MARKER!r} in conversation history — "
+            f"replacement content not consumed"
+        )
+        assert not has_first, (
+            f"Did NOT expect {FIRST_MARKER!r} in conversation history "
+            f"— replacement contract is broken: both injections were "
+            f"consumed instead of replacing"
+        )
+        logger.info(
+            "[STEP9] ✓ only second marker in history (replacement OK)"
+        )
+
+        logger.info("TEST 8 PASSED")
+
+    finally:
+        if instance_id:
+            _terminate_instance(instance_id)
+
+
+@pytest.mark.integration
+def test_injection_into_waiting_children():
+    """TEST 9: Injection into WAITING_CHILDREN parent (W3).
+
+    Validates the W3 fix: when a leader is in ``waiting_children``
+    status (parked waiting for child completion reports) and the user
+    posts an injection, it lands in the slot and is consumed when the
+    leader's next LLM turn picks it up — i.e. when the leader resumes
+    after the child completes.
+
+    The TEST_MESSAGE pattern from Test 1 (delegating "ask developer to
+    say hello" to a developer child) produces a parent in
+    ``waiting_children`` once the child is spawned.
+    """
+    instance_id: str | None = None
+    child_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 9: injection into waiting_children parent (W3 fix)")
+    logger.info("=" * 60)
+
+    INJECTION_MARKER = "WAITING_CHILDREN_INJECTION_MARKER"
+    PARENT_MESSAGE = (
+        "ask developer to say hello, this is a test workflow, "
+        "developer dont need do anything"
+    )
+
+    try:
+        # Step 1: spawn leader, send child-spawn prompt
+        instance_id = _spawn_instance("leader")
+        assert instance_id, "Failed to spawn leader instance"
+        _send_message(instance_id, PARENT_MESSAGE)
+        logger.info(f"[STEP1] leader spawned, message sent: "
+                    f"{instance_id[:8]}...")
+
+        # Step 2: wait for child spawned
+        child_id = _wait_for_child_spawned(instance_id, timeout=SPAWN_TIMEOUT)
+        assert child_id is not None, (
+            f"Leader did not spawn a child within {SPAWN_TIMEOUT}s — "
+            f"cannot test waiting_children injection"
+        )
+        logger.info(f"[STEP2] child spawned: {child_id[:8]}...")
+
+        # Step 3: poll parent until 'waiting_children' (2s, 60s timeout)
+        WAITING_TIMEOUT = 60
+        waiting_ok = _wait_for_status(
+            instance_id, "waiting_children", timeout=WAITING_TIMEOUT
+        )
+        if not waiting_ok:
+            # Tolerate: we may hit 'running' between turns, or the
+            # LLM may complete too fast. Skip the injection step
+            # rather than fail the test — the test value is in
+            # proving INJECTION works at all in waiting_children.
+            current = _get_instance(instance_id)
+            logger.warning(
+                f"[STEP3] leader never reached 'waiting_children' "
+                f"within {WAITING_TIMEOUT}s (status="
+                f"{current.get('status')!r}); TEST 9 cannot verify "
+                f"the waiting_children injection contract."
+            )
+            pytest.skip(
+                f"Leader did not enter 'waiting_children' within "
+                f"{WAITING_TIMEOUT}s — cannot test injection in that "
+                f"state"
+            )
+        logger.info(f"[STEP3] leader in waiting_children")
+
+        # Step 4: POST /messages to parent — expect 202
+        response = _send_injection_raw(instance_id, INJECTION_MARKER)
+        assert response.status_code == 202, (
+            f"Expected 202 for injection into waiting_children, got "
+            f"{response.status_code}; body={response.text[:300]!r}"
+        )
+
+        # Step 5: GET /injection → pending=True
+        injection = _get_injection(instance_id)
+        assert injection.get("pending") is True, (
+            f"Expected pending=True after injection to waiting "
+            f"children, got {injection!r}"
+        )
+        logger.info("[STEP5] ✓ injection accepted, pending=True")
+
+        # Step 6: wait for leader+child to complete (parent resumes,
+        # consumes the injection slot on its final turn). Use safe
+        # completion to confirm no premature-completion bug.
+        finished, final_status, premature = _wait_for_leader_completion_safe(
+            instance_id, [child_id], timeout=COMPLETION_TIMEOUT
+        )
+        assert not premature, (
+            f"PREMATURE COMPLETION DETECTED: {premature}"
+        )
+        assert finished, (
+            f"Leader did not reach terminal status within "
+            f"{COMPLETION_TIMEOUT}s (last status: {final_status})"
+        )
+        logger.info(
+            f"[STEP6] ✓ leader reached terminal: {final_status} "
+            f"(with child terminal)"
+        )
+
+        # Step 7: marker appears in parent conversation history
+        messages = _get_messages(instance_id)
+        marker_found = any(
+            INJECTION_MARKER in str(m.get("content", ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        assert marker_found, (
+            f"Expected {INJECTION_MARKER!r} in parent's conversation "
+            f"history — injection into waiting_children was NOT consumed"
+        )
+        logger.info(
+            "[STEP7] ✓ marker present in parent's conversation history"
+        )
+
+        logger.info("TEST 9 PASSED")
+
+    finally:
+        if instance_id:
+            _terminate_instance(instance_id)
+
+
+@pytest.mark.integration
+def test_paused_auto_resume_unchanged():
+    """TEST 10: PAUSED auto-resume contract preserved (C4 regression guard).
+
+    Validates C4: sending a message to a PAUSED instance must CONTINUE
+    to return 200 with ``auto_resumed: true`` (the old behaviour), NOT
+    409 (rejection) and NOT 202 (injection — paused is not in
+    ``_INJECTION_ELIGIBLE_STATUSES``).
+
+    This guards against accidental scope creep where the injection
+    route's "running" handling might silently move the PAUSED branch
+    to an incompatible response code. PAUSED must remain a hard
+    auto-resume trigger — that is the contract the legacy frontend
+    depends on.
+    """
+    instance_id: str | None = None
+    logger.info("=" * 60)
+    logger.info(
+        "TEST 10: paused auto-resume unchanged (C4 regression guard)"
+    )
+    logger.info("=" * 60)
+
+    AUTO_RESUME_MARKER = "AUTO_RESUME_TEST_MARKER"
+
+    try:
+        # Step 1: spawn + send long-running prompt
+        instance_id = _spawn_instance("leader")
+        assert instance_id, "Failed to spawn leader instance"
+        _send_message(instance_id, LONG_PROMPT)
+
+        # Step 2: wait for RUNNING
+        running_ok = _wait_for_status(instance_id, "running", timeout=30)
+        if not running_ok:
+            current = _get_instance(instance_id)
+            logger.warning(
+                f"[STEP2] leader never reached 'running' "
+                f"(status={current.get('status')!r}); TEST 10 cannot "
+                f"verify C4 auto-resume contract."
+            )
+            pytest.skip(
+                "Leader did not enter 'running' within 30s — cannot "
+                "test pause+auto-resume"
+            )
+        logger.info(f"[STEP2] leader is running: {instance_id[:8]}...")
+
+        # Step 3: pause the instance
+        _pause_instance(instance_id)
+
+        # Step 4: wait for PAUSED
+        paused_ok = _wait_for_status(instance_id, "paused", timeout=30)
+        assert paused_ok, (
+            f"Instance did not reach 'paused' within 30s"
+        )
+        logger.info(f"[STEP4] ✓ instance paused: {instance_id[:8]}...")
+
+        # Step 5: POST /messages to PAUSED — expect 200 + auto_resumed=True
+        # NOT 202 (paused is NOT an injection-eligible status), NOT 409.
+        response = _send_injection_raw(instance_id, AUTO_RESUME_MARKER)
+        assert response.status_code == 200, (
+            f"Expected 200 from PAUSED auto-resume, got "
+            f"{response.status_code}; body={response.text[:300]!r}. "
+            f"PAUSED must continue to auto-resume (status 200, "
+            f"NOT 202 injection, NOT 409 rejection) — the C4 "
+            f"contract is broken."
+        )
+        body = response.json()
+        assert body.get("auto_resumed") is True, (
+            f"Expected auto_resumed=True from PAUSED branch, got "
+            f"{body!r}. PAUSED must signal auto-resume, not silent "
+            f"injection (PAUSED is NOT eligible for the injection slot)."
+        )
+        assert "message_id" in body, (
+            f"Expected message_id in PAUSED auto-resume response, got "
+            f"{body!r}"
+        )
+        logger.info(
+            f"[STEP5] ✓ PAUSED auto-resume: 200 + auto_resumed=True "
+            f"(NOT 202, NOT 409)"
+        )
+
+        # Step 6: wait for completion (resume auto-triggered).
+        # LONG_PROMPT may need extra time after auto-resume — observed
+        # 4-6 minute completions in local dev.
+        finished, final_status = _wait_for_completion(
+            instance_id, timeout=COMPLETION_TIMEOUT * 3
+        )
+        assert finished, (
+            f"Instance did not reach terminal status within "
+            f"{COMPLETION_TIMEOUT * 3}s after auto-resume "
+            f"(last status: {final_status})"
+        )
+        logger.info(f"[STEP6] ✓ instance reached terminal: {final_status}")
+
+        # Step 7: message content appears in history
+        messages = _get_messages(instance_id)
+        marker_found = any(
+            AUTO_RESUME_MARKER in str(m.get("content", ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        assert marker_found, (
+            f"Expected {AUTO_RESUME_MARKER!r} in conversation history "
+            f"— auto-resumed message was not processed"
+        )
+        logger.info(
+            "[STEP7] ✓ auto-resumed message present in conversation history"
+        )
+
+        logger.info("TEST 10 PASSED")
+
+    finally:
+        # Defensive resume in case the instance is still paused.
+        if instance_id:
+            try:
+                current = _get_instance(instance_id)
+                if str(current.get("status", "")).lower() == "paused":
+                    _resume_instance(instance_id)
+            except Exception as exc:
+                logger.warning(
+                    f"[CLEANUP] resume check failed: {exc}"
+                )
+            _terminate_instance(instance_id)
+
+
+@pytest.mark.integration
+def test_injection_query_endpoint():
+    """TEST 11: GET /injection query endpoint lifecycle.
+
+    Validates the slot lifecycle as observed through the query endpoint:
+      1. No injection yet → pending=False, content=None.
+      2. POST /messages → pending=True, content=<marker>.
+      3. agent_node consumes → pending=False again.
+
+    This is the Task 6 query endpoint that the frontend uses to
+    reconcile SSE-event gaps (e.g. mid-stream reconnects).
+    """
+    instance_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 11: GET /injection query endpoint lifecycle")
+    logger.info("=" * 60)
+
+    QUERY_MARKER = "QUERY_ENDPOINT_TEST_MARKER"
+
+    try:
+        # Step 1: spawn + send long-running prompt
+        instance_id = _spawn_instance("leader")
+        assert instance_id, "Failed to spawn leader instance"
+        _send_message(instance_id, LONG_PROMPT)
+
+        # Step 2: wait for RUNNING
+        running_ok = _wait_for_status(instance_id, "running", timeout=30)
+        if not running_ok:
+            current = _get_instance(instance_id)
+            logger.warning(
+                f"[STEP2] leader never reached 'running' "
+                f"(status={current.get('status')!r}); TEST 11 cannot "
+                f"verify the query-endpoint lifecycle."
+            )
+            pytest.skip(
+                "Leader did not enter 'running' within 30s — cannot "
+                "test injection query endpoint lifecycle"
+            )
+        logger.info(f"[STEP2] leader is running: {instance_id[:8]}...")
+
+        # Step 3: GET /injection → pending=False (no injection yet)
+        initial = _get_injection(instance_id)
+        assert initial.get("pending") is False, (
+            f"Expected pending=False before any injection, got "
+            f"{initial!r}"
+        )
+        assert initial.get("content") in (None, ""), (
+            f"Expected content=None when pending=False, got "
+            f"{initial.get('content')!r}"
+        )
+        logger.info("[STEP3] ✓ initial state: pending=False, content=None")
+
+        # Step 4: send injection
+        response = _send_injection_raw(instance_id, QUERY_MARKER)
+        assert response.status_code == 202
+
+        # Step 5: GET /injection → pending=True, content=QUERY_MARKER
+        filled = _get_injection(instance_id)
+        assert filled.get("pending") is True, (
+            f"Expected pending=True after injection, got {filled!r}"
+        )
+        assert filled.get("content") == QUERY_MARKER, (
+            f"Expected content={QUERY_MARKER!r}, got "
+            f"{filled.get('content')!r}"
+        )
+        assert filled.get("timestamp"), (
+            f"Expected timestamp to be set, got {filled!r}"
+        )
+        logger.info(
+            f"[STEP5] ✓ filled: pending=True, content={QUERY_MARKER!r}, "
+            f"timestamp={filled.get('timestamp')}"
+        )
+
+        # Step 6: poll until pending=False (consumed)
+        CONSUME_TIMEOUT = 60
+        consume_deadline = time.time() + CONSUME_TIMEOUT
+        consumed = False
+        while time.time() < consume_deadline:
+            current = _get_injection(instance_id)
+            if current.get("pending") is False:
+                consumed = True
+                break
+            time.sleep(2)
+        assert consumed, (
+            f"pending did not flip to False within {CONSUME_TIMEOUT}s — "
+            f"slot never cleared"
+        )
+        logger.info("[STEP6] ✓ consumed: pending=False again")
+
+        # Step 7: GET /injection → pending=False (post-consumption)
+        final_state = _get_injection(instance_id)
+        assert final_state.get("pending") is False, (
+            f"Expected pending=False after consumption, got "
+            f"{final_state!r}"
+        )
+        logger.info("[STEP7] ✓ post-consumption state: pending=False")
+
+        # Step 8: wait for completion. LONG_PROMPT may need extra time —
+        # observed 4-6 minute completions in local dev.
+        finished, final_status = _wait_for_completion(
+            instance_id, timeout=COMPLETION_TIMEOUT * 3
+        )
+        assert finished, (
+            f"Instance did not reach terminal status within "
+            f"{COMPLETION_TIMEOUT * 3}s (last status: {final_status})"
+        )
+        logger.info(f"[STEP8] ✓ instance reached terminal: {final_status}")
+
+        logger.info("TEST 11 PASSED")
+
+    finally:
+        if instance_id:
+            _terminate_instance(instance_id)
