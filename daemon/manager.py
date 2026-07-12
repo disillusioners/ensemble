@@ -36,6 +36,7 @@ from .repositories import (
     create_message_queue_repository,
     create_mcp_server_repository,
     create_infra_repository,
+    create_shared_context_metadata_repository,
     create_skill_repository,
     create_skill_lineage_repository,
     create_skill_embedding_repository,
@@ -57,6 +58,7 @@ from .repositories.message_queue.models import MessageQueue, MessageStatus, Mess
 from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
+from .repositories.shared_context.models import SharedContextMetadata
 from sqlmodel import Session
 from sqlalchemy import text, select
 from .tools import create_instance_tools
@@ -660,6 +662,19 @@ class InstanceManager:
         # call that used to live here was the C1 bug (it bypassed
         # the fault-tolerance wrap).
         self._infra_repository = create_infra_repository(
+            engine=self._engine,
+            create_tables=False,
+        )
+
+        # ── Shared Context Metadata repository (shared singleton) ──
+        # One repository at the manager level, bound to the shared
+        # engine (C3 — same singleton rationale as ``_infra_repository``).
+        # Tables are created by the MigrationRunner via a dedicated
+        # migration, so ``create_tables=False`` here (matches the
+        # ``_infra_repository`` wiring immediately above). The model
+        # was imported at module level so it is registered with
+        # ``SQLModel.metadata`` before ``create_all()`` runs.
+        self._shared_context_metadata_repo = create_shared_context_metadata_repository(
             engine=self._engine,
             create_tables=False,
         )
@@ -1374,6 +1389,19 @@ class InstanceManager:
         ``__init__``.
         """
         return self._infra_repository
+
+    @property
+    def shared_context_metadata_repo(self) -> "SharedContextMetadataRepository":
+        """Public read-only access to the shared :class:`SharedContextMetadataRepository`.
+
+        Used by the Shared Context Metadata KV layer to read/write
+        rows in ``shared_context_metadata``. Constructed once in
+        ``__init__`` with the shared engine so all callers share one
+        repository bound to the same engine — preventing per-call
+        engine allocation and lock contention (C3, matching the
+        ``infra_repository`` wiring immediately above).
+        """
+        return self._shared_context_metadata_repo
 
     @property
     def credential_manager(self):
