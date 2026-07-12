@@ -1130,7 +1130,18 @@ class InstanceLifecycleService:
         # instance can still resume with the user turn intact; only the
         # RAM slot needs to be dropped here. ``clear_injection`` is a
         # no-op when no injection exists.
-        self._manager.clear_injection(instance_id)
+        #
+        # Capture the return value so the post-commit Phase 2 ``injection_cleared``
+        # SSE emit (mirrors the pause path) can fire without re-querying the
+        # manager. Emit POST-COMMIT so a listener that races the transition
+        # observes the cleared slot alongside the terminated status, not before
+        # it (race-safe ordering with the ``status_change`` SSE below).
+        cleared_injection = self._manager.clear_injection(instance_id)
+        if cleared_injection is not None:
+            logger.info(
+                f"Cleared pending injection for terminated instance "
+                f"{instance_id[:8]}... (len={len(cleared_injection.get('content', ''))})"
+            )
 
         # 1.5. Cancel any running graph task for this instance, bounded-await
         # unwind. The graph task may take a few seconds to honor cancellation
@@ -1250,6 +1261,32 @@ class InstanceLifecycleService:
                 f"terminate_instance: status_change SSE emit failed for "
                 f"{instance_id[:8]}...: {e}"
             )
+
+        # W1: emit ``injection_cleared`` POST-COMMIT alongside the
+        # status_change for any instance whose RAM slot was cleared in
+        # the pre-DB step. Reuses ``stream_message`` with a custom
+        # ``event_type`` (no new method on the hub) — mirrors the pause
+        # path (Phase 2 / Task 8, W5). ``None`` content means the slot
+        # was empty for this instance — no emit.
+        if cleared_injection is not None:
+            try:
+                await self._manager._live_hub.stream_message(
+                    instance_id,
+                    message={
+                        "instance_id": instance_id,
+                        "event_type": "injection_cleared",
+                        "content": cleared_injection.get("content"),
+                        "timestamp": cleared_injection.get("timestamp"),
+                    },
+                    event_type="injection_cleared",
+                )
+            except Exception as e:
+                # Log + swallow — terminate must not fail on SSE outage.
+                logger.warning(
+                    f"terminate_instance: injection_cleared SSE emit failed "
+                    f"for {instance_id[:8]}...: "
+                    f"{type(e).__name__}: {e}"
+                )
 
         # 6. Release project lock if JobQueueService is connected.
         if self._job_queue_service is not None:
