@@ -28,6 +28,7 @@ from .cancellation import CancellationService
 from .dependency_bus import get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
+from .language_utils import get_language_preference
 from .project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
@@ -225,6 +226,27 @@ def append_current_time(system_prompt: str, now: datetime | None = None) -> str:
         f"Use the `time` tool for fresh time information when needed."
     )
     return system_prompt + time_section
+
+
+def append_user_language(system_prompt: str, language: str) -> str:
+    """Append user language preference to a system prompt.
+
+    Post-processing step (like ``append_context_key`` and ``append_current_time``)
+    — runs AFTER the cached prompt is loaded, so language changes do NOT
+    invalidate the prompt cache.
+
+    Args:
+        system_prompt: The base system prompt to append to.
+        language: The user's preferred language name (e.g. "English",
+            "Chinese", "Spanish"). Falls back to "English" when falsy.
+
+    Returns:
+        The system prompt with a User Language Preference section appended.
+    """
+    if not language:
+        language = "English"
+    language_section = f"\n---\n\n## User Language Preference\n\nUser prefer language: {language}\n"
+    return system_prompt + language_section
 
 
 class InstanceLifecycleService:
@@ -540,6 +562,10 @@ class InstanceLifecycleService:
         # Append current time so the agent has temporal context for the conversation
         system_prompt = append_current_time(system_prompt)
 
+        # Append user language preference (post-cache; does not invalidate PromptCache)
+        user_language = get_language_preference(project_repository)
+        system_prompt = append_user_language(system_prompt, user_language)
+
         # Create tools with this manager reference
         # Import from manager to pick up test patches
         from ..manager import create_instance_tools
@@ -575,6 +601,8 @@ class InstanceLifecycleService:
             retry_config=retry_config,
             compactor=self._compactor,
             graph_config=config,
+            user_language=user_language,
+            language_check_enabled=self._config.language.check_enabled,
         )
 
         # Save metadata to DB using instance repository
@@ -1497,6 +1525,10 @@ class InstanceLifecycleService:
         # Append current time so the agent has temporal context for the conversation
         system_prompt = append_current_time(system_prompt)
 
+        # Append user language preference (post-cache; does not invalidate PromptCache)
+        user_language = get_language_preference(project_repository)
+        system_prompt = append_user_language(system_prompt, user_language)
+
         # Create tools with this manager reference
         # Import from manager to pick up test patches
         from ..manager import create_instance_tools
@@ -1566,6 +1598,8 @@ class InstanceLifecycleService:
             retry_config=retry_config,
             compactor=self._compactor,
             graph_config=config,
+            user_language=user_language,
+            language_check_enabled=self._config.language.check_enabled,
         )
 
         # Store in instances dict

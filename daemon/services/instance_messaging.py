@@ -1904,6 +1904,16 @@ class InstanceMessagingService:
         # per-process _original_timestamps map growing without bound.
         _emitted_tool_result_ids: set[str] = set()
 
+        # C1 FIX (Phase 2 — User Language Preference): When language_check is
+        # active, the agent node's final AIMessage would otherwise be dispatched
+        # to the source BEFORE language_check runs and rewrites it, causing users
+        # to see a wrong-language response followed by a corrected one. Defer
+        # the final-message dispatch until the astream loop completes normally.
+        # Retries naturally overwrite this buffer, so only the corrected (final)
+        # message is ever sent to the external source.
+        language_check_active = bool(getattr(self._config.language, "check_enabled", False))
+        _deferred_final_message: Any = None
+
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
         # if CancelledError is raised during _maybe_compact_context
@@ -1954,6 +1964,18 @@ class InstanceMessagingService:
                                             content = " ".join(text_parts)
 
                                         if content and content.strip():
+                                            # C1 FIX (Phase 2): If language_check is active AND this
+                                            # is a final response (no tool_calls → will route through
+                                            # language_check next), buffer it instead of dispatching
+                                            # immediately. Retries overwrite the buffer so only the
+                                            # corrected final message is sent. The msg_id is already
+                                            # in _dispatched_msg_ids above, so state accumulation won't
+                                            # re-trigger anything; the deferred dispatch after the
+                                            # astream loop is the only external send.
+                                            has_tool_calls = bool(getattr(msg, 'tool_calls', None))
+                                            if language_check_active and not has_tool_calls:
+                                                _deferred_final_message = msg
+                                                continue
                                             try:
                                                 await self._manager.source_dispatcher.dispatch_message(
                                                     source=dispatch_source,
@@ -2098,6 +2120,34 @@ class InstanceMessagingService:
                     self._manager._graph_tasks.pop(instance_id, None)
                     self._manager.release_context_usage_cache(instance_id)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
+
+        # C1 FIX (Phase 2): Dispatch the deferred final message AFTER the astream
+        # loop completes normally. This code only runs on successful completion —
+        # asyncio.CancelledError is re-raised above and skips this block, so a
+        # cancelled response is never sent to the external source.
+        if _deferred_final_message is not None:
+            deferred_content = getattr(_deferred_final_message, 'content', '') or ""
+            if isinstance(deferred_content, list):
+                deferred_content = " ".join(
+                    b.get("text", "")
+                    for b in deferred_content
+                    if isinstance(b, dict) and b.get("text")
+                )
+            if (
+                deferred_content
+                and deferred_content.strip()
+                and dispatch_source
+                and self._manager.source_dispatcher
+            ):
+                try:
+                    await self._manager.source_dispatcher.dispatch_message(
+                        source=dispatch_source,
+                        content=deferred_content,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Deferred dispatch failed for message {message_id[:8]}...: {e}"
+                    )
 
         # Parse <think/> tags from final content
         content, thinking_extracted = parse_think_tags(final_content)

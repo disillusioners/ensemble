@@ -119,6 +119,7 @@ from .context_tools import create_context_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools
 from .system import create_system_tools
+from .language_tools import create_language_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
@@ -1063,6 +1064,13 @@ Returns:
     # Add MCP tools BEFORE creating help tool so mcp_tool_names are available
     if mcp_tools:
         tools.extend(mcp_tools)
+
+    # ── Language tools (language preference check, always available) ──
+    # Phase 2 wiring: register language_tools module. MUST run BEFORE
+    # scan_tools_for_full_docs(tools) so the help tool sees the language
+    # category for documentation expansion.
+    language_tool_list = create_language_tools()
+    tools.extend(language_tool_list)
 
     # Create help tool - needs mcp_tool_names for MCP category expansion
     help_tool = create_help_tool(tools, agent_id, mcp_tool_names)

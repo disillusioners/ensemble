@@ -329,10 +329,15 @@ class SessionState(MessagesState):
     
     Inherits all message handling from MessagesState (add_messages reducer).
     Adds compaction metadata fields that persist in checkpoints.
+    Also tracks user language preference check state.
     """
     # Compaction dedup: ISO timestamp of last successful compaction
     # Stored/retrieved via graph.aupdate_state() and state.values["compacted_at"]
     compacted_at: str | None = None
+    # Language preference check state. Persisted in checkpoints so retries
+    # survive across resumed graph executions.
+    language_check_retry: bool = False
+    language_check_count: int = 0
 
 
 def should_continue(state: MessagesState) -> str:
@@ -421,6 +426,153 @@ NUDGE_MESSAGE = "Continue with your task, or provide your final response if you 
 def nudge_node(state):
     """Inject a nudge message to prompt the agent to continue or finish."""
     return {'messages': [HumanMessage(content=NUDGE_MESSAGE)]}
+
+
+# ---------------------------------------------------------------------------
+# User language preference: language check node + routing helpers
+# ---------------------------------------------------------------------------
+#
+# These functions implement Phase 2 of the user language preference feature.
+# They intercept the would-be END decision in should_continue() and route the
+# final AI response through a detection step that may re-inject a reminder
+# message if the response is in the wrong language.
+#
+# The original should_continue() is NOT modified. Instead, create_should_continue()
+# returns a wrapper that translates END -> "end_candidate" so the graph routes
+# to the language_check node when language_check_enabled=True.
+LANGUAGE_REMINDER_TEMPLATE = (
+    "You are using wrong language, prefer user language is {language}. "
+    "Please respond again with the correct language: {language}."
+)
+
+LANGUAGE_CHECK_MAX_RETRIES = 2
+
+
+def create_language_check_node(user_language: str):
+    """Create the language check node function.
+
+    The returned node examines the last AI message, runs language detection
+    against the user's preferred language, and either:
+    - Returns a HumanMessage reminder injected into the conversation, OR
+    - Allows the conversation to END.
+
+    Counter logic (S5 fix): language_check_count resets whenever a new
+    HumanMessage without the language_check_reminder marker is observed,
+    so each user turn starts with a fresh retry budget.
+
+    Skip logic (C4 fix): if a `language_skip_check` tool was invoked since
+    the last user message, detection is bypassed entirely for this turn.
+    """
+
+    async def language_check_node(state):
+        messages = state["messages"]
+        last_message = messages[-1]
+
+        # Only check AIMessage content (not tool calls). If the last message
+        # has tool_calls, it's a tool execution in progress — nothing to
+        # validate yet.
+        if not hasattr(last_message, 'content') or getattr(last_message, 'tool_calls', None):
+            return {"language_check_retry": False, "language_check_count": 0}
+
+        count = state.get("language_check_count", 0)
+
+        # S5 FIX: Reset counter when a new HumanMessage is detected.
+        # A reminder-injected HumanMessage is marked via additional_kwargs
+        # so we don't reset on our own re-injections.
+        for msg in reversed(messages[:-1]):
+            msg_type = getattr(msg, 'type', None)
+            if msg_type == 'human':
+                if not getattr(msg, 'additional_kwargs', {}).get('language_check_reminder', False):
+                    count = 0  # New user message, reset counter
+                break
+
+        # C4 FIX: Detect skip via message history scan.
+        # If the agent invoked `language_skip_check` since the last user
+        # message, allow the response without detection.
+        skip = False
+        for msg in reversed(messages[:-1]):
+            msg_type = getattr(msg, 'type', None)
+            if msg_type == 'tool':
+                tool_name = getattr(msg, 'name', None)
+                if tool_name == 'language_skip_check':
+                    skip = True
+                    break
+            elif msg_type == 'human':
+                break  # Don't look past the last user message
+
+        # Max retries — prevent infinite loop.
+        if count >= LANGUAGE_CHECK_MAX_RETRIES:
+            logger.warning(
+                f"[LanguageCheck] Max retries ({LANGUAGE_CHECK_MAX_RETRIES}) reached, allowing response"
+            )
+            return {"language_check_retry": False, "language_check_count": 0}
+
+        # Skip if language_skip_check tool was called.
+        if skip:
+            return {"language_check_retry": False, "language_check_count": 0}
+
+        # Get content.
+        content = getattr(last_message, 'content', '') or ''
+
+        # W4 FIX: Wrap detection in try/except — never crash the graph.
+        try:
+            from .language_detection import detect_wrong_language
+            if detect_wrong_language(content, user_language):
+                reminder = HumanMessage(
+                    content=LANGUAGE_REMINDER_TEMPLATE.format(language=user_language),
+                    additional_kwargs={"language_check_reminder": True},
+                )
+                logger.info(
+                    f"[LanguageCheck] Wrong language detected "
+                    f"(attempt {count + 1}/{LANGUAGE_CHECK_MAX_RETRIES}), injecting reminder"
+                )
+                return {
+                    "messages": [reminder],
+                    "language_check_retry": True,
+                    "language_check_count": count + 1,
+                }
+        except Exception as e:
+            logger.warning(f"[LanguageCheck] Detection error, allowing response: {e}")
+            return {"language_check_retry": False, "language_check_count": 0}
+
+        # Correct language — reset counter, no retry.
+        return {"language_check_retry": False, "language_check_count": 0}
+
+    return language_check_node
+
+
+def should_end_language_check(state) -> str:
+    """Determine if language check should retry or end.
+
+    Returns "retry" if the language_check_node flagged a retry (wrong
+    language detected); otherwise returns END so the conversation finishes.
+    """
+    if state.get("language_check_retry", False):
+        return "retry"
+    return END
+
+
+def create_should_continue(language_check_enabled: bool):
+    """Create a should_continue wrapper that routes to language_check when enabled.
+
+    When language_check_enabled=True:
+        - Routes final responses (would-be END) to "end_candidate" -> language_check
+        - All other branches (tools, agent, nudge) unchanged.
+
+    When language_check_enabled=False:
+        - Returns the original should_continue() unchanged (END -> END).
+        - No language_check node exists in the graph in this case.
+    """
+    if not language_check_enabled:
+        return should_continue  # Use original function directly
+
+    def should_continue_with_language_check(state: MessagesState) -> str:
+        result = should_continue(state)
+        if result == END:
+            return "end_candidate"
+        return result
+
+    return should_continue_with_language_check
 
 
 def create_agent_node(
@@ -659,12 +811,21 @@ def build_instance_graph(
     retry_config: dict | None = None,
     compactor=None,
     graph_config=None,
+    user_language: str = "English",
+    language_check_enabled: bool = True,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
     When model_vision is configured, we create two LLM instances:
     - llm_with_tools (vision): Used when images are present
     - llm_standard: Used for text-only calls
+
+    When language_check_enabled=True, the graph gains an additional
+    `language_check` node that intercepts the would-be END decision from
+    should_continue() and validates the final AI response against the
+    user's preferred language. If the language is wrong, a reminder
+    HumanMessage is injected and the agent re-runs (up to
+    LANGUAGE_CHECK_MAX_RETRIES times).
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
@@ -706,12 +867,40 @@ def build_instance_graph(
     
     # Add edges
     graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", should_continue, {
-        "tools": "tools",  # Normal: LLM made tool calls
-        "agent": "agent",  # Ghost promise: LLM promised but no tool_call, retry
-        "nudge": "nudge",  # Empty after tool: inject prompt to continue
-        END: END,
-    })
+
+    # Conditionally add language_check node + build routing.
+    # When language_check_enabled=True, the wrapper routes the original
+    # END decision to "end_candidate" -> language_check, which then either
+    # retries (back to agent) or ends the graph.
+    # When language_check_enabled=False, we use the original should_continue
+    # unchanged and no language_check node is added to the graph.
+    if language_check_enabled:
+        graph.add_node("language_check", create_language_check_node(user_language))
+
+        # Closure wrapper: routes END -> "end_candidate"
+        routing_fn = create_should_continue(language_check_enabled=True)
+
+        graph.add_conditional_edges("agent", routing_fn, {
+            "tools": "tools",          # Normal: LLM made tool calls
+            "agent": "agent",          # Ghost promise: retry agent
+            "nudge": "nudge",          # Empty after tool: inject prompt
+            "end_candidate": "language_check",  # Would-be END: validate language
+        })
+
+        # Language check -> retry or END
+        graph.add_conditional_edges("language_check", should_end_language_check, {
+            "retry": "agent",
+            END: END,
+        })
+    else:
+        # Language check disabled: use original should_continue, no language_check node
+        graph.add_conditional_edges("agent", should_continue, {
+            "tools": "tools",          # Normal: LLM made tool calls
+            "agent": "agent",          # Ghost promise: LLM promised but no tool_call, retry
+            "nudge": "nudge",          # Empty after tool: inject prompt to continue
+            END: END,
+        })
+
     graph.add_edge("tools", "agent")
     graph.add_edge("nudge", "agent")
     
