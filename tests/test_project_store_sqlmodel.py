@@ -72,7 +72,7 @@ class TestCreate:
         with pytest.raises(ValueError, match="Invalid project_type"):
             store.create(name="Test", project_type="")
 
-    def test_create_invalid_type_error(self, store):
+    def test_create_invalid_type_string_error(self, store):
         """Test that invalid type raises error."""
         with pytest.raises(ValueError, match="Invalid project_type"):
             store.create(name="Test", project_type="invalid-type")

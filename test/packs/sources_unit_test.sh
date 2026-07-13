@@ -10,7 +10,7 @@ echo "=== Test Pack: sources_unit_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 120s pytest \
+timeout 120s .venv/bin/pytest \
   tests/test_sources_circuit_breaker.py \
   tests/test_sources_dispatcher.py \
   tests/test_sources_mapper.py \

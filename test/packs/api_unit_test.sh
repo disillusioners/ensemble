@@ -10,7 +10,7 @@ echo "=== Test Pack: api_unit_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 120s pytest \
+timeout 120s .venv/bin/pytest \
   tests/test_api.py \
   tests/test_scheduler_adapter.py \
   tests/test_scheduler_api.py \

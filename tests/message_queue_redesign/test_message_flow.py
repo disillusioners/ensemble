@@ -1021,41 +1021,6 @@ class TestWaitingChildrenToRunningTransition:
         # Verify: status should be RUNNING (not stuck in WAITING_CHILDREN)
         updated = get_instance(engine, instance_id)
         assert updated.status == InstanceStatus.RUNNING.value, (
-            "FIX C3 violation: Instance should transition WAITING_CHILDREN → RUNNING on message enqueue"
-        )
-
-    def test_enqueue_message_transitions_waiting_children_to_running(self, engine, message_repo):
-        """FIX C3: enqueue_message() transitions instance from WAITING_CHILDREN to RUNNING."""
-        instance_id = str(uuid.uuid4())
-
-        # Create instance in WAITING_CHILDREN status
-        create_test_instance(
-            engine,
-            instance_id,
-            status=InstanceStatus.WAITING_CHILDREN.value,
-        )
-
-        # Verify initial status is WAITING_CHILDREN
-        instance = get_instance(engine, instance_id)
-        assert instance.status == InstanceStatus.WAITING_CHILDREN.value
-
-        # Enqueue message and update status (simulating enqueue_message behavior)
-        with Session(engine) as session:
-            instance = session.get(Instance, instance_id)
-            # This is the key fix: WAITING_CHILDREN is now included in the transition check
-            if instance.status in (
-                InstanceStatus.IDLE.value,
-                InstanceStatus.PAUSED.value,
-                InstanceStatus.WAITING_CHILDREN.value,
-            ):
-                instance.status = InstanceStatus.RUNNING.value
-            instance.last_activity_at = datetime.now(timezone.utc)
-            instance.version = (instance.version or 1) + 1
-            session.commit()
-
-        # Verify: status should be RUNNING (not stuck in WAITING_CHILDREN)
-        updated = get_instance(engine, instance_id)
-        assert updated.status == InstanceStatus.RUNNING.value, (
             "FIX C3 violation: Instance should transition WAITING_CHILDREN → RUNNING on message enqueue via JobQueue"
         )
 

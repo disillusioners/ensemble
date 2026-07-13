@@ -122,20 +122,16 @@ async def test_agent_bootstrap_with_instance_manager(integration_config, agent_s
     This validates the complete flow used by the actual application.
     """
     from daemon.manager import InstanceManager
-    from daemon.persistence import PersistenceManager
-    from daemon.loader import PromptCache
-    
+
     project_root = Path(__file__).parent.parent.parent
     developer_agent_dir = str(project_root / "agents" / "developer")
-    
-    # Create persistence manager with in-memory database
-    persistence = PersistenceManager(db_path=":memory:")
-    
+
+    # Use in-memory database for test isolation
+    integration_config.persistence.db_path = ":memory:"
+
     # Create instance manager
     manager = InstanceManager(
         config=integration_config,
-        persistence=persistence,
-        prompt_cache=PromptCache()
     )
     
     # Spawn an instance with the developer agent

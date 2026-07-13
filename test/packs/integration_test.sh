@@ -10,7 +10,7 @@ echo "=== Test Pack: integration_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 300s python -m pytest \
+timeout 300s .venv/bin/python -m pytest \
   tests/integration/ \
   --tb=short -q 2>&1
 

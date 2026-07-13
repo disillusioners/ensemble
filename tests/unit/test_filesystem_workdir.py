@@ -424,7 +424,7 @@ class TestWindowsBehavior:
         )
         assert result is True
 
-    def test_windows_temp_env_recognized(self, tmp_path):
+    def test_windows_temp_env_recognized_with_tmp_path(self, tmp_path):
         """On Windows, paths under %TEMP% are recognized as temp."""
         custom_temp = "D:\\CustomTemp"
         temp_file = Path(f"{custom_temp}\\output.log")
@@ -440,7 +440,7 @@ class TestWindowsBehavior:
         )
         assert result is True
 
-    def test_windows_tmp_env_recognized(self, tmp_path):
+    def test_windows_tmp_env_recognized_with_tmp_path(self, tmp_path):
         """On Windows, paths under %TMP% are recognized as temp."""
         custom_tmp = "D:\\CustomTmp"
         tmp_file = Path(f"{custom_tmp}\\cache.bin")
@@ -456,7 +456,7 @@ class TestWindowsBehavior:
         )
         assert result is True
 
-    def test_windows_case_variation_in_temp_paths(self, tmp_path):
+    def test_windows_case_variation_in_temp_paths_with_tmp_path(self, tmp_path):
         """On Windows, case variations in temp paths are treated as same."""
         workdir = tmp_path / "workdir"
         workdir.mkdir()
@@ -472,7 +472,7 @@ class TestWindowsBehavior:
         )
         assert result is True
 
-    def test_windows_empty_temp_env_still_uses_fallback(self, tmp_path):
+    def test_windows_empty_temp_env_still_uses_fallback_with_tmp_path(self, tmp_path):
         """On Windows, empty TEMP/TMP should not break temp path resolution."""
         workdir = tmp_path / "workdir"
         workdir.mkdir()

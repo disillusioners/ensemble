@@ -261,7 +261,7 @@ class TestTaskScopedStdioClient:
                 task.cancel()
                 try:
                     await asyncio.wait_for(task, timeout=2.0)
-                except BaseException:
+                except Exception:
                     pass
 
     @pytest.mark.asyncio
@@ -306,11 +306,11 @@ class TestTaskScopedStdioClient:
             if task is not None and not task.done():
                 try:
                     await asyncio.wait_for(task, timeout=2.0)
-                except BaseException:
+                except Exception:
                     task.cancel()
                     try:
                         await task
-                    except BaseException:
+                    except Exception:
                         pass
 
 

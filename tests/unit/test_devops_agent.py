@@ -555,18 +555,57 @@ class TestDevopsToolConfiguration:
                 f"{tool} should NOT be in DevOps allowed tools (no opencode delegation)"
             )
 
-    def test_devops_tools_doc_loads(self) -> None:
+    def test_devops_tools_doc_loads(self, monkeypatch) -> None:
         """load_tools_doc_for_agent should return docs for DevOps allowed tools."""
         from daemon.loader import load_tools_doc_for_agent
+        from daemon.registry import AgentRegistry
+        from daemon.tools._tool_registry import _full_docs, _tool_metadata, clear_registry
+        import daemon.registry
 
-        # This should not raise
-        docs = load_tools_doc_for_agent("devops")
+        # Initialize and discover an AgentRegistry using the correct agents
+        # directory, following the existing project test pattern (see
+        # test_devops_discovered_in_registry). load_tools_doc_for_agent()
+        # resolves agent metadata through the global registry returned by
+        # get_registry(); a freshly discovered registry wired into that global
+        # slot guarantees the devops tool filter is visible.
+        agents_dir = DEVOPS_AGENT_DIR.parent
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
 
-        assert isinstance(docs, str)
-        assert len(docs) > 0
-        # Should contain tool categories
-        assert "Bash" in docs or "bash" in docs.lower()
-        assert "File Operations" in docs or "Filesystem" in docs or "filesystem" in docs.lower()
+        # monkeypatch handles auto-restore of the module-level registry slot
+        # on teardown, so neighbouring tests do not see this leaked registry.
+        monkeypatch.setattr(daemon.registry, "_registry", registry)
+
+        # Snapshot the current tool-registration state so we can restore it
+        # after the test. clear_registry() mutates these dicts in-place, so
+        # monkeypatch (which only handles attribute reassignment) cannot undo
+        # the mutation — we restore explicitly in finally below.
+        saved_metadata = dict(_tool_metadata)
+        saved_full_docs = dict(_full_docs)
+
+        try:
+            # Reset _tool_metadata so load_tools_doc_for_agent's
+            # _ensure_tool_metadata_populated() runs the full scan. The daemon.tools
+            # package transitively registers ``language_skip_check`` at import time,
+            # which would otherwise trigger the ensure function's early-return branch
+            # and leave bash/filesystem/etc. tools unregistered.
+            clear_registry()
+
+            # This should not raise
+            docs = load_tools_doc_for_agent("devops")
+
+            assert isinstance(docs, str)
+            assert len(docs) > 0
+            # Should contain tool categories
+            assert "Bash" in docs or "bash" in docs.lower()
+            assert "File Operations" in docs or "Filesystem" in docs or "filesystem" in docs.lower()
+        finally:
+            # Restore the tool-registration state to avoid leaking it into
+            # other tests that rely on the pre-populated tool metadata.
+            _tool_metadata.clear()
+            _tool_metadata.update(saved_metadata)
+            _full_docs.clear()
+            _full_docs.update(saved_full_docs)
 
     def test_innate_skills_empty_means_no_tool_expansion(self) -> None:
         """Empty innate_skills means no automatic tool category expansion."""

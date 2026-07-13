@@ -293,11 +293,27 @@ def _run_sqlite_migration(engine: Engine) -> None:
     # Pre-mark all OTHER migrations as applied so ``run_pending_migrations``
     # only picks up the rename migration. This isolates the test to the
     # rename contract; running the full chain would clobber seeded rows.
+    #
+    # Dedupe by version: ``discover_migrations`` can return multiple
+    # ``MigrationFile`` objects with the same version when a migrations
+    # directory contains more than one ``.sql`` file sharing a version
+    # prefix (e.g. ``20260628_000002_drop_admission_legacy.sql`` and
+    # ``20260628_000002_drop_job_queue_legacy_columns.sql``). Pre-marking
+    # both would INSERT two rows with the same ``schema_migrations.version``
+    # and fail the UNIQUE constraint on ``version PRIMARY KEY``. Since
+    # ``get_pending_migrations`` filters by version equality, marking the
+    # first occurrence is enough to short-circuit the duplicate.
     applied = runner.get_applied_versions()
     now_iso = datetime.now(timezone.utc).isoformat()
+    seen_versions: set[str] = set()
     with Session(engine) as session:
         for m in runner.discover_migrations():
-            if m.version != target.version and m.version not in applied:
+            if (
+                m.version != target.version
+                and m.version not in applied
+                and m.version not in seen_versions
+            ):
+                seen_versions.add(m.version)
                 session.add(
                     SchemaMigration(
                         version=m.version,

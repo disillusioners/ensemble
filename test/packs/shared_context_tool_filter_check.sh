@@ -56,7 +56,7 @@ AGENTS=(
 EXPECTED_COUNT=${#AGENTS[@]}
 FAIL=0
 
-"$PYTHON_BIN" - "$EXPECTED_COUNT" "${AGENTS[@]}" <<'PYEOF'
+timeout 30s "$PYTHON_BIN" - "$EXPECTED_COUNT" "${AGENTS[@]}" <<'PYEOF'
 import json
 import sys
 from pathlib import Path

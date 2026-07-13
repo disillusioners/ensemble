@@ -10,7 +10,7 @@ echo "=== Test Pack: job_queue_unit_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 120s pytest \
+timeout 120s .venv/bin/pytest \
   tests/job_queue/ \
   --tb=short -q 2>&1
 
