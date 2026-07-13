@@ -1094,7 +1094,12 @@ class TestCrossCuttingInvariants:
             _ACTIVE_JOB_IDS_SUBQUERY,
         )
 
-        assert "admission_state IN ('queued', 'active')" in _ACTIVE_JOB_IDS_SUBQUERY
+        # The order of values inside the IN list is implementation
+        # detail (currently produced sorted: ``('active','queued')``),
+        # so we check membership rather than literal string equality.
+        assert "admission_state IN" in _ACTIVE_JOB_IDS_SUBQUERY
+        assert "'queued'" in _ACTIVE_JOB_IDS_SUBQUERY
+        assert "'active'" in _ACTIVE_JOB_IDS_SUBQUERY
         # And the legacy ``status IN`` predicate must be gone.
         assert "status IN" not in _ACTIVE_JOB_IDS_SUBQUERY
 

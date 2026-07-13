@@ -31,6 +31,8 @@ POLL_INTERVAL = 0.5  # seconds between status checks
 
 @dataclass
 class TestResult:
+    # Tell pytest this dataclass is NOT a test class (it just stores results).
+    __test__ = False
     name: str
     passed: bool
     message: str = ""
@@ -38,6 +40,8 @@ class TestResult:
 
 @dataclass
 class TestSuite:
+    # Tell pytest this dataclass is NOT a test class (it aggregates results).
+    __test__ = False
     results: list[TestResult] = field(default_factory=list)
     test_instance_id: Optional[str] = None
     test_instance_ids: list[str] = field(default_factory=list)

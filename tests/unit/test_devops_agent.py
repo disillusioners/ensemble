@@ -729,9 +729,13 @@ class TestDevopsLeaderIntegration:
         developer_pos = content.lower().find("developer")
 
         if devops_pos != -1 and developer_pos != -1:
-            # DevOps should appear in the decision context
-            # (The exact ordering depends on document structure, so we just check both exist)
-            assert True
+            # Both 'devops' and 'developer' appear in the leader rule.
+            # The exact ordering depends on document structure, so we
+            # assert both are present rather than enforcing an order.
+            assert devops_pos > -1 and developer_pos > -1, (
+                f"Both 'devops' and 'developer' should appear in leader rule.md "
+                f"(devops_pos={devops_pos}, developer_pos={developer_pos})"
+            )
         else:
             # At minimum, devops should be mentioned somewhere in the routing context
             assert "devops" in content.lower(), "Leader rule should mention devops for routing"

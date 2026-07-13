@@ -76,10 +76,17 @@ class TestQueuedMessage:
             status="processing",
             error_message="Previous error"
         )
-        
+
+        assert msg.message_id == "test-id"
+        assert msg.instance_id == "test-instance"
+        assert msg.content == "test content"
+        assert msg.source == "test"
         assert msg.priority == 0
         assert msg.retry_count == 3
         assert msg.metadata == {"key": "value"}
+        assert msg.created_at == now
         assert msg.processing_started_at == now
-        assert msg.admission_state == "active"
+        assert msg.status == "processing"
+        # admission_state was removed from QueuedMessage; status alone is
+        # the surviving column for message lifecycle state.
         assert msg.error_message == "Previous error"

@@ -43,6 +43,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
+pytestmark = pytest.mark.integration
+
 
 # =============================================================================
 # Engine + repository stack — self-contained per test

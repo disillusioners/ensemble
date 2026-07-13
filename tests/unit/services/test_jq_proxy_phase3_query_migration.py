@@ -317,11 +317,22 @@ class TestPhase3QueryMigrationSource:
         """``_ACTIVE_JOB_IDS_SUBQUERY`` must include BOTH 'queued'
         AND 'active' (C3 fix). Narrowing to only 'active' would
         race-delete locks in the B1 single-transaction window.
+
+        The order of values inside the IN list is implementation
+        detail (currently produced sorted: ``('active','queued')``),
+        so we check membership rather than literal string equality.
         """
-        assert "admission_state IN ('queued', 'active')" in _ACTIVE_JOB_IDS_SUBQUERY, (
-            "_ACTIVE_JOB_IDS_SUBQUERY must include BOTH 'queued' AND "
-            "'active'. The 'queued' inclusion protects the B1 single-"
-            "transaction window from race-deletes (C3 fix)."
+        assert "admission_state IN" in _ACTIVE_JOB_IDS_SUBQUERY, (
+            "_ACTIVE_JOB_IDS_SUBQUERY must filter on admission_state "
+            "via an IN list."
+        )
+        assert "'queued'" in _ACTIVE_JOB_IDS_SUBQUERY, (
+            "_ACTIVE_JOB_IDS_SUBQUERY must include 'queued' (C3 fix). "
+            "Dropping 'queued' would race-delete locks for jobs still "
+            "in the B1 single-transaction window."
+        )
+        assert "'active'" in _ACTIVE_JOB_IDS_SUBQUERY, (
+            "_ACTIVE_JOB_IDS_SUBQUERY must include 'active'."
         )
         # Negative: the predicate MUST NOT use only 'active'.
         # The literal `IN ('active')` would be a regression.
@@ -1295,5 +1306,10 @@ class TestSmoke:
         delete its lock.
         """
         # The subquery is just a SQL string. Verify it explicitly
-        # filters on admission_state and includes 'queued'.
-        assert "admission_state IN ('queued', 'active')" in _ACTIVE_JOB_IDS_SUBQUERY
+        # filters on admission_state and includes 'queued'. The
+        # order of values inside the IN list is implementation
+        # detail (currently produced sorted: ``('active','queued')``),
+        # so we check membership rather than literal string equality.
+        assert "admission_state IN" in _ACTIVE_JOB_IDS_SUBQUERY
+        assert "'queued'" in _ACTIVE_JOB_IDS_SUBQUERY
+        assert "'active'" in _ACTIVE_JOB_IDS_SUBQUERY
