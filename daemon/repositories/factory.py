@@ -29,6 +29,7 @@ from .skill.repository import (
     SkillTriggerRepository,
     SkillUsageRepository,
 )
+from .skill.skill_bank_repository import SkillBankRepository
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -874,6 +875,45 @@ def create_skill_ab_test_repository(
     return SkillABTestRepository(engine)
 
 
+def create_skill_bank_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SkillBankRepository:
+    """Create a SkillBankRepository from configuration or shared engine.
+
+    Persistence layer for the Skill Bank — an isolated,
+    user-facing CRUD store (NOT part of the Skill Evolution
+    System). One table is created on first use via
+    ``SQLModel.metadata.create_all``:
+
+    * ``skill_bank`` — user-managed skill templates, scoped per
+      project (or ``project_id IS NULL`` for global). No FK to
+      ``skills``. No counters, no lineage, no embeddings.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SkillBankRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SkillBankRepository(engine)
+
+
 # Backward compatibility alias
 create_task_repository = create_job_repository
 
@@ -897,5 +937,6 @@ __all__ = [
     "create_skill_trigger_repository",
     "create_skill_embedding_repository",
     "create_skill_ab_test_repository",
+    "create_skill_bank_repository",
     "run_migrations",
 ]

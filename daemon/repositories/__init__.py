@@ -58,6 +58,7 @@ from .skill.models import (
     SkillLineage,
     SkillTrigger,
     SkillUsageRecord,
+    SkillBankItem,
 )
 
 # Dependency Bus repository.
@@ -90,6 +91,7 @@ from .factory import (
     create_skill_trigger_repository,
     create_skill_embedding_repository,
     create_skill_ab_test_repository,
+    create_skill_bank_repository,
     run_migrations,
 )
 
@@ -159,6 +161,7 @@ __all__ = [
     "SkillTrigger",
     "SkillEmbedding",
     "SkillABTest",
+    "SkillBankItem",
     # Dependency Bus
     "DependencyWatcher",
     "DependencyWatcherState",
@@ -182,5 +185,6 @@ __all__ = [
     "create_skill_trigger_repository",
     "create_skill_embedding_repository",
     "create_skill_ab_test_repository",
+    "create_skill_bank_repository",
     "run_migrations",
 ]

@@ -68,6 +68,7 @@ from daemon.routers import (
     notifications_router,
     migration_router,
     settings_router,       # /api/settings (Phase 1: user language preference)
+    skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
 )
 
 from daemon.mcp import (
@@ -1350,6 +1351,7 @@ def create_app() -> FastAPI:
     api_router.include_router(migration_router)       # /api/migration
     api_router.include_router(database_router)        # /api/database
     api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
+    api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
 
     app.include_router(api_router)
 

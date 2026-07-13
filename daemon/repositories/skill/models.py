@@ -603,3 +603,50 @@ class SkillABTest(SQLModel, table=True):
             "resolved_at": self.resolved_at,
             "winner_skill_id": self.winner_skill_id,
         }
+
+
+class SkillBankItem(SQLModel, table=True):
+    """A skill stored in the Skill Bank — a user-managed template.
+
+    Isolated from the skill evolution system: no FK to ``skills``,
+    no counters, no lineage, no triggers, no embeddings. Pure
+    user-facing CRUD storage.
+
+    Attributes:
+        id: UUID4 primary key (TEXT for dual-driver portability).
+        project_id: Owning project. ``NULL`` = global/shared.
+        name: Human-readable name (NOT unique — duplicates allowed).
+        description: One-line summary (default empty string).
+        content: The skill body — markdown / instructions.
+        category: Free-form category string (default ``'workflow'``).
+        created_at: ISO-8601 timestamp, immutable.
+        updated_at: ISO-8601 timestamp, bumped on every update.
+    """
+
+    __tablename__ = "skill_bank"
+    __table_args__ = (Index("ix_skill_bank_project_id", "project_id"),)
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+        max_length=64,
+    )
+    project_id: Optional[str] = Field(default=None, max_length=64)
+    name: str = Field(sa_column=Column(String, nullable=False), max_length=256)
+    description: str = Field(default="")
+    content: str = Field(sa_column=Column(String, nullable=False))
+    category: str = Field(default="workflow", max_length=64)
+    created_at: str = Field(default_factory=_now_iso)
+    updated_at: str = Field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "name": self.name,
+            "description": self.description,
+            "content": self.content,
+            "category": self.category,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }

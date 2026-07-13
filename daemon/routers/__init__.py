@@ -18,6 +18,7 @@ from .mcp_servers import router as mcp_servers_router
 from .notifications import router as notifications_router
 from .migration import router as migration_router
 from .settings import router as settings_router
+from .skill_bank import router as skill_bank_router
 
 __all__ = [
     "agents_router",
@@ -38,4 +39,5 @@ __all__ = [
     "notifications_router",
     "migration_router",
     "settings_router",
+    "skill_bank_router",
 ]

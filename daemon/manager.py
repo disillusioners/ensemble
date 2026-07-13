@@ -43,6 +43,7 @@ from .repositories import (
     create_skill_usage_repository,
     create_skill_trigger_repository,
     create_skill_ab_test_repository,
+    create_skill_bank_repository,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -734,6 +735,11 @@ class InstanceManager:
 
         # NEW: MCP Server repository for MCP server configuration storage
         self._mcp_server_repository = create_mcp_server_repository(engine=self._engine, create_tables=False)
+
+        # Skill Bank — standalone user-facing CRUD (NOT gated by skill_evolution)
+        self._skill_bank_repo = create_skill_bank_repository(
+            engine=self._engine, create_tables=False
+        )
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
@@ -3054,6 +3060,20 @@ class InstanceManager:
                 ")"
             ),
             "CREATE INDEX IF NOT EXISTS idx_skill_ab_tests_group ON skill_ab_tests(ab_test_group)",
+            # ── Skill Bank table (isolated user CRUD, not skill evolution) ────
+            (
+                "CREATE TABLE IF NOT EXISTS skill_bank ("
+                "id TEXT PRIMARY KEY, "
+                "project_id TEXT, "
+                "name TEXT NOT NULL, "
+                "description TEXT NOT NULL DEFAULT '', "
+                "content TEXT NOT NULL, "
+                "category TEXT NOT NULL DEFAULT 'workflow', "
+                "created_at TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_skill_bank_project ON skill_bank(project_id)",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
