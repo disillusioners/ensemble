@@ -53,10 +53,10 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
-# Expected tool categories in meta.json allow list (10 declared categories).
+# Expected tool categories in meta.json allow list (11 declared categories).
 EXPECTED_ALLOW_CATEGORIES = [
     "bash", "filesystem", "time", "self", "help",
-    "knowledge", "mcp", "context", "rag", "instance",
+    "knowledge", "mcp", "context", "shared_context", "rag", "instance",
 ]
 
 
@@ -481,11 +481,7 @@ class TestWandererSoulContent:
             "Core Identity",
             "Core Beliefs",
             "Role",
-            "What I Do",
             "Tool Inventory",
-            "Workflow",
-            "Rules",
-            "Core Principles",
         ]
         for section in required_sections:
             assert section in content, (

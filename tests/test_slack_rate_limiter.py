@@ -158,24 +158,33 @@ class TestAcquireAndExecute:
         assert success is False
         assert result is None
 
+    @pytest.mark.no_xdist
     @pytest.mark.asyncio
     async def test_acquire_and_execute_timeout(self, limiter):
         """Test failure when rate limit can't be acquired."""
-        # Create a limiter and exhaust TIER_1 bucket
+        # Create a limiter and exhaust TIER_2 bucket. TIER_2 is used (not
+        # TIER_1) so the max_wait floor in ``acquire_and_execute`` stays
+        # small (``TIER_1`` would bump 0.1s → 65s and the loop would sleep
+        # 1s per iteration). The intent of this test is to verify the
+        # timeout path of ``acquire_and_execute``, not a specific tier.
         limiter = SlackTieredRateLimiter()
-        tier1_bucket = limiter._buckets[SlackTier.TIER_1]
+        tier2_bucket = limiter._buckets[SlackTier.TIER_2]
 
-        # Drain all tokens and prevent refill by holding the lock
-        async with tier1_bucket._lock:
-            tier1_bucket._tokens = 0
-            tier1_bucket._last_refill = float('inf')  # Prevent time-based refill
+        # Drain all tokens and prevent refill by holding the lock.
+        async with tier2_bucket._lock:
+            tier2_bucket._tokens = 0
+            tier2_bucket._last_refill = float('inf')  # Prevent time-based refill
 
-        # Mock the bucket's acquire to always return False
-        with patch.object(tier1_bucket, 'acquire', return_value=False):
+        # Prod ``wait_and_acquire`` calls ``_try_acquire_unlocked`` directly
+        # (NOT ``acquire``) — see ``daemon/sources/adapters/slack/rate_limiter.py``
+        # lines 224-230. We must patch BOTH so the timeout path actually
+        # observes "no token available" instead of looping via real sleeps.
+        with patch.object(tier2_bucket, 'acquire', return_value=False), \
+             patch.object(tier2_bucket, '_try_acquire_unlocked', return_value=False):
             mock_fn = AsyncMock(return_value="should not execute")
 
             success, result = await limiter.acquire_and_execute(
-                "admin.users.list",  # TIER_1 method
+                "chat.postMessage",  # TIER_2 method (no max_wait floor bump)
                 mock_fn,
                 max_wait=0.1  # Very short timeout
             )

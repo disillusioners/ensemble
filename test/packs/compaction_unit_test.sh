@@ -10,7 +10,7 @@ echo "=== Test Pack: compaction_unit_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 120s pytest \
+timeout 120s .venv/bin/pytest \
   tests/unit/test_compaction.py \
   tests/unit/test_find_near_instance.py \
   tests/unit/test_graph_retry_integration.py \

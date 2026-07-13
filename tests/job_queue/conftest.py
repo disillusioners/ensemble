@@ -181,6 +181,50 @@ def concurrent_lock_manager(concurrent_lock_repo):
 
 
 @pytest.fixture
+def concurrent_engine(tmp_path):
+    """SQLAlchemy ``Engine`` backed by a file on disk (default QueuePool).
+
+    Use this for tests that need a ``JobRepository`` exercising concurrent
+    ``atomic_transition`` / ``atomic_retry`` / ``start_job`` writes
+    against the same row. The file-backed engine hands each thread its
+    own SQLite connection, which is necessary to observe the
+    cross-connection UPDATE / SQL-guard race that the production code
+    defends against.
+
+    StaticPool (the default for the in-memory ``engine`` fixture) shares
+    a single connection across threads and SQLite's per-connection
+    parameter binding is not safe under concurrent statements —
+    concurrent threads trip ``InterfaceError('bad parameter or other
+    API misuse')`` instead of producing a clean ``ValueError`` /
+    ``InvalidTransitionError`` for the loser.
+    """
+    db_path = tmp_path / "job_repository_concurrent.db"
+    eng = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def concurrent_repository(concurrent_engine):
+    """JobRepository backed by a file-backed SQLite engine.
+
+    Pair this with ``concurrent_engine`` (or use it directly) in
+    concurrent tests that exercise ``atomic_transition``,
+    ``atomic_retry``, or ``start_job``. Each thread gets its own
+    SQLite connection, so the SQL-level guard produces a clean
+    ``ValueError`` / ``InvalidTransitionError`` for the losing
+    writer — exactly the contract these tests assert on.
+    """
+    return JobRepository(concurrent_engine)
+
+
+@pytest.fixture
 def queue_repository(engine):
     """Create JobQueueRepository instance with fresh database."""
     repo = JobQueueRepository(engine)

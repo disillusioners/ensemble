@@ -693,6 +693,14 @@ async def test_manager_streaming_multiple_messages_same_execution(
     mock_graph.astream = mock_astream
     mock_graph.invoke = Mock(return_value={"messages": [msg1, msg2]})
 
+    # Disable the language-check node so both streamed messages are
+    # dispatched individually. Without this, ``mock_graph.language_check_active``
+    # auto-creates as a truthy Mock and the production path buffers every
+    # message into ``_deferred_final_message``, dispatching only the LAST
+    # one — collapsing ``dispatch_message.call_count`` to 1 even when two
+    # distinct messages streamed through.
+    mock_graph.language_check_active = False
+
     mock_dispatcher = AsyncMock()
     mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
 

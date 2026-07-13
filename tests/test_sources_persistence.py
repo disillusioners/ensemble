@@ -13,8 +13,21 @@ from daemon.sources import persistence
 
 
 @pytest.fixture
-def conn():
+def conn(monkeypatch):
     """Create a temporary SQLite database with the required schema."""
+    # Disable Fernet encryption for the persistence-layer unit tests.
+    # ``daemon.sources.persistence._row_to_dict`` instantiates a
+    # ``CredentialManager`` on every read which reads
+    # ``SOURCE_CREDENTIAL_KEY`` from the environment. Developers have
+    # this set in their ``.env`` (real Fernet key), so without this
+    # unset the manager would try to decrypt the plain JSON
+    # credentials these tests store (``'{"bot_token": "abc123"}'``)
+    # and raise ``InvalidToken`` / ``binascii.Error: Incorrect
+    # padding``. These tests exercise the persistence layer only —
+    # the encryption round-trip is covered by ``tests/test_db_tools.py``
+    # via the ``fernet_key`` / ``credential_manager`` fixtures.
+    monkeypatch.delenv("SOURCE_CREDENTIAL_KEY", raising=False)
+
     fd, path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
     conn = sqlite3.connect(path)

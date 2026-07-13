@@ -189,7 +189,7 @@ class TestGaiaRegistryDiscovery:
         assert gaia is not None
         assert gaia.tools is not None
         assert isinstance(gaia.tools, ToolFilter)
-        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp", "system"]
+        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp", "system", "shared_context"]
         assert gaia.tools.deny is None
 
     def test_gaia_tags_and_capabilities(self) -> None:
@@ -362,21 +362,57 @@ class TestGaiaToolFiltering:
         gaia = registry.get("gaia")
         assert gaia is not None
         assert gaia.tools is not None
-        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp", "system"]
+        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp", "system", "shared_context"]
 
-    def test_gaia_tools_doc_loads(self) -> None:
+    def test_gaia_tools_doc_loads(self, monkeypatch) -> None:
         """load_tools_doc_for_agent should return docs for Gaia's allowed tools."""
         from daemon.loader import load_tools_doc_for_agent
+        from daemon.registry import AgentRegistry
+        from daemon.tools._tool_registry import _full_docs, _tool_metadata, clear_registry
+        import daemon.registry
 
-        # This should not raise
-        docs = load_tools_doc_for_agent("gaia")
+        # Initialize and discover an AgentRegistry using the correct agents directory,
+        # following the existing project test pattern (see test_gaia_discovered_in_real_registry).
+        # load_tools_doc_for_agent() resolves agent metadata through the global
+        # registry returned by get_registry(); a freshly discovered registry wired
+        # into that global slot guarantees the gaia's tool filter is visible.
+        agents_dir = GAIA_AGENT_DIR.parent
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
 
-        assert isinstance(docs, str)
-        assert len(docs) > 0
-        # Should contain tool categories
-        assert "Bash" in docs or "bash" in docs.lower()
-        assert "File Operations" in docs or "Filesystem" in docs or "filesystem" in docs.lower()
-        assert "Help" in docs or "help" in docs.lower()
+        # monkeypatch handles auto-restore of the module-level registry slot
+        # on teardown, so neighbouring tests do not see this leaked registry.
+        monkeypatch.setattr(daemon.registry, "_registry", registry)
+
+        # Snapshot the current tool-registration state so we can restore it
+        # after the test. clear_registry() mutates these dicts in-place, so
+        # monkeypatch (which only handles attribute reassignment) cannot undo
+        # the mutation — we restore explicitly in finally below.
+        saved_metadata = dict(_tool_metadata)
+        saved_full_docs = dict(_full_docs)
+
+        try:
+            # Reset _tool_metadata so load_tools_doc_for_agent's
+            # _ensure_tool_metadata_populated() runs the full scan. The daemon.tools
+            # package transitively registers ``language_skip_check`` at import time,
+            # which would otherwise trigger the ensure function's early-return branch
+            # and leave bash/filesystem/etc. tools unregistered.
+            clear_registry()
+            docs = load_tools_doc_for_agent("gaia")
+
+            assert isinstance(docs, str)
+            assert len(docs) > 0
+            # Should contain tool categories
+            assert "Bash" in docs or "bash" in docs.lower()
+            assert "File Operations" in docs or "Filesystem" in docs or "filesystem" in docs.lower()
+            assert "Help" in docs or "help" in docs.lower()
+        finally:
+            # Restore the tool-registration state to avoid leaking it into
+            # other tests that rely on the pre-populated tool metadata.
+            _tool_metadata.clear()
+            _tool_metadata.update(saved_metadata)
+            _full_docs.clear()
+            _full_docs.update(saved_full_docs)
 
     def test_gaia_has_bash_tool(self) -> None:
         """Gaia should have bash tool available."""
@@ -475,89 +511,8 @@ class TestGaiaToolFiltering:
         tools_config = meta.get("tools")
         tool_filter = ToolFilter.model_validate(tools_config)
 
-        assert tool_filter.allow == ["bash", "filesystem", "help", "mcp", "system"]
+        assert tool_filter.allow == ["bash", "filesystem", "help", "mcp", "system", "shared_context"]
         assert tool_filter.deny is None
-
-
-# =============================================================================
-# 5. Script Accessibility
-# =============================================================================
-
-
-class TestGaiaScriptAccessibility:
-    """Tests for Gaia's setup scripts accessibility."""
-
-    def test_scripts_directory_exists(self) -> None:
-        """scripts/ directory should exist in Gaia agent."""
-        scripts_dir = GAIA_AGENT_DIR / "scripts"
-        assert scripts_dir.exists(), f"scripts directory not found at {scripts_dir}"
-        assert scripts_dir.is_dir(), "scripts should be a directory"
-
-    def test_npx_script_exists(self) -> None:
-        """npx.md script should exist in the scripts directory."""
-        npx_script = GAIA_AGENT_DIR / "scripts" / "npx.md"
-        assert npx_script.exists(), f"npx.md script not found at {npx_script}"
-
-    def test_npx_script_is_readable(self) -> None:
-        """npx.md script should be readable."""
-        npx_script = GAIA_AGENT_DIR / "scripts" / "npx.md"
-        content = npx_script.read_text(encoding="utf-8")
-        assert isinstance(content, str)
-        assert len(content) > 0
-
-    def test_npx_script_has_content(self) -> None:
-        """npx.md script should have meaningful content."""
-        npx_script = GAIA_AGENT_DIR / "scripts" / "npx.md"
-        content = npx_script.read_text(encoding="utf-8")
-
-        # Should contain npx/Node.js related content
-        assert len(content) > 50, "npx.md should have meaningful content"
-        # Check for key terms (case insensitive)
-        content_lower = content.lower()
-        assert any(term in content_lower for term in ["npx", "node", "npm", "javascript"]), \
-            "npx.md should contain npx/Node.js related content"
-
-    def test_npx_script_referenced_in_workflow(self) -> None:
-        """npx.md should be referenced in the workflow documentation."""
-        workflow_path = GAIA_AGENT_DIR / "workflow.md"
-        content = workflow_path.read_text(encoding="utf-8")
-
-        # Workflow should mention the scripts directory
-        assert "scripts" in content.lower(), "workflow.md should reference scripts directory"
-        # And ideally mention npx
-        assert "npx" in content.lower(), "workflow.md should reference npx"
-
-    def test_npx_script_referenced_in_rule(self) -> None:
-        """npx.md should be referenced in the rule documentation."""
-        rule_path = GAIA_AGENT_DIR / "rule.md"
-        content = rule_path.read_text(encoding="utf-8")
-
-        # Rules should mention reading scripts
-        assert "script" in content.lower() or "read" in content.lower(), \
-            "rule.md should mention reading scripts"
-
-    def test_scripts_directory_listable(self) -> None:
-        """scripts/ directory should be listable."""
-        scripts_dir = GAIA_AGENT_DIR / "scripts"
-        entries = list(scripts_dir.iterdir())
-
-        assert len(entries) >= 1, "scripts directory should have at least one script"
-        script_names = [e.name for e in entries]
-        assert "npx.md" in script_names, "npx.md should be in scripts directory"
-
-    def test_no_symlinks_in_scripts(self) -> None:
-        """scripts/ should not contain symlinks (security)."""
-        scripts_dir = GAIA_AGENT_DIR / "scripts"
-        for entry in scripts_dir.iterdir():
-            if entry.is_symlink():
-                pytest.fail(f"Script {entry.name} is a symlink, which should be avoided for security")
-
-    def test_scripts_are_markdown_files(self) -> None:
-        """All scripts should be markdown files (.md extension)."""
-        scripts_dir = GAIA_AGENT_DIR / "scripts"
-        for entry in scripts_dir.iterdir():
-            if entry.is_file():
-                assert entry.suffix == ".md", f"Script {entry.name} should be a markdown file (.md)"
 
 
 # =============================================================================

@@ -54,6 +54,8 @@ from daemon.services.skill_metrics_service import (
     SkillMetricsService,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

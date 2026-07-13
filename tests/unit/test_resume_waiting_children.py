@@ -67,7 +67,13 @@ class MockTask:
     ``task_id`` is intentionally a string (not an int) so the legacy
     ``job_id`` assertions (``result["job_id"] == "job-..."``) keep
     working unchanged — ``resume_processing_job`` derives
-    ``old_job_id = str(existing_task.id)``.
+    ``old_job_id = existing_task.work_id`` (the Task's stable UUID4
+    cross-system handle, NOT the integer PK ``id``).
+
+    ``work_id`` defaults to ``str(uuid.uuid4())`` so each mock has a
+    unique UUID4. Tests that compare ``result["job_id"]`` against a
+    known value should pass ``work_id="..."`` explicitly to pin the
+    assertion to a deterministic value.
     """
 
     def __init__(
@@ -80,6 +86,7 @@ class MockTask:
         # ``task_id=``. Accept both so existing test bodies do not need
         # to be rewritten. ``job_id`` wins when both are supplied.
         job_id: str | None = None,
+        work_id: str | None = None,
     ):
         self.id = job_id if job_id is not None else (task_id or "test-job-123")
         self.task_type = task_type
@@ -87,6 +94,12 @@ class MockTask:
         self.message_id = message_id
         self.status = status
         self.worker_id = "worker-0"
+        # Stable UUID4 cross-system handle. Production
+        # ``resume_processing_job`` derives ``old_job_id`` from this
+        # attribute (NOT the integer PK ``id``). Tests should pin a
+        # deterministic value via ``work_id="..."`` when asserting
+        # ``result["job_id"]``.
+        self.work_id = work_id if work_id is not None else str(uuid.uuid4())
 
 
 class MockJob(MockTask):
@@ -206,6 +219,7 @@ class TestResumeQueueFlow:
         """Root instance with old_jobs should schedule background processing and return immediately."""
         instance_id = "parent-instance-123"
         job_id = "job-abc-789"
+        work_id = "work-abc-789"
         message_id = "msg-xyz-456"
 
         # Setup: TaskRepository reports a PAUSED/RUNNING PROCESS_MESSAGE
@@ -214,7 +228,11 @@ class TestResumeQueueFlow:
         # been removed; the new primitive lives on ``_task_repo``
         # (Task 2.5.2).
         mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=MockJob(job_id=job_id, message_id=message_id)
+            return_value=MockJob(
+                job_id=job_id,
+                message_id=message_id,
+                work_id=work_id,
+            )
         )
 
         # Instance is complete (waiting_for=0)
@@ -232,7 +250,11 @@ class TestResumeQueueFlow:
 
         # Should return immediately with "resuming" status
         assert result["instance_id"] == instance_id
-        assert result["job_id"] == job_id
+        # Production derives ``result["job_id"]`` from
+        # ``existing_task.work_id`` (the Task's stable UUID4 cross-system
+        # handle, NOT the integer PK ``id``). Compare against the pinned
+        # ``work_id`` so the assertion is deterministic.
+        assert result["job_id"] == work_id
         assert result["message_id"] is not None
         assert result["status"] == "resuming"
 
@@ -331,6 +353,7 @@ class TestResumeQueueFlow:
         """
         instance_id = "parent-instance-multi"
         job_id_1 = "job-1-123"
+        work_id_1 = "work-1-123"
         job_id_2 = "job-2-456"
 
         # Setup: the first PAUSED/RUNNING PROCESS_MESSAGE task for this
@@ -338,7 +361,11 @@ class TestResumeQueueFlow:
         # returns a single Task — the "extra" sibling is no longer
         # queried because the task is the canonical source of truth.)
         mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=MockJob(job_id=job_id_1, message_id="msg-1")
+            return_value=MockJob(
+                job_id=job_id_1,
+                message_id="msg-1",
+                work_id=work_id_1,
+            )
         )
 
         # Instance is complete (waiting_for=0)
@@ -356,7 +383,9 @@ class TestResumeQueueFlow:
 
         # Should return immediately with "resuming" status
         assert result["status"] == "resuming"
-        assert result["job_id"] == job_id_1  # First (only) task is used
+        # ``result["job_id"]`` is the Task's ``work_id`` (production
+        # contract); compare against the pinned ``work_id_1``.
+        assert result["job_id"] == work_id_1  # First (only) task is used
 
         # Should NOT call _process_message_with_tracking synchronously
         mock_manager._process_message_with_tracking.assert_not_called()
@@ -399,10 +428,15 @@ class TestResumeQueueFlow:
         """Root instance with waiting_for > 0 keeps job as PROCESSING - background task handles this."""
         instance_id = "parent-waiting-for"
         job_id = "job-waiting-123"
+        work_id = "work-waiting-123"
 
         # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
         mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=MockJob(job_id=job_id, message_id="msg-1")
+            return_value=MockJob(
+                job_id=job_id,
+                message_id="msg-1",
+                work_id=work_id,
+            )
         )
 
         # With waiting_for > 0, job should stay PROCESSING
@@ -420,7 +454,9 @@ class TestResumeQueueFlow:
 
         # Should return immediately with "resuming" status
         assert result["status"] == "resuming"
-        assert result["job_id"] == job_id
+        # ``result["job_id"]`` is the Task's ``work_id`` (production
+        # contract); compare against the pinned ``work_id``.
+        assert result["job_id"] == work_id
         assert result["message_id"] is not None
 
         # Should NOT call _process_message_with_tracking synchronously

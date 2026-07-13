@@ -90,7 +90,6 @@ async def test_leader_spawns_developer_and_receives_report(
     8. Leader processes the report message
     """
     from daemon.manager import InstanceManager
-    from daemon.persistence import get_instance_metadata
     
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
@@ -221,12 +220,12 @@ Wait for it to respond. Do not use any other tools."""
     logger.info("=" * 70)
     
     # Check Leader's metadata for children
-    leader_meta = get_instance_metadata(manager.conn, leader_instance_id)
+    leader_meta = manager.get_instance_info(leader_instance_id)
     logger.info(f"[TEST] Leader has {len(leader_meta.get('children', []))} child instance(s)")
     
     if leader_meta.get('children'):
         for child_id in leader_meta['children']:
-            child_meta = get_instance_metadata(manager.conn, child_id)
+            child_meta = manager.get_instance_info(child_id)
             logger.info(f"[TEST]   Child: {child_meta.get('agent_name')} ({child_id[:8]}...)")
     
     # Log all events
@@ -317,7 +316,6 @@ async def test_completion_report_message_format(
     and verifies the report format when Developer completes.
     """
     from daemon.manager import InstanceManager
-    from daemon.persistence import get_instance_metadata
     
     integration_config.persistence.db_path = str(test_db_path)
     
@@ -341,7 +339,7 @@ async def test_completion_report_message_format(
     logger.info(f"[TEST] Developer (child): {developer_instance_id[:8]}...")
     
     # Verify parent-child relationship
-    developer_meta = get_instance_metadata(manager.conn, developer_instance_id)
+    developer_meta = manager.get_instance_info(developer_instance_id)
     assert developer_meta['parent_id'] == leader_instance_id, "Developer should have Leader as parent"
     assert developer_meta['agent_name'] == 'Developer', "Agent name should be 'Developer'"
     logger.info("[TEST] ✅ Parent-child relationship verified")

@@ -725,7 +725,8 @@ class TestImagesWithoutVisionConfig:
                 asyncio.run(send_message(
                     instance_id="test-instance-id",
                     message=message,
-                    request=mock_request
+                    request=mock_request,
+                    response=MagicMock(),
                 ))
             
             assert exc_info.value.status_code == 400
@@ -735,46 +736,50 @@ class TestImagesWithoutVisionConfig:
         """Sending text-only to instance without vision model should succeed."""
         from unittest.mock import AsyncMock, MagicMock, patch
         from datetime import datetime, timezone
-        
-        # Mock result from enqueue_message
+
+        # Mock result from enqueue_message_job
         mock_result = MagicMock()
         mock_result.message_id = "test-msg-id"
-        
+        mock_result.job_id = "test-job-id"  # MessageResponse.job_id is str | None
+
         # Create a mock manager config with no model_vision
         mock_config = MagicMock()
         mock_config.llm.model_vision = None  # No vision configured
-        
+
         # Create mock manager
         mock_manager = MagicMock()
         mock_manager.config = mock_config
         mock_manager.get_instance = AsyncMock()  # Instance exists
-        mock_manager.enqueue_message = AsyncMock(return_value=mock_result)
+        # Phase 5 cutover: send_message router now dispatches via
+        # enqueue_message_job (creates JobItem mirror), not enqueue_message.
+        mock_manager.enqueue_message_job = AsyncMock(return_value=mock_result)
         # Phase 3: routers check manager.is_write_paused; MagicMock auto-attr is truthy → 503.
         mock_manager.is_write_paused = False
 
         # Create mock request with app.state.manager
         mock_request = MagicMock()
         mock_request.app.state.manager = mock_manager
-        
+
         # Patch _get_manager to return our mock
         with patch("daemon.routers.messages._get_manager", return_value=mock_manager):
             from daemon.routers.messages import send_message
             from daemon.models import MessageCreate
-            
+
             # Create text-only message (no images)
             message = MessageCreate(content="Hello")
-            
+
             # Call should succeed (no HTTPException)
             import asyncio
-            response = asyncio.run(send_message(
+            asyncio.run(send_message(
                 instance_id="test-instance-id",
                 message=message,
-                request=mock_request
+                request=mock_request,
+                response=MagicMock(),
             ))
-            
-            # Verify enqueue was called with images=None
-            mock_manager.enqueue_message.assert_called_once()
-            call_kwargs = mock_manager.enqueue_message.call_args.kwargs
+
+            # Verify enqueue_message_job was called with images=None
+            mock_manager.enqueue_message_job.assert_called_once()
+            call_kwargs = mock_manager.enqueue_message_job.call_args.kwargs
             assert call_kwargs["images"] is None
 
 

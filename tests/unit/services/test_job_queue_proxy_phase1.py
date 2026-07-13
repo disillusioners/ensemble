@@ -296,18 +296,30 @@ class TestInstanceDerivedStatus:
             f"Instance status (Phase 1 invariant violated)."
         )
 
-    def test_completed_job_mirror_overridden_by_active_instance(
+    def test_terminal_admission_state_wins_over_active_instance(
         self, engine, resolver
     ):
-        """JobItem.status='completed' + Instance.status='idle'
-        → WorkRecord.status='processing' (from Instance, NOT 'completed').
+        """JobItem.admission_state='done' + Instance.status='running'
+        → WorkRecord.status='completed' (from terminal admission_state,
+        NOT 'processing' from the Instance).
 
-        Drift case: the JobItem mirror says "completed" but the
-        Instance is still active (e.g. a re-enqueue / retry path that
-        updated the Instance without updating the mirror yet, or a
-        mirror that was written by an older code path). Phase 1 says
-        the Instance wins — the response should reflect "work in
-        flight", not "all done".
+        Phase 1 / Phase 7c invariant: ``_job_to_record`` short-circuits
+        on ``admission_state='done'`` BEFORE consulting the Instance.
+        The terminal ``admission_state`` is the source of truth for
+        terminal status reporting — even if a backing Instance row
+        still reports 'running' (e.g. the instance hadn't observed its
+        own termination heartbeat yet, or a re-enqueue / retry path
+        updated the Instance without rewriting the JobItem terminal
+        state), the resolver surfaces the terminal canonical status
+        (``'completed'``) so SSE consumers can detect completion.
+
+        The previous "mirror overridden by active instance" framing
+        was incorrect: terminal admission_state is a hard terminal
+        marker, not a mirror that the Instance can override. The
+        only override the Instance is allowed to make is for
+        non-terminal admission states (``queued`` / ``active``),
+        which is covered by
+        ``test_running_instance_overrides_pending_job_status``.
         """
         _seed_instance(engine, instance_id="inst-drift")
         jid = _seed_job(
@@ -319,9 +331,13 @@ class TestInstanceDerivedStatus:
         record = resolver.resolve_work(jid)
 
         assert record is not None
-        assert record.status == "processing", (
-            "JobItem mirror ('completed') leaked through despite an "
-            "active Instance — Phase 1 invariant violated."
+        # Terminal admission_state wins — Instance is not consulted
+        # for done rows (see ``_job_to_record`` DONE branch).
+        assert record.status == "completed", (
+            f"Expected terminal 'completed' (from admission_state='done'), "
+            f"got {record.status!r}. The terminal admission_state must "
+            f"take precedence over Instance status — the Instance is "
+            f"only authoritative for non-terminal JobItem rows."
         )
         # ``result_summary`` is still sourced from the JobItem mirror
         # (the Instance doesn't model result storage in Phase 1).

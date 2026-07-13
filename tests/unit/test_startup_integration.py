@@ -152,6 +152,19 @@ class TestHealthEndpointLogic:
             # Mirrors the logic in daemon/api.py
             start_time = getattr(request.app.state, 'start_time', None)
             ensemble_config = getattr(request.app.state, 'ensemble_config', None)
+            migration_worker = getattr(request.app.state, 'migration_worker', None)
+
+            # migration_available mirrors the real endpoint's handling of
+            # app.state.migration_worker (None until lifespan wires it up).
+            migration_available: bool | None = None
+            if migration_worker is not None:
+                try:
+                    migration_available = bool(
+                        migration_worker.is_migration_available().get("can_migrate")
+                    )
+                except Exception:
+                    migration_available = None
+
             return HealthResponse(
                 status="healthy",
                 uptime_seconds=time_module_time() - start_time if start_time else 0,
@@ -161,6 +174,7 @@ class TestHealthEndpointLogic:
                     ensemble_config.postgres_env_available
                     if ensemble_config is not None else None
                 ),
+                migration_available=migration_available,
             )
 
         app.include_router(api_router)
@@ -196,9 +210,14 @@ class TestHealthEndpointLogic:
         assert dumped["current_database"] is None
         assert dumped["postgres_env_available"] is None
 
-    def test_health_endpoint_returns_ensemble_config_fields(self, minimal_health_app):
+    def test_health_endpoint_returns_ensemble_config_fields(self, minimal_health_app, monkeypatch):
         """TestClient GET /api/health returns the new fields populated."""
         from daemon.ensemble_config import EnsembleConfig
+
+        # Clear POSTGRES env vars so postgres_env_available returns False
+        # regardless of the host environment (deterministic test).
+        for key in ("POSTGRES_HOST", "POSTGRES_DB"):
+            monkeypatch.delenv(key, raising=False)
 
         minimal_health_app.state.ensemble_config = EnsembleConfig(database="sqlite")
         minimal_health_app.state.start_time = time_module_time() - 1.0

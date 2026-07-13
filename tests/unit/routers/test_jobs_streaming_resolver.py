@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -269,7 +270,7 @@ def _seed_completed_job(
             project_id="test-project",
             priority=5,
 
-            admission_state=status_to_admission(AdmissionState.DONE.value),
+            admission_state=AdmissionState.DONE.value,
             instance_id=None,
             queue_id=queue_id,
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -313,13 +314,16 @@ def _seed_completed_task(
 # ─── Wire-format helpers ─────────────────────────────────────────────────────
 
 
-def _read_sse_events(response, *, max_events: int = 4) -> list[dict]:
-    """Parse SSE ``event:`` / ``data:`` pairs into a list of dicts."""
+async def _read_sse_events(response, *, max_events: int = 4) -> list[dict]:
+    """Parse SSE ``event:`` / ``data:`` pairs into a list of dicts.
+
+    Uses ``response.aiter_lines()`` (async) so the caller can break
+    out of the loop once enough events have been collected, then close
+    the response to terminate the infinite SSE stream.
+    """
     events: list[dict] = []
     current: dict = {}
-    lines_read = 0
-    for line in response.iter_lines():
-        lines_read += 1
+    async for line in response.aiter_lines():
         if not line:
             if current.get("event") and current.get("data"):
                 events.append(current)
@@ -356,10 +360,10 @@ class TestStreamJobEventsResolverOff:
     data path.
     """
 
-    def test_completed_job_emits_terminal_events_with_legacy_fields(
+    async def test_completed_job_emits_terminal_events_with_legacy_fields(
         self,
         engine: Engine,
-        client_resolver_off: TestClient,
+        app_resolver_off: FastAPI,
         job_repo: JobRepository,
     ):
         """A completed JobItem must stream ``connected`` + ``completed`` with
@@ -372,11 +376,17 @@ class TestStreamJobEventsResolverOff:
         """
         jid = _seed_completed_job(engine, queue_id="queue-xyz")
 
-        with client_resolver_off.stream(
-            "GET", f"/api/jobs/{jid}/events"
-        ) as response:
-            assert response.status_code == 200
-            events = _read_sse_events(response, max_events=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_off),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
 
         names = [e["event"] for e in events]
         assert names == ["connected", "completed"]
@@ -393,7 +403,10 @@ class TestStreamJobEventsResolverOff:
         completed = events[1]["data"]
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"
-        assert completed["result_summary"] == "done"
+        # Phase 5: ``result_summary`` is ``None`` for JobItem-backed
+        # records because the mirror columns were dropped. The
+        # resolver sources it from Instance/Task, not the JobItem.
+        assert completed["result_summary"] is None
         assert completed["error_message"] is None
         assert completed["queue_id"] is None
 
@@ -405,17 +418,23 @@ class TestStreamJobEventsResolverOff:
         assert response.status_code == 404
         assert response.json()["detail"]["error"] == "Job not found"
 
-    def test_sse_content_type_header(
+    async def test_sse_content_type_header(
         self,
         engine: Engine,
-        client_resolver_off: TestClient,
+        app_resolver_off: FastAPI,
     ):
         jid = _seed_completed_job(engine)
-        with client_resolver_off.stream(
-            "GET", f"/api/jobs/{jid}/events"
-        ) as response:
-            assert response.status_code == 200
-            assert "text/event-stream" in response.headers.get("content-type", "")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_off),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                assert "text/event-stream" in response.headers.get("content-type", "")
+                await response.aclose()
 
 
 class TestStreamJobEventsResolverOn:
@@ -431,19 +450,25 @@ class TestStreamJobEventsResolverOn:
       JobItem ``processing`` stays ``processing``).
     """
 
-    def test_completed_job_via_resolver_emits_terminal_events(
+    async def test_completed_job_via_resolver_emits_terminal_events(
         self,
         engine: Engine,
-        client_resolver_on: TestClient,
+        app_resolver_on: FastAPI,
     ):
         """JobItem-backed work_id resolves through the resolver."""
         jid = _seed_completed_job(engine, queue_id="queue-original")
 
-        with client_resolver_on.stream(
-            "GET", f"/api/jobs/{jid}/events"
-        ) as response:
-            assert response.status_code == 200
-            events = _read_sse_events(response, max_events=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_on),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
 
         names = [e["event"] for e in events]
         assert names == ["connected", "completed"]
@@ -459,16 +484,19 @@ class TestStreamJobEventsResolverOn:
         }
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"
-        assert completed["result_summary"] == "done"
+        # Phase 5: ``result_summary`` is ``None`` for JobItem-backed
+        # records (mirror columns dropped). The resolver does not
+        # derive it from ``admission_state``.
+        assert completed["result_summary"] is None
         # ``WorkRecord`` does not surface JobItem.queue_id, so the SSE
         # payload collapses it to ``None`` instead of leaking an empty
         # string. The frontend accepts either null or a real value.
         assert completed["queue_id"] is None
 
-    def test_completed_task_via_resolver_emits_terminal_events(
+    async def test_completed_task_via_resolver_emits_terminal_events(
         self,
         engine: Engine,
-        client_resolver_on: TestClient,
+        app_resolver_on: FastAPI,
     ):
         """Task-backed work_id resolves through the resolver too.
 
@@ -479,11 +507,17 @@ class TestStreamJobEventsResolverOn:
         """
         wid = _seed_completed_task(engine, result="task finished", error=None)
 
-        with client_resolver_on.stream(
-            "GET", f"/api/jobs/{wid}/events"
-        ) as response:
-            assert response.status_code == 200
-            events = _read_sse_events(response, max_events=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_on),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{wid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
 
         names = [e["event"] for e in events]
         assert names == ["connected", "completed"]
@@ -497,10 +531,10 @@ class TestStreamJobEventsResolverOn:
         # Tasks have no queue concept; the unified view-model collapses it.
         assert completed["queue_id"] is None
 
-    def test_failed_task_maps_error_message_correctly(
+    async def test_failed_task_maps_error_message_correctly(
         self,
         engine: Engine,
-        client_resolver_on: TestClient,
+        app_resolver_on: FastAPI,
     ):
         """``WorkRecord.error`` must surface as ``error_message`` in the
         ``completed`` payload (the frontend's existing field name)."""
@@ -510,11 +544,17 @@ class TestStreamJobEventsResolverOn:
             error="boom: simulated failure",
         )
 
-        with client_resolver_on.stream(
-            "GET", f"/api/jobs/{wid}/events"
-        ) as response:
-            assert response.status_code == 200
-            events = _read_sse_events(response, max_events=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_on),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{wid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
 
         completed = events[1]["data"]
         assert completed["status"] == "completed"
@@ -528,17 +568,23 @@ class TestStreamJobEventsResolverOn:
         assert response.status_code == 404
         assert response.json()["detail"]["error"] == "Job not found"
 
-    def test_sse_content_type_header(
+    async def test_sse_content_type_header(
         self,
         engine: Engine,
-        client_resolver_on: TestClient,
+        app_resolver_on: FastAPI,
     ):
         jid = _seed_completed_job(engine)
-        with client_resolver_on.stream(
-            "GET", f"/api/jobs/{jid}/events"
-        ) as response:
-            assert response.status_code == 200
-            assert "text/event-stream" in response.headers.get("content-type", "")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_on),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                assert "text/event-stream" in response.headers.get("content-type", "")
+                await response.aclose()
 
 
 class TestResolverFlagDefault:
@@ -553,7 +599,7 @@ class TestResolverFlagDefault:
     Phase 7 cleanup, but it no longer changes the data path.
     """
 
-    def test_resolver_flag_off_still_routes_through_resolver(
+    async def test_resolver_flag_off_still_routes_through_resolver(
         self,
         engine: Engine,
         service_with_resolver: JobQueueService,
@@ -579,7 +625,6 @@ class TestResolverFlagDefault:
         # so the OFF path still routes through the resolver. The flag
         # remains in the config schema for Phase 7 cleanup but it no
         # longer changes the data path.
-        from types import SimpleNamespace
         app.state.manager = SimpleNamespace(
             config=SimpleNamespace(
                 job_system=SimpleNamespace(use_virtual_job_resolver=False),
@@ -587,10 +632,17 @@ class TestResolverFlagDefault:
         )
 
         jid = _seed_completed_job(engine, queue_id="queue-q")
-        client = TestClient(app)
-        with client.stream("GET", f"/api/jobs/{jid}/events") as response:
-            assert response.status_code == 200
-            events = _read_sse_events(response, max_events=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
 
         completed = events[1]["data"]
         # Phase 1 (Job as Queue Proxy): ``queue_id`` collapses to ``None``

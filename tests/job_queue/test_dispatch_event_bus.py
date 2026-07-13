@@ -155,9 +155,9 @@ class TestDispatchEventBusNotifyAll:
         # Call notify_all with no projects registered
         # Should not raise
         event_bus.notify_all()
-        
-        # Should complete without error
-        assert True
+
+        # Should complete without error and not register any events
+        assert len(event_bus._events) == 0
 
     @pytest.mark.asyncio
     async def test_notify_all_waits_return_true(self, event_bus, event_loop):

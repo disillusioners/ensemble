@@ -33,6 +33,8 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.project.models import Project, ProjectStatus
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 
+pytestmark = pytest.mark.integration
+
 
 # =============================================================================
 # Fixtures

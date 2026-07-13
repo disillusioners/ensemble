@@ -71,6 +71,17 @@ async def mock_manager():
         status="queued",
         job_id="test-job-id",
     ))
+    # Mock the RAM-injection primitives so the router's "existing content"
+    # branch dereferences cleanly. Without these, ``existing.get("content")``
+    # at daemon/routers/messages.py:270 raises
+    # ``TypeError: object of type 'Mock' has no len()`` when ``len()`` is
+    # applied to the auto-generated child Mock. Default to ``None`` so the
+    # router skips the replacement-SSE path entirely.
+    manager.get_injection = Mock(return_value=None)
+    manager.set_injection = Mock(return_value={
+        "content": "",
+        "timestamp": "2024-01-01T00:00:00",
+    })
     # Mock get_messages for message history (now async)
     manager.get_messages = AsyncMock(return_value=[])
     # Mock conn for source endpoints (temp SQLite file)
@@ -801,13 +812,29 @@ async def test_resume_instance_backward_compatibility_no_body(client, mock_manag
 @pytest.mark.asyncio
 async def test_send_message_success(client, mock_manager):
     """Test POST /instances/{id}/messages."""
+    # Force the legacy enqueue path (200) by reporting an idle instance.
+    # The default ``status="running"`` fixture routes through the new
+    # RAM-injection branch which returns 202; the assertions below
+    # expect 200 from the legacy ``enqueue_message_job`` path.
+    mock_manager.get_instance_info = Mock(return_value={
+        "instance_id": "test-instance-id",
+        "agent_id": "developer",
+        "agent_dir": "/path/to/agent",
+        "status": "idle",
+        "parent_id": None,
+        "children": [],
+        "project_id": None,
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    })
+
     response = await client.post(
         "/instances/test-instance-id/messages",
         json={
             "content": "Hello, agent!"
         }
     )
-    
+
     assert response.status_code == 200
     data = response.json()
     assert "message_id" in data
@@ -855,15 +882,28 @@ async def test_global_exception_handler(client, mock_manager):
     """Test that exceptions return proper error response."""
     # Make enqueue_message_job raise an unexpected exception (Phase 5: router uses job path)
     mock_manager.get_instance.return_value = AsyncMock()
+    # Force the legacy enqueue path (idle instance) so the exception fires
+    # inside ``enqueue_message_job`` rather than the RAM-injection branch.
+    mock_manager.get_instance_info = Mock(return_value={
+        "instance_id": "test-instance-id",
+        "agent_id": "developer",
+        "agent_dir": "/path/to/agent",
+        "status": "idle",
+        "parent_id": None,
+        "children": [],
+        "project_id": None,
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    })
     mock_manager.enqueue_message_job.side_effect = RuntimeError("Unexpected error")
-    
+
     response = await client.post(
         "/instances/test-instance-id/messages",
         json={
             "content": "Hello!"
         }
     )
-    
+
     assert response.status_code == 500
     data = response.json()
     assert "detail" in data

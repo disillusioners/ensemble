@@ -86,10 +86,20 @@ def _make_manager(*, status: str = "idle", task_repo=None) -> MagicMock:
     manager.get_queue_stats = AsyncMock(
         return_value={"pending_count": 0, "processing_count": 0}
     )
-    # Phase 5 cutover: ``send_message`` dispatches through
-    # ``enqueue_message_job`` (public message-Job path) so a JobItem
-    # mirror is written alongside the Task row. Mock the new attribute.
-    manager.enqueue_message_job = AsyncMock(
+    # ``send_message`` dispatches via ``enqueue_message`` (NOT
+    # ``enqueue_message_job``). Production ``send_message`` at
+    # daemon/tools/instance.py:715 calls ``await manager.enqueue_message(...)``.
+    # Awaiting a plain ``MagicMock`` raises
+    # ``TypeError: object MagicMock can't be used in 'await' expression``,
+    # so this attribute must be an ``AsyncMock``.
+    manager.enqueue_message = AsyncMock(
+        return_value=MagicMock(message_id="msg-abc-123")
+    )
+    # ``enqueue_message_job`` is the public/external path (POST /messages,
+    # chat adapters, scheduler) and is NOT called by ``send_message``.
+    # Kept as a MagicMock so any straggling read doesn't accidentally
+    # invoke the real implementation, but NOT asserted against.
+    manager.enqueue_message_job = MagicMock(
         return_value=MagicMock(message_id="msg-abc-123")
     )
 

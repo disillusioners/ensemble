@@ -2910,6 +2910,7 @@ class TestWaitAnyEventWake:
         assert isinstance(result, str)
         assert result.startswith("[SUMMARY]")
 
+    @pytest.mark.no_xdist
     @pytest.mark.asyncio
     async def test_wait_any_does_not_spin_when_event_pre_set(
         self,
@@ -2946,7 +2947,11 @@ class TestWaitAnyEventWake:
         )
 
         # Use a fixture patch for POLL_INTERVAL_S to keep the test fast.
-        from daemon.opencode import constants as oc_const
+        # Patch the live name (``daemon.tools.external_opencode``) — the
+        # ``from daemon.opencode.constants import POLL_INTERVAL_S`` at the
+        # top of ``external_opencode`` bound the value to a local name that
+        # is NOT updated by patching the constants module.
+        from daemon.tools import external_opencode as ext_oc
 
         poll_count = 0
 
@@ -2958,7 +2963,7 @@ class TestWaitAnyEventWake:
         with patch(
             "daemon.tools.external_opencode._server_send_message",
             new=_counting_poll,
-        ), patch.object(oc_const, "POLL_INTERVAL_S", 0.2), patch(
+        ), patch.object(ext_oc, "POLL_INTERVAL_S", 0.2), patch(
             "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.5,
         ):
             tools = create_opencode_tools(mock_manager, "test-id")

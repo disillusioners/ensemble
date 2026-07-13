@@ -783,6 +783,7 @@ class TestEdgeCases:
         first_item_count = sum(1 for line in lines if line.strip().startswith("* First"))
         assert first_item_count == 1
 
+    @pytest.mark.no_xdist
     def test_lock_concurrent_access(self, tmp_path):
         """Multiple threads can access different files concurrently."""
         test_file_1 = tmp_path / "file1.md"

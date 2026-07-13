@@ -543,7 +543,7 @@ class TestMaybeRetryAtomicConcurrency:
     transition the row.
     """
 
-    def test_atomic_retry_concurrent_calls_only_one_succeeds(self, job_repo, engine):
+    def test_atomic_retry_concurrent_calls_only_one_succeeds(self, concurrent_repository, concurrent_engine):
         """Two concurrent ``atomic_retry`` calls — only one increments.
 
         Without the SQL-level guard, both threads would observe
@@ -554,7 +554,17 @@ class TestMaybeRetryAtomicConcurrency:
         retry_count < max_retries`` predicate; the second writer
         sees ``status='pending'`` (or the incremented
         ``retry_count``) and matches zero rows.
+
+        Uses the file-backed ``concurrent_repository`` /
+        ``concurrent_engine`` fixtures (not the in-memory ``job_repo`` /
+        ``engine``) so each thread gets its own SQLite connection.
+        StaticPool serialises cursor access and yields a hidden race
+        where both threads interleave at the cursor level; the
+        file-backed engine exposes the real cross-connection UPDATE
+        race this test guards against.
         """
+        job_repo = concurrent_repository
+        engine = concurrent_engine
         create_job(
             engine,
             job_id="job-concurrent",

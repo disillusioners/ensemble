@@ -179,15 +179,16 @@ def fresh_pg_schema() -> Iterator[Engine]:
 
     engine = create_engine(_pg_url(), pool_pre_ping=True)
     try:
-        # Drop everything first so the create_all below installs the
-        # current model definitions (not whatever a prior test left
-        # behind).
+        # Drop and recreate the entire public schema so create_all
+        # below installs the current model definitions on a truly
+        # clean slate. Dropping tables one-by-one left behind
+        # schema-level artifacts (sequences, types, column
+        # metadata) that caused column-visibility issues after
+        # migration runs — DROP SCHEMA CASCADE removes everything
+        # atomically.
         with engine.begin() as conn:
-            tables = conn.execute(
-                text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-            ).fetchall()
-            for (name,) in tables:
-                conn.execute(text(f'DROP TABLE IF EXISTS "{name}" CASCADE'))
+            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
 
         SQLModel.metadata.create_all(engine)
         # ``OpenCodeSessionRecord`` is created separately because
@@ -196,16 +197,13 @@ def fresh_pg_schema() -> Iterator[Engine]:
         OpenCodeSessionRecord.__table__.create(engine, checkfirst=True)
         yield engine
     finally:
-        # Best-effort cleanup. Use a fresh connection to avoid
-        # issues with the engine being in an aborted state from a
-        # failed test.
+        # Best-effort cleanup: drop the schema so the next test
+        # starts fresh. Using a fresh connection avoids issues with
+        # the engine being in an aborted state from a failed test.
         try:
             with engine.begin() as conn:
-                tables = conn.execute(
-                    text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-                ).fetchall()
-                for (name,) in tables:
-                    conn.execute(text(f'DROP TABLE IF EXISTS "{name}" CASCADE'))
+                conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+                conn.execute(text("CREATE SCHEMA public"))
         except Exception:
             pass
         engine.dispose()

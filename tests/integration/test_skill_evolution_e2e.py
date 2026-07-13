@@ -80,6 +80,8 @@ from daemon.services.skill_metrics_service import (
 from daemon.services.skill_search_service import SkillSearchService
 from daemon.services.skill_store_service import SkillStoreService
 
+pytestmark = pytest.mark.integration
+
 
 # ---------------------------------------------------------------------------
 # Engine + repos fixture

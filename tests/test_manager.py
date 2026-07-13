@@ -780,24 +780,32 @@ class TestProgressiveMessageDelivery:
     def streaming_graph_with_agent_message(self):
         """Create a mock graph that yields streaming events with agent messages."""
         graph = Mock()
-        
+
         # Create an AI message with text content
         ai_message = Mock()
         ai_message.content = "Streaming response"
         ai_message.type = 'ai'
         ai_message.tool_calls = []
         ai_message.id = "msg-1"
-        
+
         # Create a streaming event with agent node data
         stream_event = ("updates", {"agent": {"messages": [ai_message]}})
-        
+
         # Generator that yields the stream event
         async def mock_astream(*args, **kwargs):
             yield stream_event
             yield ("updates", {"agent": {"messages": []}})  # Empty update to end
         graph.astream = mock_astream
         graph.invoke = Mock(return_value={"messages": [ai_message]})
-        
+
+        # Disable the language-check node so this fixture's two-message
+        # stream is dispatched normally. Without this, ``graph.language_check_active``
+        # auto-creates as a truthy Mock, the production buffer-everything-to-
+        # deferred-final-message path fires, and only the LAST message in the
+        # stream is dispatched — collapsing ``dispatch_message.call_count``
+        # to 1 even when multiple distinct messages streamed through.
+        graph.language_check_active = False
+
         return graph
 
     @pytest.fixture
@@ -1409,29 +1417,34 @@ class TestStreamingDeduplicationByMessageId:
     def streaming_graph_with_unique_ids(self):
         """Create a mock graph that yields events with unique message IDs."""
         graph = Mock()
-        
+
         msg1 = Mock()
         msg1.content = "First unique message"
         msg1.type = 'ai'
         msg1.tool_calls = []
         msg1.id = "msg-unique-1"
-        
+
         msg2 = Mock()
         msg2.content = "Second unique message"
         msg2.type = 'ai'
         msg2.tool_calls = []
         msg2.id = "msg-unique-2"
-        
+
         stream_event1 = ("updates", {"agent": {"messages": [msg1]}})
         stream_event2 = ("updates", {"agent": {"messages": [msg2]}})
-        
+
         async def mock_astream(*args, **kwargs):
             yield stream_event1
             yield stream_event2
             yield ("updates", {"agent": {"messages": []}})
         graph.astream = mock_astream
         graph.invoke = Mock(return_value={"messages": [msg1, msg2]})
-        
+
+        # Disable the language-check node so each streamed message is
+        # dispatched individually (see the equivalent fixture above for
+        # the full rationale — Mock() auto-creates a truthy attribute).
+        graph.language_check_active = False
+
         return graph
 
     @pytest.mark.asyncio
