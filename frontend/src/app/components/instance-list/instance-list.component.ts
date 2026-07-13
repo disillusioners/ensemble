@@ -4,10 +4,12 @@ import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
+import { MatDialog } from '@angular/material/dialog';
 import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
 import { InstanceService } from '../../services/instance.service';
 import { TabStateService } from '../../services/tab-state.service';
+import { InstanceDeleteDialogComponent, InstanceDeleteDialogData } from '../instance-delete-dialog/instance-delete-dialog.component';
 
 export interface InstanceTreeNode {
   instance: InstanceInfo;
@@ -24,6 +26,7 @@ export interface InstanceTreeNode {
 export class InstanceListComponent implements AfterViewInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
   private readonly tabStateService = inject(TabStateService);
+  private readonly dialog = inject(MatDialog);
 
   // Signal inputs
   readonly agents = input<Agent[]>([]);
@@ -158,12 +161,41 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     };
   }
 
+  /**
+   * Open the two-step delete dialog for an instance.
+   *
+   * The dialog handles the API call itself (terminate or hard delete),
+   * so we don't need to forward this through the ``terminateInstance``
+   * output any more. The instanceService polling will pick up the
+   * backend change on the next tick and drop the row from the list.
+   */
   onTerminateInstance(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    if (confirm('Terminate this instance?')) {
+
+    const instance = this.instances().find(i => i.instance_id === instanceId);
+    if (!instance) {
+      // Defensive: terminate button only shows for instances we have,
+      // but if a stale click slips through, fall back to the existing
+      // emit path so callers can still react.
       this.terminateInstance.emit(instanceId);
+      return;
     }
+
+    const data: InstanceDeleteDialogData = { instance };
+    this.dialog
+      .open(InstanceDeleteDialogComponent, {
+        data,
+        width: '460px',
+        maxWidth: '95vw',
+        panelClass: 'instance-delete-dialog-panel',
+        autoFocus: 'first-tabbable',
+        restoreFocus: true,
+      })
+      .afterClosed()
+      .subscribe(() => {
+        // List refresh is driven by the polling service; nothing to do here.
+      });
   }
 
   onPauseInstance(instanceId: string, event: Event): void {

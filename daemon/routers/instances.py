@@ -297,13 +297,61 @@ async def get_instance(
 async def terminate_instance(
     instance_id: str,
     request: Request,
+    hard_delete: bool = Query(
+        False,
+        description=(
+            "When True, hard-delete DB records for the entire instance "
+            "tree (instances.db + checkpoints.db) AFTER the standard "
+            "terminate cascade. Removes ``instances`` rows, "
+            "``instance_hierarchy`` rows, ``tasks``/``events``/``message_queue`` "
+            "rows, AND the job-queue sub-tree (``job_queue_items``, "
+            "``job_watchers``, ``job_locks``) in FK-safe order. Sweeps "
+            "checkpoint threads for every member of the tree via the "
+            "CheckpointerAdapter. Destructive — use only from admin "
+            "cleanup paths."
+        ),
+    ),
 ) -> dict:
-    """Terminate an instance."""
+    """Terminate an instance.
+
+    Default (``hard_delete=False``): runs the standard in-memory
+    terminate cascade — graph task cancellation, request-registry
+    cleanup, live_hub close, MCP close, todo clear, job-state
+    transitions (PROCESSING → CANCELLED via ``complete_job``;
+    PENDING/FAILED → ``cancel_job``), project-lock release. The
+    ``instances`` row and dependent rows remain in ``instances.db``
+    for the maintenance service to sweep on the TTL/history-cap
+    cycle.
+
+    When ``hard_delete=True``: same as above, PLUS a one-shot
+    destructive delete from BOTH databases:
+
+    1. Snapshot the tree (root + all descendants) via
+       ``instance_repository.get_tree_ids`` — taken BEFORE
+       ``terminate_instance`` because the in-memory cascade can
+       rewrite ``instance_hierarchy`` rows.
+    2. Run ``terminate_instance`` (in-memory cleanup, status
+       transition, child cascade, job-state transitions).
+    3. FK-safe DB cascade via
+       ``instance_repository.hard_delete_tree`` (job_locks →
+       job_queue_items → job_watchers → tasks → events →
+       message_queue → instance_hierarchy → instances).
+    4. Per-instance checkpoint sweep via
+       ``checkpointer.adelete_thread``.
+
+    The endpoint returns ``{"terminated": True, "hard_deleted": True,
+    ...}`` on success. ``hard_deleted`` is omitted when
+    ``hard_delete=False``.
+    """
     manager = _get_manager(request)
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
-    # Check instance exists
+    # Check instance exists — same 404 mapping as every other
+    # instance-scoped endpoint in this router. The hard-delete path
+    # requires a real instance row to enumerate the tree (snapshot
+    # falls back to [instance_id] when the row is missing, but the
+    # caller still benefits from a uniform 404 contract).
     try:
         await manager.get_instance(instance_id)
     except KeyError:
@@ -315,8 +363,25 @@ async def terminate_instance(
             ).model_dump()
         )
 
+    if hard_delete:
+        # Destructive operator path: full DB cascade for the whole tree
+        # + checkpoint sweep. Errors propagate as 500 (handled by
+        # FastAPI default exception handler); the cascade is
+        # transactional at the row level so a mid-cascade failure rolls
+        # back cleanly and the caller can retry.
+        result = await manager.hard_delete_instance(instance_id)
+        return {
+            "terminated": True,
+            "hard_deleted": True,
+            "root_instance_id": result.get("root_instance_id"),
+            "tree_ids": result.get("tree_ids", []),
+            "checkpoint_threads_deleted": result.get("checkpoint_threads_deleted", 0),
+            "checkpoint_errors": result.get("checkpoint_errors", []),
+            "db_counts": result.get("counts", {}),
+        }
+
     await manager.terminate_instance(instance_id)
-    
+
     return {"terminated": True}
 
 

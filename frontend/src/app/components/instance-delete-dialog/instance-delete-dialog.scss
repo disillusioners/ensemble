@@ -1,0 +1,181 @@
+.dialog-shell {
+  background-color: #0f172a;
+  color: #f1f5f9;
+  min-width: 360px;
+  max-width: 480px;
+  padding: 0.25rem 0.25rem 0.5rem;
+}
+
+h2[mat-dialog-title] {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 0.5rem 0;
+  padding: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #f8fafc;
+
+  .title-icon {
+    font-size: 22px;
+    width: 22px;
+    height: 22px;
+    color: #f59e0b;
+
+    &.title-icon--danger {
+      color: #f43f5e;
+    }
+  }
+}
+
+.dialog-content {
+  padding-top: 0 !important;
+  padding-bottom: 8px !important;
+  color: #e2e8f0;
+}
+
+.lead {
+  margin: 0 0 1rem 0;
+  font-size: 0.95rem;
+  color: #cbd5e1;
+
+  strong {
+    color: #f1f5f9;
+    word-break: break-word;
+  }
+}
+
+.option-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.option-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background-color: #1e293b;
+  color: #e2e8f0;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.05s ease;
+
+  &:hover:not(:disabled) {
+    background-color: #273449;
+    border-color: #475569;
+    transform: translateY(-1px);
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 2px;
+  }
+}
+
+.option-card--danger {
+  border-color: rgba(244, 63, 94, 0.4);
+
+  &:hover:not(:disabled) {
+    background-color: rgba(244, 63, 94, 0.12);
+    border-color: rgba(244, 63, 94, 0.7);
+  }
+
+  .option-icon {
+    color: #f43f5e;
+  }
+}
+
+.option-card--warn {
+  border-color: rgba(245, 158, 11, 0.35);
+
+  &:hover:not(:disabled) {
+    background-color: rgba(245, 158, 11, 0.1);
+    border-color: rgba(245, 158, 11, 0.6);
+  }
+
+  .option-icon {
+    color: #f59e0b;
+  }
+}
+
+.option-card--neutral {
+  .option-icon {
+    color: #94a3b8;
+  }
+}
+
+.option-icon {
+  font-size: 22px;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.option-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f8fafc;
+  line-height: 1.2;
+}
+
+.option-subtitle {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.confirm-message {
+  margin: 0 0 0.5rem 0;
+  font-size: 1rem;
+  color: #f1f5f9;
+  line-height: 1.4;
+
+  strong {
+    color: #f43f5e;
+    word-break: break-word;
+  }
+}
+
+.confirm-subtext {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+
+mat-dialog-actions {
+  padding: 8px 0 0 !important;
+  gap: 0.5rem;
+  min-height: auto;
+
+  button {
+    min-width: 96px;
+
+    mat-spinner {
+      display: inline-block;
+    }
+  }
+}

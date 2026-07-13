@@ -1461,6 +1461,181 @@ class InstanceLifecycleService:
 
         return True
 
+    async def hard_delete_instance(self, instance_id: str) -> dict[str, Any]:
+        """Hard-delete an instance tree from both DBs.
+
+        Composes four steps in this exact order:
+
+        1. **Snapshot the tree** via :meth:`SQLModelInstanceRepository.get_tree_ids`
+           — must run BEFORE :meth:`terminate_instance` because the in-memory
+           cascade can rewrite ``instance_hierarchy`` rows (a hard delete is
+           destructive: if we asked for the tree AFTER terminate, descendants
+           that already terminated earlier in the call might be missing).
+        2. **Terminate** via :meth:`terminate_instance` — performs the
+           in-memory cleanup, status transition, child cascade, and
+           graceful job-state transitions (PROCESSING → CANCELLED via
+           ``complete_job``; PENDING/FAILED → ``cancel_job``). The
+           ``job_queue_items`` rows are still in the DB at this point;
+           ``hard_delete_tree`` removes them below. **After terminate
+           returns** we also sweep any zombie graph tasks that
+           ``terminate_instance`` could not cancel inside its 5s
+           timeout window — see the W5 inline comment below.
+        3. **Hard-delete DB records** via
+           :meth:`SQLModelInstanceRepository.hard_delete_tree` — runs
+           the FK-safe cascade across ``job_locks``,
+           ``job_queue_items``, ``job_watchers``, ``tasks``, ``events``,
+           ``message_queue``, ``dependency_watchers``,
+           ``instance_mappings``, ``instance_hierarchy``, ``instances``.
+           Off-loaded to ``asyncio.to_thread`` because ``hard_delete_tree``
+           is a sync SQLModel/SQLAlchemy call that takes a connection
+           from the engine pool under SQLite WAL — same pattern as
+           the existing ``_terminate_instance_db_sync`` calls.
+        4. **Sweep checkpoints** for every member of ``tree_ids`` via
+           the ``CheckpointerAdapter`` ``adelete_thread`` method. One
+           thread per ``instance_id`` — LangGraph checkpoint rows are
+           keyed on ``thread_id`` which equals the instance_id. Wrap
+           per-thread in try/except so a single failure does not abort
+           the whole sweep; log + continue. Each ``adelete_thread``
+           returns void on success. The IDs that fail per-thread are
+           collected into ``checkpoint_errors`` and returned to the
+           caller so a UI / admin can see exactly which threads need
+           manual intervention.
+
+        Failure handling:
+
+        * If the instance is not found in the DB at the snapshot step,
+          ``get_tree_ids`` returns ``[]`` — we fall back to ``[instance_id]``
+          so a partially-existing tree still cleans up the orphan
+          checkpoints and the in-memory state via terminate.
+        * If ``terminate_instance`` raises mid-cascade, the caller gets
+          the exception and the DB cascade is skipped. In-memory state
+          stays consistent (the manager has already cancelled the
+          graph task); orphan rows can be swept by the maintenance
+          service's :class:`CheckpointCleanupJob` (orphan-thread sweep).
+        * If ``hard_delete_tree`` raises mid-cascade, the session
+          ``rollback`` undoes all 10 DELETEs — caller sees the exception
+          and can retry safely (idempotent: a re-run deletes the
+          remaining rows).
+        * If ``adelete_thread`` raises for one thread, the others still
+          get swept (best-effort checkpoint cleanup) and the failed
+          thread ID is appended to ``checkpoint_errors`` so the caller
+          can surface it (the maintenance orphan-thread sweep will also
+          pick it up on the next cycle).
+
+        Args:
+            instance_id: The root instance ID whose tree to hard-delete.
+                Must exist (or have existed) in ``instances.db``; the
+                method does NOT raise ``KeyError`` — a missing
+                instance still snapshots ``[instance_id]`` so the
+                checkpoint cleanup runs.
+
+        Returns:
+            Dict summarising the deletion::
+
+                {
+                    "terminated": bool,            # terminate_instance result
+                    "deleted": bool,               # hard_delete_tree result
+                    "root_instance_id": str,
+                    "tree_ids": [str, ...],
+                    "checkpoint_threads_deleted": int,
+                    "checkpoint_errors": [str, ...],   # tree_ids whose sweep failed
+                    "counts": {                    # hard_delete_tree counts
+                        "job_locks": int,
+                        "job_queue_items": int,
+                        "job_watchers": int,
+                        "tasks": int,
+                        "events": int,
+                        "message_queue": int,
+                        "dependency_watchers": int,
+                        "instance_mappings": int,
+                        "instance_hierarchy": int,
+                        "instances": int,
+                    },
+                }
+        """
+        # 1. Snapshot the tree BEFORE terminate. ``get_tree_ids`` returns
+        # an empty list when the root is not in the DB (defensive —
+        # matches the behaviour callers rely on elsewhere in the
+        # lifecycle service).
+        instance_repository = self._manager._instance_repository
+        tree_ids = instance_repository.get_tree_ids(instance_id)
+        if not tree_ids:
+            # Fall back to [instance_id] so a partially-deleted tree
+            # still sweeps checkpoints. ``terminate_instance`` will
+            # short-circuit on the missing row (its pre-check returns
+            # ``True`` for already-terminated, but the in-memory cleanup
+            # is the safety we want here).
+            tree_ids = [instance_id]
+
+        # 2. Terminate — in-memory cleanup + graceful state transition
+        # + cascade to children. ``terminate_instance`` recursively
+        # terminates children first, then runs the per-instance DB
+        # transition (status, jobs cancel via WriteGuardSession, message_queue
+        # delete). It does NOT delete the ``instances`` row — that is
+        # ``hard_delete_tree``'s job.
+        terminated = await self.terminate_instance(instance_id)
+
+        # W5 fix: sweep zombie graph tasks that survived the 5s terminate
+        # timeout. ``terminate_instance`` schedules an asyncio.CancelledError
+        # but doesn't await it; a stubborn in-flight LLM call can leave a
+        # dangling task in ``_graph_tasks``. Clear them for every tree_id so
+        # the in-memory state matches the on-disk state after the cascade.
+        for iid in tree_ids:
+            self._manager._graph_tasks.pop(iid, None)
+
+        # 3. Hard-delete DB records — FK-safe cascade across the 10
+        # tables. Off-load to a thread so SQLite WAL write contention
+        # does not deadlock the event loop (same rationale as
+        # ``terminate_instance``'s use of ``asyncio.to_thread`` for
+        # ``_terminate_instance_db_sync``).
+        repo = self._manager._instance_repository
+        cascade_result = await asyncio.to_thread(repo.hard_delete_tree, tree_ids)
+
+        # 4. Sweep checkpoints for every member of the tree. Best-effort
+        # per-thread — a failure on one thread does not abort the rest.
+        # Same separation-of-concerns as the maintenance service's
+        # :meth:`CheckpointCleanupJob._cleanup_orphaned_threads`.
+        checkpoint_count = 0
+        checkpoint_errors: list[str] = []
+        adapter = getattr(self._manager, "_checkpointer", None)
+        if adapter is not None:
+            for tree_id in tree_ids:
+                try:
+                    await adapter.adelete_thread(tree_id)
+                    checkpoint_count += 1
+                except Exception as e:  # noqa: BLE001
+                    # Best-effort sweep — log + continue so one orphan
+                    # thread doesn't block the rest. The maintenance
+                    # orphan-thread sweep will pick this up on the next
+                    # cycle if we miss it here.
+                    logger.warning(
+                        f"hard_delete_instance: checkpoint sweep failed "
+                        f"for {tree_id[:8]}...: {type(e).__name__}: {e}"
+                    )
+                    checkpoint_errors.append(tree_id)
+        else:
+            logger.debug(
+                f"hard_delete_instance: checkpointer is None — skipping "
+                f"checkpoint sweep for {instance_id[:8]}..."
+            )
+
+        logger.info(
+            f"[TRACE] hard_delete_instance: {instance_id[:8]}... complete "
+            f"(tree_size={len(tree_ids)}, db_deleted={cascade_result.get('deleted')}, "
+            f"checkpoints_deleted={checkpoint_count}, "
+            f"checkpoint_errors={len(checkpoint_errors)}, terminated={terminated})"
+        )
+
+        return {
+            "terminated": terminated,
+            "deleted": cascade_result.get("deleted", False),
+            "root_instance_id": instance_id,
+            "tree_ids": tree_ids,
+            "checkpoint_threads_deleted": checkpoint_count,
+            "checkpoint_errors": checkpoint_errors,
+            "counts": cascade_result.get("counts", {}),
+        }
+
     async def pause_instance_cascade(self, instance_id: str) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 

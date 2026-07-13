@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, not_, text
+from sqlalchemy import bindparam, delete as sql_delete, func, not_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -17,7 +17,10 @@ from .models import Instance, InstanceHierarchy, InstanceStatus
 from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
 from daemon.repositories.message_queue.models import MessageQueue
+from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.job_queue.watcher_models import JobWatcher
+from daemon.repositories.dependency_bus.models import DependencyWatcher
+from daemon.repositories.source.models import InstanceMapping
 
 logger = logging.getLogger(__name__)
 
@@ -842,6 +845,277 @@ class SQLModelInstanceRepository:
                 "deleted": True,
                 "instance_id": instance_id,
                 "agent_dir": instance.agent_dir,
+            }
+
+    def hard_delete_tree(self, tree_ids: list[str]) -> dict[str, Any]:
+        """Hard-delete DB records for a tree of instances in FK-safe order.
+
+        Destructive: removes ``instance`` rows AND every dependent row
+        across the standard cascade (``tasks``, ``events``, ``message_queue``,
+        ``instance_hierarchy``) PLUS the job-queue sub-tree (``job_queue_items``,
+        ``job_watchers``, ``job_locks``) AND the source / dependency-bus
+        linkage rows (``dependency_watchers``, ``instance_mappings``).
+        Checkpoints (``checkpoints.db``) are NOT touched by this method —
+        the caller is responsible for sweeping ``adelete_thread`` for each
+        ``tree_ids`` member via :class:`CheckpointerAdapter` (see
+        :meth:`InstanceLifecycleService.hard_delete_instance`).
+
+        Dependency order (must match to avoid FK violations):
+
+        1. ``job_locks`` — via subquery on ``job_queue_items.job_id``
+           (matches the plan documented in
+           ``instance-deletion-architecture-in-agents-ensemble``
+           on the Knowledge Base). The lock table has no formal FK to
+           ``job_queue_items.job_id`` — we delete by job_id rather than
+           by ``JobLock.instance_id`` because the ``instance_id`` field
+           on locks is informational (denormalised at acquire time) and
+           the job-id subquery is the authoritative source.
+        2. ``job_queue_items`` — must precede ``job_watchers``/``tasks``/
+           ``instances`` for symmetry even though no formal FK chain
+           exists; also drops the source rows the lock subquery keys on.
+        3. ``job_watchers`` — has a REAL ``foreign_key="instances.instance_id"``
+           constraint, so MUST be cleaned before the matching ``instance``
+           rows are deleted. Without this, PostgreSQL raises IntegrityError
+           and SQLite silently leaves the instance row but loses the watcher.
+        4. ``tasks`` — referenced by instance_id (no FK).
+        5. ``events`` — referenced by instance_id (no FK).
+        6. ``message_queue`` — referenced by instance_id (no FK).
+        7. ``dependency_watchers`` — has a logical FK
+           (``target_instance_id`` → instances.instance_id) but no formal
+           DB-level FK constraint declared on the model. MUST be cleaned
+           before the instance rows go; otherwise the watchers become
+           orphans pointing at non-existent instance IDs (and the bus's
+           cancellation scan picks them up on next stop).
+        8. ``instance_mappings`` — has a logical FK
+           (``agent_instance_id`` → instances.instance_id) but no formal
+           DB-level FK constraint declared on the model. MUST be cleaned
+           before the instance rows go; otherwise the mappings become
+           orphans and any source routing that re-resolves them on the
+           cancelled instance path will silently fail.
+        9. ``instance_hierarchy`` — must precede ``instances`` because the
+           junction rows reference instance_id on either side. Wipe both
+           parent and child sides in a single statement so the cascade is
+           symmetric (a tree root has no parent link; a tree leaf has no
+           child link).
+        10. ``instances`` — last; every dependent row above must be gone.
+
+        All ten DELETEs run inside a single ``SQLModelSession`` so a
+        mid-cascade error rolls back the entire cascade — matches the
+        ``WriteGuardSession`` pattern used elsewhere in the codebase
+        (H10 transaction-boundary fix).
+
+        Concurrency: on PostgreSQL, we acquire ``SELECT ... FOR UPDATE``
+        on the affected ``Instance`` rows BEFORE the cascade — same
+        defence-in-depth pattern as :meth:`delete_by_project` (M7 fix).
+        On SQLite, the implicit per-session transaction serializes
+        writes (SQLite is single-writer).
+
+        Idempotency: re-running with the same ``tree_ids`` is a no-op
+        once the matching rows are gone — the WHEREs simply match zero
+        rows and ``rowcount`` is 0.
+
+        Args:
+            tree_ids: List of instance IDs to hard-delete. Caller MUST
+                resolve the tree (root + all descendants) BEFORE calling
+                because the existing ``terminate_instance`` already
+                removes some related rows — see
+                :func:`append_context_key` and the H10 plan for how
+                the in-memory cascade composes with this hard-delete
+                step.
+
+        Returns:
+            Dict with the deletion summary::
+
+                {
+                    "deleted": True|False,
+                    "tree_ids": [...],
+                    "counts": {
+                        "job_locks": int,
+                        "job_queue_items": int,
+                        "job_watchers": int,
+                        "tasks": int,
+                        "events": int,
+                        "message_queue": int,
+                        "dependency_watchers": int,
+                        "instance_mappings": int,
+                        "instance_hierarchy": int,
+                        "instances": int,
+                    },
+                }
+
+            ``deleted`` is ``True`` iff at least one ``instances`` row
+            was removed; ``False`` means the ``tree_ids`` set matched
+            no rows (caller likely passed an already-deleted or empty
+            list).
+        """
+        if not tree_ids:
+            return {
+                "deleted": False,
+                "tree_ids": [],
+                "counts": {
+                    "job_locks": 0,
+                    "job_queue_items": 0,
+                    "job_watchers": 0,
+                    "tasks": 0,
+                    "events": 0,
+                    "message_queue": 0,
+                    "dependency_watchers": 0,
+                    "instance_mappings": 0,
+                    "instance_hierarchy": 0,
+                    "instances": 0,
+                },
+            }
+
+        # Freeze the snapshot as a list — a calling thread that mutates
+        # the original between read and write here must not silently
+        # widen the cascade set.
+        ids: list[str] = list(tree_ids)
+
+        with SQLModelSession(self.engine) as db_session:
+            # Detect dialect once so we can take PG row-locks. Mirrors
+            # ``delete_by_project`` (M7 fix).
+            is_pg = (
+                db_session.bind is not None
+                and db_session.bind.dialect.name == "postgresql"
+            )
+
+            # Pre-lock the affected instance rows. On PG this is a real
+            # ``SELECT ... FOR UPDATE``; on SQLite we fall back to a
+            # plain SELECT — SQLite's implicit per-session transaction
+            # serialises writers (single-writer DB engine).
+            lock_stmt = select(Instance.instance_id).where(
+                col(Instance.instance_id).in_(ids)
+            )
+            if is_pg:
+                lock_stmt = lock_stmt.with_for_update()
+            db_session.exec(lock_stmt).all()
+
+            # 1. job_locks — via job_id subquery. Uses bindparam(..., expanding=True)
+            # so the same SQL works for both SQLite (positional ``?``) and
+            # PostgreSQL (named ``:tree_ids``) — each dialect expands the
+            # ``IN`` correctly.
+            locks_stmt = (
+                text(
+                    "DELETE FROM job_locks "
+                    "WHERE job_id IN ("
+                    "  SELECT job_id FROM job_queue_items "
+                    "  WHERE instance_id IN :tree_ids"
+                    ")"
+                )
+                .bindparams(bindparam("tree_ids", expanding=True))
+            )
+            locks_count = db_session.execute(
+                locks_stmt, {"tree_ids": ids}
+            ).rowcount or 0
+
+            # 2. job_queue_items. Uses the ORM ``sql_delete`` for symmetry with
+            # the existing ``_cascade_instance_deps`` helper.
+            jobs_count = db_session.exec(
+                sql_delete(JobItem).where(col(JobItem.instance_id).in_(ids))
+            ).rowcount or 0
+
+            # 3. job_watchers — REAL FK to ``instances.instance_id``.
+            # Must be cleaned BEFORE the corresponding ``instances`` row
+            # is deleted or PostgreSQL raises IntegrityError.
+            watchers_count = db_session.exec(
+                sql_delete(JobWatcher).where(col(JobWatcher.instance_id).in_(ids))
+            ).rowcount or 0
+
+            # 4. tasks.
+            tasks_count = db_session.exec(
+                sql_delete(Task).where(col(Task.instance_id).in_(ids))
+            ).rowcount or 0
+
+            # 5. events.
+            events_count = db_session.exec(
+                sql_delete(Event).where(col(Event.instance_id).in_(ids))
+            ).rowcount or 0
+
+            # 6. message_queue.
+            msgq_count = db_session.exec(
+                sql_delete(MessageQueue).where(col(MessageQueue.instance_id).in_(ids))
+            ).rowcount or 0
+
+            # 7. dependency_watchers — logical FK via target_instance_id
+            # (no DB-level constraint declared on the model). Must be cleaned
+            # before the matching ``instances`` rows go; otherwise watchers
+            # become orphans pointing at non-existent instance IDs and the
+            # bus's cancellation scan picks them up on the next stop.
+            # Uses the same ORM ``sql_delete`` pattern as the other dependent
+            # table deletes — SQLAlchemy expands the ``IN`` to ``?`` on
+            # SQLite and ``:ids`` on PostgreSQL automatically, so no
+            # bindparam boilerplate is required.
+            dep_watchers_count = db_session.exec(
+                sql_delete(DependencyWatcher).where(
+                    col(DependencyWatcher.target_instance_id).in_(ids)
+                )
+            ).rowcount or 0
+
+            # 8. instance_mappings — logical FK via agent_instance_id (no
+            # DB-level constraint declared on the model). Must be cleaned
+            # before the matching ``instances`` rows go; otherwise the
+            # mappings become orphans and any source routing that
+            # re-resolves them on the cancelled instance path silently
+            # fails. Same ORM ``sql_delete`` pattern as #7.
+            instance_mappings_count = db_session.exec(
+                sql_delete(InstanceMapping).where(
+                    col(InstanceMapping.agent_instance_id).in_(ids)
+                )
+            ).rowcount or 0
+
+            # 9. instance_hierarchy — wipe parent and child sides
+            # together so the cascade is symmetric regardless of root
+            # vs leaf position. Composed as a single statement with
+            # ``OR`` so the planner can collapse it into one scan.
+            hierarchy_count = db_session.exec(
+                sql_delete(InstanceHierarchy).where(
+                    col(InstanceHierarchy.parent_id).in_(ids)
+                    | col(InstanceHierarchy.child_id).in_(ids)
+                )
+            ).rowcount or 0
+
+            # 10. instances — last. Single bulk DELETE so the planner
+            # can issue one statement instead of N round-trips.
+            instances_result = db_session.exec(
+                sql_delete(Instance).where(col(Instance.instance_id).in_(ids))
+            )
+            instances_count = instances_result.rowcount or 0
+
+            db_session.commit()
+
+            logger.info(
+                "hard_delete_tree: removed instances=%d, hierarchy=%d, "
+                "watchers=%d, jobs=%d, locks=%d, tasks=%d, events=%d, "
+                "msgq=%d, dep_watchers=%d, instance_mappings=%d "
+                "(tree_size=%d)",
+                instances_count,
+                hierarchy_count,
+                watchers_count,
+                jobs_count,
+                locks_count,
+                tasks_count,
+                events_count,
+                msgq_count,
+                dep_watchers_count,
+                instance_mappings_count,
+                len(ids),
+            )
+
+            return {
+                "deleted": instances_count > 0,
+                "tree_ids": ids,
+                "counts": {
+                    "job_locks": int(locks_count),
+                    "job_queue_items": int(jobs_count),
+                    "job_watchers": int(watchers_count),
+                    "tasks": int(tasks_count),
+                    "events": int(events_count),
+                    "message_queue": int(msgq_count),
+                    "dependency_watchers": int(dep_watchers_count),
+                    "instance_mappings": int(instance_mappings_count),
+                    "instance_hierarchy": int(hierarchy_count),
+                    "instances": int(instances_count),
+                },
             }
 
     def delete_all(self) -> int:
