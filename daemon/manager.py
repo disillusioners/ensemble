@@ -4178,6 +4178,10 @@ class InstanceManager:
         if task is not None and task.done():
             logger.debug(f"Graph task already done for instance {instance_id[:8]}...")
             del self._graph_tasks[instance_id]
+            # Memory-leak fix: drop the per-instance get_instance_info
+            # throttle counter alongside the dead-task cleanup. Without
+            # this the dict leaks one entry per cancelled instance.
+            self._gii_throttle.pop(instance_id, None)
             return gate_cancelled
 
         if task is not None:

@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 163 packs
-- Unit: 137 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
+- Total: 164 packs
+- Unit: 138 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
 
 ## Unit Test Packs
 
@@ -33,6 +33,7 @@
 | instance_messaging_regression_test | test/packs/instance_messaging_regression_test.sh | Instance messaging injection hooks regression: skill injection (pre-existing) + shared context message-body injection (NEW). Validates `_process_message_with_tracking` injection gates, once-per-instance flags, completion/retry exclusions. | 2 min | 2026-07-12 | ✅ PASS (28/28 in 0.96s, feature/shared-context-message-injection, commit 6fa1f41a) |
 | services_orchestration_regression_test | test/packs/services_orchestration_regression_test.sh | Services orchestration regression: instance lifecycle H10/L14, terminate, context usage emission. Excludes skill/shared_context injection tests. | 2 min | 2026-07-12 | ✅ PASS (21 passed, 14 skipped in 6.76s, feature/shared-context-message-injection, commit 6fa1f41a) |
 
+| gii_throttle_unit_test | tests/test_gii_throttle.py | get_instance_info consecutive call throttling: InstanceManager._gii_throttle counter (bump/reset/get_count, multi-instance isolation, cleanup regression), ToolThrottleSlot delegation (getattr None-safety), delay map constants (GII_DELAY_MAP={3:180,4:300,5:600}, GII_MAX_DELAY=900), agent_node integration (counts 1/3/4/5/6/7+, no-slot-safe, AIMessage/reset), parallel tool call semantics (messages[-1] only detection), error ToolMessage still bumps, HumanMessage/non-gii ToolMessage reset, high-count cap holds, real ToolThrottleSlot chain, AIMessage-with-tool-calls reset, empty messages safe | 2 min | 2026-07-13 | ✅ PASS (31/31, feature/instance-info-throttle, commit 9221931c, 0 failures) |
 | wanderer_agent_unit_test | tests/unit/test_wanderer_agent.py | Wanderer agent: auto-discovery, meta.json validation (fields/types/innate_skills/tools config), tool filter (deny=None, no write tools, no db/opencode, instance ALLOWED for coder delegation, todo/chart expansion), soul content (readonly discipline, coder delegation, forbidden-modify, MCP, explore/experience, required sections, prompt loader) | 2 min | 2026-07-10 | ✅ PASS (37/37, feature/coder-alias-removal, 0 failures) |
 | system_tools_unit_test | tests/unit/tools/test_system_tools.py | system_env (prefix filter, secret masking, nomask), system_config (section filter, recursive nested masking, dynamic Config.model_fields sections), system_health (version/db_type/rag/platform/PID), connection string masking, curated env allowlist, factory pattern wiring | 2 min | 2026-07-09 | ✅ PASS (69/69, feature/system-info-tools-gaia, commit 9f90f78e, 0 failures) |
 | coder_agent_unit_test | tests/unit/test_coder_agent.py | Coder agent: auto-discovery, meta.json validity (required fields, types, innate_skills, tools.allow), prompt composition (soul only, no opencode injection), tool configuration (bash/filesystem/time/self present, no instance/opencode/db), no opencode contamination | 2 min | 2026-07-10 | ✅ PASS (39/39, feature/coder-alias-removal, 0 failures) |

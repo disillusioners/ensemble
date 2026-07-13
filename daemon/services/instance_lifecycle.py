@@ -1163,6 +1163,12 @@ class InstanceLifecycleService:
         # (LLM socket drain) but the daemon must not hang on DELETE.
         graph_task = self._manager._graph_tasks.pop(instance_id, None)
         self._manager.release_context_usage_cache(instance_id)
+        # Memory-leak fix: drop the per-instance get_instance_info throttle
+        # counter alongside the other in-memory state. terminate_instance
+        # bypasses ``_cleanup_instance_state`` (this method predates that
+        # centralization) so the pop has to be inline here, otherwise the
+        # ``_gii_throttle`` dict leaks one entry per terminated instance.
+        self._manager._gii_throttle.pop(instance_id, None)
         graph_unwind_ms = 0
         if graph_task and not graph_task.done():
             graph_task.cancel()
@@ -1583,6 +1589,10 @@ class InstanceLifecycleService:
         # the in-memory state matches the on-disk state after the cascade.
         for iid in tree_ids:
             self._manager._graph_tasks.pop(iid, None)
+            # Memory-leak fix: drop the per-instance get_instance_info
+            # throttle counter alongside the zombie-task sweep. The dict
+            # would otherwise leak one entry per hard-deleted instance.
+            self._manager._gii_throttle.pop(iid, None)
 
         # 3. Hard-delete DB records — FK-safe cascade across the 10
         # tables. Off-load to a thread so SQLite WAL write contention
@@ -1726,6 +1736,12 @@ class InstanceLifecycleService:
                 # Use pop() to prevent stale references after cancellation (consistent with terminate_instance)
                 graph_task = self._manager._graph_tasks.pop(node_id, None)
                 self._manager.release_context_usage_cache(node_id)
+                # Pause reset: drop the per-instance get_instance_info
+                # throttle counter so a resumed instance does not inherit
+                # stale consecutive-call state. pause_instance_cascade
+                # bypasses ``_cleanup_instance_state`` (paused instances
+                # stay in memory for resume), so the pop has to be inline.
+                self._manager._gii_throttle.pop(node_id, None)
                 if graph_task and not graph_task.done():
                     graph_task.cancel()
                     logger.info(f"Cancelled graph task for instance {node_id[:8]}...")

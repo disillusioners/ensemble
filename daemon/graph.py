@@ -848,7 +848,7 @@ def create_agent_node(
                     logger.info(
                         f"[THROTTLE] Instance {instance_short}: "
                         f"get_instance_info consecutive call #{count}, "
-                        f"sleeping {delay}s before LLM response"
+                        f"sleeping {delay}s before next LLM call"
                     )
                     await asyncio.sleep(delay)
             else:
