@@ -63,6 +63,7 @@ dev = [
 markers = [
     "integration: integration tests that require a live OpenCode server (run with `pytest -m integration`)",
     "postgres: PostgreSQL-only tests that require a live PostgreSQL server (run with `pytest -m postgres`)",
+    "no_xdist: tests that cannot run under pytest-xdist parallelism (skipped automatically when PYTEST_XDIST_WORKER is set; run them serially with `pytest -m no_xdist`)",
 ]
 addopts = "-m 'not integration and not postgres'"
 asyncio_mode = "auto"

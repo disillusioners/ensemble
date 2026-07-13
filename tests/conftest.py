@@ -276,6 +276,30 @@ def pytest_pycollect_makemodule(module_path, parent):
     return pytest.Module.from_parent(parent, path=module_path)
 
 
+# --- xdist guard for ``no_xdist``-marked tests --------------------------
+# Some tests cannot run safely under pytest-xdist worker parallelism (real
+# timeouts + thread-based pytest-timeout cause worker crashes). They carry the
+# ``no_xdist`` marker; when a worker is active we skip them so the parallel
+# suite stays clean. Running them serially is opt-in via:
+#   pytest --override-ini="addopts=" -m no_xdist
+# Mirrors the pattern used by tests/postgres/conftest.py.
+_NO_XDIST_WORKER_ENV = "PYTEST_XDIST_WORKER"
+_RUNNING_UNDER_XDIST = _NO_XDIST_WORKER_ENV in os.environ
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``no_xdist``-marked tests when running under pytest-xdist."""
+    if not _RUNNING_UNDER_XDIST:
+        return
+    skip_marker = pytest.mark.skip(
+        reason="Test marked no_xdist (cannot run under pytest-xdist). "
+        "Run serially: pytest --override-ini=\"addopts=\" -m no_xdist"
+    )
+    for item in items:
+        if "no_xdist" in item.keywords:
+            item.add_marker(skip_marker)
+
+
 @pytest.fixture
 def sample_config_yaml():
     """Sample YAML configuration content."""

@@ -319,7 +319,7 @@ class TestAtomicTransitionConcurrent:
     """True concurrent (threaded) execution — the SQL guard is the only
     thing that protects two writers from each other under SQLite WAL."""
 
-    def test_concurrent_terminal_writes_only_one_succeeds(self, repository, sample_job_data):
+    def test_concurrent_terminal_writes_only_one_succeeds(self, concurrent_repository, sample_job_data):
         """Two threads racing to write a terminal status: exactly one wins.
 
         Under the old (Pattern B) implementation both threads could
@@ -327,7 +327,16 @@ class TestAtomicTransitionConcurrent:
         in whichever state the slower writer happened to land on. Under
         the fix, the SQL guard ensures exactly one writer commits and
         the other raises ``InvalidTransitionError``.
+
+        Uses the file-backed ``concurrent_repository`` fixture (not
+        the in-memory ``repository``) so each thread gets its own
+        SQLite connection. StaticPool serialises cursor access and
+        produces ``InterfaceError('bad parameter or other API misuse')``
+        instead of a clean ``InvalidTransitionError`` for the losing
+        writer — the file-backed engine is required to observe the
+        cross-connection UPDATE race this test guards against.
         """
+        repository = concurrent_repository
         job = repository.create(**sample_job_data)
         repository.start_job(job.job_id, "inst-A")
 
@@ -487,7 +496,7 @@ class TestStartJobAtomic:
         assert "Cannot start job" in str(exc_info.value)
 
     def test_concurrent_start_only_one_succeeds(
-        self, repository, sample_job_data
+        self, concurrent_repository, sample_job_data
     ):
         """Two threads racing to start the same job: exactly one wins.
 
@@ -498,7 +507,14 @@ class TestStartJobAtomic:
         and clobbering each other's ``instance_id`` / ``started_at``.
         Under the fix, the SQL guard ensures exactly one writer
         commits and the other raises ``ValueError``.
+
+        Uses the file-backed ``concurrent_repository`` fixture so each
+        thread gets its own SQLite connection — StaticPool serialises
+        cursor access and yields ``InterfaceError('bad parameter or
+        other API misuse')`` instead of a clean ``ValueError`` for
+        the losing writer.
         """
+        repository = concurrent_repository
         job = repository.create(**sample_job_data)
 
         results: list[object] = []
