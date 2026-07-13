@@ -173,6 +173,15 @@ def _gii_tool_message(content: str = "result") -> ToolMessage:
     return ToolMessage(content=content, tool_call_id="t1", name="get_instance_info")
 
 
+def _non_gii_tool_message(content: str = "bash-result", tool_call_id: str = "t2") -> ToolMessage:
+    """Build a ToolMessage whose name is NOT ``GII_TOOL_NAME``.
+
+    Used by reset-path tests to simulate the interleaved-ToolMessage case
+    where ``messages[-1]`` is some other tool's result.
+    """
+    return ToolMessage(content=content, tool_call_id=tool_call_id, name="bash")
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — InstanceManager methods
 # ---------------------------------------------------------------------------
@@ -613,3 +622,311 @@ class TestAgentNodeThrottleIntegration:
         assert "messages" in result
         assert len(result["messages"]) == 1
         assert sleeps == []
+
+    # ------------------------------------------------------------------
+    # Additional coverage — reset / cap / edge cases
+    # ------------------------------------------------------------------
+    # Pinned behaviours for the throttle's ``messages[-1]``-only detection:
+    #   * Parallel-tool calls produce interleaved ToolMessages and reset
+    #     (NOT bump) — this is intentional and protects the
+    #     "consecutive single-tool polling" target.
+    #   * ToolMessage ``status="error"`` is ignored — name match is the
+    #     sole criterion, so an error response still counts as a gii call.
+    #   * Non-gii messages of any type (HumanMessage, AIMessage,
+    #     non-gii ToolMessage) reset the counter.
+    #   * Empty messages list is a safe no-op via the
+    #     ``messages[-1] if messages else None`` guard.
+    #   * Count >= 6 always maps to ``GII_MAX_DELAY`` (the cap holds).
+
+    @pytest.mark.asyncio
+    async def test_parallel_tool_call_resets_counter(self, monkeypatch):
+        """Parallel-tool interleaving resets the counter — intentional.
+
+        INTENTIONAL BEHAVIOR: when the agent emits ``get_instance_info`` in
+        parallel with other tools in a single AIMessage, ToolNode produces
+        interleaved ToolMessages, so ``messages[-1]`` may be a different
+        tool. The throttle only detects CONSECUTIVE single-tool gii
+        calls — the parallel path falls into the else branch and resets
+        rather than accumulating.
+
+        This test pins that design so a future refactor that tries to
+        widen the throttle to track parallel calls fails loudly.
+        """
+        slot = _StubToolThrottleSlot()
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        # messages[-1] is a non-gii ToolMessage — must RESET, not bump
+        await agent_node(
+            {"messages": [_gii_tool_message(), _non_gii_tool_message()]},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Parallel calls don't accumulate: reset called, bump NOT called
+        assert slot.bump_calls == []
+        assert slot.reset_calls == ["iid-1"]
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_error_tool_message_still_bumps(self, monkeypatch):
+        """ToolMessage with status="error" still bumps the counter.
+
+        The throttle detection only checks ``name == GII_TOOL_NAME`` — the
+        ``status`` field is intentionally ignored. An error response still
+        counts as a consecutive gii invocation: the agent tried to call
+        gii, the system answered, and the next attempt must be throttled.
+        Otherwise an error-spamming agent could reset the counter every
+        call by simply failing.
+        """
+        from daemon.graph import GII_DELAY_MAP
+
+        # Pre-seed to 2 so this call is the 3rd consecutive one (triggers 180s)
+        slot = _StubToolThrottleSlot(counts={"iid-1": 2})
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        error_gii = ToolMessage(
+            content="upstream failed",
+            tool_call_id="t-err",
+            name="get_instance_info",
+            status="error",
+        )
+
+        await agent_node(
+            {"messages": [error_gii]},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Counter bumped to 3, sleep 180 fired — status field was ignored
+        assert slot.bump_calls == ["iid-1"]
+        assert slot.reset_calls == []
+        assert slot.get_count("iid-1") == 3
+        assert sleeps == [GII_DELAY_MAP[3]]
+
+    @pytest.mark.asyncio
+    async def test_non_gii_tool_message_resets(self, monkeypatch):
+        """After three gii bumps, a non-gii ToolMessage at the end resets."""
+        from daemon.graph import GII_DELAY_MAP
+
+        slot = _StubToolThrottleSlot()
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        # Three gii turns -> bumps 1..3, sleep fires on the third (count=3)
+        msgs: list = []
+        for turn in range(3):
+            msgs.append(_gii_tool_message(content=f"turn-{turn}"))
+            await agent_node(
+                {"messages": list(msgs)},
+                config={"configurable": {"thread_id": "iid-1"}},
+            )
+
+        # Add a non-gii ToolMessage at messages[-1] -> reset on the next turn
+        msgs.append(_non_gii_tool_message(content="bash-output"))
+        await agent_node(
+            {"messages": list(msgs)},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Three bumps followed by one reset; reset turn does not sleep
+        assert slot.bump_calls == ["iid-1", "iid-1", "iid-1"]
+        assert slot.reset_calls == ["iid-1"]
+        assert sleeps == [GII_DELAY_MAP[3]]
+
+    @pytest.mark.asyncio
+    async def test_human_message_resets_counter(self, monkeypatch):
+        """A HumanMessage at messages[-1] resets the throttle counter.
+
+        Mirrors the production sequence where the user stops the polling
+        agent by sending a message; the gii polling loop is broken, and
+        the counter must be cleared so the agent isn't penalised on the
+        next turn.
+        """
+        slot = _StubToolThrottleSlot()
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        await agent_node(
+            {"messages": [_gii_tool_message(), HumanMessage(content="stop polling")]},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # HumanMessage is not a ToolMessage -> else branch -> reset
+        assert slot.bump_calls == []
+        assert slot.reset_calls == ["iid-1"]
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_cap_holds_at_high_counts(self, monkeypatch):
+        """Counts >= 6 all cap at GII_MAX_DELAY (900) — bump never saturates.
+
+        Pre-seeds the slot to count=19 and runs one more bump to push it
+        to 20. The throttle block reads ``GII_DELAY_MAP.get(count,
+        GII_MAX_DELAY)`` so anything off the table (count >= 6) falls
+        through to the 900s cap. This pins that:
+          * bump returns the live count (does NOT saturate at some max int),
+          * the delay is 900 (cap holds indefinitely),
+          * the cap does NOT keep climbing past 900.
+        """
+        from daemon.graph import GII_MAX_DELAY
+
+        # Pre-seed to 19 so this bump lands at 20 — well past the delay-table ceiling
+        slot = _StubToolThrottleSlot(counts={"iid-1": 19})
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        await agent_node(
+            {"messages": [_gii_tool_message()]},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        assert slot.bump_calls == ["iid-1"]
+        assert slot.reset_calls == []
+        # The cap holds — 20 still maps to GII_MAX_DELAY, no further escalation
+        assert sleeps == [GII_MAX_DELAY]
+        # Bump did NOT saturate — the live count is preserved
+        assert slot.get_count("iid-1") == 20
+
+    @pytest.mark.asyncio
+    async def test_real_tool_throttle_slot_integration(self, monkeypatch):
+        """End-to-end delegation: agent_node → ToolThrottleSlot.bump → manager.
+
+        Uses the REAL ``ToolThrottleSlot`` from ``daemon.graph`` wrapped
+        around the ``_ManagerStub`` (which already binds the real
+        ``bump_gii_throttle`` implementation onto its ``_gii_throttle``
+        dict via ``__get__``). This proves the full delegation chain:
+        the agent_node calls ``slot.bump``, which routes through to the
+        manager, which mutates the shared dict — no mocks at the slot
+        boundary.
+
+        Three consecutive gii calls must bump the real counter 1..3 and
+        trigger sleep(180) on the third.
+        """
+        from daemon.graph import GII_DELAY_MAP, ToolThrottleSlot
+
+        manager = _make_manager_with_throttle_dict()
+        slot = ToolThrottleSlot(manager)
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        msgs: list = []
+        for turn in range(3):
+            msgs.append(_gii_tool_message(content=f"turn-{turn}"))
+            await agent_node(
+                {"messages": list(msgs)},
+                config={"configurable": {"thread_id": "iid-1"}},
+            )
+
+        # The shared manager dict must hold the bumped counter (real chain)
+        assert manager.get_gii_throttle_count("iid-1") == 3
+        # Only the third call sleeps — confirms the chain drives sleep correctly
+        assert sleeps == [GII_DELAY_MAP[3]]
+
+    @pytest.mark.asyncio
+    async def test_aimessage_with_tool_calls_resets(self, monkeypatch):
+        """An AIMessage (even one requesting a gii tool_call) resets the counter.
+
+        The throttle only inspects ``messages[-1]``: a ``ToolMessage``
+        with ``name == GII_TOOL_NAME`` bumps; anything else resets. The
+        AIMessage here carries ``tool_calls=[{name='get_instance_info',
+        ...}]`` — but until ToolNode runs and emits the resulting
+        ``ToolMessage``, the AIMessage itself is not a ToolMessage, so
+        the counter resets.
+
+        This pins the messages[-1]-only design: the throttle does NOT
+        walk ``AIMessage.tool_calls`` to peek at the next planned tool
+        name (doing so would couple the throttle to AIMessage shape).
+        """
+        slot = _StubToolThrottleSlot()
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        planned_gii_ai = AIMessage(
+            content="let me check the instance info",
+            tool_calls=[{"name": "get_instance_info", "args": {}, "id": "call-1"}],
+        )
+
+        await agent_node(
+            {"messages": [_gii_tool_message(), planned_gii_ai]},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # AIMessage is not a ToolMessage -> else branch -> reset
+        assert slot.bump_calls == []
+        assert slot.reset_calls == ["iid-1"]
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_empty_messages_list_does_not_raise(self, monkeypatch):
+        """Empty messages list must not IndexError — last_msg falls back to None.
+
+        The throttle guards on ``messages[-1] if messages else None``, so
+        an empty list takes the else branch and resets (safe no-op for
+        an unset key). This test exists so a future refactor that drops
+        the guard fails loudly in CI rather than crashing on the
+        empty-state edge case.
+        """
+        slot = _StubToolThrottleSlot()
+        agent_node, llm = _make_agent(throttle_slot=slot)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        # Empty messages — must not raise
+        result = await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # reset is called (safe no-op for an unset count)
+        assert slot.bump_calls == []
+        assert slot.reset_calls == ["iid-1"]
+        assert sleeps == []
+        # Agent still returns a state dict (LLM was invoked with just the system prompt)
+        assert "messages" in result
