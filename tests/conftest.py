@@ -398,6 +398,131 @@ def sample_instance_create_with_instance_id():
     }
 
 
+# ==================== create_mock_config factory and mock_config fixture ====================
+
+
+def create_mock_config() -> MagicMock:
+    """Build a MagicMock(spec=Config) wired for InstanceManager unit tests.
+
+    ``MagicMock(spec=Config)`` does NOT expose Pydantic ``BaseSettings``
+    fields automatically — they must be set explicitly so attribute
+    access (``config.skill_evolution``, ``config.language``) returns the
+    expected ``MagicMock(spec=…)`` instead of raising AttributeError.
+
+    The set of sub-configs mirrors what ``InstanceManager.__init__``
+    reads (see daemon/manager.py:474-545 for the full set). Tests that
+    only need a slim ``Config`` can override just the fields they
+    care about — the factory leaves every sub-config as a ``MagicMock``
+    so additional attributes resolve to auto-generated child Mocks.
+
+    Defaults mirror ``Config``'s own defaults where it matters
+    (compaction.enabled=False so the compactor is not constructed;
+    language.check_enabled=False so the language-check gate is off).
+    """
+    from daemon.config import (
+        Config,
+        LLMConfig,
+        DaemonConfig,
+        LimitsConfig,
+        PersistenceConfig,
+        QueueConfig,
+        CompactionConfig,
+        ServicesConfig,
+        JobSystemConfig,
+        AgentsConfig,
+        McpPoolConfig,
+        SkillEvolutionConfig,
+        LanguageConfig,
+    )
+
+    config = MagicMock(spec=Config)
+
+    config.llm = MagicMock(spec=LLMConfig)
+    config.llm.base_url = "https://api.openai.com/v1"
+    config.llm.api_key = "test-key"
+    config.llm.model = "gpt-4"
+    config.llm.model_vision = None
+    config.llm.temperature = 0.7
+    config.llm.request_timeout = 60
+
+    config.daemon = MagicMock(spec=DaemonConfig)
+    config.daemon.host = "0.0.0.0"
+    config.daemon.port = 8079
+
+    config.limits = MagicMock(spec=LimitsConfig)
+    config.limits.max_instances = 100
+    config.limits.max_children_per_instance = 10
+    config.limits.instance_timeout_minutes = 60
+    config.limits.message_rate_limit = 60
+    config.limits.graph_recursion_limit = 100
+    config.limits.llm_concurrency = 10
+
+    config.persistence = MagicMock(spec=PersistenceConfig)
+    config.persistence.db_path = ":memory:"
+
+    config.queue = MagicMock(spec=QueueConfig)
+    config.queue.discard_on_startup = None
+    config.queue.llm_retry_transient_attempts = 10
+    config.queue.llm_retry_timeout_attempts = 3
+
+    config.compaction = MagicMock(spec=CompactionConfig)
+    config.compaction.enabled = False
+
+    config.services = MagicMock(spec=ServicesConfig)
+    config.services.worker_poll_interval = 0.5
+    config.services.stale_task_recovery_interval = 60
+    config.services.task_timeout_minutes = 60
+    config.services.max_task_retries = 3
+    config.services.task_retry_backoff_base = 60
+    config.services.task_retry_backoff_max = 3600
+    config.services.stale_task_cancel_grace_seconds = 10
+    config.services.graph_timeout_minutes = 55
+
+    config.agents = MagicMock(spec=AgentsConfig)
+    config.agents.directory = "./agents"
+
+    config.job_system = MagicMock(spec=JobSystemConfig)
+    config.job_system.default_max_retries = 3
+    config.job_system.retry_backoff_base_seconds = 60
+    config.job_system.retry_backoff_max_seconds = 3600
+    config.job_system.retry_backoff_multiplier = 2.0
+    config.job_system.dlq_enabled = True
+    config.job_system.event_dispatch_enabled = True
+    config.job_system.observer_health_check_interval_seconds = 300
+    config.job_system.idempotency_key_ttl_hours = 24
+    config.job_system.job_retry_scheduler_enabled = None
+
+    config.mcp_pool = MagicMock(spec=McpPoolConfig)
+    config.mcp_pool.enabled = True
+    config.mcp_pool.default_pool_size = 1
+    config.mcp_pool.servers = {}
+    config.mcp_pool.health_check_interval = 60
+    config.mcp_pool.health_check_timeout = 5
+    config.mcp_pool.tool_call_timeout = 120
+
+    # CRITICAL: ``InstanceManager.__init__`` reads these two sub-configs
+    # directly. MagicMock(spec=Config) does NOT auto-create them — without
+    # the explicit setattr, attribute access raises AttributeError on the
+    # first ``config.skill_evolution``/``config.language`` lookup.
+    config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
+    config.language = MagicMock(spec=LanguageConfig)
+    config.language.check_enabled = False
+
+    return config
+
+
+@pytest.fixture
+def mock_config():
+    """Fixture wrapper around ``create_mock_config()``.
+
+    Tests that need a Config-shaped mock should prefer this fixture over
+    building one inline so sub-configs stay consistent across the suite.
+    The instance is fresh per-test (function scope is the default for
+    pytest fixtures) so tests can mutate fields without leaking state.
+    """
+    return create_mock_config()
+
+
 @pytest.fixture
 def sample_message_create_data():
     """Sample MessageCreate data for testing."""

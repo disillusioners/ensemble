@@ -485,7 +485,7 @@ class TestWebFetchBootstrapIntegration:
         from daemon.config import (
             Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig,
             QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig,
-            McpPoolConfig
+            McpPoolConfig, SkillEvolutionConfig, LanguageConfig
         )
         from unittest.mock import MagicMock
 
@@ -552,6 +552,12 @@ class TestWebFetchBootstrapIntegration:
         config.job_system.observer_health_check_interval_seconds = 300
         config.job_system.idempotency_key_ttl_hours = 24
         config.job_system.job_retry_scheduler_enabled = None
+
+        # ``InstanceManager.__init__`` reads these sub-configs directly;
+        # ``MagicMock(spec=Config)`` does not auto-create them.
+        config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
+        config.language = MagicMock(spec=LanguageConfig)
+        config.language.check_enabled = False
 
         return config
 

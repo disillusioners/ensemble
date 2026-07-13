@@ -32,6 +32,13 @@ class MockJob:
     ``resume_processing_job`` reads (``existing_task.id``,
     ``existing_task.status``) plus the pre-D13 attributes kept for
     backwards-compat with call sites that haven't been rewritten.
+
+    The ``work_id`` attribute (a UUID4 string) is the stable Task
+    handle the production code derives ``old_job_id`` from when
+    building the resume context. Tests that need a specific work_id
+    should pass it explicitly via ``work_id=``; the default
+    ``uuid.uuid4()`` keeps each instance unique so concurrent
+    resume flows cannot collide on a shared value.
     """
 
     def __init__(
@@ -41,12 +48,18 @@ class MockJob:
         message_id: str | None = "original-msg-123",
         status: str = "running",
         task_type: str = "process_message",
+        work_id: str | None = None,
     ):
         # Post-D13 ``Task`` attributes.
         self.id = job_id
         self.task_type = task_type
         self.status = status
         self.worker_id = "worker-0"
+        # Stable UUID4 work_id — production derives ``old_job_id`` from
+        # this attribute (the Task's stable identifier, NOT the integer
+        # PK ``id``). Tests that pin a specific value should pass
+        # ``work_id="..."`` explicitly.
+        self.work_id = work_id if work_id is not None else str(uuid.uuid4())
         # Pre-D13 ``JobItem`` attributes (kept for backwards-compat).
         self.job_id = job_id
         self.instance_id = instance_id

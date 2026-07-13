@@ -89,6 +89,15 @@ def mock_manager(task_repo):
     manager._instance_repository = instance_repo
     # Phase 2.5 (Task 2.5.8): the gate moved onto ``_task_repo``.
     manager._task_repo = task_repo
+    # Phase 5 cutover: ``job_continue`` enqueues via ``enqueue_message_job``
+    # (the inline message-Job path — see daemon/tools/job_queue.py:749).
+    # Tests must mock this attribute; ``enqueue_message`` is the legacy
+    # internal-only path and is NOT called by ``job_continue``.
+    manager.enqueue_message_job = AsyncMock()
+    # Kept as a defensive belt-and-suspenders mock so any straggling
+    # ``enqueue_message`` call site (regressions, future code that
+    # forgets to migrate) does not accidentally pass through the real
+    # implementation. Production does not exercise this attribute.
     manager.enqueue_message = AsyncMock()
     return manager
 
@@ -111,12 +120,29 @@ def job_continue(tools):
 
 
 def _make_old_job(*, instance_id: str = "inst-1"):
-    """Build a MagicMock standing in for a JobItem returned by ``job_service.get_job``."""
+    """Build a MagicMock standing in for a JobItem returned by ``job_service.get_work`` / ``job_service.get_job``.
+
+    Production ``job_continue`` calls ``await job_service.get_work(old_job_id)``
+    first (the kind-agnostic resolver — see daemon/tools/job_queue.py:651),
+    then routes by ``record.kind``. When ``kind == "job"`` it also calls
+    ``get_job`` for the soft-delete column. To keep both code paths happy
+    with a single fixture, the returned mock carries:
+      * ``.status = "completed"``  — terminal-state check needs a real string,
+        not an AsyncMock (the bug this test was written to catch).
+      * ``.kind = "job"``          — routes into the ``enqueue_message_job``
+        enqueue path.
+      * ``.instance_id``           — used by the gate's instance_status
+        pre-check and the ``has_inflight_task`` keying.
+      * ``.deleted_at = None``     — soft-delete guard skips.
+      * ``.admission_state = "done"`` — same value ``_make_old_job`` exposed
+        pre-D13, kept for backwards-compat with any code that reads it.
+    """
     old_job = MagicMock()
     # NOTE: we must set status via a direct assignment that is NOT
     # itself a MagicMock — the job_continue path calls get_work which
     # returns a WorkRecord whose .status is read directly.
     type(old_job).status = property(lambda self: "completed")
+    type(old_job).kind = property(lambda self: "job")
     type(old_job).admission_state = property(lambda self: "done")
     old_job.instance_id = instance_id
     old_job.deleted_at = None
@@ -155,6 +181,9 @@ class TestJobContinueConcurrencyGate:
         ``JobItem`` to collide with any more.
         """
         job_service.get_job.return_value = _make_old_job()
+        # Production calls ``get_work`` first (kind-agnostic resolver); mock
+        # both so the test stays green if the resolver path regresses.
+        job_service.get_work.return_value = _make_old_job()
         mock_manager._instance_repository.get.return_value = _make_instance(
             status="running"
         )
@@ -173,7 +202,7 @@ class TestJobContinueConcurrencyGate:
         )
         assert "inst-1" in result["error"]
         # Critical: enqueue must NOT have been called.
-        mock_manager.enqueue_message.assert_not_awaited()
+        mock_manager.enqueue_message_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_proceeds_when_no_task_in_flight(
@@ -192,12 +221,13 @@ class TestJobContinueConcurrencyGate:
 
         old_job = _make_old_job(instance_id="inst-1")
         job_service.get_job.return_value = old_job
+        job_service.get_work.return_value = old_job
         mock_manager._instance_repository.get.return_value = _make_instance(
             status="running"
         )
         # Gate: no Task is driving this instance.
         task_repo.has_inflight_task = MagicMock(return_value=False)
-        mock_manager.enqueue_message.return_value = AsyncMessageResult(
+        mock_manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-1",
             instance_id="inst-1",
             status="queued",
@@ -213,7 +243,7 @@ class TestJobContinueConcurrencyGate:
         assert "error" not in result
         assert result["new_job_id"] == "new-job-1"
         assert result["message_id"] == "msg-1"
-        mock_manager.enqueue_message.assert_awaited_once()
+        mock_manager.enqueue_message_job.assert_awaited_once()
         # The gate must have been consulted with the right instance_id.
         # NOTE: ``has_inflight_task`` is invoked via ``asyncio.to_thread``
         # so the mock's call counter (not await counter) is what
@@ -254,6 +284,7 @@ class TestJobContinueConcurrencyGate:
 
         old_job = _make_old_job(instance_id="inst-1")
         job_service.get_job.return_value = old_job
+        job_service.get_work.return_value = old_job
         mock_manager._instance_repository.get.return_value = _make_instance(
             status="running"
         )
@@ -267,7 +298,7 @@ class TestJobContinueConcurrencyGate:
 
         # The first enqueue resolves normally; the second never
         # enqueues (gate rejects before we reach it).
-        mock_manager.enqueue_message.return_value = AsyncMessageResult(
+        mock_manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-A",
             instance_id="inst-1",
             status="queued",
@@ -310,9 +341,9 @@ class TestJobContinueConcurrencyGate:
         assert "inst-1" in result_b["error"]
 
         # Exactly one enqueue fired (the rejected call short-circuited).
-        assert mock_manager.enqueue_message.await_count == 1, (
+        assert mock_manager.enqueue_message_job.await_count == 1, (
             "the rejected concurrent call must NOT enqueue; only the "
-            "passing call should reach enqueue_message"
+            "passing call should reach enqueue_message_job"
         )
 
         # Both calls consulted the gate.
@@ -352,14 +383,16 @@ class TestJobContinueConcurrencyGate:
 
         # Use a RUNNING instance (not paused) — the paused pre-check
         # would otherwise short-circuit before the gate fires.
-        job_service.get_job.return_value = _make_old_job(instance_id="inst-1")
+        old_job = _make_old_job(instance_id="inst-1")
+        job_service.get_job.return_value = old_job
+        job_service.get_work.return_value = old_job
         mock_manager._instance_repository.get.return_value = _make_instance(
             status="running"
         )
         # The Task is PAUSED — ``has_inflight_task`` excludes PAUSED
         # so the gate returns False (the tool is allowed to proceed).
         task_repo.has_inflight_task = MagicMock(return_value=False)
-        mock_manager.enqueue_message.return_value = AsyncMessageResult(
+        mock_manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-1",
             instance_id="inst-1",
             status="queued",
@@ -382,6 +415,6 @@ class TestJobContinueConcurrencyGate:
         )
         assert result["new_job_id"] == "new-job-1"
         # The gate returned False — tool proceeded to enqueue.
-        mock_manager.enqueue_message.assert_awaited_once()
+        mock_manager.enqueue_message_job.assert_awaited_once()
         # The gate's return value was consulted and was False.
         task_repo.has_inflight_task.assert_called_with("inst-1")

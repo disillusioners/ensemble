@@ -68,7 +68,16 @@ def _make_manager(*, status: str) -> MagicMock:
       * ``get_instance_info`` — returns ``{"status": status}`` (the contract
         the production code reads).
       * ``get_queue_stats`` (async) — returns empty counts.
-      * ``enqueue_message`` (async) — succeeds (used only for live status).
+      * ``enqueue_message`` (async) — succeeds (the live-status path).
+
+    Production ``send_message`` (daemon/tools/instance.py:715) calls
+    ``await manager.enqueue_message(...)`` — this is the internal
+    agent-to-agent path, which intentionally does NOT create a JobItem
+    mirror. The public/external entry points (POST /messages, chat
+    adapters, scheduler) go through ``enqueue_message_job`` instead.
+    Tests must mock ``enqueue_message`` as ``AsyncMock`` (awaiting a
+    plain ``MagicMock`` raises ``TypeError: object MagicMock can't be
+    used in 'await' expression``).
     """
     manager = MagicMock()
 
@@ -86,11 +95,17 @@ def _make_manager(*, status: str) -> MagicMock:
     manager.get_queue_stats = AsyncMock(
         return_value={"pending_count": 0, "processing_count": 0}
     )
-    # Phase 5 cutover: the ``send_message`` tool now dispatches through
-    # ``enqueue_message_job`` (public message-Job path) so the JobItem
-    # mirror is created alongside the Task row. Test mocks must target
-    # this attribute — the legacy ``enqueue_message`` is internal-only.
-    manager.enqueue_message_job = AsyncMock(
+    # ``send_message`` dispatches via ``enqueue_message`` (NOT
+    # ``enqueue_message_job``). The legacy ``enqueue_message_job``
+    # attribute is intentionally NOT called by the tool — the
+    # JobItem-mirror path is reserved for external/public entry points.
+    # Keep it on the manager as a MagicMock so any straggling code that
+    # reads it doesn't accidentally invoke the real implementation, but
+    # do not assert against it.
+    manager.enqueue_message = AsyncMock(
+        return_value=MagicMock(message_id="msg-abc-123")
+    )
+    manager.enqueue_message_job = MagicMock(
         return_value=MagicMock(message_id="msg-abc-123")
     )
     # Real code path also touches _instance_repository for the waiting_for
@@ -165,7 +180,7 @@ class TestSendMessageStatusGuard:
         )
 
         # The post-guard path was NOT taken: enqueue_message_job was never called.
-        manager.enqueue_message_job.assert_not_called()
+        manager.enqueue_message.assert_not_called()
 
     async def test_send_message_rejects_errored_instance(self):
         """An errored instance must be rejected with an ERROR string.
@@ -186,7 +201,7 @@ class TestSendMessageStatusGuard:
         assert "error" in result.lower()
 
         # No enqueue attempted.
-        manager.enqueue_message_job.assert_not_called()
+        manager.enqueue_message.assert_not_called()
 
     async def test_send_message_accepts_idle_instance(self):
         """An idle instance is live and must pass the status guard.
@@ -209,7 +224,7 @@ class TestSendMessageStatusGuard:
         )
 
         # The post-guard path WAS taken: enqueue_message_job was called.
-        manager.enqueue_message_job.assert_awaited_once()
+        manager.enqueue_message.assert_awaited_once()
 
     async def test_send_message_accepts_running_instance(self):
         """A running instance is live and must pass the status guard.
@@ -227,7 +242,7 @@ class TestSendMessageStatusGuard:
         assert not (isinstance(result, str) and result.startswith("ERROR")), (
             f"Running instance should not be rejected; got: {result!r}"
         )
-        manager.enqueue_message_job.assert_awaited_once()
+        manager.enqueue_message.assert_awaited_once()
 
     async def test_send_message_rejects_when_terminated_check_runs_first(self):
         """Sanity: the guard checks status BEFORE the in-progress check.
@@ -254,7 +269,7 @@ class TestSendMessageStatusGuard:
         # Not the in-progress error.
         assert "in progress" not in result.lower()
         # No enqueue attempted.
-        manager.enqueue_message_job.assert_not_called()
+        manager.enqueue_message.assert_not_called()
 
     async def test_send_message_does_not_use_deprecated_terminated_key(self):
         """Regression guard: the fix replaced ``instance_info.get("terminated")``

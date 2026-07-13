@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from daemon.config import Config, LLMConfig, LimitsConfig, QueueConfig, _parse_csv_or_json_list
+from daemon.config import (
+    Config,
+    LLMConfig,
+    LimitsConfig,
+    QueueConfig,
+    SkillEvolutionConfig,
+    LanguageConfig,
+    _parse_csv_or_json_list,
+)
 from daemon.registry import AgentMetadata
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.services.instance_lifecycle import _SpawnResult
@@ -44,6 +52,11 @@ def create_mock_config(
     config.llm = mock_llm
     config.limits = mock_limits
     config.queue = mock_queue
+    # ``InstanceManager.__init__`` reads these sub-configs directly;
+    # ``MagicMock(spec=Config)`` does not auto-create them.
+    config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
+    config.language = MagicMock(spec=LanguageConfig)
+    config.language.check_enabled = False
     return config
 
 
