@@ -8,7 +8,7 @@ from langchain_openai.chat_models.base import (
     _convert_delta_to_message_chunk as _base_convert_delta_to_message_chunk,
 )
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
@@ -20,6 +20,25 @@ import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# get_instance_info throttling (escalating backoff)
+# ============================================================================
+# Counter resets on any non-gii message — see ToolThrottleSlot.bump/reset.
+# Delay table maps the consecutive-call count (after the bump) to seconds
+# spent sleeping in agent_node before the next LLM call.
+# Scope: detects CONSECUTIVE gii calls only. When the agent emits gii in
+# parallel with other tools in one AIMessage, ToolNode produces interleaved
+# ToolMessages so messages[-1] may not be gii and the counter resets. This is
+# intentional — the throttle targets consecutive single-tool polling loops.
+GII_TOOL_NAME = "get_instance_info"
+GII_DELAY_MAP: dict[int, int] = {
+    3: 180,   # 3rd consecutive call: 3 min
+    4: 300,   # 4th: 5 min
+    5: 600,   # 5th: 10 min
+}
+GII_MAX_DELAY = 900  # 6+ consecutive: 15 min (cap)
 
 from .llm_error_classifier import (
     classify_llm_errors,
@@ -87,6 +106,43 @@ class InjectionSlot:
         if clearer is None:
             return None
         return clearer(instance_id)
+
+
+class ToolThrottleSlot:
+    """Lightweight, mock-friendly handle around InstanceManager tool-throttle counters.
+
+    Mirrors :class:`InjectionSlot`'s pattern: only the methods agent_node needs
+    are exposed, the manager reference is duck-typed via ``getattr`` so the
+    agent_node can be tested without a real ``InstanceManager``.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object exposing
+            ``bump_gii_throttle``, ``reset_gii_throttle``, and
+            ``get_gii_throttle_count`` methods).
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    def bump(self, instance_id: str) -> int:
+        """Increment and return the consecutive ``get_instance_info`` count."""
+        bumper = getattr(self._manager, "bump_gii_throttle", None)
+        if bumper is None:
+            return 0
+        return bumper(instance_id)
+
+    def reset(self, instance_id: str) -> None:
+        """Reset the consecutive-call counter (no-op when unset)."""
+        resetter = getattr(self._manager, "reset_gii_throttle", None)
+        if resetter is not None:
+            resetter(instance_id)
+
+    def get_count(self, instance_id: str) -> int:
+        """Return the current consecutive-call count (0 if unset)."""
+        getter = getattr(self._manager, "get_gii_throttle_count", None)
+        if getter is None:
+            return 0
+        return getter(instance_id)
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -641,6 +697,7 @@ def create_agent_node(
     llm_standard=None,
     injection_slot: InjectionSlot | None = None,
     live_hub: Any = None,
+    throttle_slot: ToolThrottleSlot | None = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -666,6 +723,13 @@ def create_agent_node(
             "injection_consumed" ...)``). In Phase 1 the handle is wired
             but only a log-only stub runs so the structural call site is
             exercised; ``None`` skips the stub entirely.
+        throttle_slot: Optional :class:`ToolThrottleSlot` handle that
+            throttles consecutive ``get_instance_info`` tool calls by
+            injecting escalating ``asyncio.sleep`` delays before the
+            LLM call. The slot's ``bump``/``reset``/``get_count`` are
+            invoked on the last message in the state — non-gii
+            messages reset the consecutive-call counter. ``None``
+            disables throttling (backward compatible).
     """
 
     async def agent_node(state, config=None):
@@ -769,6 +833,26 @@ def create_agent_node(
         vision_log = f", vision={model_vision}" if model_vision and has_images else ""
         call_type = "VISION" if use_vision_model else "STANDARD"
         logger.info(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
+
+        # ── get_instance_info throttling ─────────────────────────────────
+        # Counts consecutive gii tool messages so we can inject escalating
+        # delays and break the hallucination polling loop. The counter
+        # resets on any non-gii message — this branch covers every other
+        # message type (HumanMessage, AIMessage without tool_calls, etc.).
+        if throttle_slot is not None:
+            last_msg = messages[-1] if messages else None
+            if isinstance(last_msg, ToolMessage) and last_msg.name == GII_TOOL_NAME:
+                count = throttle_slot.bump(instance_id)
+                if count >= 3:
+                    delay = GII_DELAY_MAP.get(count, GII_MAX_DELAY)
+                    logger.info(
+                        f"[THROTTLE] Instance {instance_short}: "
+                        f"get_instance_info consecutive call #{count}, "
+                        f"sleeping {delay}s before LLM response"
+                    )
+                    await asyncio.sleep(delay)
+            else:
+                throttle_slot.reset(instance_id)
 
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -978,6 +1062,7 @@ def build_instance_graph(
     language_check_enabled: bool = True,
     injection_slot: InjectionSlot | None = None,
     live_hub: Any = None,
+    throttle_slot: ToolThrottleSlot | None = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -1010,6 +1095,11 @@ def build_instance_graph(
         live_hub: Optional ``LiveEventHub`` reference (Phase 1 / C1)
             threaded for Phase 2 SSE emission (placeholder only in
             Phase 1).
+        throttle_slot: Optional :class:`ToolThrottleSlot` handle that
+            throttles consecutive ``get_instance_info`` tool calls by
+            injecting escalating ``asyncio.sleep`` delays before the
+            LLM call. ``None`` disables throttling (backward-compatible
+            default).
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
@@ -1058,6 +1148,7 @@ def build_instance_graph(
         llm_standard=llm_standard,
         injection_slot=injection_slot,
         live_hub=live_hub,
+        throttle_slot=throttle_slot,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)

@@ -904,7 +904,7 @@ class InstanceLifecycleService:
         # reference through the factory closure so the agent_node can
         # consume pending user messages and (Phase 2) emit SSE events
         # without coupling to module-level singletons.
-        from ..graph import InjectionSlot
+        from ..graph import InjectionSlot, ToolThrottleSlot
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -917,6 +917,7 @@ class InstanceLifecycleService:
             language_check_enabled=self._config.language.check_enabled,
             injection_slot=InjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
+            throttle_slot=ToolThrottleSlot(self._manager),
         )
 
         # Save metadata to DB using instance repository
@@ -2195,7 +2196,7 @@ class InstanceLifecycleService:
         from ..manager import build_instance_graph
         # Phase 1 / C1: thread injection_slot + live_hub via factory
         # closure (see _spawn_instance_internal for the same wiring).
-        from ..graph import InjectionSlot
+        from ..graph import InjectionSlot, ToolThrottleSlot
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -2208,6 +2209,7 @@ class InstanceLifecycleService:
             language_check_enabled=self._config.language.check_enabled,
             injection_slot=InjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
+            throttle_slot=ToolThrottleSlot(self._manager),
         )
 
         # Store in instances dict

@@ -721,7 +721,11 @@ class InstanceManager:
         # to checkpoint via C2 (agent_node returns both [injected, response]).
         # Threaded into the LangGraph agent node via factory closure (C1).
         self._pending_injections: dict[str, dict[str, str]] = {}
-        
+
+        # Per-instance consecutive-call counter for ``get_instance_info`` throttling.
+        # Reset on any non-gii tool/message — see ``ToolThrottleSlot`` in graph.py.
+        self._gii_throttle: dict[str, int] = {}
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -1818,6 +1822,25 @@ class InstanceManager:
         """
         return self._pending_injections.pop(instance_id, None)
 
+    def bump_gii_throttle(self, instance_id: str) -> int:
+        """Increment the consecutive ``get_instance_info`` call counter.
+
+        Returns the new count after the increment. The counter is reset
+        whenever the agent invokes any other tool or sends a non-gii
+        message — see :meth:`reset_gii_throttle`.
+        """
+        count = self._gii_throttle.get(instance_id, 0) + 1
+        self._gii_throttle[instance_id] = count
+        return count
+
+    def reset_gii_throttle(self, instance_id: str) -> None:
+        """Clear the consecutive-call counter for ``instance_id``."""
+        self._gii_throttle.pop(instance_id, None)
+
+    def get_gii_throttle_count(self, instance_id: str) -> int:
+        """Return the current consecutive-call count (0 if unset)."""
+        return self._gii_throttle.get(instance_id, 0)
+
     def _cleanup_instance_state(self, instance_id: str) -> dict | None:
         """Centralized per-instance in-memory state cleanup (W1).
 
@@ -1852,6 +1875,10 @@ class InstanceManager:
         """
         task = self._graph_tasks.pop(instance_id, None)
         cleared_injection = self._pending_injections.pop(instance_id, None)
+        # Pop the gii throttle entry too — without this cleanup the dict
+        # grows unbounded for long-lived daemons that process many short-
+        # lived instances (each termination leaks one entry).
+        self._gii_throttle.pop(instance_id, None)
         self.release_context_usage_cache(instance_id)
         # Note: request_registry.cancel_by_instance() is called separately
         # by the lifecycle callers because the cancellation reason differs
