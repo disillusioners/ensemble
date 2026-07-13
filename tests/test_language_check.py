@@ -231,6 +231,36 @@ class TestDetectWrongLanguage:
         assert detect_wrong_language(content, "ENGLISH") is False
         assert detect_wrong_language(content, "  English  ") is False  # whitespace stripped
 
+    # ── Defense-in-depth: Auto / None preference (no enforcement) ─────────
+
+    def test_none_or_empty_preferred_language_returns_false(self):
+        """None or empty preferred_language → False (no preference to enforce).
+
+        Defense-in-depth guard: ``detect_wrong_language`` returns False when the
+        preferred language is missing (``None`` or ``""``), regardless of the
+        content's language. The graph node should not even be invoked in this
+        case (controlled by ``LanguageConfig.check_enabled``), but other callers
+        must not crash or flag content as wrong.
+        """
+        assert detect_wrong_language("Hello world.", None) is False
+        assert detect_wrong_language("Hello world.", "") is False
+
+    def test_auto_preferred_language_returns_false_case_insensitive(self):
+        """'Auto' (case-insensitive, whitespace-tolerant) → False.
+
+        Explicit ``"Auto"`` preference means "no language enforcement" — the
+        check must return False even for clearly wrong-language content like
+        Chinese characters. Whitespace and case are normalized before the
+        sentinel comparison.
+        """
+        # Use clearly wrong-language content so the test would FAIL if the
+        # guard were removed (i.e. content alone would trigger detection).
+        cjk_content = "你好世界这是一段中文内容用于测试"
+        for lang in ("Auto", "auto", "AUTO", "  Auto  "):
+            assert detect_wrong_language(cjk_content, lang) is False, (
+                f"Auto sentinel must disable check for {lang!r}"
+            )
+
     # ── Helper coverage (sanity for completeness) ─────────────────────────
 
     def test_strip_code_blocks_removes_fences(self):
@@ -827,15 +857,26 @@ class TestAppendUserLanguage:
         assert "## User Language Preference" in result
         assert "User prefers language: Spanish" in result
 
-    def test_empty_string_defaults_to_english(self):
-        """Empty language string falls back to English."""
+    def test_empty_string_defaults_to_auto_and_skips_injection(self):
+        """Empty language string falls back to "Auto" sentinel — injection skipped."""
         result = append_user_language("prompt", "")
-        assert "User prefers language: English" in result
+        # "Auto" is the no-preference sentinel — system prompt returned unchanged.
+        assert result == "prompt"
+        assert "User Language Preference" not in result
 
-    def test_none_defaults_to_english(self):
-        """None language falls back to English (falsy branch)."""
+    def test_none_defaults_to_auto_and_skips_injection(self):
+        """None language falls back to "Auto" sentinel — injection skipped."""
         result = append_user_language("prompt", None)
-        assert "User prefers language: English" in result
+        # "Auto" is the no-preference sentinel — system prompt returned unchanged.
+        assert result == "prompt"
+        assert "User Language Preference" not in result
+
+    def test_explicit_auto_skips_injection(self):
+        """Explicit "Auto" (case-insensitive) skips injection entirely."""
+        for value in ("Auto", "auto", "AUTO"):
+            result = append_user_language("base prompt.", value)
+            assert result == "base prompt.", f"Failed for {value!r}"
+            assert "User Language Preference" not in result
 
     def test_chinese_language_preserved(self):
         """Non-English language values pass through unchanged."""

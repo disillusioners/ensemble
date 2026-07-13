@@ -9,6 +9,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { SettingsService } from '../../services/settings.service';
 
 const PREDEFINED_LANGUAGES = [
+  'Auto',
   'English',
   'Spanish',
   'Chinese',
@@ -26,7 +27,7 @@ const PREDEFINED_LANGUAGES = [
 ];
 
 const CUSTOM_OPTION_VALUE = 'Other (custom)';
-const DEFAULT_LANGUAGE = 'English';
+const DEFAULT_LANGUAGE = 'Auto';
 const STORAGE_KEY = 'settings-language-preference';
 
 @Component({

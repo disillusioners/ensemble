@@ -518,16 +518,30 @@ def append_user_language(system_prompt: str, language: str) -> str:
     — runs AFTER the cached prompt is loaded, so language changes do NOT
     invalidate the prompt cache.
 
+    When ``language`` is ``"Auto"`` (case-insensitive) — the sentinel meaning
+    "no preference" — the system prompt is returned unchanged. We do NOT
+    inject any "User prefers language: Auto" line; the LLM is left to reply
+    in whatever language matches the user's input.
+
     Args:
         system_prompt: The base system prompt to append to.
         language: The user's preferred language name (e.g. "English",
-            "Chinese", "Spanish"). Falls back to "English" when falsy.
+            "Chinese", "Spanish"). Falls back to "Auto" when falsy.
 
     Returns:
-        The system prompt with a User Language Preference section appended.
+        The system prompt with a User Language Preference section appended,
+        or the original system_prompt unchanged when language is "Auto"
+        or falsy.
     """
+    # Resolve falsy → the "Auto" sentinel first, so the Auto-skip below
+    # also covers None / empty-string callers.
     if not language:
-        language = "English"
+        language = "Auto"
+    # "Auto" (case-insensitive) means no preference — skip injection entirely.
+    # We do NOT inject any "User prefers language: Auto" line; the LLM is
+    # left to reply in whatever language matches the user's input.
+    if language.lower() == "auto":
+        return system_prompt
     language_section = f"\n---\n\n## User Language Preference\n\nUser prefers language: {language}\n"
     return system_prompt + language_section
 

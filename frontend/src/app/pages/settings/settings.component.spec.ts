@@ -5,6 +5,7 @@ import { of, throwError } from 'rxjs';
 const STORAGE_KEY = 'settings-language-preference';
 const CUSTOM_OPTION_VALUE = 'Other (custom)';
 const PREDEFINED_LANGUAGES = [
+  'Auto',
   'English',
   'Spanish',
   'Chinese',
@@ -90,7 +91,7 @@ class MockSettingsService {
 class TestableSettingsComponent {
   readonly languages = PREDEFINED_LANGUAGES;
   readonly customOptionValue = CUSTOM_OPTION_VALUE;
-  readonly selectedLanguage = signal<string>('English');
+  readonly selectedLanguage = signal<string>('Auto');
   readonly customLanguage = signal<string>('');
   readonly isCustom = signal<boolean>(false);
   readonly saving = signal<boolean>(false);
@@ -136,7 +137,7 @@ class TestableSettingsComponent {
       },
       error: () => {
         if (!hadCachedValue) {
-          this.selectedLanguage.set('English');
+          this.selectedLanguage.set('Auto');
         }
         this.snackBar.open('Failed to load language preference', 'Dismiss', {
           duration: 5000,
@@ -230,7 +231,7 @@ describe('SettingsComponent', () => {
   describe('initialization', () => {
     it('should create with default values', () => {
       component = new TestableSettingsComponent(service, snackBar);
-      expect(component.selectedLanguage()).toBe('English');
+      expect(component.selectedLanguage()).toBe('Auto');
       expect(component.isCustom()).toBe(false);
       expect(component.customLanguage()).toBe('');
       expect(component.saving()).toBe(false);
@@ -243,11 +244,11 @@ describe('SettingsComponent', () => {
       expect(service.getLanguagePreference).toHaveBeenCalledTimes(1);
     });
 
-    it('should default to English with no localStorage and no API', () => {
+    it('should default to Auto with no localStorage and no API', () => {
       service.getLanguagePreference.mockReturnValue(throwError(() => new Error('Network error')));
       component = new TestableSettingsComponent(service, snackBar);
       component.ngOnInit();
-      expect(component.selectedLanguage()).toBe('English');
+      expect(component.selectedLanguage()).toBe('Auto');
       expect(component.isCustom()).toBe(false);
     });
   });
@@ -354,11 +355,11 @@ describe('SettingsComponent', () => {
       expect(() => component.ngOnInit()).not.toThrow();
     });
 
-    it('should fall back to English when both localStorage and API fail', () => {
+    it('should fall back to Auto when both localStorage and API fail', () => {
       service.getLanguagePreference.mockReturnValue(throwError(() => new Error('Network')));
       component = new TestableSettingsComponent(service, snackBar);
       component.ngOnInit();
-      expect(component.selectedLanguage()).toBe('English');
+      expect(component.selectedLanguage()).toBe('Auto');
     });
   });
 

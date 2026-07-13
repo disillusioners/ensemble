@@ -90,6 +90,8 @@ def detect_wrong_language(content, preferred_language: str) -> bool:
     Args:
         content: The assistant message content (str or list for multimodal).
         preferred_language: The user's preferred language (e.g., "English").
+            ``None`` or ``"Auto"`` (case-insensitive) means "no preference" —
+            the check is disabled and this function always returns False.
 
     Returns:
         True if the content appears to be in the wrong language.
@@ -100,7 +102,17 @@ def detect_wrong_language(content, preferred_language: str) -> bool:
     - W4 FIX: Content is normalized to string (handles multimodal list content)
     - Code blocks are stripped before detection
     - Empty content → not wrong (let other logic handle empty)
+    - "Auto" / None preference → not wrong (language check disabled)
     """
+    # Defense-in-depth: when preference is "Auto" (or unset), there is no
+    # language to enforce — never flag the response as wrong. The graph
+    # node itself is skipped via language_check_enabled=False in
+    # build_instance_graph(), but this guard protects any other caller.
+    if not preferred_language:
+        return False
+    if preferred_language.lower().strip() == "auto":
+        return False
+
     # W4 FIX: Normalize content to string
     text = _normalize_content(content)
 

@@ -253,12 +253,12 @@ class TestGetLanguage:
     """GET /api/settings/language — read current preference."""
 
     @pytest.mark.asyncio
-    async def test_returns_default_english_when_unset(self, client):
-        """With no preference stored, GET returns ``English``."""
+    async def test_returns_default_auto_when_unset(self, client):
+        """With no preference stored, GET returns ``"Auto"`` (no preference)."""
         response = await client.get("/api/settings/language")
 
         assert response.status_code == 200
-        assert response.json() == {"language": "English"}
+        assert response.json() == {"language": "Auto"}
 
     @pytest.mark.asyncio
     async def test_returns_stored_value_after_put(self, client):
@@ -357,11 +357,11 @@ class TestPutValidation:
 class TestGetLanguagePreferenceHelper:
     """Unit tests for ``get_language_preference`` — graceful failure paths."""
 
-    def test_returns_english_when_repo_is_none(self):
-        """``None`` repo is handled — returns the default language."""
-        assert get_language_preference(None) == "English"
+    def test_returns_auto_when_repo_is_none(self):
+        """``None`` repo is handled — returns the default sentinel."""
+        assert get_language_preference(None) == "Auto"
 
-    def test_returns_english_when_repo_raises(self):
+    def test_returns_auto_when_repo_raises(self):
         """A repo that raises during ``get_metadata_record`` falls back gracefully."""
         from daemon.services import language_utils as language_utils_module
 
@@ -389,14 +389,14 @@ class TestGetLanguagePreferenceHelper:
                 "Session",
                 lambda *_a, **_kw: _DummySession(),
             )
-            assert get_language_preference(broken_repo) == "English"
+            assert get_language_preference(broken_repo) == "Auto"
         broken_repo.get_metadata_record.assert_called_once()
 
-    def test_returns_english_when_metadata_record_missing(
+    def test_returns_auto_when_metadata_record_missing(
         self, project_repo: SQLModelProjectRepository
     ):
         """A live repo with no stored record returns the default."""
-        assert get_language_preference(project_repo) == "English"
+        assert get_language_preference(project_repo) == "Auto"
 
     def test_returns_stored_value_from_live_repo(
         self,

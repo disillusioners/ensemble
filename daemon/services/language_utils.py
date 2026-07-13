@@ -11,11 +11,14 @@ from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
 logger = logging.getLogger(__name__)
 
 LANGUAGE_METADATA_KEY = "user_language"
-DEFAULT_LANGUAGE = "English"
+# "Auto" means "no preference — skip language injection and the language_check
+# node entirely". The LLM is free to reply in whatever language matches the
+# user's input.
+DEFAULT_LANGUAGE = "Auto"
 
 
 def get_language_preference(project_repo) -> str:
-    """Get the stored language preference, or default 'English'.
+    """Get the stored language preference, or default 'Auto'.
     
     Used by:
     - daemon/routers/settings.py (GET endpoint)
@@ -25,8 +28,9 @@ def get_language_preference(project_repo) -> str:
         project_repo: A SQLModelProjectRepository instance.
     
     Returns:
-        The preferred language string, or 'English' if unset, system
-        project missing, or DB error.
+        The preferred language string, or 'Auto' if unset, system
+        project missing, or DB error. 'Auto' is the sentinel for
+        "no preference — skip language handling".
     """
     if project_repo is None or SYSTEM_DEFAULT_PROJECT_ID is None:
         return DEFAULT_LANGUAGE

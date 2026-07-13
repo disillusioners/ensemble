@@ -971,7 +971,7 @@ def build_instance_graph(
     retry_config: dict | None = None,
     compactor=None,
     graph_config=None,
-    user_language: str = "English",
+    user_language: str = "Auto",
     language_check_enabled: bool = True,
     injection_slot: InjectionSlot | None = None,
     live_hub: Any = None,
@@ -1017,6 +1017,12 @@ def build_instance_graph(
     # Check if vision model is configured
     model_vision = llm_config.get("model_vision")
     model_standard = llm_config.get("model")
+
+    # "Auto" means "no preference" — disable the language_check node so the
+    # LLM is free to reply in whatever language matches the user's input.
+    # Must happen BEFORE the conditional graph wiring below.
+    if user_language and user_language.lower() == "auto":
+        language_check_enabled = False
 
     # Create LLMs using the helper function
     llm_with_tools, llm_standard = build_instance_llms(
