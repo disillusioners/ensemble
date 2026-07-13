@@ -12,6 +12,8 @@ cd "$PROJECT_DIR"
 
 timeout 300s .venv/bin/python -m pytest \
   tests/integration/ \
+  --override-ini="addopts=" \
+  -m integration \
   --tb=short -q 2>&1
 
 EXIT_CODE=$?
