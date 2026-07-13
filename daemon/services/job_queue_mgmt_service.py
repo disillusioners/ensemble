@@ -356,8 +356,8 @@ class JobQueueMgmtService:
             Updated JobQueue if successful, None if not found or not owned.
             
         Raises:
-            ValueError: If updating to reserved name, changing FIFO concurrency,
-                        or queue name conflicts with existing queue.
+            ValueError: If updating to reserved name, changing FIFO/defer/background
+                        concurrency, or queue name conflicts with existing queue.
         """
         # Get queue with IDOR protection
         queue = await self.get_queue(project_id, queue_id)
@@ -382,8 +382,8 @@ class JobQueueMgmtService:
         # Validate queue_type update
         new_queue_type = updates.get("queue_type", queue.queue_type)
         new_concurrency = updates.get("concurrency_limit", queue.concurrency_limit)
-        if new_queue_type == "fifo" and new_concurrency != 1:
-            raise ValueError("FIFO queue must have concurrency_limit=1")
+        if new_queue_type in ("fifo", "defer", "background") and new_concurrency != 1:
+            raise ValueError(f"{new_queue_type} queue must have concurrency_limit=1")
         
         # Apply updates
         updated = await asyncio.to_thread(

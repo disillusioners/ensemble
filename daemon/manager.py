@@ -3736,6 +3736,7 @@ class InstanceManager:
         metadata: dict[str, Any] | None = None,
         *,
         is_deferred: bool = False,
+        is_background: bool = False,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
@@ -3753,6 +3754,10 @@ class InstanceManager:
             metadata: Optional metadata dict.
             is_deferred: Forwarded to ``enqueue_message_job`` — stamps
                 ``Task.is_deferred=True``.
+            is_background: Forwarded to ``enqueue_message_job`` — stamps
+                ``Task.is_background=True`` so the dispatcher routes the
+                work onto the background queue instead of the foreground
+                message lane.
 
         Returns:
             ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
@@ -3767,6 +3772,7 @@ class InstanceManager:
             images=images,
             metadata=metadata,
             is_deferred=is_deferred,
+            is_background=is_background,
         )
 
     async def _process_message_with_tracking(

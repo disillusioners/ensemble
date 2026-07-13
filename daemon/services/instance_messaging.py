@@ -1205,6 +1205,7 @@ class InstanceMessagingService:
         metadata: dict[str, Any] | None = None,
         *,
         is_deferred: bool = False,
+        is_background: bool = False,
     ) -> "AsyncMessageResult":
         """POC variant of :meth:`enqueue_message` that also creates a JobItem.
 
@@ -1258,6 +1259,10 @@ class InstanceMessagingService:
             is_deferred: Forwarded to ``enqueue_message`` — stamps
                 ``Task.is_deferred=True`` so the worker pool's idle gate
                 holds the task until every non-defer queue is empty.
+            is_background: Forwarded to ``enqueue_message`` — stamps
+                ``Task.is_background=True`` so the dispatcher routes the
+                work onto the background queue instead of the foreground
+                message lane.
 
         Returns:
             ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
@@ -1282,6 +1287,7 @@ class InstanceMessagingService:
             images=images,
             metadata=metadata,
             is_deferred=is_deferred,
+            is_background=is_background,
             work_id=job_id,
         )
 
