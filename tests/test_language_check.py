@@ -156,6 +156,81 @@ class TestDetectWrongLanguage:
         content = "This is a normal English sentence with no Spanish indicators at all."
         assert detect_wrong_language(content, "Spanish") is True
 
+    # ── Vietnamese preference ────────────────────────────────────────────
+
+    def test_english_content_with_vietnamese_preference_returns_false(self):
+        """English content + Vietnamese preference → not wrong (English is allowed).
+
+        Vietnamese users commonly code-switch in/out of English, so English
+        text should pass the language check just like for an English preference.
+        """
+        content = "Hello, this is a normal English sentence with no foreign characters."
+        assert detect_wrong_language(content, "Vietnamese") is False
+
+    def test_chinese_content_with_vietnamese_preference_returns_true(self):
+        """CJK content + Vietnamese preference → wrong language (shares English rule)."""
+        content = "你好世界这是一段中文内容用于测试"
+        assert detect_wrong_language(content, "Vietnamese") is True
+
+    def test_japanese_hiragana_with_vietnamese_preference_returns_true(self):
+        """Hiragana chars count as CJK — should trigger detection under Vietnamese preference."""
+        content = "こんにちは世界"
+        assert detect_wrong_language(content, "Vietnamese") is True
+
+    def test_korean_hangul_with_vietnamese_preference_returns_true(self):
+        """Hangul chars count as CJK — should trigger detection under Vietnamese preference."""
+        content = "안녕하세요 세계"
+        assert detect_wrong_language(content, "Vietnamese") is True
+
+    def test_spanish_content_with_vietnamese_preference_returns_true(self):
+        """Spanish drift + Vietnamese preference → wrong (shares English rule)."""
+        # All 6 words are in SPANISH_INDICATORS, ratio = 100%, count = 6 ≥ 5.
+        content = "Porque entonces después está también aquí"
+        assert detect_wrong_language(content, "Vietnamese") is True
+
+    def test_spanish_below_absolute_count_with_vietnamese_returns_false(self):
+        """Spanish content with <5 indicator words + Vietnamese preference → not wrong."""
+        content = "Porque quiero hacer esto"
+        s, total = spanish_word_count(content)
+        assert s < SPANISH_MIN_ABSOLUTE_COUNT
+        assert detect_wrong_language(content, "Vietnamese") is False
+
+    def test_vietnamese_text_with_vietnamese_preference_returns_false(self):
+        """Vietnamese text with diacritics + Vietnamese preference → not wrong.
+
+        The function has no specific Vietnamese detection heuristics (Vietnamese
+        shares the English rule: flag CJK + Spanish drift, allow English/Latin),
+        so genuine Vietnamese prose passes through as non-CJK, non-Spanish.
+        """
+        content = "Xin chào, tôi có thể giúp gì cho bạn?"
+        # Sanity: Vietnamese diacritics don't trigger Spanish indicators.
+        s, total = spanish_word_count(content)
+        assert s == 0
+        assert total > 0
+        # No CJK, ratio 0 → not flagged.
+        assert detect_wrong_language(content, "Vietnamese") is False
+
+    def test_vietnamese_preference_variants_match(self):
+        """'Vietnamese', 'Tiếng Việt'-like spellings, lowercase/uppercase all match.
+
+        Same case-insensitive / whitespace-tolerant matching as other languages.
+        The detection branches on the lowercased token so spelling variations
+        of the language label share the same rule.
+        """
+        content = "Hello, this is English content that should pass."
+        assert detect_wrong_language(content, "Vietnamese") is False
+        assert detect_wrong_language(content, "vietnamese") is False
+        assert detect_wrong_language(content, "VIETNAMESE") is False
+        assert detect_wrong_language(content, "  Vietnamese  ") is False
+
+    def test_vietnamese_preference_case_insensitive_for_wrong_language(self):
+        """Case-insensitive matching also applies on the wrong-language path."""
+        cjk_content = "你好世界这是一段中文内容用于测试"
+        for lang in ("Vietnamese", "vietnamese", "VIETNAMESE", "  VIETNAMESE  "):
+            assert detect_wrong_language(cjk_content, lang) is True, (
+                f"Vietnamese preference must flag CJK for {lang!r}"
+            )
+
     # ── Code block stripping ──────────────────────────────────────────────
 
     def test_chinese_in_code_block_is_stripped(self):

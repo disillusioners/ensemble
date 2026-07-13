@@ -131,8 +131,10 @@ def detect_wrong_language(content, preferred_language: str) -> bool:
 
     preferred = preferred_language.lower().strip()
 
-    # C2 FIX: English preference IS checked — detects CJK and Spanish drift
-    if preferred == "english":
+    # Vietnamese shares the English detection profile: CJK and Spanish drift
+    # are flagged, while English text is allowed (Vietnamese users commonly
+    # code-switch in/out of English).
+    if preferred in ("english", "vietnamese"):
         if has_cjk_characters(clean_content):
             return True
         # W1 FIX: 50% threshold + ≥5 absolute count
