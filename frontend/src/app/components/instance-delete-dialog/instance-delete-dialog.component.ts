@@ -1,5 +1,6 @@
 import { Component, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { Router } from '@angular/router';
 import {
   MatDialogRef,
   MAT_DIALOG_DATA,
@@ -10,6 +11,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../services/api.service';
+import { SseService } from '../../services/sse.service';
 import type { InstanceInfo } from '../../models';
 
 export interface InstanceDeleteDialogData {
@@ -51,6 +53,8 @@ export interface InstanceDeleteDialogData {
 export class InstanceDeleteDialogComponent {
   private readonly api = inject(ApiService);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly sseService = inject(SseService);
+  private readonly router = inject(Router);
 
   protected readonly dialogRef =
     inject<MatDialogRef<InstanceDeleteDialogComponent>>(MatDialogRef);
@@ -124,6 +128,15 @@ export class InstanceDeleteDialogComponent {
 
   /**
    * User confirmed the hard delete on the secondary view.
+   *
+   * After a successful hard delete we must stop the SSE channel for the now-
+   * gone instance and close any chat tab the user had open against it.
+   * This mirrors the chat page's own cleanup on termination
+   * (``chat.component.ts:onTerminateInstance`` + ``ngOnDestroy``): the SSE
+   * channel is closed unconditionally so a stale connection can never
+   * resurrect the deleted row, and if the deleted instance is currently the
+   * active chat route we navigate to ``/`` so the user is bounced back to
+   * home instead of landing on a now-empty chat view.
    */
   protected handleConfirmDelete(): void {
     if (this.isBusy()) return;
@@ -135,6 +148,24 @@ export class InstanceDeleteDialogComponent {
           duration: 3000,
           panelClass: 'success-snackbar',
         });
+
+        // Disconnect the SSE channel before closing the dialog so we stop
+        // receiving events for an instance that no longer exists in the DB.
+        // chat.component.ts does the same in its ngOnDestroy / handleInstanceIdChange
+        // paths; the call is idempotent and safe when no channel is open.
+        const deletedInstanceId = this.data.instance.instance_id;
+        this.sseService.disconnect();
+        this.sseService.clearEvents();
+
+        // Close any chat tab the user had open for this instance. The chat
+        // page URL is ``/projects/:projectContext/instances/:instanceId`` —
+        // matching that segment is the same signal chat.component.ts uses
+        // (its ``currentInstanceId() === instanceId`` check) because the URL
+        // param and the component state are kept in sync by handleInstanceIdChange.
+        if (this.router.url.includes(`/instances/${deletedInstanceId}`)) {
+          this.router.navigate(['/']);
+        }
+
         this.dialogRef.close({ action: 'delete' });
       },
       error: (err) => {
@@ -149,11 +180,16 @@ export class InstanceDeleteDialogComponent {
   }
 
   private extractErrorMessage(err: unknown, fallback: string): string {
-    const candidate = err as { error?: { detail?: string }; message?: string };
-    return (
-      candidate?.error?.detail ||
-      candidate?.message ||
-      fallback
-    );
+    const detail = (err as { error?: { detail?: unknown } })?.error?.detail;
+    if (typeof detail === 'string') return detail;
+    // FastAPI may return `detail` as an object like `{code, message}` for
+    // structured error responses — surface the message instead of the
+    // `[object Object]` placeholder.
+    if (typeof detail === 'object' && detail && 'message' in detail) {
+      const message = (detail as { message?: unknown }).message;
+      if (typeof message === 'string') return message;
+    }
+    const candidate = err as { message?: string };
+    return candidate?.message || fallback;
   }
 }

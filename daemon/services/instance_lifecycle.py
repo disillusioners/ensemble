@@ -1476,12 +1476,16 @@ class InstanceLifecycleService:
            graceful job-state transitions (PROCESSING → CANCELLED via
            ``complete_job``; PENDING/FAILED → ``cancel_job``). The
            ``job_queue_items`` rows are still in the DB at this point;
-           ``hard_delete_tree`` removes them below.
+           ``hard_delete_tree`` removes them below. **After terminate
+           returns** we also sweep any zombie graph tasks that
+           ``terminate_instance`` could not cancel inside its 5s
+           timeout window — see the W5 inline comment below.
         3. **Hard-delete DB records** via
            :meth:`SQLModelInstanceRepository.hard_delete_tree` — runs
            the FK-safe cascade across ``job_locks``,
            ``job_queue_items``, ``job_watchers``, ``tasks``, ``events``,
-           ``message_queue``, ``instance_hierarchy``, ``instances``.
+           ``message_queue``, ``dependency_watchers``,
+           ``instance_mappings``, ``instance_hierarchy``, ``instances``.
            Off-loaded to ``asyncio.to_thread`` because ``hard_delete_tree``
            is a sync SQLModel/SQLAlchemy call that takes a connection
            from the engine pool under SQLite WAL — same pattern as
@@ -1492,7 +1496,10 @@ class InstanceLifecycleService:
            keyed on ``thread_id`` which equals the instance_id. Wrap
            per-thread in try/except so a single failure does not abort
            the whole sweep; log + continue. Each ``adelete_thread``
-           returns void on success.
+           returns void on success. The IDs that fail per-thread are
+           collected into ``checkpoint_errors`` and returned to the
+           caller so a UI / admin can see exactly which threads need
+           manual intervention.
 
         Failure handling:
 
@@ -1506,12 +1513,14 @@ class InstanceLifecycleService:
           graph task); orphan rows can be swept by the maintenance
           service's :class:`CheckpointCleanupJob` (orphan-thread sweep).
         * If ``hard_delete_tree`` raises mid-cascade, the session
-          ``rollback`` undoes all 8 DELETEs — caller sees the exception
+          ``rollback`` undoes all 10 DELETEs — caller sees the exception
           and can retry safely (idempotent: a re-run deletes the
           remaining rows).
         * If ``adelete_thread`` raises for one thread, the others still
-          get swept (best-effort checkpoint cleanup) and the error is
-          logged at WARNING.
+          get swept (best-effort checkpoint cleanup) and the failed
+          thread ID is appended to ``checkpoint_errors`` so the caller
+          can surface it (the maintenance orphan-thread sweep will also
+          pick it up on the next cycle).
 
         Args:
             instance_id: The root instance ID whose tree to hard-delete.
@@ -1529,6 +1538,7 @@ class InstanceLifecycleService:
                     "root_instance_id": str,
                     "tree_ids": [str, ...],
                     "checkpoint_threads_deleted": int,
+                    "checkpoint_errors": [str, ...],   # tree_ids whose sweep failed
                     "counts": {                    # hard_delete_tree counts
                         "job_locks": int,
                         "job_queue_items": int,
@@ -1536,6 +1546,8 @@ class InstanceLifecycleService:
                         "tasks": int,
                         "events": int,
                         "message_queue": int,
+                        "dependency_watchers": int,
+                        "instance_mappings": int,
                         "instance_hierarchy": int,
                         "instances": int,
                     },
@@ -1563,7 +1575,15 @@ class InstanceLifecycleService:
         # ``hard_delete_tree``'s job.
         terminated = await self.terminate_instance(instance_id)
 
-        # 3. Hard-delete DB records — FK-safe cascade across the 8
+        # W5 fix: sweep zombie graph tasks that survived the 5s terminate
+        # timeout. ``terminate_instance`` schedules an asyncio.CancelledError
+        # but doesn't await it; a stubborn in-flight LLM call can leave a
+        # dangling task in ``_graph_tasks``. Clear them for every tree_id so
+        # the in-memory state matches the on-disk state after the cascade.
+        for iid in tree_ids:
+            self._manager._graph_tasks.pop(iid, None)
+
+        # 3. Hard-delete DB records — FK-safe cascade across the 10
         # tables. Off-load to a thread so SQLite WAL write contention
         # does not deadlock the event loop (same rationale as
         # ``terminate_instance``'s use of ``asyncio.to_thread`` for
@@ -1612,6 +1632,7 @@ class InstanceLifecycleService:
             "root_instance_id": instance_id,
             "tree_ids": tree_ids,
             "checkpoint_threads_deleted": checkpoint_count,
+            "checkpoint_errors": checkpoint_errors,
             "counts": cascade_result.get("counts", {}),
         }
 

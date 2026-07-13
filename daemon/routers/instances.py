@@ -376,6 +376,7 @@ async def terminate_instance(
             "root_instance_id": result.get("root_instance_id"),
             "tree_ids": result.get("tree_ids", []),
             "checkpoint_threads_deleted": result.get("checkpoint_threads_deleted", 0),
+            "checkpoint_errors": result.get("checkpoint_errors", []),
             "db_counts": result.get("counts", {}),
         }
 

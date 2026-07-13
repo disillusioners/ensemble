@@ -44,6 +44,8 @@ from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
+from daemon.repositories.dependency_bus.models import DependencyWatcher
+from daemon.repositories.source.models import InstanceMapping, SourceConfig
 from daemon.routers.instances import router as instances_router
 from daemon.write_pause_guard import WritePauseGuard
 
@@ -155,11 +157,31 @@ def seed_tree(engine: Engine):
             ))
             s.commit()
 
+        # Pre-seed SourceConfig rows in their own committed session so the
+        # ``source_id`` FK on InstanceMapping is satisfied on the main
+        # pass. Mirrors the ``seed_source`` fixture pattern used in
+        # ``tests/unit/test_instance_mapping_upsert.py`` — splitting the
+        # seed across two sessions avoids any unit-of-work FK-insert-
+        # ordering issues (the SourceConfig rows survive the cascade
+        # because they are not instance-scoped).
+        with Session(engine) as s:
+            for iid in (root_id, child_a_id, child_b_id):
+                s.add(SourceConfig(
+                    source_id=f"src-{iid}",
+                    source_type="telegram",
+                    name=f"source-{iid}",
+                ))
+            s.commit()
+
         # For each of the 3 instances, seed: 1 JobItem, 1 JobWatcher (real FK
         # to instances.instance_id), 1 JobLock (joins via job_id subquery),
-        # 1 Task, 1 Event, 1 MessageQueue. JobLocks share (project_id,
-        # queue_id) but use a unique lock_slot per instance because the table
-        # has a UNIQUE(project_id, queue_id, lock_slot) constraint (C5).
+        # 1 Task, 1 Event, 1 MessageQueue, 1 DependencyWatcher
+        # (target_instance_id → instances.instance_id, logical FK only),
+        # 1 InstanceMapping (agent_instance_id → instances.instance_id,
+        # with source_id FK to the pre-seeded SourceConfig rows above).
+        # JobLocks share (project_id, queue_id) but use a unique lock_slot
+        # per instance because the table has a UNIQUE(project_id,
+        # queue_id, lock_slot) constraint (C5).
         ids = [root_id, child_a_id, child_b_id]
         with Session(engine) as s:
             for idx, iid in enumerate(ids):
@@ -184,13 +206,32 @@ def seed_tree(engine: Engine):
                 s.add(Task(instance_id=iid))
                 s.add(Event(instance_id=iid, kind="message_received"))
                 s.add(MessageQueue(instance_id=iid, content=f"hello {iid}"))
+                # Dependency bus: one pending watcher targeting this
+                # instance. Logical FK only (no DB-level FK declared),
+                # but the cascade must still wipe the row.
+                s.add(DependencyWatcher(
+                    source_task_id=f"task-{iid}",
+                    target_instance_id=iid,
+                    state="PENDING",
+                ))
+                # Source mapping row referencing the pre-seeded
+                # SourceConfig (source_id FK is real and must be
+                # satisfied at INSERT time). The cascade must wipe the
+                # InstanceMapping row; the SourceConfig row survives.
+                s.add(InstanceMapping(
+                    source_id=f"src-{iid}",
+                    external_user_id=f"user-{iid}",
+                    agent_instance_id=iid,
+                    agent_id=agent_id,
+                    agent_dir=f"/tmp/agents/{agent_id}",
+                ))
             s.commit()
 
         return {
             "tree_ids": ids,
             "root_id": root_id,
             "child_ids": [child_a_id, child_b_id],
-            "per_instance_deps": 6,  # 1 JobItem + 1 Watcher + 1 Lock + 1 Task + 1 Event + 1 MsgQ
+            "per_instance_deps": 8,  # JobItem + Watcher + Lock + Task + Event + MsgQ + DepWatcher + InstanceMapping
             "hierarchy_rows": 2,
             "instances": 3,
         }
@@ -241,6 +282,8 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, MessageQueue, instance_id=iid) == 1
                 assert _count_where(s, JobItem, instance_id=iid) == 1
                 assert _count_where(s, JobLock, instance_id=iid) == 1
+                assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 1
+                assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 1
             assert _count_all(s, Instance) == 3
             assert _count_all(s, InstanceHierarchy) == 2
 
@@ -256,6 +299,8 @@ class TestHardDeleteTreeFullCascade:
         assert counts["message_queue"] == 3
         assert counts["job_queue_items"] == 3
         assert counts["job_locks"] == 3
+        assert counts["dependency_watchers"] == 3
+        assert counts["instance_mappings"] == 3
         assert counts["instance_hierarchy"] == 2
         assert counts["instances"] == 3
 
@@ -268,6 +313,8 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, MessageQueue, instance_id=iid) == 0
                 assert _count_where(s, JobItem, instance_id=iid) == 0
                 assert _count_where(s, JobLock, instance_id=iid) == 0
+                assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 0
+                assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 0
             assert _count_all(s, Instance) == 0
             assert _count_all(s, InstanceHierarchy) == 0
 
@@ -296,6 +343,8 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, MessageQueue, instance_id=iid) == 0
                 assert _count_where(s, JobItem, instance_id=iid) == 0
                 assert _count_where(s, JobLock, instance_id=iid) == 0
+                assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 0
+                assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 0
             # Other tree is untouched.
             for iid in other["tree_ids"]:
                 assert s.get(Instance, iid) is not None
@@ -305,6 +354,8 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, MessageQueue, instance_id=iid) == 1
                 assert _count_where(s, JobItem, instance_id=iid) == 1
                 assert _count_where(s, JobLock, instance_id=iid) == 1
+                assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 1
+                assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -367,6 +418,8 @@ class TestFKCascadeOrder:
             assert _count_all(s, MessageQueue) == 0
             assert _count_all(s, JobItem) == 0
             assert _count_all(s, JobLock) == 0
+            assert _count_all(s, DependencyWatcher) == 0
+            assert _count_all(s, InstanceMapping) == 0
             assert _count_all(s, InstanceHierarchy) == 0
 
 
@@ -397,6 +450,8 @@ class TestIdempotency:
             "tasks": 0,
             "events": 0,
             "message_queue": 0,
+            "dependency_watchers": 0,
+            "instance_mappings": 0,
             "instance_hierarchy": 0,
             "instances": 0,
         }
@@ -455,6 +510,8 @@ class TestEmptyTreeFallback:
                     "tasks": 0,
                     "events": 0,
                     "message_queue": 0,
+                    "dependency_watchers": 0,
+                    "instance_mappings": 0,
                     "instance_hierarchy": 0,
                     "instances": 0,
                 },
@@ -790,6 +847,8 @@ class TestDeleteEndpoint:
         assert body["root_instance_id"] == iid
         assert iid in body["tree_ids"]
         assert body["checkpoint_threads_deleted"] == 0
+        assert "checkpoint_errors" in body
+        assert body["checkpoint_errors"] == []
         assert "db_counts" in body
         # The seed planted exactly one row of each — the cascade removes
         # exactly that one. ``== 1`` (not ``>= 1``) catches both an

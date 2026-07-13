@@ -19,6 +19,8 @@ from daemon.repositories.event.models import Event
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.job_queue.watcher_models import JobWatcher
+from daemon.repositories.dependency_bus.models import DependencyWatcher
+from daemon.repositories.source.models import InstanceMapping
 
 logger = logging.getLogger(__name__)
 
@@ -851,10 +853,11 @@ class SQLModelInstanceRepository:
         Destructive: removes ``instance`` rows AND every dependent row
         across the standard cascade (``tasks``, ``events``, ``message_queue``,
         ``instance_hierarchy``) PLUS the job-queue sub-tree (``job_queue_items``,
-        ``job_watchers``, ``job_locks``). Checkpoints (``checkpoints.db``)
-        are NOT touched by this method — the caller is responsible for
-        sweeping ``adelete_thread`` for each ``tree_ids`` member via
-        :class:`CheckpointerAdapter` (see
+        ``job_watchers``, ``job_locks``) AND the source / dependency-bus
+        linkage rows (``dependency_watchers``, ``instance_mappings``).
+        Checkpoints (``checkpoints.db``) are NOT touched by this method —
+        the caller is responsible for sweeping ``adelete_thread`` for each
+        ``tree_ids`` member via :class:`CheckpointerAdapter` (see
         :meth:`InstanceLifecycleService.hard_delete_instance`).
 
         Dependency order (must match to avoid FK violations):
@@ -877,14 +880,26 @@ class SQLModelInstanceRepository:
         4. ``tasks`` — referenced by instance_id (no FK).
         5. ``events`` — referenced by instance_id (no FK).
         6. ``message_queue`` — referenced by instance_id (no FK).
-        7. ``instance_hierarchy`` — must precede ``instances`` because the
+        7. ``dependency_watchers`` — has a logical FK
+           (``target_instance_id`` → instances.instance_id) but no formal
+           DB-level FK constraint declared on the model. MUST be cleaned
+           before the instance rows go; otherwise the watchers become
+           orphans pointing at non-existent instance IDs (and the bus's
+           cancellation scan picks them up on next stop).
+        8. ``instance_mappings`` — has a logical FK
+           (``agent_instance_id`` → instances.instance_id) but no formal
+           DB-level FK constraint declared on the model. MUST be cleaned
+           before the instance rows go; otherwise the mappings become
+           orphans and any source routing that re-resolves them on the
+           cancelled instance path will silently fail.
+        9. ``instance_hierarchy`` — must precede ``instances`` because the
            junction rows reference instance_id on either side. Wipe both
            parent and child sides in a single statement so the cascade is
            symmetric (a tree root has no parent link; a tree leaf has no
            child link).
-        8. ``instances`` — last; every dependent row above must be gone.
+        10. ``instances`` — last; every dependent row above must be gone.
 
-        All eight DELETEs run inside a single ``SQLModelSession`` so a
+        All ten DELETEs run inside a single ``SQLModelSession`` so a
         mid-cascade error rolls back the entire cascade — matches the
         ``WriteGuardSession`` pattern used elsewhere in the codebase
         (H10 transaction-boundary fix).
@@ -921,6 +936,8 @@ class SQLModelInstanceRepository:
                         "tasks": int,
                         "events": int,
                         "message_queue": int,
+                        "dependency_watchers": int,
+                        "instance_mappings": int,
                         "instance_hierarchy": int,
                         "instances": int,
                     },
@@ -942,6 +959,8 @@ class SQLModelInstanceRepository:
                     "tasks": 0,
                     "events": 0,
                     "message_queue": 0,
+                    "dependency_watchers": 0,
+                    "instance_mappings": 0,
                     "instance_hierarchy": 0,
                     "instances": 0,
                 },
@@ -1017,7 +1036,34 @@ class SQLModelInstanceRepository:
                 sql_delete(MessageQueue).where(col(MessageQueue.instance_id).in_(ids))
             ).rowcount or 0
 
-            # 7. instance_hierarchy — wipe parent and child sides
+            # 7. dependency_watchers — logical FK via target_instance_id
+            # (no DB-level constraint declared on the model). Must be cleaned
+            # before the matching ``instances`` rows go; otherwise watchers
+            # become orphans pointing at non-existent instance IDs and the
+            # bus's cancellation scan picks them up on the next stop.
+            # Uses the same ORM ``sql_delete`` pattern as the other dependent
+            # table deletes — SQLAlchemy expands the ``IN`` to ``?`` on
+            # SQLite and ``:ids`` on PostgreSQL automatically, so no
+            # bindparam boilerplate is required.
+            dep_watchers_count = db_session.exec(
+                sql_delete(DependencyWatcher).where(
+                    col(DependencyWatcher.target_instance_id).in_(ids)
+                )
+            ).rowcount or 0
+
+            # 8. instance_mappings — logical FK via agent_instance_id (no
+            # DB-level constraint declared on the model). Must be cleaned
+            # before the matching ``instances`` rows go; otherwise the
+            # mappings become orphans and any source routing that
+            # re-resolves them on the cancelled instance path silently
+            # fails. Same ORM ``sql_delete`` pattern as #7.
+            instance_mappings_count = db_session.exec(
+                sql_delete(InstanceMapping).where(
+                    col(InstanceMapping.agent_instance_id).in_(ids)
+                )
+            ).rowcount or 0
+
+            # 9. instance_hierarchy — wipe parent and child sides
             # together so the cascade is symmetric regardless of root
             # vs leaf position. Composed as a single statement with
             # ``OR`` so the planner can collapse it into one scan.
@@ -1028,7 +1074,7 @@ class SQLModelInstanceRepository:
                 )
             ).rowcount or 0
 
-            # 8. instances — last. Single bulk DELETE so the planner
+            # 10. instances — last. Single bulk DELETE so the planner
             # can issue one statement instead of N round-trips.
             instances_result = db_session.exec(
                 sql_delete(Instance).where(col(Instance.instance_id).in_(ids))
@@ -1040,7 +1086,8 @@ class SQLModelInstanceRepository:
             logger.info(
                 "hard_delete_tree: removed instances=%d, hierarchy=%d, "
                 "watchers=%d, jobs=%d, locks=%d, tasks=%d, events=%d, "
-                "msgq=%d (tree_size=%d)",
+                "msgq=%d, dep_watchers=%d, instance_mappings=%d "
+                "(tree_size=%d)",
                 instances_count,
                 hierarchy_count,
                 watchers_count,
@@ -1049,6 +1096,8 @@ class SQLModelInstanceRepository:
                 tasks_count,
                 events_count,
                 msgq_count,
+                dep_watchers_count,
+                instance_mappings_count,
                 len(ids),
             )
 
@@ -1062,6 +1111,8 @@ class SQLModelInstanceRepository:
                     "tasks": int(tasks_count),
                     "events": int(events_count),
                     "message_queue": int(msgq_count),
+                    "dependency_watchers": int(dep_watchers_count),
+                    "instance_mappings": int(instance_mappings_count),
                     "instance_hierarchy": int(hierarchy_count),
                     "instances": int(instances_count),
                 },
