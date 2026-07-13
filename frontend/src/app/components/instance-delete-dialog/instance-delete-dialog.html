@@ -1,0 +1,106 @@
+<!-- Primary view: 3-option chooser -->
+@if (view() === 'primary') {
+  <div class="dialog-shell" data-testid="instance-delete-primary">
+    <h2 mat-dialog-title>
+      <mat-icon class="title-icon">warning</mat-icon>
+      <span>Stop or delete instance?</span>
+    </h2>
+
+    <mat-dialog-content class="dialog-content">
+      <p class="lead">
+        Choose how to handle <strong>{{ displayLabel() }}</strong>.
+      </p>
+
+      <div class="option-list">
+        <button
+          type="button"
+          class="option-card option-card--danger"
+          (click)="handleChooseDelete()"
+          [disabled]="isBusy()"
+        >
+          <mat-icon class="option-icon">delete_forever</mat-icon>
+          <div class="option-text">
+            <span class="option-title">Delete</span>
+            <span class="option-subtitle">
+              Terminate and permanently remove this instance and its history from the database.
+            </span>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          class="option-card option-card--warn"
+          (click)="handleTerminate()"
+          [disabled]="isBusy()"
+        >
+          @if (isBusy()) {
+            <mat-spinner diameter="20" class="option-icon"></mat-spinner>
+          } @else {
+            <mat-icon class="option-icon">stop_circle</mat-icon>
+          }
+          <div class="option-text">
+            <span class="option-title">Terminate</span>
+            <span class="option-subtitle">
+              Stop this instance now. Records are kept and can be inspected later.
+            </span>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          class="option-card option-card--neutral"
+          (click)="handleCancel()"
+          [disabled]="isBusy()"
+        >
+          <mat-icon class="option-icon">close</mat-icon>
+          <div class="option-text">
+            <span class="option-title">Cancel</span>
+            <span class="option-subtitle">
+              Keep this instance running. Nothing changes.
+            </span>
+          </div>
+        </button>
+      </div>
+    </mat-dialog-content>
+  </div>
+}
+
+<!-- Secondary view: high-emphasis hard-delete confirmation (replaces primary) -->
+@if (view() === 'confirm-delete') {
+  <div class="dialog-shell" data-testid="instance-delete-confirm">
+    <h2 mat-dialog-title>
+      <mat-icon class="title-icon title-icon--danger">delete_forever</mat-icon>
+      <span>Delete instance?</span>
+    </h2>
+
+    <mat-dialog-content class="dialog-content">
+      <p class="confirm-message">
+        Are you sure you want to delete instance
+        <strong>"{{ displayLabel() }}"</strong>?
+      </p>
+      <p class="confirm-subtext">This action cannot be undone.</p>
+    </mat-dialog-content>
+
+    <mat-dialog-actions align="end">
+      <button
+        mat-button
+        (click)="handleBack()"
+        [disabled]="isBusy()"
+      >
+        Back
+      </button>
+      <button
+        mat-flat-button
+        color="warn"
+        (click)="handleConfirmDelete()"
+        [disabled]="isBusy()"
+      >
+        @if (isBusy()) {
+          <mat-spinner diameter="18"></mat-spinner>
+        } @else {
+          Yes, delete
+        }
+      </button>
+    </mat-dialog-actions>
+  </div>
+}

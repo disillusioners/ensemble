@@ -81,8 +81,20 @@ export class ApiService {
     return this.http.get<InstanceInfo>(`${this.API_BASE}/instances/${instanceId}`);
   }
 
-  deleteInstance(instanceId: string): Observable<{ terminated: boolean }> {
-    return this.http.delete<{ terminated: boolean }>(`${this.API_BASE}/instances/${instanceId}`);
+  /**
+   * Delete an instance.
+   *
+   * By default this performs a soft terminate (status -> terminated). Pass
+   * ``hardDelete = true`` to ask the backend to permanently remove the
+   * instance row from the database.
+   *
+   * The backend accepts a ``hard_delete`` query parameter; when the
+   * parameter is missing or ``false`` the call is equivalent to a
+   * terminate-only flow.
+   */
+  deleteInstance(instanceId: string, hardDelete: boolean = false): Observable<{ terminated: boolean }> {
+    const params = new HttpParams().set('hard_delete', hardDelete.toString());
+    return this.http.delete<{ terminated: boolean }>(`${this.API_BASE}/instances/${instanceId}`, { params });
   }
 
   pauseInstance(instanceId: string): Observable<PauseResponse> {

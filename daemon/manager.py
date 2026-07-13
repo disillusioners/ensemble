@@ -4132,6 +4132,34 @@ class InstanceManager:
         """
         return await self._lifecycle_service.terminate_instance(instance_id)
 
+    async def hard_delete_instance(self, instance_id: str) -> dict[str, Any]:
+        """Hard-delete an instance tree from both DBs.
+
+        Composes :meth:`InstanceLifecycleService.hard_delete_instance`:
+
+        1. Snapshot the tree (root + all descendants).
+        2. Run the standard :meth:`terminate_instance` cascade — in-memory
+           cleanup, status transition, job-state transitions.
+        3. FK-safe DB cascade (``job_locks`` → ``job_queue_items`` →
+           ``job_watchers`` → ``tasks`` → ``events`` → ``message_queue``
+           → ``instance_hierarchy`` → ``instances``).
+        4. Sweep ``checkpoints.db`` threads via the
+           ``CheckpointerAdapter``.
+
+        This is a destructive operator call. Use it from admin/cleanup
+        paths only — the DELETE endpoint exposes it via the
+        ``?hard_delete=true`` query parameter.
+
+        Args:
+            instance_id: Root of the tree to delete.
+
+        Returns:
+            Dict summarising the deletion — see
+            :meth:`InstanceLifecycleService.hard_delete_instance` for the
+            shape.
+        """
+        return await self._lifecycle_service.hard_delete_instance(instance_id)
+
     async def pause_instance_cascade(self, instance_id: str) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
