@@ -167,7 +167,8 @@ class TestEnsureSystemQueuesService:
         """Some queues exist, some don't → correct tracking of existing vs created.
 
         Scenario: project has system_fifo_queue and system_parallel_queue,
-        but is missing system_kb_fifo_queue and system_defer_queue.
+        but is missing system_kb_fifo_queue, system_defer_queue, and
+        system_background_queue.
         """
         # Setup: two queues already exist
         existing_fifo = make_queue(
@@ -184,6 +185,9 @@ class TestEnsureSystemQueuesService:
         created_defer = make_queue(
             queue_id="sys-defer", queue_name="system_defer_queue", is_system=True
         )
+        created_background = make_queue(
+            queue_id="sys-bg", queue_name="system_background_queue", is_system=True
+        )
 
         # Sequence of calls expected:
         # 1. list_by_project (before) -> [existing_fifo, existing_parallel]
@@ -193,7 +197,9 @@ class TestEnsureSystemQueuesService:
         # 5. create(system_kb_fifo_queue) -> created_kb_fifo
         # 6. get_by_name("system_defer_queue") -> None (needs creation)
         # 7. create(system_defer_queue) -> created_defer
-        # 8. list_by_project (after) -> all 4 queues
+        # 8. get_by_name("system_background_queue") -> None (needs creation)
+        # 9. create(system_background_queue) -> created_background
+        # 10. list_by_project (after) -> all 5 queues
 
         call_count = [0]
 
@@ -203,8 +209,14 @@ class TestEnsureSystemQueuesService:
                 # First call: before provisioning
                 return [existing_fifo, existing_parallel]
             else:
-                # After provisioning: all 4 exist
-                return [existing_fifo, existing_parallel, created_kb_fifo, created_defer]
+                # After provisioning: all 5 exist
+                return [
+                    existing_fifo,
+                    existing_parallel,
+                    created_kb_fifo,
+                    created_defer,
+                    created_background,
+                ]
 
         def get_by_name_side_effect(project_id, queue_name):
             if queue_name == "system_fifo_queue":
@@ -215,7 +227,11 @@ class TestEnsureSystemQueuesService:
 
         mock_queue_repo.list_by_project.side_effect = list_by_project_side_effect
         mock_queue_repo.get_by_name.side_effect = get_by_name_side_effect
-        mock_queue_repo.create.side_effect = [created_kb_fifo, created_defer]
+        mock_queue_repo.create.side_effect = [
+            created_kb_fifo,
+            created_defer,
+            created_background,
+        ]
 
         result = await service.ensure_system_queues("proj-1")
 
@@ -223,13 +239,17 @@ class TestEnsureSystemQueuesService:
         assert "created_queues" in result
         assert "total_system_queues" in result
         assert set(result["existing_queues"]) == {"system_fifo_queue", "system_parallel_queue"}
-        assert set(result["created_queues"]) == {"system_kb_fifo_queue", "system_defer_queue"}
-        assert result["total_system_queues"] == 4
+        assert set(result["created_queues"]) == {
+            "system_kb_fifo_queue",
+            "system_defer_queue",
+            "system_background_queue",
+        }
+        assert result["total_system_queues"] == 5
 
     @pytest.mark.asyncio
     async def test_ensure_system_queues_all_exist(self, service, mock_queue_repo):
-        """All 4 queues already exist → all in existing_queues, created empty."""
-        # Setup: all 4 system queues already exist
+        """All 5 queues already exist → all in existing_queues, created empty."""
+        # Setup: all 5 system queues already exist
         existing_fifo = make_queue(
             queue_name="system_fifo_queue", is_system=True
         )
@@ -242,9 +262,18 @@ class TestEnsureSystemQueuesService:
         existing_defer = make_queue(
             queue_name="system_defer_queue", is_system=True
         )
+        existing_background = make_queue(
+            queue_name="system_background_queue", is_system=True
+        )
 
-        all_queues = [existing_fifo, existing_parallel, existing_kb_fifo, existing_defer]
-        # Before provisioning: all 4 exist
+        all_queues = [
+            existing_fifo,
+            existing_parallel,
+            existing_kb_fifo,
+            existing_defer,
+            existing_background,
+        ]
+        # Before provisioning: all 5 exist
         mock_queue_repo.list_by_project.return_value = all_queues
 
         # get_by_name returns existing for all queues (no creation needed)
@@ -256,19 +285,19 @@ class TestEnsureSystemQueuesService:
 
         mock_queue_repo.get_by_name.side_effect = get_by_name_side_effect
 
-        # After provisioning: still all 4 exist
+        # After provisioning: still all 5 exist
         mock_queue_repo.list_by_project.return_value = all_queues
 
         result = await service.ensure_system_queues("proj-1")
 
         assert set(result["existing_queues"]) == RESERVED_QUEUE_NAMES
         assert result["created_queues"] == []
-        assert result["total_system_queues"] == 4
+        assert result["total_system_queues"] == 5
 
     @pytest.mark.asyncio
     async def test_ensure_system_queues_none_exist(self, service, mock_queue_repo):
-        """No queues exist → all 4 created, existing empty."""
-        # Setup: all 4 queues to be created
+        """No queues exist → all 5 created, existing empty."""
+        # Setup: all 5 queues to be created
         created_fifo = make_queue(
             queue_id="new-1", queue_name="system_fifo_queue", is_system=True
         )
@@ -281,12 +310,15 @@ class TestEnsureSystemQueuesService:
         created_defer = make_queue(
             queue_id="new-4", queue_name="system_defer_queue", is_system=True
         )
+        created_background = make_queue(
+            queue_id="new-5", queue_name="system_background_queue", is_system=True
+        )
 
         # Sequence of calls expected:
         # 1. list_by_project (before) -> [] (no queues exist)
         # 2. get_by_name for each queue -> None (needs creation)
         # 3. create for each queue -> created queue
-        # 4. list_by_project (after) -> all 4 queues
+        # 4. list_by_project (after) -> all 5 queues
 
         call_count = [0]
 
@@ -296,8 +328,14 @@ class TestEnsureSystemQueuesService:
                 # First call: before provisioning - no queues
                 return []
             else:
-                # After provisioning: all 4 created
-                return [created_fifo, created_parallel, created_kb_fifo, created_defer]
+                # After provisioning: all 5 created
+                return [
+                    created_fifo,
+                    created_parallel,
+                    created_kb_fifo,
+                    created_defer,
+                    created_background,
+                ]
 
         mock_queue_repo.list_by_project.side_effect = list_by_project_side_effect
         mock_queue_repo.get_by_name.return_value = None  # All need to be created
@@ -306,18 +344,19 @@ class TestEnsureSystemQueuesService:
             created_parallel,
             created_kb_fifo,
             created_defer,
+            created_background,
         ]
 
         result = await service.ensure_system_queues("proj-1")
 
         assert result["existing_queues"] == []
         assert set(result["created_queues"]) == RESERVED_QUEUE_NAMES
-        assert result["total_system_queues"] == 4
+        assert result["total_system_queues"] == 5
 
     @pytest.mark.asyncio
     async def test_ensure_system_queues_idempotent(self, service, mock_queue_repo):
         """Calling twice, second time all should be in existing_queues."""
-        # Setup: all 4 queues
+        # Setup: all 5 queues
         created_fifo = make_queue(
             queue_id="new-1", queue_name="system_fifo_queue", is_system=True
         )
@@ -330,7 +369,16 @@ class TestEnsureSystemQueuesService:
         created_defer = make_queue(
             queue_id="new-4", queue_name="system_defer_queue", is_system=True
         )
-        all_queues = [created_fifo, created_parallel, created_kb_fifo, created_defer]
+        created_background = make_queue(
+            queue_id="new-5", queue_name="system_background_queue", is_system=True
+        )
+        all_queues = [
+            created_fifo,
+            created_parallel,
+            created_kb_fifo,
+            created_defer,
+            created_background,
+        ]
 
         def get_by_name_side_effect(project_id, queue_name):
             for q in all_queues:
@@ -366,7 +414,7 @@ class TestEnsureSystemQueuesService:
 
         assert set(result2["existing_queues"]) == RESERVED_QUEUE_NAMES
         assert result2["created_queues"] == []
-        assert result2["total_system_queues"] == 4
+        assert result2["total_system_queues"] == 5
 
 
 # =============================================================================
@@ -394,7 +442,7 @@ class TestEnsureSystemQueuesAPI:
         assert data["project_id"] == "test-project"
         assert isinstance(data["existing_queues"], list)
         assert isinstance(data["created_queues"], list)
-        assert data["total_system_queues"] == 4  # All 4 system queues created
+        assert data["total_system_queues"] == 5  # All 5 system queues created
 
     def test_ensure_system_queues_404_non_existent_project(self, client, mock_project_repo):
         """Non-existent project returns 404."""
@@ -426,6 +474,7 @@ class TestEnsureSystemQueuesAPI:
         parallel = queue_repository.get_by_name("test-project", "system_parallel_queue")
         kb_fifo = queue_repository.get_by_name("test-project", "system_kb_fifo_queue")
         defer = queue_repository.get_by_name("test-project", "system_defer_queue")
+        background = queue_repository.get_by_name("test-project", "system_background_queue")
 
         # system_fifo_queue
         assert fifo is not None
@@ -455,6 +504,13 @@ class TestEnsureSystemQueuesAPI:
         assert defer.concurrency_limit == 1
         assert defer.is_system is True
 
+        # system_background_queue
+        assert background is not None
+        assert background.queue_name == "system_background_queue"
+        assert background.queue_type == "background"
+        assert background.concurrency_limit == 1
+        assert background.is_system is True
+
     def test_ensure_system_queues_idempotent_api(self, client, mock_project_repo):
         """Calling endpoint twice returns existing queues on second call."""
         # Setup: project exists
@@ -471,9 +527,10 @@ class TestEnsureSystemQueuesAPI:
             "system_parallel_queue",
             "system_kb_fifo_queue",
             "system_defer_queue",
+            "system_background_queue",
         }
         assert data1["existing_queues"] == []
-        assert data1["total_system_queues"] == 4
+        assert data1["total_system_queues"] == 5
 
         # Second call
         response2 = client.post("/projects/test-project/queues/ensure-system")
@@ -484,9 +541,10 @@ class TestEnsureSystemQueuesAPI:
             "system_parallel_queue",
             "system_kb_fifo_queue",
             "system_defer_queue",
+            "system_background_queue",
         }
         assert data2["created_queues"] == []
-        assert data2["total_system_queues"] == 4
+        assert data2["total_system_queues"] == 5
 
     def test_ensure_system_queues_partial_existing_api(self, client, mock_project_repo, queue_repository):
         """Pre-create some queues, then call ensure - correctly tracks existing vs created."""
@@ -518,5 +576,9 @@ class TestEnsureSystemQueuesAPI:
 
         # Verify correct tracking
         assert set(data["existing_queues"]) == {"system_fifo_queue", "system_parallel_queue"}
-        assert set(data["created_queues"]) == {"system_kb_fifo_queue", "system_defer_queue"}
-        assert data["total_system_queues"] == 4
+        assert set(data["created_queues"]) == {
+            "system_kb_fifo_queue",
+            "system_defer_queue",
+            "system_background_queue",
+        }
+        assert data["total_system_queues"] == 5

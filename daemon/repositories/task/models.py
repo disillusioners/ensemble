@@ -79,6 +79,24 @@ _task_is_deferred_col = Column(
     "is_deferred", Boolean, nullable=False, server_default=text("false"), index=True
 )
 
+# Background-queue marker column (Phase 3 Part B2, 2026-06-27). Mirrors
+# the ``is_deferred`` pattern exactly: the Pydantic ``Field(default=False)``
+# on the Python side does NOT propagate to a SQL DEFAULT clause — we
+# declare the column manually with ``server_default=text("false")`` so
+# fresh databases created by ``SQLModel.metadata.create_all()`` emit
+# the same schema as the PostgreSQL migration in
+# ``_ensure_postgres_columns()`` and the SQLite migration in
+# ``daemon/migrations/versions/20260627_000004_task_is_background.sql``.
+# The background-queue lane follows the same gating model as the
+# defer-queue lane (concurrency_limit=1, idle-gate claim cycle) but
+# admits only when non-background queues are empty, so background work
+# runs behind "real" traffic without competing for claim slots. Indexes
+# the column because the background-queue idle gate filters on it
+# every claim cycle.
+_task_is_background_col = Column(
+    "is_background", Boolean, nullable=False, server_default=text("false"), index=True
+)
+
 
 class Task(SQLModel, table=True):
     """SQLModel Task table for worker pool tasks."""
@@ -132,6 +150,21 @@ class Task(SQLModel, table=True):
     # ``Field(default=False)`` does NOT emit to SQL on its own — see
     # the column definition above for the rationale.
     is_deferred: bool = Field(default=False, sa_column=_task_is_deferred_col)
+
+    # Background queue marker (Phase 3 Part B2, 2026-06-27,
+    # feature/virtual-job-management-surface). When True the task
+    # belongs to the background-queue lane: the worker pool's idle
+    # gate only claims a background task once every non-background
+    # queue is empty, so background work runs behind "real" traffic
+    # without competing for claim slots. Mirrors the ``is_deferred``
+    # pattern: ``sa_column=_task_is_background_col`` provides the
+    # ``server_default=text("false")`` that Pydantic's
+    # ``Field(default=False)`` does NOT emit to SQL on its own — see
+    # the column definition above for the rationale. Defaults to
+    # False so every existing task created before this column was
+    # added is treated as a regular (non-background) task — backfill
+    # is a no-op.
+    is_background: bool = Field(default=False, sa_column=_task_is_background_col)
 
     # Result storage (TEXT column storing JSON)
     result: str | None = Field(default=None)
@@ -195,6 +228,7 @@ class Task(SQLModel, table=True):
             "cancel_requested_at": self.cancel_requested_at,
             "retry_scheduled": self.retry_scheduled,
             "is_deferred": self.is_deferred,
+            "is_background": self.is_background,
             "result": result_data,
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,

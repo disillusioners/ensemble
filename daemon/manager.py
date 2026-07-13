@@ -2812,6 +2812,26 @@ class InstanceManager:
             # re-run and on fresh databases where create_all already
             # created it from the model.
             "CREATE INDEX IF NOT EXISTS ix_task_is_deferred ON task(is_deferred)",
+            # ── Background Queue marker (Phase 3 Part B2, 2026-06-27) ───
+            # ``task.is_background``: background-queue lane marker.
+            # Boolean, NOT NULL DEFAULT false so existing rows backfill
+            # cleanly (every pre-migration task is non-background).
+            # Matches the SQLite ``ALTER TABLE task ADD COLUMN
+            # is_background BOOLEAN DEFAULT 0 NOT NULL`` in
+            # ``daemon/migrations/versions/20260627_000004_task_is_background.sql``.
+            # Both dialects use the same logical default (false ↔ 0)
+            # so a freshly-added column reads back as ``False`` from
+            # the ORM regardless of which backend created it. Mirrors
+            # the ``is_deferred`` pattern exactly.
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS is_background BOOLEAN NOT NULL DEFAULT false",
+            # Plain index on is_background matching the model's
+            # ``index=True``. The background-queue idle-gate predicate
+            # filters on ``WHERE status='pending' AND is_background=...``
+            # every claim cycle, so an index keeps it O(log n) as the
+            # task table grows. IF NOT EXISTS makes this a no-op on
+            # re-run and on fresh databases where create_all already
+            # created it from the model.
+            "CREATE INDEX IF NOT EXISTS ix_task_is_background ON task(is_background)",
             # ── Phase 2 admission_state column (Job-as-Queue-Proxy) ──
             # Adds the ``admission_state`` column to ``job_queue_items``
             # alongside the existing ``status`` column. Dual-write in
@@ -3636,6 +3656,7 @@ class InstanceManager:
         metadata: dict[str, Any] | None = None,
         *,
         is_deferred: bool = False,
+        is_background: bool = False,
         work_id: str | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message WITHOUT a JobItem mirror (internal-only path).
@@ -3664,6 +3685,20 @@ class InstanceManager:
         empty. Default False preserves the prior behaviour for every
         caller that does not opt in.
 
+        ``is_background`` (Phase 3 background seam, 2026-07-14):
+        keyword-only marker forwarded to the underlying
+        ``InstanceMessagingService.enqueue_message``. When True, the
+        created Task row is stamped ``is_background=True`` and the
+        worker pool's idle gate holds the task until every non-
+        deferred, non-background lane system-wide is empty. Default
+        False preserves the prior behaviour for every caller that does
+        not opt in (HTTP route, telegram, scheduler, internal reports).
+        Independent of ``is_deferred`` — a task may be either, both, or
+        neither (e.g. ``is_deferred=True, is_background=False`` for a
+        defer-queued message, ``is_deferred=False, is_background=True``
+        for a background-queued message, both False for a normal
+        foreground message).
+
         Args:
             instance_id: The ID of the target instance.
             message: The message content.
@@ -3672,6 +3707,7 @@ class InstanceManager:
             images: Optional list of base64-encoded images for vision messages.
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
             is_deferred: See above.
+            is_background: See above.
 
         Returns:
             AsyncMessageResult with message_id, instance_id, status, and
@@ -3686,6 +3722,7 @@ class InstanceManager:
             images=images,
             metadata=metadata,
             is_deferred=is_deferred,
+            is_background=is_background,
             work_id=work_id,
         )
 

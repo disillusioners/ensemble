@@ -50,8 +50,8 @@ class TestQueueTypeEnum:
         assert QueueType.DEFER == "defer"
 
     def test_queue_type_enum_count(self):
-        """Test QueueType has exactly three values."""
-        assert len(QueueType) == 3
+        """Test QueueType has exactly four values."""
+        assert len(QueueType) == 4
 
 
 class TestJobQueueCreation:

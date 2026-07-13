@@ -340,15 +340,15 @@ class JobQueueCreateRequest(BaseModel):
     """Request body for creating a new job queue."""
     
     queue_name: str = Field(..., min_length=1, max_length=100, description="Queue name")
-    queue_type: str = Field(default="fifo", description="Queue type: 'fifo', 'parallel', or 'defer'")
+    queue_type: str = Field(default="fifo", description="Queue type: 'fifo', 'parallel', 'defer', or 'background'")
     concurrency_limit: int = Field(default=1, ge=1, le=20, description="Max concurrent jobs")
     description: str | None = Field(default=None, max_length=500, description="Queue description")
     
     @field_validator("queue_type")
     @classmethod
     def validate_queue_type(cls, v: str) -> str:
-        if v not in ("fifo", "parallel", "defer"):
-            raise ValueError("queue_type must be 'fifo', 'parallel', or 'defer'")
+        if v not in ("fifo", "parallel", "defer", "background"):
+            raise ValueError("queue_type must be 'fifo', 'parallel', 'defer', or 'background'")
         return v
     
     @field_validator("queue_name")
@@ -357,7 +357,7 @@ class JobQueueCreateRequest(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError("Queue name cannot be empty or whitespace-only")
-        reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue")
+        reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue", "system_background_queue")
         if v.lower() in reserved:
             raise ValueError(f"'{v}' is a reserved queue name")
         return v
@@ -366,8 +366,8 @@ class JobQueueCreateRequest(BaseModel):
     def validate_queue_concurrency(self) -> "JobQueueCreateRequest":
         if self.queue_type == "fifo" and self.concurrency_limit != 1:
             raise ValueError("FIFO queues must have concurrency_limit=1")
-        if self.queue_type == "defer" and self.concurrency_limit != 1:
-            raise ValueError("Defer queues must have concurrency_limit=1")
+        if self.queue_type in ("defer", "background") and self.concurrency_limit != 1:
+            raise ValueError("Defer/background queues must have concurrency_limit=1")
         return self
     
     model_config = {
@@ -386,7 +386,7 @@ class JobQueueUpdateRequest(BaseModel):
     """Request body for updating a job queue."""
     
     queue_name: str | None = Field(default=None, min_length=1, max_length=100, description="New queue name")
-    queue_type: str | None = Field(default=None, description="Queue type: 'fifo', 'parallel', or 'defer'")
+    queue_type: str | None = Field(default=None, description="Queue type: 'fifo', 'parallel', 'defer', or 'background'")
     concurrency_limit: int | None = Field(default=None, ge=1, le=20, description="New concurrency limit")
     is_paused: bool | None = Field(default=None, description="Pause/unpause the queue")
     description: str | None = Field(default=None, max_length=500, description="New description")
@@ -394,8 +394,8 @@ class JobQueueUpdateRequest(BaseModel):
     @field_validator("queue_type")
     @classmethod
     def validate_queue_type(cls, v: str | None) -> str | None:
-        if v is not None and v not in ("fifo", "parallel", "defer"):
-            raise ValueError("queue_type must be 'fifo', 'parallel', or 'defer'")
+        if v is not None and v not in ("fifo", "parallel", "defer", "background"):
+            raise ValueError("queue_type must be 'fifo', 'parallel', 'defer', or 'background'")
         return v
     
     @field_validator("queue_name")
@@ -405,7 +405,7 @@ class JobQueueUpdateRequest(BaseModel):
             v = v.strip()
             if not v:
                 raise ValueError("Queue name cannot be empty or whitespace-only")
-            reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue")
+            reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue", "system_background_queue")
             if v.lower() in reserved:
                 raise ValueError(f"'{v}' is a reserved queue name")
         return v
@@ -416,8 +416,8 @@ class JobQueueUpdateRequest(BaseModel):
         if self.queue_type is not None and self.concurrency_limit is not None:
             if self.queue_type == "fifo" and self.concurrency_limit != 1:
                 raise ValueError("FIFO queues must have concurrency_limit=1")
-            if self.queue_type == "defer" and self.concurrency_limit != 1:
-                raise ValueError("Defer queues must have concurrency_limit=1")
+            if self.queue_type in ("defer", "background") and self.concurrency_limit != 1:
+                raise ValueError("Defer/background queues must have concurrency_limit=1")
         return self
     
     model_config = {
@@ -461,8 +461,8 @@ class EnsureSystemQueuesResponse(BaseModel):
             "example": {
                 "project_id": "project-uuid",
                 "existing_queues": ["system_fifo_queue", "system_parallel_queue"],
-                "created_queues": ["system_kb_fifo_queue", "system_defer_queue"],
-                "total_system_queues": 4
+                "created_queues": ["system_kb_fifo_queue", "system_defer_queue", "system_background_queue"],
+                "total_system_queues": 5
             }
         }
     }

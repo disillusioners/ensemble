@@ -179,7 +179,8 @@ async def ensure_system_queues(
     """Ensure all system queues exist for a project.
 
     Creates any missing system queues (system_fifo_queue, system_parallel_queue,
-    system_kb_fifo_queue, system_defer_queue). Idempotent - safe to call multiple times.
+    system_kb_fifo_queue, system_defer_queue, system_background_queue).
+    Idempotent - safe to call multiple times.
 
     Args:
         project_id: Project identifier from path.

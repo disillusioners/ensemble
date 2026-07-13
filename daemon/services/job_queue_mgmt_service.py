@@ -18,7 +18,7 @@ from daemon.repositories.job_queue.models import AdmissionState, JobQueue
 
 
 # Reserved system queue names that cannot be created or deleted
-RESERVED_QUEUE_NAMES = {"system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue"}
+RESERVED_QUEUE_NAMES = {"system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue", "system_background_queue"}
 
 
 class JobQueueMgmtService:
@@ -55,11 +55,13 @@ class JobQueueMgmtService:
     async def auto_provision_system_queues(self, project_id: str) -> list[JobQueue]:
         """Create system queues for a project if they don't exist.
         
-        Creates four system queues:
+        Creates five system queues:
         - system_fifo_queue: FIFO queue with concurrency_limit=1
         - system_parallel_queue: Parallel queue with concurrency_limit=5
         - system_kb_fifo_queue: FIFO queue for KB import jobs with concurrency_limit=1
         - system_defer_queue: Defer queue with concurrency_limit=1
+        - system_background_queue: Background queue with concurrency_limit=1
+          (only processes when ALL projects are idle)
         
         Idempotent: skips creation if queue already exists.
         
@@ -135,6 +137,19 @@ class JobQueueMgmtService:
                 description="System defer queue - only processes when project is idle",
             )
         system_queues.append(defer_queue)
+        
+        # Check and create system background queue
+        background_queue = await asyncio.to_thread(
+            self._queue_repo.get_by_name, project_id, "system_background_queue",
+        )
+        if background_queue is None:
+            background_queue = await asyncio.to_thread(
+                self._queue_repo.create,
+                project_id=project_id, queue_name="system_background_queue",
+                queue_type="background", concurrency_limit=1, is_system=True,
+                description="System background queue - only processes when ALL projects are idle",
+            )
+        system_queues.append(background_queue)
         
         return system_queues
     

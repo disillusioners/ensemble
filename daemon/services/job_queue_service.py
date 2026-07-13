@@ -2280,40 +2280,67 @@ class JobQueueService:
         pending: list[JobItem],
         project_id: str,
     ) -> JobItem | None:
-        """Select the next eligible job from pending list, respecting defer semantics.
-        
+        """Select the next eligible job from pending list, respecting defer + background semantics.
+
         Defer jobs are only returned when no non-defer work (active or pending) exists.
-        This ensures defer queues don't start processing while non-defer work is pending.
-        
+        Background jobs are only returned when no non-deferred, non-background work
+        exists across ANY project (system-wide scope — see
+        :meth:`TaskRepository.has_active_non_background_work` for the rationale).
+        This ensures defer queues and background queues don't start processing
+        while their respective gate lanes are still active.
+
         Args:
             pending: List of pending jobs (ordered by priority desc, created_at asc).
-            project_id: Project ID for idle check.
-            
+            project_id: Project ID for the DEFER idle check (project-scoped).
+                The BACKGROUND idle check is system-wide and ignores this
+                argument — the background predicate is always system-wide
+                (Phase 3 background seam, 2026-07-14).
+
         Returns:
             Next eligible JobItem, or None if no eligible jobs.
         """
         if not pending:
             return None
-        
-        # Batch-fetch queue types to avoid N+1 queries
+
+        # Batch-fetch queue types to avoid N+1 queries. Stored as the
+        # queue_type STRING (e.g. "fifo", "parallel", "defer",
+        # "background") rather than the previous bool — the
+        # three-way admission decision (normal / defer / background)
+        # needs to distinguish both gate lanes, not collapse them.
         unique_queue_ids = {job.queue_id for job in pending if job.queue_id}
-        queue_type_map: dict[str, bool] = {}  # queue_id -> is_defer
+        queue_type_map: dict[str, str] = {}  # queue_id -> queue_type string
         for qid in unique_queue_ids:
             queue = await asyncio.to_thread(self._queue_repo.get, qid)
-            queue_type_map[qid] = queue.queue_type == "defer" if queue else False
-        
-        # Check once if non-defer work is active (used for defer jobs only).
-        # Phase 1 (defer-seam bugfix 2026-07-01): Gate B now consults the
-        # shared ``TaskRepository.has_active_non_deferred_work`` predicate.
-        # Previously this read went through
-        # ``JobRepository.count_active_jobs_in_non_defer_queues`` which could
-        # diverge from the ``task``-table probe used by
-        # ``TaskRepository.claim_pending_task`` and produced TOCTOU races
-        # where the two paths observed different non-defer sets in the same
-        # instant. The shared predicate returns ``True`` iff any row in
-        # ``task`` has ``status IN ('pending','running')`` and
-        # ``is_deferred = false``, optionally scoped by project — so the
-        # claim path and the admission probe never disagree.
+            # Default to "fifo" for missing/unknown queues so an
+            # unknown queue is treated as a normal (always-eligible)
+            # queue — matches the pre-existing
+            # ``queue_type == "defer" if queue else False`` fallback
+            # (an unknown queue defaulted to ``is_defer=False`` and was
+            # therefore eligible). The string default preserves that
+            # backward-compatible fallback.
+            queue_type_map[qid] = queue.queue_type if queue else "fifo"
+
+        # Compute the two idle flags ONCE per call (gate A also runs
+        # both checks in :meth:`JobProcessor._process_next_job`, so the
+        # two paths are guaranteed to observe the same state at the
+        # same logical instant — not byte-for-byte identical SQL
+        # execution but both run before either Gate A or Gate B's
+        # admission decision, closing the race window that the prior
+        # TOCTOU defer-queue bugfix closed for DEFER).
+        #
+        # Phase 1 (defer-seam bugfix 2026-07-01): Gate B now consults
+        # the shared ``TaskRepository.has_active_non_deferred_work``
+        # predicate. The shared predicate returns ``True`` iff any row
+        # in ``task`` has ``status IN ('pending','running')`` and
+        # ``is_deferred = false``, optionally scoped by project — so
+        # the claim path and the admission probe never disagree.
+        #
+        # Phase 3 background seam (2026-07-14): added the sister
+        # ``has_active_non_background_work`` predicate for the
+        # BACKGROUND gate. System-wide scope — passes ``None`` for
+        # ``project_id`` explicitly so the caller's ``project_id``
+        # argument is NOT silently mis-used as a project filter on a
+        # system-wide predicate.
         #
         # Access: ``TaskRepository`` lives on the InstanceManager
         # (``manager._task_repo`` set up in ``InstanceManager.initialize``,
@@ -2326,37 +2353,73 @@ class JobQueueService:
             if instance_manager is not None
             else None
         )
-        non_defer_active = False
-        for job in pending:
-            is_defer = queue_type_map.get(job.queue_id, False)
-            if is_defer:
-                # Defer job found - check if non-defer work is active.
-                # Defensive: tests construct ``JobQueueService`` without
-                # ``_instance_manager`` or before ``_task_repo`` is wired on
-                # the manager. Without the predicate we conservatively hold
-                # defer jobs back (treat as "non-defer active"), which
-                # preserves the F8 fix semantics — the original gate also
-                # could not evaluate in that scenario and defaulted to
-                # blocking defer work.
-                if task_repo is None:
-                    non_defer_active = True
-                else:
-                    non_defer_active = await asyncio.to_thread(
-                        task_repo.has_active_non_deferred_work, project_id
-                    )
-                break
 
-        # Iterate through pending jobs and select first eligible
-        for job in pending:
-            is_defer = queue_type_map.get(job.queue_id, False)
-            if not is_defer:
-                # Non-defer job - always safe to return
-                return job
+        # DEFER gate: project-scoped check, "is non-deferred work
+        # active in THIS project?". Only computed when at least one
+        # pending job is a defer job — short-circuits the SQL round
+        # trip when the pending list has no defer candidates.
+        non_defer_active = False
+        has_defer_candidate = any(
+            queue_type_map.get(job.queue_id) == "defer" for job in pending
+        )
+        if has_defer_candidate:
+            if task_repo is None:
+                # Defensive: tests construct ``JobQueueService`` without
+                # ``_instance_manager`` or before ``_task_repo`` is
+                # wired on the manager. Without the predicate we
+                # conservatively hold defer jobs back (treat as
+                # "non-defer active"), which preserves the F8 fix
+                # semantics — the original gate also could not
+                # evaluate in that scenario and defaulted to blocking
+                # defer work.
+                non_defer_active = True
             else:
-                # Defer job - only return if non-defer work is idle
+                non_defer_active = await asyncio.to_thread(
+                    task_repo.has_active_non_deferred_work, project_id
+                )
+
+        # BACKGROUND gate: system-wide check, "is non-deferred,
+        # non-background work active ANYWHERE?". Only computed when
+        # at least one pending job is a background job — same
+        # short-circuit rationale as the defer gate above.
+        non_background_active = False
+        has_background_candidate = any(
+            queue_type_map.get(job.queue_id) == "background" for job in pending
+        )
+        if has_background_candidate:
+            if task_repo is None:
+                # Defensive: same posture as the defer gate — when
+                # the predicate cannot be evaluated, conservatively
+                # block background work rather than risk premature
+                # admission.
+                non_background_active = True
+            else:
+                non_background_active = await asyncio.to_thread(
+                    task_repo.has_active_non_background_work, None
+                )
+
+        # Iterate through pending jobs and select first eligible.
+        # Three-way admission decision:
+        #   * FIFO / PARALLEL (and any unknown queue_type — see the
+        #     default-fallback comment above): always eligible.
+        #   * DEFER: eligible iff ``non_defer_active`` is False.
+        #   * BACKGROUND: eligible iff ``non_background_active`` is
+        #     False. Background is held back by EITHER non-deferred
+        #     work OR other background work anywhere in the system.
+        for job in pending:
+            queue_type = queue_type_map.get(job.queue_id, "fifo")
+            if queue_type == "defer":
                 if not non_defer_active:
                     return job
                 # Otherwise skip this defer job and continue checking
+                continue
+            if queue_type == "background":
+                if not non_background_active:
+                    return job
+                # Otherwise skip this background job and continue checking
+                continue
+            # FIFO / PARALLEL / unknown: always safe to return
+            return job
         return None
     
     async def _get_queue_position(

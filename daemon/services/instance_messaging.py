@@ -809,6 +809,7 @@ class InstanceMessagingService:
         *,
         path_label: str = "",
         is_deferred: bool = False,
+        is_background: bool = False,
         work_id: str | None = None,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
@@ -837,6 +838,14 @@ class InstanceMessagingService:
                 will hold the task until every non-defer queue is
                 empty. Default False preserves the prior behaviour for
                 every caller that does not explicitly opt in.
+            is_background: Background-queue lane marker. When True, the
+                created Task row is stamped ``is_background=True`` so the
+                dispatcher routes the work onto the background queue
+                instead of the foreground message lane. Default False
+                preserves the prior behaviour for every caller that does
+                not explicitly opt in (HTTP route, telegram, scheduler,
+                internal reports). Independent of ``is_deferred`` — a
+                task may be either, both, or neither.
 
         Returns:
             ``_PreparedEnqueueContext`` carrying the values callers need to
@@ -937,6 +946,7 @@ class InstanceMessagingService:
                 status=TaskStatus.PENDING.value,
                 created_at=datetime.now(timezone.utc),
                 is_deferred=is_deferred,
+                is_background=is_background,
                 # ``work_id`` is the linkage handle for the
                 # JobItem/Task pair (POC path) or a fresh UUID minted
                 # earlier in this method (legacy path). Always non-None
@@ -1060,6 +1070,7 @@ class InstanceMessagingService:
         metadata: dict[str, Any] | None = None,
         *,
         is_deferred: bool = False,
+        is_background: bool = False,
         work_id: str | None = None,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
@@ -1116,6 +1127,7 @@ class InstanceMessagingService:
             images=images,
             metadata=metadata,
             is_deferred=is_deferred,
+            is_background=is_background,
             work_id=work_id,
         )
 

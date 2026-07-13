@@ -166,6 +166,7 @@ class QueueType(str, enum.Enum):
     FIFO = "fifo"
     PARALLEL = "parallel"
     DEFER = "defer"
+    BACKGROUND = "background"
 
 
 # Module-level Column kept as a reference for use in JobItem.__mapper_args__.
@@ -182,8 +183,8 @@ class JobQueue(SQLModel, table=True):
     """Named job queue for per-project job isolation."""
     __tablename__ = "job_queues"
     __table_args__ = (
-        CheckConstraint("queue_type IN ('fifo', 'parallel', 'defer')", name="ck_job_queues_queue_type"),
-        CheckConstraint("queue_type != 'defer' OR concurrency_limit = 1", name="ck_job_queues_defer_concurrency"),
+        CheckConstraint("queue_type IN ('fifo', 'parallel', 'defer', 'background')", name="ck_job_queues_queue_type"),
+        CheckConstraint("queue_type NOT IN ('defer', 'background') OR concurrency_limit = 1", name="ck_job_queues_defer_concurrency"),
         Index("idx_job_queues_project", "project_id"),
         UniqueConstraint("project_id", "queue_name_lower", name="uq_job_queues_project_name"),
     )
@@ -213,9 +214,18 @@ class JobQueue(SQLModel, table=True):
 
     @model_validator(mode="after")
     def enforce_defer_concurrency_limit(self) -> "JobQueue":
-        """Defer queues must have concurrency_limit=1."""
-        if self.queue_type == QueueType.DEFER.value and self.concurrency_limit != 1:
-            raise ValueError("Defer queues must have concurrency_limit=1")
+        """Defer and background queues must have concurrency_limit=1.
+
+        Both ``DEFER`` and ``BACKGROUND`` queue types share the
+        same concurrency invariant: at most one job runs at a time.
+        Defer queues gate admission on non-defer idle, and background
+        queues gate admission on non-background idle — but neither
+        admits multiple concurrent workers. Renaming the validator is
+        a public-API change, so the existing name is kept and the
+        check is broadened to cover both queue types.
+        """
+        if self.queue_type in (QueueType.DEFER.value, QueueType.BACKGROUND.value) and self.concurrency_limit != 1:
+            raise ValueError("Defer and background queues must have concurrency_limit=1")
         return self
 
     def to_dict(self) -> dict[str, Any]:

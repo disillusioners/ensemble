@@ -11,7 +11,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { QueueType } from '../../models/job-queue.model';
 
 // Reserved system queue names that cannot be used
-const RESERVED_QUEUE_NAMES = ['system_fifo_queue', 'system_parallel_queue', 'system_kb_fifo_queue', 'system_defer_queue'];
+const RESERVED_QUEUE_NAMES = ['system_fifo_queue', 'system_parallel_queue', 'system_kb_fifo_queue', 'system_defer_queue', 'system_background_queue'];
 
 /**
  * Custom validator to check for reserved queue names
@@ -65,7 +65,8 @@ export class QueueCreateDialogComponent implements OnInit {
   protected readonly queueTypes = [
     { value: 'fifo', label: 'FIFO (First In, First Out)' },
     { value: 'parallel', label: 'Parallel (Concurrent execution)' },
-    { value: 'defer', label: 'Defer (Background execution)' }
+    { value: 'defer', label: 'Defer (Background execution)' },
+    { value: 'background', label: 'Background (Wait for all projects idle)' }
   ];
 
   protected readonly form: FormGroup = this.fb.group({
@@ -83,8 +84,8 @@ export class QueueCreateDialogComponent implements OnInit {
   ngOnInit(): void {
     // Listen to queue_type changes to update concurrency validation
     this.form.get('queue_type')?.valueChanges.subscribe((type) => {
-      if (type === 'fifo' || type === 'defer') {
-        // FIFO and Defer always use concurrency of 1
+      if (type === 'fifo' || type === 'defer' || type === 'background') {
+        // FIFO, Defer, and Background always use concurrency of 1
         this.form.get('concurrency_limit')?.setValue(1);
         this.form.get('concurrency_limit')?.disable();
       } else {
@@ -102,7 +103,7 @@ export class QueueCreateDialogComponent implements OnInit {
   }
 
   protected isConcurrencyDisabled(): boolean {
-    return this.selectedQueueType === 'fifo' || this.selectedQueueType === 'defer';
+    return this.selectedQueueType === 'fifo' || this.selectedQueueType === 'defer' || this.selectedQueueType === 'background';
   }
 
   protected handleClose(): void {
@@ -123,7 +124,7 @@ export class QueueCreateDialogComponent implements OnInit {
       const result: QueueCreateDialogResult = {
         queue_name: formValue.queue_name!.trim(),
         queue_type: formValue.queue_type as QueueType,
-        concurrency_limit: (formValue.queue_type === 'fifo' || formValue.queue_type === 'defer') ? 1 : formValue.concurrency_limit!,
+        concurrency_limit: (formValue.queue_type === 'fifo' || formValue.queue_type === 'defer' || formValue.queue_type === 'background') ? 1 : formValue.concurrency_limit!,
         description: formValue.description?.trim() || undefined
       };
 

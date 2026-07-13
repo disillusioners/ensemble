@@ -8,12 +8,13 @@ import time
 BASE_URL = "http://localhost:8079"
 TIMEOUT = 60
 
-# System queue definitions
+# System queue definitions (5 system queues)
 SYSTEM_QUEUES = {
     "system_fifo_queue": {"type": "fifo", "concurrency": 1},
     "system_parallel_queue": {"type": "parallel", "concurrency": 5},
     "system_kb_fifo_queue": {"type": "fifo", "concurrency": 1},
     "system_defer_queue": {"type": "defer", "concurrency": 1},
+    "system_background_queue": {"type": "background", "concurrency": 1},
 }
 
 
@@ -139,22 +140,22 @@ def main():
                 data = resp.json()
                 created_count = len(data.get("created_queues", []))
                 existing_count = len(data.get("existing_queues", []))
-                total_ok = data.get("total_system_queues", 0) == 4
+                total_ok = data.get("total_system_queues", 0) == 5
                 # Either all created, all existing, or split between them
-                # The important thing is total = 4 and created + existing = 4
-                total_match = (created_count + existing_count) == 4
+                # The important thing is total = 5 and created + existing = 5
+                total_match = (created_count + existing_count) == 5
 
                 passed, failed = test_scenario(
                     "Ensure returns 200",
                     passed, failed, True
                 )
                 passed, failed = test_scenario(
-                    "total_system_queues == 4",
+                    "total_system_queues == 5",
                     passed, failed, total_ok,
                     f"got={data.get('total_system_queues')}"
                 )
                 passed, failed = test_scenario(
-                    "created + existing == 4",
+                    "created + existing == 5",
                     passed, failed, total_match,
                     f"created={created_count}, existing={existing_count}"
                 )
@@ -180,8 +181,8 @@ def main():
             if resp.status_code == 200:
                 data = resp.json()
                 created_ok = len(data.get("created_queues", [])) == 0
-                existing_ok = len(data.get("existing_queues", [])) == 4
-                total_ok = data.get("total_system_queues", 0) == 4
+                existing_ok = len(data.get("existing_queues", [])) == 5
+                total_ok = data.get("total_system_queues", 0) == 5
 
                 passed, failed = test_scenario(
                     "Ensure returns 200 (idempotent)",
@@ -193,12 +194,12 @@ def main():
                     f"got={len(data.get('created_queues', []))}"
                 )
                 passed, failed = test_scenario(
-                    "existing_queues has 4 items",
+                    "existing_queues has 5 items",
                     passed, failed, existing_ok,
                     f"got={len(data.get('existing_queues', []))}"
                 )
                 passed, failed = test_scenario(
-                    "total_system_queues == 4",
+                    "total_system_queues == 5",
                     passed, failed, total_ok,
                     f"got={data.get('total_system_queues')}"
                 )
@@ -229,9 +230,9 @@ def main():
                     if q["queue_name"] in SYSTEM_QUEUES:
                         system_queues_found[q["queue_name"]] = q
 
-                all_found = len(system_queues_found) == 4
+                all_found = len(system_queues_found) == 5
                 passed, failed = test_scenario(
-                    "All 4 system queues exist",
+                    "All 5 system queues exist",
                     passed, failed, all_found,
                     f"found={len(system_queues_found)}"
                 )

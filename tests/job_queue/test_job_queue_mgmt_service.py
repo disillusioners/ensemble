@@ -84,7 +84,7 @@ class TestAutoProvisionSystemQueues:
 
     @pytest.mark.asyncio
     async def test_auto_provision_creates_all_system_queues(self, service, mock_queue_repo):
-        """Creates FIFO, parallel, and KB FIFO system queues for project."""
+        """Creates FIFO, parallel, KB FIFO, defer, and background system queues for project."""
         # No queue exists yet
         mock_queue_repo.get_by_name.return_value = None
         mock_queue_repo.create.side_effect = [
@@ -92,11 +92,12 @@ class TestAutoProvisionSystemQueues:
             make_queue(queue_id="sys-para", queue_name="system_parallel_queue", is_system=True),
             make_queue(queue_id="sys-kb-fifo", queue_name="system_kb_fifo_queue", is_system=True),
             make_queue(queue_id="sys-defer", queue_name="system_defer_queue", is_system=True),
+            make_queue(queue_id="sys-bg", queue_name="system_background_queue", is_system=True),
         ]
 
         result = await service.auto_provision_system_queues("proj-1")
 
-        assert len(result) == 4
+        assert len(result) == 5
         mock_queue_repo.create.assert_has_calls([
             call(
                 project_id="proj-1",
@@ -128,6 +129,14 @@ class TestAutoProvisionSystemQueues:
                 is_system=True,
                 description="System defer queue - only processes when project is idle",
             ),
+            call(
+                project_id="proj-1",
+                queue_name="system_background_queue",
+                queue_type="background",
+                concurrency_limit=1,
+                is_system=True,
+                description="System background queue - only processes when ALL projects are idle",
+            ),
         ])
 
     @pytest.mark.asyncio
@@ -139,6 +148,7 @@ class TestAutoProvisionSystemQueues:
             make_queue(queue_name="system_parallel_queue", is_system=True),
             make_queue(queue_name="system_kb_fifo_queue", is_system=True),
             make_queue(queue_name="system_defer_queue", is_system=True),
+            make_queue(queue_name="system_background_queue", is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -148,16 +158,18 @@ class TestAutoProvisionSystemQueues:
         assert result[1].queue_name == "system_parallel_queue"
         assert result[2].queue_name == "system_kb_fifo_queue"
         assert result[3].queue_name == "system_defer_queue"
+        assert result[4].queue_name == "system_background_queue"
 
     @pytest.mark.asyncio
     async def test_auto_provision_sets_queue_type(self, service, mock_queue_repo):
-        """Queues have expected types: FIFO, parallel, and KB FIFO."""
+        """Queues have expected types: FIFO, parallel, KB FIFO, defer, background."""
         mock_queue_repo.get_by_name.return_value = None
         created = [
             make_queue(queue_name="system_fifo_queue", queue_type="fifo", is_system=True),
             make_queue(queue_name="system_parallel_queue", queue_type="parallel", is_system=True),
             make_queue(queue_name="system_kb_fifo_queue", queue_type="fifo", is_system=True),
             make_queue(queue_name="system_defer_queue", queue_type="defer", is_system=True),
+            make_queue(queue_name="system_background_queue", queue_type="background", is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -167,6 +179,7 @@ class TestAutoProvisionSystemQueues:
         assert result[1].queue_type == "parallel"
         assert result[2].queue_type == "fifo"
         assert result[3].queue_type == "defer"
+        assert result[4].queue_type == "background"
 
     @pytest.mark.asyncio
     async def test_auto_provision_sets_system_flag(self, service, mock_queue_repo):
@@ -177,6 +190,7 @@ class TestAutoProvisionSystemQueues:
             make_queue(queue_name="system_parallel_queue", is_system=True),
             make_queue(queue_name="system_kb_fifo_queue", is_system=True),
             make_queue(queue_name="system_defer_queue", is_system=True),
+            make_queue(queue_name="system_background_queue", is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -186,6 +200,7 @@ class TestAutoProvisionSystemQueues:
         assert result[1].is_system is True
         assert result[2].is_system is True
         assert result[3].is_system is True
+        assert result[4].is_system is True
 
     @pytest.mark.asyncio
     async def test_auto_provision_idempotent(self, service, mock_queue_repo):
@@ -195,11 +210,18 @@ class TestAutoProvisionSystemQueues:
         existing_para = make_queue(queue_name="system_parallel_queue", is_system=True)
         existing_kb_fifo = make_queue(queue_name="system_kb_fifo_queue", is_system=True)
         existing_defer = make_queue(queue_name="system_defer_queue", is_system=True)
-        mock_queue_repo.get_by_name.side_effect = [existing_fifo, existing_para, existing_kb_fifo, existing_defer]
+        existing_background = make_queue(queue_name="system_background_queue", is_system=True)
+        mock_queue_repo.get_by_name.side_effect = [
+            existing_fifo,
+            existing_para,
+            existing_kb_fifo,
+            existing_defer,
+            existing_background,
+        ]
 
         result = await service.auto_provision_system_queues("proj-1")
 
-        assert len(result) == 4
+        assert len(result) == 5
         mock_queue_repo.create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -211,6 +233,7 @@ class TestAutoProvisionSystemQueues:
             make_queue(queue_name="system_parallel_queue", concurrency_limit=5, is_system=True),
             make_queue(queue_name="system_kb_fifo_queue", concurrency_limit=1, is_system=True),
             make_queue(queue_name="system_defer_queue", concurrency_limit=1, is_system=True),
+            make_queue(queue_name="system_background_queue", concurrency_limit=1, is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -220,6 +243,7 @@ class TestAutoProvisionSystemQueues:
         assert result[1].concurrency_limit == 5
         assert result[2].concurrency_limit == 1
         assert result[3].concurrency_limit == 1
+        assert result[4].concurrency_limit == 1
 
 
 # ---------------------------------------------------------------------------

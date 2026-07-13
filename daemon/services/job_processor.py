@@ -247,6 +247,69 @@ class JobProcessor:
             project_id,
         )
 
+    async def _background_idle_check(self) -> int:
+        """Return 1 (truthy) when background work should wait, 0 when it may run.
+
+        Gate A (Phase 3 background seam, 2026-07-14): the
+        background-queue idle gate. Consults the shared
+        ``TaskRepository.has_active_non_background_work`` predicate so
+        Gate A (here in ``_process_next_job``) agrees with Gate B
+        (``_select_next_eligible_job`` in
+        ``job_queue_service.py``) and the atomic claim path
+        (``TaskRepository.claim_pending_task``).
+
+        **Scope difference from** :meth:`_defer_idle_check`:
+
+        * DEFER checks a single project's non-deferred work count.
+        * BACKGROUND checks the SYSTEM's non-deferred, non-background
+          work count — it must wait until every project is idle on
+          its non-deferred, non-background lanes. The
+          ``has_active_non_background_work`` predicate is
+          system-wide (Phase 3 background seam, 2026-07-14) so we
+          pass ``None`` as the ``project_id`` explicitly.
+
+        Sister method to :meth:`_defer_idle_check`: same task_repo
+        access path (through ``InstanceManager._task_repo``), same
+        Mock-detection fallback via :meth:`_looks_like_mock`, same
+        ``asyncio.to_thread`` wrapping for non-blocking DB I/O, same
+        ``int(bool(...))`` coercion so the return contract stays
+        ``int``-shaped (matches the defer path). Tests that mock the
+        legacy ``count_active_jobs_in_non_defer_queues`` keep working
+        until the Phase 3 background-seam test migration lands.
+
+        Returns:
+            Truthy ``int`` (1) when non-deferred, non-background work is
+            active ANYWHERE in the system — i.e. the caller should
+            ``continue`` past this background queue. Falsy ``0`` when
+            every project's non-deferred, non-background lanes are idle
+            and the background queue may admit its next job. The legacy
+            fallback returns the raw ``int`` for back-compat with tests
+            that mock the legacy method.
+        """
+        task_repo = getattr(self._instance_manager, "_task_repo", None)
+        if (
+            task_repo is not None
+            and not self._looks_like_mock(task_repo)
+            and hasattr(task_repo, "has_active_non_background_work")
+        ):
+            # Production path: use the shared predicate so Gate A,
+            # Gate B, and the claim path all observe the same
+            # system-wide idle signal. Coerce bool → int so the
+            # return contract stays `int`-shaped (matches the defer
+            # path). Pass ``None`` explicitly for ``project_id`` —
+            # the background predicate is always system-wide.
+            active = await asyncio.to_thread(
+                task_repo.has_active_non_background_work, None
+            )
+            return int(bool(active))
+        # Legacy / test fallback: same defensive posture as
+        # ``_defer_idle_check`` — if the production predicate is not
+        # wired (older tests, partial-init harness) we conservatively
+        # treat the system as active so background work does not
+        # claim prematurely. Once the Phase 3 test migration lands
+        # this fallback can be dropped.
+        return 1
+
     async def _emit_in_progress_if_children_pending(
         self,
         instance_meta,
@@ -515,6 +578,24 @@ class JobProcessor:
                     if non_defer_active:
                         continue
 
+                if queue.queue_type == "background" and pending:
+                    # Gate A (Phase 3 background seam, 2026-07-14):
+                    # Background queues only activate when no
+                    # non-deferred, non-background work is in flight
+                    # ANYWHERE in the system (system-wide scope, not
+                    # project-scoped — see
+                    # ``_background_idle_check`` docstring for the
+                    # rationale and ``has_active_non_background_work``
+                    # for the shared predicate). Uses the same
+                    # shared predicate so the claim path and the
+                    # admission probe never disagree. Sister check to
+                    # the defer gate above; runs ALONGSIDE it so a
+                    # project that has both a defer queue and a
+                    # background queue evaluates both gates correctly.
+                    background_should_wait = await self._background_idle_check()
+                    if background_should_wait:
+                        continue
+
                 if not pending:
                     # Also check for ACTIVE-admission jobs that have instance_id set but
                     # no spawned instance yet. These jobs were transitioned to
@@ -649,6 +730,7 @@ class JobProcessor:
                                         message=proc_job.message,
                                         source=proc_job.source,
                                         is_deferred=(queue.queue_type == "defer"),
+                                        is_background=(queue.queue_type == "background"),
                                     )
                                     # Stamp message_id defensively — a
                                     # stamping failure must not fail an
@@ -708,6 +790,7 @@ class JobProcessor:
                                 message=proc_job.message,
                                 source=proc_job.source,
                                 is_deferred=(queue.queue_type == "defer"),
+                                is_background=(queue.queue_type == "background"),
                             )
                             # Stamp message_id defensively — a stamping
                             # failure must not fail an otherwise-successful
@@ -843,6 +926,7 @@ class JobProcessor:
                             message=job.message,
                             source=job.source,
                             is_deferred=(queue.queue_type == "defer"),
+                            is_background=(queue.queue_type == "background"),
                             # Stamp the JobItem's ``job_id`` onto the
                             # driving Task's ``work_id`` so the Task is
                             # explicitly linked to its JobItem (the

@@ -547,6 +547,34 @@ class TaskRepository:
                               )
                         )
                     )
+                    -- Background queue idle gate (Phase 3 background
+                    -- seam, 2026-07-14). Held back when this candidate
+                    -- is a background task AND there is active
+                    -- non-deferred, non-background work ANYWHERE in the
+                    -- system. Scope is system-wide (NO project_id
+                    -- filter) — this is the documented asymmetry from
+                    -- the defer gate: background work waits for ALL
+                    -- projects to be idle on their non-deferred,
+                    -- non-background lanes, not just the candidate's
+                    -- project. Mirrors :meth:`has_active_non_background_work`
+                    -- so the claim path and the admission probe
+                    -- cannot disagree.
+                    AND NOT (
+                        task.is_background = :is_background_true
+                        AND EXISTS (
+                            SELECT 1 FROM task t3
+                            JOIN instances i3
+                                ON t3.instance_id = i3.instance_id
+                            WHERE t3.status = :status_running
+                              AND t3.is_deferred = :is_deferred_false
+                              AND t3.is_background = :is_background_false
+                            -- Deliberately NO project_id scoping — the
+                            -- background gate is system-wide by
+                            -- design. A background candidate only
+                            -- claims when every project is idle on
+                            -- its non-deferred, non-background lanes.
+                        )
+                    )
                     AND instance_id NOT IN (
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
@@ -668,6 +696,20 @@ class TaskRepository:
                 # this repository (e.g. schedule_retry).
                 "is_deferred_true": True,
                 "is_deferred_false": False,
+                # Background queue idle gate (Phase 3 background seam,
+                # 2026-07-14). Same Python-boolean dual-driver pattern
+                # as the defer gate above. The background predicate is
+                # folded into the SAME atomic claim's inner SELECT (not
+                # a Python pre-check) so it shares the pause gate,
+                # per-instance guard, cross-system guard, and defer
+                # gate evaluation — closing the deterministic starvation
+                # window that the prior pre-check pattern had for
+                # defer. The same anti-starvation guarantee applies to
+                # background: a paused background task is filtered out
+                # by the pause gate, and the next eligible non-
+                # background task is selected instead.
+                "is_background_true": True,
+                "is_background_false": False,
                 # Carve-out (admission_state-aware, 2026-07-06):
                 # bind the two admission_state values so the
                 # bifurcated carve-out can distinguish stuck-queued
@@ -980,6 +1022,7 @@ class TaskRepository:
             cancel_requested_at=row.cancel_requested_at if hasattr(row, 'cancel_requested_at') else None,
             retry_scheduled=bool(row.retry_scheduled) if hasattr(row, 'retry_scheduled') else False,
             is_deferred=row.is_deferred,
+            is_background=row.is_background,
             result=row.result,
             error=row.error,
             created_at=row.created_at,
@@ -1471,6 +1514,75 @@ class TaskRepository:
                 }).fetchone()
             return bool(row[0])
 
+    def has_active_non_background_work(self, project_id: str | None = None) -> bool:
+        """Return True if there is any non-deferred, non-background in-flight task.
+
+        Phase 3 background-seam (2026-07-14): the shared predicate backing
+        the background-queue idle gate. Sister query to
+        :meth:`has_active_non_deferred_work` — the two gates share the
+        SAME atomic claim SQL pattern (see
+        :meth:`claim_pending_task` for the defer predicate this mirrors)
+        so the claim path and the admission probe can never disagree.
+
+        Scope difference from the defer predicate:
+
+        * DEFER is **project-scoped** — a project's defer queue only
+          waits for non-deferred work in the SAME project.
+        * BACKGROUND is **system-wide** — a background task waits for
+          non-deferred, non-background work across ALL projects. This is
+          the documented scope asymmetry from
+          ``feature/virtual-job-management-surface`` Phase 3 background
+          seam (2026-07-14).
+
+        The ``project_id`` parameter is accepted for signature symmetry
+        with :meth:`has_active_non_deferred_work` but is **ignored** —
+        the predicate is always system-wide. The parameter is preserved
+        in the signature so callers that pass ``queue.project_id`` for
+        symmetry with the defer path can do so without raising, and so
+        ``getattr(task_repo, "has_active_non_background_work", None)``
+        lookups in callers stay uniform.
+
+        Returns:
+            True if at least one ``is_deferred=false`` AND
+            ``is_background=false`` task exists with status
+            ``pending``, ``running``, or ``paused`` across ANY project;
+            False otherwise.
+
+        Dialect notes mirror :meth:`has_active_non_deferred_work`
+        exactly — Python ``False`` booleans as bound parameters so the
+        comparison works on both SQLite (INTEGER 0/1) and PostgreSQL
+        (BOOLEAN false/true), ``SELECT EXISTS(...)`` wrapped in
+        ``bool()`` for a backend-invariant return type, and the
+        ``IN (pending, running, paused)`` parameterised status list so a
+        paused instance counts as non-idle (matches the pause-fix
+        semantics from 2026-07-01).
+        """
+        with self.engine.begin() as conn:
+            # Background gate is ALWAYS system-wide (Phase 3 background
+            # seam, 2026-07-14). Mark the parameter as intentionally
+            # unused so a future reader does not silently add a project
+            # filter without understanding the documented scope
+            # asymmetry — background work waits across projects, not
+            # within them.
+            del project_id
+            stmt = text("""
+                SELECT EXISTS(
+                    SELECT 1 FROM task t
+                    JOIN instances i ON t.instance_id = i.instance_id
+                    WHERE t.status IN (:status_pending, :status_running, :status_paused)
+                      AND t.is_deferred = :is_deferred_false
+                      AND t.is_background = :is_background_false
+                )
+            """)
+            row = conn.execute(stmt, {
+                "status_pending": TaskStatus.PENDING.value,
+                "status_running": TaskStatus.RUNNING.value,
+                "status_paused": TaskStatus.PAUSED.value,
+                "is_deferred_false": False,
+                "is_background_false": False,
+            }).fetchone()
+            return bool(row[0])
+
     def count_by_status(self) -> dict[str, int]:
         """Get count of tasks by status.
 
@@ -1674,17 +1786,20 @@ class TaskRepository:
             # distinct from the parent's work_id, since the retry is
             # logically a new work attempt. ``is_deferred`` (Phase 3
             # Part B1, 2026-06-27) is inherited from the parent — a
-            # retry stays in the same defer-queue lane.
+            # retry stays in the same defer-queue lane. ``is_background``
+            # (Phase 3 background seam, 2026-07-14) is likewise inherited
+            # so the retry child remains in the same background-queue
+            # lane and continues to honour the background idle gate.
             result = conn.execute(
                 text("""
                     INSERT INTO task (task_type, instance_id, message_id, status,
                                       retry_count, next_retry_at, created_at,
                                       cancel_requested, retry_scheduled, work_id,
-                                      is_deferred)
+                                      is_deferred, is_background)
                     VALUES (:task_type, :instance_id, :message_id, :status_pending,
                             :retry_count, :next_retry_at_str, :created_at,
                             :cancel_requested, :retry_scheduled, :work_id,
-                            :is_deferred)
+                            :is_deferred, :is_background)
                     RETURNING *
                 """),
                 {
@@ -1699,6 +1814,7 @@ class TaskRepository:
                     "retry_scheduled": False,
                     "work_id": str(uuid.uuid4()),
                     "is_deferred": bool(parent_row.is_deferred) if hasattr(parent_row, 'is_deferred') else False,
+                    "is_background": bool(parent_row.is_background) if hasattr(parent_row, 'is_background') else False,
                 }
             ).fetchone()
 
@@ -1987,17 +2103,20 @@ class TaskRepository:
             # ``schedule_retry`` above: a retry is a fresh logical work
             # attempt and gets its own virtual-job identifier.
             # ``is_deferred`` is inherited from the parent so the retry
-            # child stays in the same defer-queue lane.
+            # child stays in the same defer-queue lane. ``is_background``
+            # (Phase 3 background seam, 2026-07-14) is likewise inherited
+            # so the retry child remains in the same background-queue
+            # lane and continues to honour the background idle gate.
             result = conn.execute(
                 text("""
                     INSERT INTO task (task_type, instance_id, message_id, status,
                                       retry_count, next_retry_at, created_at,
                                       cancel_requested, retry_scheduled, work_id,
-                                      is_deferred)
+                                      is_deferred, is_background)
                     VALUES (:task_type, :instance_id, :message_id, :status_pending,
                             :retry_count, :next_retry_at_str, :created_at,
                             :cancel_requested, :retry_scheduled, :work_id,
-                            :is_deferred)
+                            :is_deferred, :is_background)
                     RETURNING *
                 """),
                 {
@@ -2012,6 +2131,7 @@ class TaskRepository:
                     "retry_scheduled": False,
                     "work_id": str(uuid.uuid4()),
                     "is_deferred": bool(parent_row.is_deferred) if hasattr(parent_row, 'is_deferred') else False,
+                    "is_background": bool(parent_row.is_background) if hasattr(parent_row, 'is_background') else False,
                 },
             ).fetchone()
 
