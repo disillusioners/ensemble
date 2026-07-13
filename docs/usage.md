@@ -935,13 +935,13 @@ Create a custom queue for specialized job processing.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `queue_name` | string | Yes | Unique name per project |
-| `queue_type` | string | No | `fifo` (default), `parallel`, or `defer` |
+| `queue_type` | string | No | `fifo` (default), `parallel`, `defer`, or `background` |
 | `concurrency_limit` | int | No | Max concurrent jobs (default: 1, max: 20) |
 | `description` | string | No | Optional description |
 
 **Constraints:**
-- FIFO and DEFER queues: `concurrency_limit` must be 1
-- Reserved names: `system_fifo_queue`, `system_parallel_queue`, `system_kb_fifo_queue`, `system_defer_queue`
+- FIFO, DEFER, and BACKGROUND queues: `concurrency_limit` must be 1
+- Reserved names: `system_fifo_queue`, `system_parallel_queue`, `system_kb_fifo_queue`, `system_defer_queue`, `system_background_queue`
 
 ### Get Queue
 

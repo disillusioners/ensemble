@@ -229,9 +229,11 @@ class JobQueueMgmtService:
         if queue_name.lower() in RESERVED_QUEUE_NAMES:
             raise ValueError(f"Cannot use reserved queue name: {queue_name}")
         
-        # Validate FIFO concurrency
-        if queue_type == "fifo" and concurrency_limit != 1:
-            raise ValueError("FIFO queue must have concurrency_limit=1")
+        # Validate FIFO/defer/background concurrency (mirror
+        # ``update_queue``'s rule: these queue types must be serialized
+        # so defer-idle and background-idle semantics stay well-defined).
+        if queue_type in ("fifo", "defer", "background") and concurrency_limit != 1:
+            raise ValueError(f"{queue_type} queue must have concurrency_limit=1")
         
         # Check uniqueness within project
         existing = await asyncio.to_thread(

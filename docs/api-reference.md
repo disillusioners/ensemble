@@ -819,7 +819,8 @@ Job queue management within projects.
 
 - `fifo` - First-in-first-out (concurrency_limit must be 1)
 - `parallel` - Parallel processing (concurrency_limit > 1)
-- `defer` - Deferred execution (concurrency_limit must be 1)
+- `defer` - Deferred execution (concurrency_limit must be 1); only runs when the owning project is idle
+- `background` - System-wide background execution (concurrency_limit must be 1); only runs when ALL projects are idle
 
 ### System Queues
 
@@ -828,6 +829,7 @@ Reserved queue names (cannot be created/deleted):
 - `system_parallel_queue`
 - `system_kb_fifo_queue`
 - `system_defer_queue`
+- `system_background_queue`
 
 ### Create Queue
 
@@ -869,7 +871,7 @@ Creates missing system queues idempotently.
   "project_id": "project-uuid",
   "existing_queues": ["system_fifo_queue"],
   "created_queues": ["system_parallel_queue"],
-  "total_system_queues": 4
+  "total_system_queues": 5
 }
 ```
 

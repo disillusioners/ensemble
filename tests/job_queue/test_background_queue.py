@@ -331,12 +331,35 @@ class TestDeferVsBackgroundScopeAsymmetry:
     def test_defer_claimable_while_other_project_active_background_blocked(
         self, task_repository, engine
     ):
-        """Same setup — active work in project B only:
+        """Scope asymmetry under C1 (claim-path ↔ admission probe alignment).
 
-        * The DEFER task in project A IS claimable (defer is project-scoped,
-          project A is idle).
-        * The BACKGROUND task in project A is NOT claimable (background is
-          system-wide, project B has active work).
+        Setup:
+          * Project B: 1 RUNNING non-deferred, non-background task.
+          * Project A: 1 PENDING DEFER task + 1 PENDING BACKGROUND task.
+
+        Assertions (post-C1 corrected semantics):
+          * The DEFER task in project A is HELD BACK. C1 widened the
+            claim-path defer gate from ``status = running`` to
+            ``status IN (pending, running, paused)``, aligning it with
+            the shared ``has_active_non_deferred_work(project_id=A)``
+            predicate (repository.py ``claim_pending_task`` defer
+            EXISTS, project-scoped ``has_active_non_deferred_work``
+            variant). That predicate counts the PENDING BACKGROUND in A
+            as 'active non-deferred work' (``is_deferred=false``), so
+            the DEFER candidate is correctly blocked.
+          * The BACKGROUND task in project A is HELD BACK system-wide
+            (project B has active non-deferred, non-background work).
+
+        Both tasks remain ``PENDING``; the system is correctly idle-locked.
+
+        Pre-C1 this test asserted the DEFER in A was claimable — that
+        was the exact inconsistency C1 fixes (claim-path deferred gate
+        used ``status = :status_running`` only, bypassing the admission
+        probe's stricter ``status IN (pending, running, paused)`` check
+        via the shared predicate). The project-scoped DEFER ↔
+        system-wide BACKGROUND asymmetry itself is still asserted by
+        sibling tests in this file / class where project A holds only
+        a DEFER and project B holds active work.
         """
         # Project B: one RUNNING non-deferred, non-background task.
         _insert_instance(engine, "inst-C-active", "project-B")
@@ -374,18 +397,22 @@ class TestDeferVsBackgroundScopeAsymmetry:
             is_background=True,
         )
 
-        # The DEFER task in project A must be claimable — defer is
-        # project-scoped, project A has no active non-deferred work.
+        # Post-C1: BOTH gates hold back. DEFER in A is blocked by the
+        # same-project PENDING BACKGROUND (claim-path defer gate now
+        # aligned with the shared ``has_active_non_deferred_work``
+        # predicate). BACKGROUND in A is blocked system-wide by project
+        # B's RUNNING task. claim_pending_task returns None.
         claimed = task_repository.claim_pending_task(worker_id="worker-1")
-        assert claimed is not None
-        assert claimed.id == defer_in_A.id
-        assert bool(claimed.is_deferred) is True
+        assert claimed is None
 
-        # The BACKGROUND task in project A must NOT be claimable —
-        # background is system-wide, project B has active work.
-        assert task_repository.claim_pending_task(worker_id="worker-2") is None
+        # Verify the DEFER task is still PENDING (held back by C1).
+        db_defer = task_repository.get(defer_in_A.id)
+        assert db_defer is not None
+        assert db_defer.status == TaskStatus.PENDING.value
+        assert bool(db_defer.is_deferred) is True
 
-        # Verify the background task is still PENDING.
+        # Verify the BACKGROUND task is still PENDING (held back
+        # system-wide by project B's active work).
         db_bg = task_repository.get(background_in_A.id)
         assert db_bg is not None
         assert db_bg.status == TaskStatus.PENDING.value

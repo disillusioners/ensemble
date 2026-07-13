@@ -538,7 +538,7 @@ class TaskRepository:
                             SELECT 1 FROM task t2
                             JOIN instances i2
                                 ON t2.instance_id = i2.instance_id
-                            WHERE t2.status = :status_running
+                            WHERE t2.status IN (:status_pending, :status_running, :status_paused)
                               AND t2.is_deferred = :is_deferred_false
                               AND i2.project_id = (
                                   SELECT i_cand.project_id
@@ -565,7 +565,7 @@ class TaskRepository:
                             SELECT 1 FROM task t3
                             JOIN instances i3
                                 ON t3.instance_id = i3.instance_id
-                            WHERE t3.status = :status_running
+                            WHERE t3.status IN (:status_pending, :status_running, :status_paused)
                               AND t3.is_deferred = :is_deferred_false
                               AND t3.is_background = :is_background_false
                             -- Deliberately NO project_id scoping — the
@@ -685,7 +685,7 @@ class TaskRepository:
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running_guard": TaskStatus.RUNNING.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
-                "status_paused": InstanceStatus.PAUSED.value,
+                "status_paused": TaskStatus.PAUSED.value,
                 "status_terminated": InstanceStatus.TERMINATED.value,
                 "process_message_type": TaskType.PROCESS_MESSAGE.value,
                 "now_str": now_str,

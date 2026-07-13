@@ -289,6 +289,25 @@ jitter = random(0, base × 0.5)
 }
 ```
 
+### BACKGROUND
+
+- **Concurrency**: Always 1 (enforced)
+- **Behavior**: Only processes when ALL projects in the system are idle (system-wide, not per-project)
+- **Use case**: Lowest-priority maintenance / cleanup that must never compete with user work
+- **System queue**: `system_background_queue`
+
+```json
+{
+  "queue_name": "system_background_queue",
+  "queue_type": "background",
+  "concurrency_limit": 1,
+  "description": "System background queue - only processes when ALL projects are idle",
+  "is_system": true
+}
+```
+
+> **DEFER vs BACKGROUND**: `defer` is gated on the owning project being idle. `background` is gated on every project system-wide being idle — use it only for true low-priority work that should yield to everything else.
+
 ### Creating Custom Queues
 
 **POST /projects/{project_id}/queues**
@@ -306,8 +325,8 @@ curl -X POST http://localhost:8079/api/projects/my-project/queues \
 
 **Constraints:**
 
-- FIFO and DEFER queues: `concurrency_limit` must be 1
-- Cannot use reserved names: `system_fifo_queue`, `system_parallel_queue`, `system_kb_fifo_queue`, `system_defer_queue`
+- FIFO, DEFER, and BACKGROUND queues: `concurrency_limit` must be 1
+- Cannot use reserved names: `system_fifo_queue`, `system_parallel_queue`, `system_kb_fifo_queue`, `system_defer_queue`, `system_background_queue`
 
 ---
 
@@ -320,7 +339,8 @@ System queues are auto-provisioned per project when first needed. They handle di
 | `system_fifo_queue` | FIFO | 1 | TASK jobs - serial execution |
 | `system_parallel_queue` | PARALLEL | 5 | MESSAGE jobs - concurrent execution |
 | `system_kb_fifo_queue` | FIFO | 1 | Knowledge base import jobs |
-| `system_defer_queue` | DEFER | 1 | Background tasks (idle-only) |
+| `system_defer_queue` | DEFER | 1 | Project-idle tasks (per-project) |
+| `system_background_queue` | BACKGROUND | 1 | System-wide low-priority tasks (all-projects idle) |
 
 ### Ensuring System Queues
 
@@ -336,8 +356,8 @@ curl -X POST http://localhost:8079/api/projects/my-project/queues/ensure-system
 {
   "project_id": "my-project",
   "existing_queues": ["system_fifo_queue", "system_parallel_queue"],
-  "created_queues": ["system_kb_fifo_queue", "system_defer_queue"],
-  "total_system_queues": 4
+  "created_queues": ["system_kb_fifo_queue", "system_defer_queue", "system_background_queue"],
+  "total_system_queues": 5
 }
 ```
 
@@ -736,7 +756,7 @@ data: {"job_id": "job-abc123", "status": "completed", "result_summary": "Task co
 | `queue_id` | string | Unique queue identifier |
 | `project_id` | string | Owning project ID |
 | `queue_name` | string | Display name (unique per project) |
-| `queue_type` | string | "fifo", "parallel", or "defer" |
+| `queue_type` | string | "fifo", "parallel", "defer", or "background" |
 | `concurrency_limit` | integer | Max concurrent jobs (1-20) |
 | `is_system` | boolean | System queue (cannot delete) |
 | `is_paused` | boolean | Queue is paused |
