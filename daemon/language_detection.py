@@ -110,7 +110,12 @@ def detect_wrong_language(content, preferred_language: str) -> bool:
     # build_instance_graph(), but this guard protects any other caller.
     if not preferred_language:
         return False
-    if preferred_language.lower().strip() == "auto":
+    # Lazy import breaks the circular dependency: daemon.services.__init__
+    # pulls in instance_lifecycle → compaction → graph → language_detection,
+    # so a module-level ``from .services.language_utils import ...`` would
+    # re-enter this module mid-load.
+    from .services.language_utils import is_auto_language
+    if is_auto_language(preferred_language):
         return False
 
     # W4 FIX: Normalize content to string

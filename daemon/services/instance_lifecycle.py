@@ -29,7 +29,7 @@ from .cancellation import CancellationService
 from .dependency_bus import get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
-from .language_utils import get_language_preference
+from .language_utils import get_language_preference, is_auto_language
 from .project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
@@ -540,7 +540,7 @@ def append_user_language(system_prompt: str, language: str) -> str:
     # "Auto" (case-insensitive) means no preference — skip injection entirely.
     # We do NOT inject any "User prefers language: Auto" line; the LLM is
     # left to reply in whatever language matches the user's input.
-    if language.lower() == "auto":
+    if is_auto_language(language):
         return system_prompt
     language_section = f"\n---\n\n## User Language Preference\n\nUser prefers language: {language}\n"
     return system_prompt + language_section

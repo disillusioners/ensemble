@@ -17,6 +17,16 @@ LANGUAGE_METADATA_KEY = "user_language"
 DEFAULT_LANGUAGE = "Auto"
 
 
+def is_auto_language(value: str) -> bool:
+    """Return True if value is the 'Auto' sentinel (case-insensitive, whitespace-trimmed).
+
+    Truthy guard preserves the legacy ``user_language and user_language.lower() == "auto"``
+    semantics at the graph level so ``None`` / empty strings are handled by callers
+    that intend a real language and fall through to language enforcement.
+    """
+    return bool(value) and value.strip().lower() == "auto"
+
+
 def get_language_preference(project_repo) -> str:
     """Get the stored language preference, or default 'Auto'.
     

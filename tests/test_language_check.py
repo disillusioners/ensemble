@@ -14,7 +14,7 @@ in pyproject.toml, async test functions are automatically marked.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -873,7 +873,7 @@ class TestAppendUserLanguage:
 
     def test_explicit_auto_skips_injection(self):
         """Explicit "Auto" (case-insensitive) skips injection entirely."""
-        for value in ("Auto", "auto", "AUTO"):
+        for value in ("Auto", "auto", "AUTO", "  Auto  "):
             result = append_user_language("base prompt.", value)
             assert result == "base prompt.", f"Failed for {value!r}"
             assert "User Language Preference" not in result
@@ -901,6 +901,68 @@ class TestAppendUserLanguage:
         assert twice.count("## User Language Preference") == 2
         assert "User prefers language: English" in twice
         assert "User prefers language: Spanish" in twice
+
+    def test_build_instance_graph_auto_disables_language_check(self):
+        """build_instance_graph(user_language="Auto") MUST disable the language_check node
+        even when language_check_enabled=True is passed — the Auto sentinel overrides.
+
+        Implemented by checking the public ``compiled.language_check_active`` attribute
+        that ``build_instance_graph`` sets after compile() so that downstream streaming
+        code reads the effective flag, not the requested one.
+        """
+        from daemon.graph import build_instance_graph
+
+        tools = [MagicMock(name="t1"), MagicMock(name="t2")]
+        checkpointer = MagicMock()
+        llm_config = {"model": "gpt-4o", "api_key": "test"}
+
+        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class:
+            mock_llm_instance = MagicMock()
+            mock_llm_with_tools = MagicMock()
+            mock_llm_instance.bind_tools.return_value = mock_llm_with_tools
+            mock_llm_class.return_value = mock_llm_instance
+
+            with patch("daemon.graph.StateGraph") as mock_state_graph:
+                mock_graph_instance = MagicMock()
+                mock_compiled = MagicMock()
+                mock_graph_instance.compile.return_value = mock_compiled
+                mock_state_graph.return_value = mock_graph_instance
+
+                with patch("daemon.graph.ToolNode"):
+                    # Case A — Auto sentinel MUST force the check OFF even though True was requested.
+                    graph_auto = build_instance_graph(
+                        tools=tools,
+                        checkpointer=checkpointer,
+                        llm_config=llm_config,
+                        system_prompt="test prompt",
+                        user_language="Auto",
+                        language_check_enabled=True,
+                    )
+                    assert graph_auto.language_check_active is False, (
+                        "Auto sentinel must override language_check_enabled=True"
+                    )
+
+                    # Case B — explicit non-Auto language with check_enabled=True MUST keep it ON.
+                    graph_en = build_instance_graph(
+                        tools=tools,
+                        checkpointer=checkpointer,
+                        llm_config=llm_config,
+                        system_prompt="test prompt",
+                        user_language="English",
+                        language_check_enabled=True,
+                    )
+                    assert graph_en.language_check_active is True
+
+                    # Case C — explicit non-Auto with check_enabled=False stays OFF.
+                    graph_off = build_instance_graph(
+                        tools=tools,
+                        checkpointer=checkpointer,
+                        llm_config=llm_config,
+                        system_prompt="test prompt",
+                        user_language="English",
+                        language_check_enabled=False,
+                    )
+                    assert graph_off.language_check_active is False
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -31,6 +31,9 @@ from .llm_error_classifier import (
 )
 from .response_validation import LLMResponseValidationError
 from .language_detection import detect_wrong_language
+# Lazy import below — module-level ``from .services.language_utils`` would
+# trigger daemon.services.__init__ → instance_lifecycle → compaction →
+# graph (cycle) before this module finishes loading.
 
 
 # ============================================================================
@@ -1021,7 +1024,9 @@ def build_instance_graph(
     # "Auto" means "no preference" — disable the language_check node so the
     # LLM is free to reply in whatever language matches the user's input.
     # Must happen BEFORE the conditional graph wiring below.
-    if user_language and user_language.lower() == "auto":
+    # Lazy import — see top-of-file note about the graph ↔ services cycle.
+    from .services.language_utils import is_auto_language
+    if is_auto_language(user_language):
         language_check_enabled = False
 
     # Create LLMs using the helper function
