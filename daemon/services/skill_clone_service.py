@@ -60,6 +60,8 @@ import asyncio
 import logging
 from typing import Any, Optional
 
+from sqlalchemy.exc import IntegrityError
+
 logger = logging.getLogger(__name__)
 
 
@@ -308,27 +310,44 @@ class SkillCloneService:
         BM25-searchable. See the module docstring's "Embedding
         computation" section for the design rationale.
         """
-        cloned = self._skill_repo.create(
-            name=template.name,
-            description=template.description,
-            content=template.content,
-            project_id=project_id,
-            category=template.category,
-            lineage_origin=_LINEAGE_ORIGIN_BANK_CLONE,
-            generation=0,
-            status=_DEFAULT_CLONE_STATUS,
-            is_active=True,
-            # C2 fix: auto_load is propagated from the template,
-            # NOT hardcoded. Phase 3 seeded this from
-            # ``skill-set.md``'s ``auto_load:`` frontmatter.
-            auto_load=template.auto_load,
-            source_skill_bank_id=template.id,
-        )
-        logger.info(
-            f"Cloned skill from bank: name={template.name}, "
-            f"project={project_id[:8]}..., auto_load={template.auto_load}, "
-            f"source_skill_bank_id={template.id}"
-        )
+        try:
+            cloned = self._skill_repo.create(
+                name=template.name,
+                description=template.description,
+                content=template.content,
+                project_id=project_id,
+                category=template.category,
+                lineage_origin=_LINEAGE_ORIGIN_BANK_CLONE,
+                generation=0,
+                status=_DEFAULT_CLONE_STATUS,
+                is_active=True,
+                # C2 fix: auto_load is propagated from the template,
+                # NOT hardcoded. Phase 3 seeded this from
+                # ``skill-set.md``'s ``auto_load:`` frontmatter.
+                auto_load=template.auto_load,
+                source_skill_bank_id=template.id,
+            )
+            logger.info(
+                f"Cloned skill from bank: name={template.name}, "
+                f"project={project_id[:8]}..., auto_load={template.auto_load}, "
+                f"source_skill_bank_id={template.id}"
+            )
+        except IntegrityError:
+            # Race loser — another instance already created this skill.
+            # Re-query for the winning row and return it; this is expected
+            # behavior under concurrent spawns, not a DB outage.
+            logger.debug(
+                f"Clone race lost for {template.name}, re-querying existing skill"
+            )
+            existing = self._skill_repo.get_by_name(
+                project_id=project_id,
+                name=template.name,
+                generation=0,
+            )
+            if existing is None:
+                # Not a race — re-raise so the caller sees the real error.
+                raise
+            return existing
 
         # Embeddings computed lazily by async path; sync clones
         # are BM25-searchable. SkillSearchService gracefully

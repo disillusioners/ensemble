@@ -645,6 +645,67 @@ def append_auto_load_skills(
     return system_prompt + auto_load_section
 
 
+def _apply_post_cache_appends(
+    *,
+    system_prompt: str,
+    instance_id: str,
+    instance_repository: Any,
+    shared_context_metadata_repo: Any,
+    parent_id: str | None,
+    agent_id: str,
+    project_id: str | None,
+    project_repository: Any,
+    manager: Any,
+) -> tuple[str, str]:
+    """Apply the shared post-cache append chain for spawn and restore.
+
+    This consolidates the five appenders used by both the spawn path and the
+    restore path. Running them after the cached prompt load keeps project-scoped
+    and runtime content, including language and skill changes, out of the
+    prompt cache so those changes do not invalidate it.
+
+    Args:
+        system_prompt: The cached system prompt to append to.
+        instance_id: The instance identifier used for context lookups.
+        instance_repository: Repository used by the context appenders.
+        shared_context_metadata_repo: Repository for shared context metadata.
+        parent_id: Parent instance identifier, if any.
+        agent_id: Resolved agent identifier for auto-loaded skills.
+        project_id: Project identifier for auto-loaded skills.
+        project_repository: Repository used to resolve language preference.
+        manager: Instance manager passed to the skill appender.
+
+    Returns:
+        A tuple containing the system prompt with all post-cache sections
+        appended and the resolved user language for graph configuration.
+    """
+    system_prompt = append_context_key(
+        system_prompt,
+        instance_id,
+        instance_repository,
+        parent_id=parent_id,
+    )
+    system_prompt = append_shared_context_metadata(
+        system_prompt,
+        instance_id,
+        instance_repository,
+        shared_context_metadata_repo,
+        parent_id=parent_id,
+    )
+    system_prompt = append_current_time(system_prompt)
+    user_language = get_language_preference(project_repository)
+    system_prompt = append_user_language(system_prompt, user_language)
+    return (
+        append_auto_load_skills(
+            system_prompt,
+            agent_id=agent_id,
+            project_id=project_id,
+            manager=manager,
+        ),
+        user_language,
+    )
+
+
 class InstanceLifecycleService:
     """Service for managing instance lifecycle (spawn, terminate, restore).
     
@@ -952,38 +1013,17 @@ class InstanceLifecycleService:
         agent_path = Path(resolved_agent_dir)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
-        # Phase 5: auto_load skills are appended below via
-        # append_auto_load_skills() — keeps the PromptCache free of
-        # project-scoped content.
-
-        # Append CONTEXT_KEY (root parent instance ID) to system prompt
-        system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=parent_id)
-
-        # Append shared context metadata KV (post-cache; does not invalidate PromptCache).
-        # Injected BEFORE current_time so time stamps render below the metadata block.
-        system_prompt = append_shared_context_metadata(
-            system_prompt,
-            instance_id,
-            instance_repository,
-            self._manager.shared_context_metadata_repo,
+        # Apply the post-cache append chain for context, metadata, time,
+        # language preference, and auto-loaded skills.
+        system_prompt, user_language = _apply_post_cache_appends(
+            system_prompt=system_prompt,
+            instance_id=instance_id,
+            instance_repository=instance_repository,
+            shared_context_metadata_repo=self._manager.shared_context_metadata_repo,
             parent_id=parent_id,
-        )
-
-        # Append current time so the agent has temporal context for the conversation
-        system_prompt = append_current_time(system_prompt)
-
-        # Append user language preference (post-cache; does not invalidate PromptCache)
-        user_language = get_language_preference(project_repository)
-        system_prompt = append_user_language(system_prompt, user_language)
-
-        # Append auto_load skills (post-cache; does not invalidate PromptCache).
-        # Queries project-scoped skills where auto_load=true and appends them
-        # to the prompt. Triggers clone-on-miss to ensure skills exist in
-        # project scope before querying.
-        system_prompt = append_auto_load_skills(
-            system_prompt,
             agent_id=resolved_agent_id,
             project_id=project_id,
+            project_repository=project_repository,
             manager=self._manager,
         )
 
@@ -2242,38 +2282,17 @@ class InstanceLifecycleService:
         agent_path = Path(agent_meta.path)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
-        # Phase 5: auto_load skills are appended below via
-        # append_auto_load_skills() — keeps the PromptCache free of
-        # project-scoped content.
-
-        # Append CONTEXT_KEY (root parent instance ID) to system prompt
-        system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)
-
-        # Append shared context metadata KV (post-cache; does not invalidate PromptCache).
-        # Uses meta.parent_id so the restored instance sees the same context
-        # metadata it had before the daemon restart.
-        system_prompt = append_shared_context_metadata(
-            system_prompt,
-            instance_id,
-            instance_repository,
-            self._manager.shared_context_metadata_repo,
+        # Apply the post-cache append chain for context, metadata, time,
+        # language preference, and auto-loaded skills.
+        system_prompt, user_language = _apply_post_cache_appends(
+            system_prompt=system_prompt,
+            instance_id=instance_id,
+            instance_repository=instance_repository,
+            shared_context_metadata_repo=self._manager.shared_context_metadata_repo,
             parent_id=meta.parent_id,
-        )
-
-        # Append current time so the agent has temporal context for the conversation
-        system_prompt = append_current_time(system_prompt)
-
-        # Append user language preference (post-cache; does not invalidate PromptCache)
-        user_language = get_language_preference(project_repository)
-        system_prompt = append_user_language(system_prompt, user_language)
-
-        # Append auto_load skills (post-cache; does not invalidate PromptCache).
-        # Uses meta.project_id so the restored instance sees the same
-        # project-scoped auto_load set it had before the daemon restart.
-        system_prompt = append_auto_load_skills(
-            system_prompt,
             agent_id=resolved_agent_id,
             project_id=meta.project_id,
+            project_repository=project_repository,
             manager=self._manager,
         )
 
