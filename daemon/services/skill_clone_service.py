@@ -58,9 +58,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy.exc import IntegrityError
+
+if TYPE_CHECKING:
+    from ..repositories.skill.models import Skill, SkillBankItem
+    from ..repositories.skill.repository import SkillRepository
+    from ..repositories.skill.skill_bank_repository import SkillBankRepository
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +110,9 @@ class SkillCloneService:
 
     def __init__(
         self,
-        skill_repo: Any,           # SkillRepository
-        skill_bank_repo: Any,      # SkillBankRepository
-        embedding_service: Any = None,  # SkillEmbeddingService (reserved)
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+        embedding_service: Optional[Any] = None,  # SkillEmbeddingService (reserved)
     ) -> None:
         """Store the repositories and the reserved embedding service.
 
@@ -134,12 +139,13 @@ class SkillCloneService:
     # SYNC METHODS (prompt loader / instance lifecycle)
     # ================================================================
 
+    # Reserved for future single-skill lookups
     def clone_on_miss_sync(
         self,
         name: str,
         agent_id: str,
         project_id: str,
-    ) -> Optional[Any]:
+    ) -> Optional[Skill]:
         """Sync clone-on-miss: existing → return; miss → clone.
 
         Lookup order:
@@ -193,7 +199,7 @@ class SkillCloneService:
         self,
         agent_id: str,
         project_id: str,
-    ) -> list[Any]:
+    ) -> list[Skill]:
         """Sync: ensure all ``auto_load=True`` skills exist for the agent.
 
         Queries ``skill_bank`` for ``auto_load=True`` templates
@@ -220,30 +226,13 @@ class SkillCloneService:
             templates exist for the agent.
         """
         templates = self._skill_bank_repo.get_auto_load_by_agent(agent_id)
-        results: list[Any] = []
-
-        for template in templates:
-            # Idempotency — short-circuit on existing.
-            existing = self._skill_repo.get_by_name(
-                project_id=project_id,
-                name=template.name,
-                generation=0,
-            )
-            if existing is not None:
-                results.append(existing)
-                continue
-
-            cloned = self._clone_template_sync(template, project_id)
-            if cloned is not None:
-                results.append(cloned)
-
-        return results
+        return self._clone_missing_templates_sync(templates, project_id)
 
     def ensure_all_skills_sync(
         self,
         agent_id: str,
         project_id: str,
-    ) -> list[Any]:
+    ) -> list[Skill]:
         """Sync: ensure ALL skills (auto_load + on-demand) exist for the agent.
 
         Used by the injection pipeline (see ``instance_messaging.py``)
@@ -270,9 +259,34 @@ class SkillCloneService:
             query order.
         """
         templates = self._skill_bank_repo.list_by_agent(agent_id)
-        results: list[Any] = []
+        return self._clone_missing_templates_sync(templates, project_id)
+
+    def _clone_missing_templates_sync(
+        self,
+        templates: list[SkillBankItem],
+        project_id: str,
+    ) -> list[Skill]:
+        """Clone templates that don't yet exist as project skills.
+
+        For each template, return the existing project-scoped row
+        if present (idempotent contract) or clone it via
+        :meth:`_clone_template_sync`. Order of the returned list
+        matches the input template order.
+
+        Args:
+            templates: Bank templates to materialize into project
+                scope (already filtered by the caller — e.g.
+                auto-load only, or all).
+            project_id: Owning project for the cloned skills.
+
+        Returns:
+            List of :class:`Skill` instances — either existing
+            or freshly-cloned.
+        """
+        results: list[Skill] = []
 
         for template in templates:
+            # Idempotency — short-circuit on existing.
             existing = self._skill_repo.get_by_name(
                 project_id=project_id,
                 name=template.name,
@@ -290,9 +304,9 @@ class SkillCloneService:
 
     def _clone_template_sync(
         self,
-        template: Any,   # SkillBankItem
+        template: SkillBankItem,
         project_id: str,
-    ) -> Any:
+    ) -> Skill:
         """Clone a ``SkillBankItem`` into a project-scoped ``Skill``.
 
         ``auto_load`` is read from ``template.auto_load`` — NOT
@@ -363,7 +377,7 @@ class SkillCloneService:
         self,
         agent_id: str,
         project_id: str,
-    ) -> list[Any]:
+    ) -> list[Skill]:
         """Async wrapper for :meth:`ensure_all_skills_sync`.
 
         Used by the injection pipeline (``instance_messaging.py``)
@@ -388,7 +402,7 @@ class SkillCloneService:
         name: str,
         agent_id: str,
         project_id: str,
-    ) -> Optional[Any]:
+    ) -> Optional[Skill]:
         """Async wrapper for :meth:`clone_on_miss_sync`.
 
         Args:
@@ -408,7 +422,7 @@ class SkillCloneService:
         self,
         agent_id: str,
         project_id: str,
-    ) -> list[Any]:
+    ) -> list[Skill]:
         """Async wrapper for :meth:`ensure_auto_load_skills_sync`.
 
         Provided so the Phase 5 prompt-loader hook can be called
