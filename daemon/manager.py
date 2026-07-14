@@ -85,6 +85,7 @@ from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
+from .services.skill_seed_service import SkillSeedService
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
 from .services.todo_manager import TodoManager
 from .cancellation import (
@@ -1687,6 +1688,28 @@ class InstanceManager:
             )
 
         await self._maintenance_service.start()
+
+        # ── Skill Bank seeding (Phase 3: versioned templates) ──────────
+        # Scans agents/*/skill-set.md + skills-template/ and populates
+        # skill_bank. Idempotent via version guard (W4). NOT gated by
+        # skill_evolution — the Skill Bank is standalone infrastructure.
+        # Soft-fail: any error is logged and swallowed so startup
+        # never crashes.
+        try:
+            agents_base = Path(__file__).parent.parent / "agents"
+            seed_service = SkillSeedService(
+                skill_bank_repo=self._skill_bank_repo,
+                agents_dir=agents_base,
+            )
+            seed_result = await asyncio.to_thread(seed_service.seed_all)
+            if seed_result["new"] > 0 or seed_result["updated"] > 0:
+                logger.info(f"Skill bank seeding (Phase 3): {seed_result}")
+            else:
+                logger.debug(
+                    f"Skill bank seeding (Phase 3): {seed_result}"
+                )
+        except Exception as seed_exc:
+            logger.warning(f"Skill bank seeding (Phase 3) failed: {seed_exc}")
 
         # ── Recover opencode sessions on startup ───────────────────────────
         # Loads all persisted sessions from the dedicated opencode DB and
