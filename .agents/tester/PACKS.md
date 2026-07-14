@@ -297,3 +297,11 @@ Update after each test run:
 |------|----------|-------|---------|----------|--------|
 | instance_messaging_compaction_guard_test | tests/services/test_instance_messaging_compaction_guard.py | Terminal-checkpoint guard in _maybe_compact_context: terminal skip, non-terminal compact, edge cases (8 tests) | 2 min | 2026-07-14 | ✅ PASS (8/8, feature/instance-status-reuse-bug, commit 52133a14, 0.97s) |
 | multi_reuse_lifecycle_test | tests/services/test_multi_reuse_lifecycle.py | Multi-reuse lifecycle scenario: 3+ reuse cycles, aupdate_state never called on terminal, ainvoke yields events, non-trivial wall-clock, negative control (active turn still compacts) (11 tests) | 2 min | 2026-07-14 | ✅ PASS (11/11, feature/instance-status-reuse-bug, commit 52133a14, 0.83s) |
+
+## Injection SSE Echo Fix Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| injection_sse_unit_test | tests/test_injection_sse.py | Injection SSE event tests: user_message SSE emission on injection consumption, event ordering (user_message before injection_consumed), payload correctness (role=user, instance_id, content), live_hub None guard, serialize_message try/except guard, multiple sequential injections, normal path regression | 2 min | 2026-07-14 | ✅ PASS (13/13, 0.69s, feature/injection-sse-echo-fix, commit 0f4f5a00, 0 failures) |
+| injection_api_unit_test | tests/test_injection_api.py | Injection API tests: send_message injection path, state-aware API, SSE events, GET /injection endpoint | 2 min | 2026-07-14 | ✅ PASS (27/27, ~1.04s, feature/injection-sse-echo-fix, commit 0f4f5a00, 0 failures) |
+| injection_graph_unit_test | tests/test_injection_graph.py | Graph integration tests: injection consumption in LangGraph agent node, RAM slot, factory closure, compaction fixes | 2 min | 2026-07-14 | ✅ PASS (9/9, 0.71s, feature/injection-sse-echo-fix, commit 0f4f5a00, 0 failures) |
