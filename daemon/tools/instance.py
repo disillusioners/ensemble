@@ -108,6 +108,7 @@ from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .chart_tools import create_chart_tools
+from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
 from .skill_tools import create_skill_tools
 from .skill_evolution_tools import create_skill_evolution_tools
@@ -978,6 +979,11 @@ Returns:
     # to agents with innate_skills:["chart"] via INNATE_SKILL_TOOL_CATEGORIES.
     chart_tool_list = create_chart_tools(manager, current_instance_id)
     tools.extend(chart_tool_list)
+
+    # ── Image tools (delegates to image-reader agent for vision analysis, always available) ──
+    # Image tools (always available, like chart tools)
+    image_tools = create_image_tools(manager, current_instance_id)
+    tools.extend(image_tools)
 
     # ── Todo tools (per-instance todo list with SSE emission, always available) ──
     # NOTE: NOT inside the is_rag_enabled() block — these are always available,

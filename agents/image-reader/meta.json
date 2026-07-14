@@ -1,0 +1,15 @@
+{
+  "id": "image-reader",
+  "name": "Image Reader",
+  "description": "Reads and explains images from URLs or local file paths",
+  "icon": "🖼️",
+  "color": "accent-blue",
+  "version": "1.0.0",
+  "llm_model": "quick",
+  "no_force_explore": true,
+  "innate_skills": [],
+  "team_members": [],
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
+  }
+}

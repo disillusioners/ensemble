@@ -7,7 +7,7 @@
   "innate_skills": ["opencode", "test-pack", "todo", "dynamic-skill"],
   "skill_injection": true,
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "shared_context", "db"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db"]
   },
   "team_members": ["explorer"]
 }
