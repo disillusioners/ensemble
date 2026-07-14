@@ -3,7 +3,7 @@
 
 # Installation settings
 INSTALL_DIR ?= $(HOME)/agents-ensemble
-PROD_PORT ?= 8088
+PROD_PORT ?= 9797
 
 # Project structure
 BACKEND_DIRS = daemon agents data
