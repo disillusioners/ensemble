@@ -535,7 +535,27 @@ class InstanceMessagingService:
             state = await graph.aget_state(config)
             if not state:
                 return
-            
+
+            # ── Terminal-checkpoint guard ───────────────────────────────
+            # Skip compaction entirely when the checkpoint is terminal
+            # (state.next is empty/None). On a finished graph, calling
+            # ``aupdate_state(as_node="agent")`` below would clear the
+            # checkpoint's ``next=()``, causing the subsequent
+            # ``astream(graph_input)`` to return instantly without running
+            # the agent. On reuse of a completed instance this collapses
+            # the COMPLETED→RUNNING→COMPLETED cycle to <100ms so the
+            # frontend never observes RUNNING.
+            #
+            # Compaction is an optimization — skipping it here is safe:
+            # the new message is passed as ``graph_input`` to ``astream``
+            # and the agent runs against the full (uncompacted) history
+            # for this turn. Active (non-terminal) turns compact normally.
+            if not state.next:
+                logger.debug(
+                    f"[Compaction] Skipping on terminal checkpoint for {instance_id[:8]}..."
+                )
+                return
+
             messages = state.values.get('messages', [])
             system_prompt_tokens = await self._get_system_prompt_tokens(instance_id)
             last_compacted_at = state.values.get('compacted_at')
