@@ -313,3 +313,10 @@ Update after each test run:
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | 4 E2E workflow tests from ensure.md Release Gate: parent-child happy path, pause/resume, terminate/revive, wave spawn + defer queue. Requires live daemon at localhost:8079 (./dev.sh). Real LLM calls. NOTE: All 4 tests together exceed 5-min cap (~450s). Must run individually via -k filter. | 5 min per test (run individually) | 2026-07-14 | ⚠️ PARTIAL (3/4 PASS, test 4 FAIL — deferred job stuck pending) |
+
+## Image-Reader Agent Test Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| image_tools_unit_test | test/packs/image_tools_unit_test.sh | Image tools: tool import & registration (CATEGORY_MODULES "image"), create_image_tools factory, explain_image tool; image-reader agent meta.json validation (id, llm_model, tools.allow excludes bash/filesystem, team_members empty, soul/rule/workflow no curl/mktemp/rm); 11-agent meta.json updates (image in tools.allow for ari/worker/leader/planner/developer/reviewer/tidier/approver/tester/giter/devops); security: SSRF guard (_ensure_public_url rejects private/loopback/link-local/metadata IPs, non-http schemes), path traversal (outside workdir, symlinks), memory cap (10MB), magic byte validation (non-image .png, format mismatch .png+JPEG); invoke_agent_and_wait backward compat (images=None default); explain_image delegation | 2 min | 2026-07-14 | ✅ PASS (101/101 in ~1s, feature/image-reader-agent, 0 failures) |
+| image_regression_test | test/packs/image_regression_test.sh | Regression: chart_tools (delegation pattern analog), invoke_agent_and_wait (signature changed: images param added), skill_phase2_integration (CATEGORY_MODULES wiring pattern), tool_filter (tools.allow filtering — 11 agents updated), help_tool (_tool_registry mechanics) | 2 min | 2026-07-14 | ✅ PASS (115/115 in 2.02s, feature/image-reader-agent, 0 failures) |
