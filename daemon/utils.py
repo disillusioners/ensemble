@@ -495,6 +495,7 @@ async def invoke_agent_and_wait(
     project_id: str | None = None,
     instance_name: str | None = None,
     parent_id: str | None = None,
+    images: list[str] | None = None,
     timeout: float = 300.0,
     return_instance_id: bool = False,
 ) -> str | tuple[str, str]:
@@ -513,6 +514,11 @@ async def invoke_agent_and_wait(
         project_id: Optional project ID for context.
         instance_name: Optional name for the spawned instance.
         parent_id: Optional parent instance ID (for hierarchy).
+        images: Optional list of base64 data URI strings to attach to the message.
+            When provided, the spawned agent instance will receive these as
+            ``image_url`` multimodal content blocks, enabling vision-capable
+            LLM analysis. Forwarded to ``manager.enqueue_message`` which
+            stores them in the message queue and routes to the vision model.
         timeout: Maximum seconds to wait for completion.
         return_instance_id: When True, the return value is always a
             ``(content, instance_id)`` tuple, including all error and
@@ -561,6 +567,7 @@ async def invoke_agent_and_wait(
             instance_id=instance_id,
             message=message,
             source=f"internal_invoke_and_wait:{parent_id or 'system'}",
+            images=images,
         )
 
         # 4. Re-register if resuming from checkpoint (child may have completed while unregisterd)
