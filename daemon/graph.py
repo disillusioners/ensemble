@@ -50,6 +50,7 @@ from .llm_error_classifier import (
 )
 from .response_validation import LLMResponseValidationError
 from .language_detection import detect_wrong_language
+from .utils import serialize_message
 # Lazy import below — module-level ``from .services.language_utils`` would
 # trigger daemon.services.__init__ → instance_lifecycle → compaction →
 # graph (cycle) before this module finishes loading.
@@ -787,6 +788,39 @@ def create_agent_node(
                 # The clear returned the entry that was just consumed; we
                 # re-emit content + timestamp so the SSE listener sees the
                 # exact text the LLM was about to see.
+                #
+                # BUG FIX (injection-sse-echo-fix): the normal ``send_message``
+                # path in ``instance_messaging.py`` pre-emits a ``user_message``
+                # SSE event before the LLM runs so the frontend can echo the
+                # user's text. The injection path only emitted
+                # ``injection_consumed`` and was missing the ``user_message``
+                # echo, so injected messages rendered without a user-bubble
+                # update on the UI. We mirror the normal-path shape here:
+                # serialize a HumanMessage carrying the injected ``content``,
+                # stamp ``instance_id``, and emit ``user_message`` with
+                # ``checkpoint_id="user"`` so the frontend treats it the same
+                # way as a regular user turn.
+                if live_hub is not None:
+                    try:
+                        injected_user_msg = HumanMessage(content=content)
+                        user_serialized = serialize_message(injected_user_msg)
+                        user_serialized["instance_id"] = instance_id
+                        await live_hub.stream_message(
+                            instance_id=instance_id,
+                            message=user_serialized,
+                            event_type="user_message",
+                            checkpoint_id="user",
+                        )
+                    except Exception as e:  # pragma: no cover - defensive
+                        # LLM call must not be blocked by an SSE outage —
+                        # log and continue. The injection is already
+                        # consumed locally (checkpoint persist + injected_msg
+                        # in full_messages); the SSE event is best-effort.
+                        logger.warning(
+                            f"[Injection] user_message SSE emit failed for "
+                            f"{instance_short}: {type(e).__name__}: {e}"
+                        )
+
                 if live_hub is not None:
                     try:
                         await live_hub.stream_message(

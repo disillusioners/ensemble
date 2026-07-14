@@ -231,7 +231,23 @@ class TestAgentNodeConsumptionSSE:
 
     @pytest.mark.asyncio
     async def test_agent_node_emits_injection_consumed_after_clear(self):
-        """Agent turn with a pending injection emits SSE after clearing the slot."""
+        """Agent turn with a pending injection emits SSE after clearing the slot.
+
+        Bug fix (injection-sse-echo-fix): the injection path now emits two
+        SSE events at the consumption point, mirroring the normal
+        ``send_message`` path so the frontend renders a user-bubble update
+        even for injected messages:
+
+            1. ``user_message`` (serialized HumanMessage carrying the
+               injected ``content`` so the FE echoes it like a normal
+               user turn).
+            2. ``injection_consumed`` (W5 envelope — content + timestamp
+               of the slot entry that was just cleared).
+
+        Order matters: ``user_message`` MUST arrive before
+        ``injection_consumed`` so the FE paints the user bubble before
+        it removes the "pending" indicator.
+        """
         from langchain_core.messages import AIMessage
 
         class _StubInjectionSlot:
@@ -262,17 +278,30 @@ class TestAgentNodeConsumptionSSE:
         # Slot was consumed
         assert slot.clear_called
 
-        # SSE event was emitted with the right event_type and content
-        hub.stream_message.assert_awaited_once()
-        call = hub.stream_message.await_args
-        # ``message`` is passed as a kwarg (the daemon convention).
-        assert call.kwargs["event_type"] == "injection_consumed"
-        assert call.args[0] == "inst-1"
-        payload = call.kwargs["message"]
-        assert payload["event_type"] == "injection_consumed"
-        assert payload["content"] == "user pending msg"
-        assert payload["timestamp"] == "2026-07-13T00:00:00+00:00"
-        assert payload["instance_id"] == "inst-1"
+        # Two SSE events fire at the consumption point: user_message
+        # first (echoes the injected text to the FE) and
+        # injection_consumed second (clears the pending indicator).
+        assert hub.stream_message.await_count == 2
+        calls = hub.stream_message.await_args_list
+
+        # ---- Call 1: user_message — must carry the injected content ----
+        first = calls[0]
+        assert first.kwargs["event_type"] == "user_message"
+        assert first.kwargs["instance_id"] == "inst-1"
+        user_payload = first.kwargs["message"]
+        assert user_payload["instance_id"] == "inst-1"
+        assert user_payload["role"] == "user"
+        assert user_payload["content"] == "user pending msg"
+
+        # ---- Call 2: injection_consumed — slot entry echoed ----
+        second = calls[1]
+        assert second.kwargs["event_type"] == "injection_consumed"
+        assert second.args[0] == "inst-1"
+        consumed_payload = second.kwargs["message"]
+        assert consumed_payload["event_type"] == "injection_consumed"
+        assert consumed_payload["content"] == "user pending msg"
+        assert consumed_payload["timestamp"] == "2026-07-13T00:00:00+00:00"
+        assert consumed_payload["instance_id"] == "inst-1"
 
         # The return value still persists both messages (Phase 1 C2 contract)
         assert len(result["messages"]) == 2
