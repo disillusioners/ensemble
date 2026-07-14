@@ -22,4 +22,4 @@ CREATE TABLE IF NOT EXISTS skill_bank (
     updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_skill_bank_project ON skill_bank(project_id);
+CREATE INDEX IF NOT EXISTS ix_skill_bank_project_id ON skill_bank(project_id);

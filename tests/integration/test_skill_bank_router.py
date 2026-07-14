@@ -51,6 +51,8 @@ from sqlmodel import SQLModel
 from daemon.repositories.skill.skill_bank_repository import SkillBankRepository
 from daemon.routers.skill_bank import router as skill_bank_router
 
+pytestmark = pytest.mark.integration
+
 
 # ---------------------------------------------------------------------------
 # Fixtures (module-scoped to the file, function scope by default)
