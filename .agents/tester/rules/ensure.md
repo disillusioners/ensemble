@@ -37,6 +37,7 @@ Run ONLY when blast-radius determines the change is big/critical (cross-module, 
 - Daemon running: `./dev.sh` (health at `localhost:8079`)
 - SSL certs clean: `unset SSL_CERT_FILE SSL_CERT_DIR` before each run
 - Timeout override: `PYTEST_TIMEOUT=280` + `--override-ini="timeout=280"` (pyproject default `timeout=30` kills E2E prematurely)
+- **Queue cleanup before each test**: check `GET /api/jobs?status=pending` for leftover jobs. If any exist, clean them up (cancel/delete) before running — leftover pending jobs from previous runs block defer queue admission and cause false failures.
 - Run tests **one by one** (each makes real LLM calls; combined exceeds 5-min cap)
 
 ### Critical (release-gate)
