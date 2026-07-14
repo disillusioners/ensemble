@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 _rag_enabled: bool = True
 
 # Auto-test timeout in seconds
-AUTO_TEST_TIMEOUT: float = 15.0
+AUTO_TEST_TIMEOUT: float = 30.0
 
 
 class RAGRequiredError(RuntimeError):
