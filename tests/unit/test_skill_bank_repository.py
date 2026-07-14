@@ -725,6 +725,9 @@ class TestEdgeCases:
             "description": "desc",
             "content": "body",
             "category": "cat",
+            "template_version": "1.0.0",
+            "agent_id": None,
+            "auto_load": False,
             "created_at": created.created_at,
             "updated_at": created.updated_at,
         }
@@ -746,3 +749,323 @@ class TestEdgeCases:
         created = repo_a.create(name="shared", content="x")
 
         assert repo_b.get(created.id) is not None
+
+
+# ============================================================================
+# Phase 2: template_version + agent_id + auto_load fields (skill evolution)
+# ============================================================================
+
+
+class TestCreateWithPhase2Fields:
+    """``create()`` accepts and persists ``template_version``,
+    ``agent_id``, and ``auto_load`` (Phase 2 of tester-skill-evolution).
+    """
+
+    def test_create_with_template_version_persists(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Explicit ``template_version`` survives the round-trip."""
+        item = repository.create(
+            name="vtest",
+            content="body",
+            template_version="2.3.4",
+        )
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.template_version == "2.3.4"
+
+    def test_create_with_agent_id_persists(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Explicit ``agent_id`` survives the round-trip."""
+        item = repository.create(
+            name="agentest",
+            content="body",
+            agent_id="tester",
+        )
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.agent_id == "tester"
+
+    def test_create_with_auto_load_persists(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Explicit ``auto_load=True`` survives the round-trip."""
+        item = repository.create(
+            name="autoloadtest",
+            content="body",
+            auto_load=True,
+        )
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.auto_load is True
+
+    def test_create_defaults_template_version_is_1_0_0(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Default ``template_version`` is the documented sentinel."""
+        item = repository.create(name="default-v", content="body")
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.template_version == "1.0.0"
+
+    def test_create_defaults_agent_id_is_none(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Default ``agent_id`` is ``None`` (generic/shared template)."""
+        item = repository.create(name="default-a", content="body")
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.agent_id is None
+
+    def test_create_defaults_auto_load_is_false(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Default ``auto_load`` is ``False`` (on-demand only)."""
+        item = repository.create(name="default-l", content="body")
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.auto_load is False
+
+    def test_create_with_all_phase2_fields_round_trips(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """All three Phase 2 fields set together round-trip cleanly."""
+        item = repository.create(
+            name="all",
+            content="body",
+            template_version="3.1.0",
+            agent_id="tester",
+            auto_load=True,
+        )
+
+        fetched = repository.get(item.id)
+
+        assert fetched is not None
+        assert fetched.template_version == "3.1.0"
+        assert fetched.agent_id == "tester"
+        assert fetched.auto_load is True
+
+    def test_update_auto_load_field(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """``update()`` can flip ``auto_load`` on an existing row."""
+        created = repository.create(name="upd-l", content="x", auto_load=False)
+
+        updated = repository.update(created.id, auto_load=True)
+
+        assert updated is not None
+        assert updated.auto_load is True
+        # And the value is persisted (not just returned from memory).
+        fetched = repository.get(created.id)
+        assert fetched is not None
+        assert fetched.auto_load is True
+
+    def test_update_template_version_field(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """``update()`` can bump ``template_version`` on an existing row."""
+        created = repository.create(
+            name="upd-v", content="x", template_version="1.0.0"
+        )
+
+        updated = repository.update(created.id, template_version="1.0.1")
+
+        assert updated is not None
+        assert updated.template_version == "1.0.1"
+
+    def test_update_agent_id_field(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """``update()`` can set ``agent_id`` on an existing row."""
+        created = repository.create(name="upd-a", content="x", agent_id=None)
+
+        updated = repository.update(created.id, agent_id="developer")
+
+        assert updated is not None
+        assert updated.agent_id == "developer"
+
+
+class TestGetByNameAndAgent:
+    """``SkillBankRepository.get_by_name_and_agent``."""
+
+    def test_returns_correct_record_for_match(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Returns the row whose name + agent_id both match."""
+        repository.create(name="alpha", content="x", agent_id="tester")
+        target = repository.create(
+            name="beta", content="y", agent_id="tester"
+        )
+        repository.create(name="beta", content="z", agent_id="developer")
+
+        fetched = repository.get_by_name_and_agent("beta", "tester")
+
+        assert fetched is not None
+        assert fetched.id == target.id
+        assert fetched.content == "y"
+
+    def test_returns_none_for_wrong_agent(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Wrong agent_id returns ``None`` — not a row from another agent."""
+        repository.create(name="gamma", content="x", agent_id="tester")
+
+        fetched = repository.get_by_name_and_agent("gamma", "developer")
+
+        assert fetched is None
+
+    def test_returns_none_for_wrong_name(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Wrong name returns ``None`` even when the agent_id exists."""
+        repository.create(name="delta", content="x", agent_id="tester")
+
+        fetched = repository.get_by_name_and_agent(
+            "non-existent", "tester"
+        )
+
+        assert fetched is None
+
+    def test_returns_none_when_table_empty(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Empty bank returns ``None`` (not raise)."""
+        assert (
+            repository.get_by_name_and_agent("anything", "tester") is None
+        )
+
+
+class TestGetAutoLoadByAgent:
+    """``SkillBankRepository.get_auto_load_by_agent``."""
+
+    def test_returns_only_auto_load_true(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Only rows with ``auto_load=True`` are returned."""
+        on = repository.create(
+            name="on", content="x", agent_id="tester", auto_load=True
+        )
+        repository.create(
+            name="off", content="x", agent_id="tester", auto_load=False
+        )
+
+        rows = repository.get_auto_load_by_agent("tester")
+
+        assert len(rows) == 1
+        assert rows[0].id == on.id
+
+    def test_filters_by_agent(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Rows for other agents are excluded."""
+        repository.create(
+            name="other-on",
+            content="x",
+            agent_id="developer",
+            auto_load=True,
+        )
+        target = repository.create(
+            name="self-on",
+            content="x",
+            agent_id="tester",
+            auto_load=True,
+        )
+
+        rows = repository.get_auto_load_by_agent("tester")
+
+        assert len(rows) == 1
+        assert rows[0].id == target.id
+
+    def test_returns_empty_list_when_no_match(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Empty bank returns ``[]`` (not raise, not ``None``)."""
+        rows = repository.get_auto_load_by_agent("tester")
+
+        assert rows == []
+
+    def test_returns_all_when_all_auto_load(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """When every row is auto_load=True, all are returned."""
+        for i in range(3):
+            repository.create(
+                name=f"all-{i}",
+                content="x",
+                agent_id="tester",
+                auto_load=True,
+            )
+
+        rows = repository.get_auto_load_by_agent("tester")
+
+        assert len(rows) == 3
+
+
+class TestListByAgent:
+    """``SkillBankRepository.list_by_agent``."""
+
+    def test_returns_all_rows_for_agent(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """All rows for an agent are returned regardless of ``auto_load``."""
+        repository.create(
+            name="a", content="x", agent_id="tester", auto_load=True
+        )
+        repository.create(
+            name="b", content="x", agent_id="tester", auto_load=False
+        )
+
+        rows = repository.list_by_agent("tester")
+
+        assert len(rows) == 2
+        names = {r.name for r in rows}
+        assert names == {"a", "b"}
+
+    def test_excludes_other_agents(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Rows for other agents are not returned."""
+        repository.create(name="x", content="x", agent_id="tester")
+        repository.create(name="y", content="x", agent_id="developer")
+
+        rows = repository.list_by_agent("tester")
+
+        assert len(rows) == 1
+        assert rows[0].name == "x"
+
+    def test_returns_empty_list_when_no_match(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Empty bank returns ``[]``."""
+        rows = repository.list_by_agent("tester")
+
+        assert rows == []
+
+    def test_excludes_rows_with_null_agent_id(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Generic/shared rows (``agent_id IS NULL``) are not returned."""
+        repository.create(
+            name="global", content="x", agent_id=None, auto_load=True
+        )
+        repository.create(
+            name="scoped", content="x", agent_id="tester", auto_load=True
+        )
+
+        rows = repository.list_by_agent("tester")
+
+        names = {r.name for r in rows}
+        assert names == {"scoped"}

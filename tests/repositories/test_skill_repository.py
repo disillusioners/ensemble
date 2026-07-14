@@ -1428,3 +1428,216 @@ class TestTouchLastUsed:
         # Second touch should be >= first (timestamps may be equal
         # at second resolution, so allow equality).
         assert second >= first
+
+
+# =============================================================================
+# Phase 2: auto_load + source_skill_bank_id (skill evolution)
+# =============================================================================
+
+
+class TestPhase2SkillColumns:
+    """Phase 2 column additions: ``auto_load`` and
+    ``source_skill_bank_id``. The Skill model's ``**kwargs`` passthrough
+    in :meth:`SkillRepository.create` already accepts these without a
+    signature change — these tests lock in the round-trip semantics.
+    """
+
+    def test_create_with_auto_load_true_persists(
+        self, skill_repo, project_id
+    ):
+        """Explicit ``auto_load=True`` survives the round-trip."""
+        skill = skill_repo.create(
+            name="al-true",
+            description="auto-loaded",
+            content="content",
+            project_id=project_id,
+            auto_load=True,
+        )
+
+        fetched = skill_repo.get(skill.id)
+
+        assert fetched is not None
+        assert fetched.auto_load is True
+
+    def test_create_default_auto_load_is_false(
+        self, skill_repo, project_id
+    ):
+        """Default ``auto_load`` is ``False`` (on-demand only)."""
+        skill = _make_skill(skill_repo, project_id, "al-default")
+
+        assert skill.auto_load is False
+
+        fetched = skill_repo.get(skill.id)
+
+        assert fetched is not None
+        assert fetched.auto_load is False
+
+    def test_create_with_source_skill_bank_id_persists(
+        self, skill_repo, project_id
+    ):
+        """Explicit ``source_skill_bank_id`` survives the round-trip."""
+        skill = skill_repo.create(
+            name="src-sbid",
+            description="cloned from bank",
+            content="content",
+            project_id=project_id,
+            source_skill_bank_id="bank-row-uuid-123",
+        )
+
+        fetched = skill_repo.get(skill.id)
+
+        assert fetched is not None
+        assert fetched.source_skill_bank_id == "bank-row-uuid-123"
+
+    def test_create_default_source_skill_bank_id_is_none(
+        self, skill_repo, project_id
+    ):
+        """Default ``source_skill_bank_id`` is ``None`` (not a clone)."""
+        skill = _make_skill(skill_repo, project_id, "src-default")
+
+        assert skill.source_skill_bank_id is None
+
+    def test_to_dict_round_trip_includes_phase2_fields(
+        self, skill_repo, project_id
+    ):
+        """``to_dict()`` exposes the two new Phase 2 fields."""
+        skill = skill_repo.create(
+            name="al-dict",
+            description="dict-test",
+            content="content",
+            project_id=project_id,
+            auto_load=True,
+            source_skill_bank_id="bank-uuid-abc",
+        )
+
+        d = skill.to_dict()
+
+        assert d["auto_load"] is True
+        assert d["source_skill_bank_id"] == "bank-uuid-abc"
+
+    def test_update_auto_load_field(
+        self, skill_repo, project_id
+    ):
+        """``update()`` can flip ``auto_load`` on an existing skill."""
+        skill = _make_skill(skill_repo, project_id, "al-update")
+
+        updated = skill_repo.update(skill.id, auto_load=True)
+
+        assert updated is not None
+        assert updated.auto_load is True
+        fetched = skill_repo.get(skill.id)
+        assert fetched is not None
+        assert fetched.auto_load is True
+
+
+class TestGetAutoLoadSkills:
+    """``SkillRepository.get_auto_load_skills`` returns active auto_load
+    skills for a project (Phase 5 of tester-skill-evolution).
+    """
+
+    def test_returns_only_active_auto_load_skills(
+        self, skill_repo, project_id
+    ):
+        """Filters to ``is_active=True AND auto_load=True``."""
+        keeper = skill_repo.create(
+            name="keeper",
+            description="kept",
+            content="content",
+            project_id=project_id,
+            auto_load=True,
+        )
+        skill_repo.create(
+            name="manual",
+            description="on-demand",
+            content="content",
+            project_id=project_id,
+            auto_load=False,
+        )
+        skill_repo.create(
+            name="deactivated",
+            description="off",
+            content="content",
+            project_id=project_id,
+            auto_load=True,
+            is_active=False,
+        )
+
+        rows = skill_repo.get_auto_load_skills(project_id)
+
+        assert len(rows) == 1
+        assert rows[0].id == keeper.id
+
+    def test_filters_by_project_id(
+        self, skill_repo, project_id, other_project_id
+    ):
+        """Other-project skills are excluded."""
+        skill_repo.create(
+            name="other-p",
+            description="other",
+            content="content",
+            project_id=other_project_id,
+            auto_load=True,
+        )
+        target = skill_repo.create(
+            name="self-p",
+            description="self",
+            content="content",
+            project_id=project_id,
+            auto_load=True,
+        )
+
+        rows = skill_repo.get_auto_load_skills(project_id)
+
+        names = {r.name for r in rows}
+        assert names == {"self-p"}
+        assert target.id in {r.id for r in rows}
+
+    def test_returns_empty_list_when_no_match(
+        self, skill_repo, project_id
+    ):
+        """No qualifying skills returns ``[]`` (not raise)."""
+        rows = skill_repo.get_auto_load_skills(project_id)
+
+        assert rows == []
+
+    def test_returns_empty_for_different_project(
+        self, skill_repo, project_id, other_project_id
+    ):
+        """Querying a project with no skills returns ``[]``."""
+        skill_repo.create(
+            name="x",
+            description="x",
+            content="x",
+            project_id=project_id,
+            auto_load=True,
+        )
+
+        rows = skill_repo.get_auto_load_skills(other_project_id)
+
+        assert rows == []
+
+
+class TestGetActiveVariantWorksWithPhase2Fields:
+    """Sanity: existing ``get_active_variant`` still works after the
+    Phase 2 column additions (no regression).
+    """
+
+    def test_get_active_variant_returns_active_skill(
+        self, skill_repo, project_id
+    ):
+        """Existing query path is unbroken by the Phase 2 schema
+        additions — confirms the dual-driver model + migration
+        round-trip does not regress."""
+        skill_repo.create(
+            name="active-one",
+            description="d",
+            content="c",
+            project_id=project_id,
+            auto_load=True,
+        )
+
+        active = skill_repo.get_active_variant(project_id, "active-one")
+
+        assert active is not None
+        assert active.name == "active-one"
+        assert active.auto_load is True

@@ -557,10 +557,10 @@ class SkillRepository:
             return session.exec(stmt).first()
 
     def list_all_active(
-        self,
-        limit: int = 1000,
-        offset: int = 0,
-    ) -> list[Skill]:
+            self,
+            limit: int = 1000,
+            offset: int = 0,
+        ) -> list[Skill]:
         """List every active skill across all projects.
 
         Used by the trigger engine (Phase 4) to evaluate every
@@ -579,7 +579,7 @@ class SkillRepository:
         Args:
             limit: Maximum number of rows to return (default
                 ``1000``).
-            offset: Number of rows to skip (default ``0``).
+            offset: Number of rows to skip.
 
         Returns:
             List of active :class:`Skill` instances ordered
@@ -592,6 +592,42 @@ class SkillRepository:
                 .order_by(col(Skill.created_at).desc())
                 .offset(offset)
                 .limit(limit)
+            )
+            return list(session.exec(stmt))
+
+    def get_auto_load_skills(
+        self,
+        project_id: str,
+    ) -> list[Skill]:
+        """Fetch all active ``auto_load=True`` skills for a project.
+
+        Used by the system-prompt composer (Phase 5 of
+        tester-skill-evolution) to materialize the auto-load
+        section of the prompt before every task. Filters on
+        both ``is_active=True`` (deactivated skills must not
+        leak into the prompt) and ``auto_load=True`` (only the
+        eager-loaded subset).
+
+        Args:
+            project_id: Owning project ID. Unlike
+                :meth:`list` which accepts ``None`` for global
+                skills, the auto-load surface is project-scoped
+                only — the agent always operates in a project
+                context, and global auto-loads are explicitly
+                out of scope (they would be cloned per-project
+                during Phase 4 seeding instead).
+
+        Returns:
+            List of active :class:`Skill` rows for the project
+            with ``auto_load=True``. Empty list when no skills
+            match.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(Skill)
+                .where(Skill.project_id == project_id)
+                .where(Skill.is_active == True)  # noqa: E712
+                .where(Skill.auto_load == True)  # noqa: E712
             )
             return list(session.exec(stmt))
 

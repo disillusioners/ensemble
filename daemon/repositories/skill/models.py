@@ -155,6 +155,7 @@ class Skill(SQLModel, table=True):
         Index("ix_skills_project_id", "project_id"),
         Index("ix_skills_is_active", "is_active"),
         Index("ix_skills_ab_test_group", "ab_test_group"),
+        Index("ix_skills_auto_load", "auto_load"),
     )
 
     id: str = Field(
@@ -172,6 +173,28 @@ class Skill(SQLModel, table=True):
     lineage_origin: str = Field(default="imported", max_length=32)
     generation: int = Field(default=0)
     ab_test_group: Optional[str] = Field(default=None, max_length=64)
+    # Phase 2 (skill evolution): auto_load + source_skill_bank_id.
+    # ``auto_load`` is the clone-side counterpart of the skill_bank
+    # template flag: True means the skill is loaded into the system
+    # prompt before every task (vs on-demand only). ``source_skill_bank_id``
+    # records the skill_bank template ID this row was cloned from
+    # (NULL for manually-created or evolved skills — soft FK only,
+    # not enforced).
+    auto_load: bool = Field(
+        default=False,
+        description=(
+            "Whether this skill is auto-loaded into the system "
+            "prompt before every task. False = on-demand only."
+        ),
+    )
+    source_skill_bank_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "If cloned from a skill_bank template, the bank item ID. "
+            "NULL for manually created or evolved skills."
+        ),
+    )
 
     # Counter columns. Stored as INTEGER (no Python type coercion
     # needed — ``int`` round-trips on both SQLite and PostgreSQL).
@@ -202,6 +225,8 @@ class Skill(SQLModel, table=True):
             "lineage_origin": self.lineage_origin,
             "generation": self.generation,
             "ab_test_group": self.ab_test_group,
+            "auto_load": self.auto_load,
+            "source_skill_bank_id": self.source_skill_bank_id,
             "total_selections": self.total_selections,
             "total_applied": self.total_applied,
             "total_completions": self.total_completions,
@@ -624,7 +649,10 @@ class SkillBankItem(SQLModel, table=True):
     """
 
     __tablename__ = "skill_bank"
-    __table_args__ = (Index("ix_skill_bank_project_id", "project_id"),)
+    __table_args__ = (
+        Index("ix_skill_bank_project_id", "project_id"),
+        Index("ix_skill_bank_agent_id", "agent_id"),
+    )
 
     id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
@@ -636,6 +664,39 @@ class SkillBankItem(SQLModel, table=True):
     description: str = Field(default="")
     content: str = Field(sa_column=Column(String, nullable=False))
     category: str = Field(default="workflow", max_length=64)
+    # Phase 2 (skill evolution): template_version + agent_id + auto_load.
+    # ``template_version`` is bumped when the skills-template source file
+    # changes so startup seeding can detect and refresh stale bank copies.
+    # ``agent_id`` scopes the template to one agent (e.g. 'tester');
+    # NULL means generic/shared. ``auto_load`` is the source-of-truth
+    # flag from the skill-set.md definition: when True, skills cloned
+    # from this template inherit auto_load=True (loaded into the system
+    # prompt before every task, not on demand).
+    template_version: str = Field(
+        default="1.0.0",
+        max_length=32,
+        description=(
+            "Semver version of this template. Bumped when the "
+            "skills-template source file changes so startup "
+            "seeding can detect and refresh stale bank copies."
+        ),
+    )
+    agent_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Agent this template belongs to (e.g. 'tester'). "
+            "NULL means generic/shared template."
+        ),
+    )
+    auto_load: bool = Field(
+        default=False,
+        description=(
+            "Whether skills cloned from this template should have "
+            "auto_load=true (loaded into system prompt before every "
+            "task). Source of truth from skill-set.md definition."
+        ),
+    )
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
 
@@ -647,6 +708,9 @@ class SkillBankItem(SQLModel, table=True):
             "description": self.description,
             "content": self.content,
             "category": self.category,
+            "template_version": self.template_version,
+            "agent_id": self.agent_id,
+            "auto_load": self.auto_load,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

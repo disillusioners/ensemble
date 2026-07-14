@@ -3074,6 +3074,39 @@ class InstanceManager:
                 ")"
             ),
             "CREATE INDEX IF NOT EXISTS ix_skill_bank_project_id ON skill_bank(project_id)",
+            # ── Skill Bank template versioning + agent_id + auto_load (2026-07-14) ──
+            # Phase 2 of tester-skill-evolution. The skill_bank table gains
+            # three columns backing template versioning (for stale-bank refresh
+            # detection), per-agent template scoping, and the auto_load flag
+            # that propagates from the skill-set.md source of truth into
+            # cloned skills. SQLite counterpart lives in
+            # ``daemon/migrations/versions/20260714_000003_skill_bank_new_columns.sql``;
+            # the .sql runner is a NO-OP on PG (runner.py lines 446-448), so
+            # we mirror the statements here for parity with fresh databases
+            # where ``SQLModel.metadata.create_all()`` creates the columns
+            # from the SkillBankItem model field declarations.
+            #
+            # Type differences from SQLite: TEXT NOT NULL DEFAULT '1.0.0'
+            # matches SQLite exactly (TEXT in both). BOOLEAN NOT NULL DEFAULT
+            # false vs INTEGER NOT NULL DEFAULT 0 — both read back as ``False``
+            # from the ORM regardless of which backend created the column.
+            "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS template_version TEXT NOT NULL DEFAULT '1.0.0'",
+            "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS agent_id TEXT",
+            "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS auto_load BOOLEAN NOT NULL DEFAULT false",
+            "CREATE INDEX IF NOT EXISTS ix_skill_bank_agent_id ON skill_bank(agent_id)",
+            # ── Skills auto_load + source_skill_bank_id (2026-07-14) ─────
+            # Phase 2 of tester-skill-evolution. The skills (evolution)
+            # table gains two columns: ``auto_load`` is the clone-side
+            # counterpart of the skill_bank auto_load flag (controls whether
+            # the skill is loaded into the system prompt before every
+            # task vs on-demand), and ``source_skill_bank_id`` is a soft FK
+            # back to the skill_bank template this row was cloned from
+            # (NULL for manually-created or evolved skills — soft FK only,
+            # never enforced at the DB level). SQLite counterpart lives in
+            # ``daemon/migrations/versions/20260714_000004_skills_new_columns.sql``.
+            "ALTER TABLE skills ADD COLUMN IF NOT EXISTS auto_load BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE skills ADD COLUMN IF NOT EXISTS source_skill_bank_id TEXT",
+            "CREATE INDEX IF NOT EXISTS ix_skills_auto_load ON skills(auto_load)",
             # ── Widen job_queues.queue_type CHECK constraint (2026-07-14) ──
             # The job_queues.queue_type column must accept 'defer' and
             # 'background' values in addition to 'fifo' and 'parallel' so

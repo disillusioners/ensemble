@@ -69,6 +69,9 @@ class SkillBankRepository:
         project_id: Optional[str] = None,
         description: str = "",
         category: str = "workflow",
+        template_version: str = "1.0.0",
+        agent_id: Optional[str] = None,
+        auto_load: bool = False,
     ) -> SkillBankItem:
         """Insert a new SkillBankItem row.
 
@@ -80,6 +83,16 @@ class SkillBankRepository:
             description: One-line summary (default empty).
             category: Free-form category string (default
                 ``'workflow'``).
+            template_version: Semver version of this template
+                (default ``'1.0.0'``). Bumped by the seeding
+                pipeline when the source skill-set.md file
+                changes so stale bank copies can be refreshed.
+            agent_id: Agent this template belongs to (e.g.
+                ``'tester'``). ``None`` means a generic/shared
+                template (default ``None``).
+            auto_load: Whether skills cloned from this template
+                should be loaded into the system prompt before
+                every task. ``False`` = on-demand only (default).
 
         Returns:
             The newly created :class:`SkillBankItem` instance.
@@ -91,6 +104,9 @@ class SkillBankRepository:
             project_id=project_id,
             description=description,
             category=category,
+            template_version=template_version,
+            agent_id=agent_id,
+            auto_load=auto_load,
             created_at=now,
             updated_at=now,
         )
@@ -100,7 +116,8 @@ class SkillBankRepository:
             session.refresh(item)
             logger.info(
                 f"Created skill bank item: id={item.id}, name={name}, "
-                f"project_id={project_id}"
+                f"project_id={project_id}, agent_id={agent_id}, "
+                f"auto_load={auto_load}"
             )
             return item
 
@@ -217,6 +234,91 @@ class SkillBankRepository:
             session.commit()
             logger.info(f"Deleted skill bank item: id={item_id}")
             return True
+
+    def get_by_name_and_agent(
+        self,
+        name: str,
+        agent_id: str,
+    ) -> SkillBankItem | None:
+        """Fetch a skill bank template by ``(name, agent_id)``.
+
+        Used by the seeding pipeline to look up the existing copy of
+        a template before deciding whether to refresh it (Phase 3 of
+        tester-skill-evolution).
+
+        Args:
+            name: Human-readable skill name.
+            agent_id: Owning agent ID (e.g. ``'tester'``).
+
+        Returns:
+            The matching :class:`SkillBankItem`, or ``None`` when
+            no row exists for the pair. When multiple rows match
+            the same ``(name, agent_id)`` (the bank intentionally
+            permits duplicates across and within agents), the
+            specific row returned is implementation-defined —
+            callers needing a deterministic choice should add an
+            explicit ``order_by`` to a custom query.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(SkillBankItem)
+                .where(SkillBankItem.name == name)
+                .where(SkillBankItem.agent_id == agent_id)
+            )
+            return session.exec(stmt).first()
+
+    def get_auto_load_by_agent(
+        self,
+        agent_id: str,
+    ) -> list[SkillBankItem]:
+        """Fetch all ``auto_load=True`` templates for an agent.
+
+        Used by the clone-on-miss path (Phase 4 of
+        tester-skill-evolution) to clone foundational skills into
+        project scope before the first spawn. The set is filtered
+        to ``auto_load=True`` so on-demand templates are excluded
+        from the auto-clone batch — they only land in a project
+        when explicitly requested.
+
+        Args:
+            agent_id: Owning agent ID (e.g. ``'tester'``).
+
+        Returns:
+            List of :class:`SkillBankItem` rows for the agent with
+            ``auto_load=True``. Empty list when no such templates
+            exist (or no templates at all).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(SkillBankItem)
+                .where(SkillBankItem.agent_id == agent_id)
+                .where(SkillBankItem.auto_load == True)  # noqa: E712
+            )
+            return list(session.exec(stmt))
+
+    def list_by_agent(
+        self,
+        agent_id: str,
+    ) -> list[SkillBankItem]:
+        """Fetch all templates for an agent (every ``auto_load`` value).
+
+        Used by inspection / debugging endpoints where the caller
+        wants the full per-agent template set, not just the
+        auto-clone subset returned by
+        :meth:`get_auto_load_by_agent`.
+
+        Args:
+            agent_id: Owning agent ID (e.g. ``'tester'``).
+
+        Returns:
+            List of :class:`SkillBankItem` rows for the agent.
+            Empty list when no templates exist for the agent.
+        """
+        with Session(self.engine) as session:
+            stmt = select(SkillBankItem).where(
+                SkillBankItem.agent_id == agent_id
+            )
+            return list(session.exec(stmt))
 
     def count(
         self,

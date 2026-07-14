@@ -28,6 +28,14 @@ class SkillBankItemCreate(BaseModel):
     project_id: str | None = None
     description: str = ""
     category: str = "workflow"
+    # Phase 2 (skill evolution): optional template metadata.
+    # ``template_version`` defaults to ``'1.0.0'``; callers creating a
+    # new revision should pass the bumped semver. ``agent_id`` scopes
+    # the template to one agent (NULL = generic/shared). ``auto_load``
+    # is the source-of-truth flag from the skill-set.md definition.
+    template_version: str = "1.0.0"
+    agent_id: str | None = None
+    auto_load: bool = False
 
 
 class SkillBankItemUpdate(BaseModel):
@@ -37,6 +45,12 @@ class SkillBankItemUpdate(BaseModel):
     description: str | None = None
     category: str | None = None
     project_id: str | None = None
+    # Phase 2 (skill evolution): optional template metadata updates.
+    # All optional — clients can selectively bump ``template_version``
+    # when refreshing a stale bank copy.
+    template_version: str | None = None
+    agent_id: str | None = None
+    auto_load: bool | None = None
 
 
 class SkillBankItemResponse(BaseModel):
@@ -47,6 +61,10 @@ class SkillBankItemResponse(BaseModel):
     description: str = ""
     content: str
     category: str = "workflow"
+    # Phase 2 (skill evolution): template metadata returned to clients.
+    template_version: str = "1.0.0"
+    agent_id: str | None = None
+    auto_load: bool = False
     created_at: str
     updated_at: str
 
@@ -108,6 +126,9 @@ async def create_item(item: SkillBankItemCreate, request: Request):
         project_id=item.project_id,
         description=item.description,
         category=item.category,
+        template_version=item.template_version,
+        agent_id=item.agent_id,
+        auto_load=item.auto_load,
     )
     return _item_to_response(created)
 

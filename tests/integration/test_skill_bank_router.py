@@ -440,3 +440,102 @@ class TestListFiltering:
         body = resp.json()
         assert len(body["items"]) == 1
         assert body["total"] == 3
+
+
+class TestPhase2CreateFieldsRoundTrip:
+    """Phase 2 of tester-skill-evolution: the ``create_item`` endpoint
+    must forward ``template_version``, ``agent_id``, and ``auto_load``
+    to ``SkillBankRepository.create()`` — they were silently dropped
+    before this fix.
+
+    These tests lock in the round-trip: the 201 response must echo
+    the exact values the client sent for all three new fields.
+    """
+
+    def test_post_forwards_template_version_to_response(self, client):
+        """Non-default ``template_version`` is echoed in the 201 response."""
+        resp = client.post(
+            "/skill-bank",
+            json=_create_payload(name="v-test", template_version="2.3.4"),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["template_version"] == "2.3.4"
+
+    def test_post_forwards_agent_id_to_response(self, client):
+        """Non-default ``agent_id`` is echoed in the 201 response."""
+        resp = client.post(
+            "/skill-bank",
+            json=_create_payload(name="a-test", agent_id="tester"),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["agent_id"] == "tester"
+
+    def test_post_forwards_auto_load_to_response(self, client):
+        """Non-default ``auto_load=True`` is echoed in the 201 response."""
+        resp = client.post(
+            "/skill-bank",
+            json=_create_payload(name="l-test", auto_load=True),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["auto_load"] is True
+
+    def test_post_with_all_three_phase2_fields_round_trips(self, client):
+        """All three Phase 2 fields together are forwarded and echoed."""
+        resp = client.post(
+            "/skill-bank",
+            json=_create_payload(
+                name="all-three",
+                template_version="3.1.0",
+                agent_id="tester",
+                auto_load=True,
+            ),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["template_version"] == "3.1.0"
+        assert body["agent_id"] == "tester"
+        assert body["auto_load"] is True
+
+    def test_post_defaults_template_version_when_omitted(self, client):
+        """When omitted, ``template_version`` defaults to ``'1.0.0'``."""
+        resp = client.post("/skill-bank", json=_create_payload(name="dv-test"))
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["template_version"] == "1.0.0"
+
+    def test_post_defaults_agent_id_to_null_when_omitted(self, client):
+        """When omitted, ``agent_id`` defaults to JSON ``null``."""
+        resp = client.post("/skill-bank", json=_create_payload(name="da-test"))
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["agent_id"] is None
+
+    def test_post_defaults_auto_load_to_false_when_omitted(self, client):
+        """When omitted, ``auto_load`` defaults to ``False``."""
+        resp = client.post("/skill-bank", json=_create_payload(name="dl-test"))
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["auto_load"] is False
+
+    def test_post_persists_phase2_fields_via_repository(self, client, repository):
+        """After POST, fetching via the repository confirms persistence —
+        guards against the values being computed at response-serialisation
+        time but not actually stored."""
+        resp = client.post(
+            "/skill-bank",
+            json=_create_payload(
+                name="persist-test",
+                template_version="4.5.6",
+                agent_id="developer",
+                auto_load=True,
+            ),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        item_id = body["id"]
+
+        fetched = repository.get(item_id)
+        assert fetched is not None
+        assert fetched.template_version == "4.5.6"
+        assert fetched.agent_id == "developer"
+        assert fetched.auto_load is True
