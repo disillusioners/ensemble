@@ -2,6 +2,14 @@
 
 Skills are reusable knowledge and procedures that get injected into your context when relevant. When the system finds one, it appears as a `[System Inject]` message before the user's message — read and use it if it fits, ignore it if it doesn't. You may also see a brief **low-match** list of nearby skills; use `skill_search` or `skill_view` to explore them.
 
+## Auto-Load Skills
+
+Some skills are `auto_load` — the system loads them for you automatically before every task. These are foundational skills that should always be present.
+
+Other skills are injected **on-demand** when your task context matches (via the BM25 → embedding → LLM search pipeline).
+
+You can also search manually using `skill_search` to find skills relevant to your current task.
+
 ## Tools
 
 | Tool | Purpose |

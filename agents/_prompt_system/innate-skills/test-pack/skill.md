@@ -95,3 +95,25 @@ Exit codes:
 ## TTQA
 
 When timeout occurs, apply TTQA optimizations per rule.md.
+
+---
+
+## Skill System Integration
+
+This innate skill defines the **INVARIANT rules** for test packs. These rules NEVER change.
+
+The following **evolvable skills** build on this foundation and contain project-specific procedures:
+- `test-strategy` (auto_load) — How to decide WHAT to test (blast radius, planning)
+- `test-pack-execution` (auto_load) — How to optimize and split packs for this project
+- `unit-test` (auto_load) — Unit test patterns for this codebase
+- `mock-test` (auto_load) — Mock test design for this project's stack
+- `integration-test` (on-demand) — Cross-component integration testing
+- `e2e-test` (on-demand) — End-to-end test procedures
+- `quick-fix` (on-demand) — Quick fix patterns and eligibility
+- `ensure-validation` (on-demand) — Quality gate validation
+- `flaky-test-management` (on-demand) — Flaky test quarantine lifecycle
+
+**auto_load** skills are always loaded into your context by the system.
+**on-demand** skills are injected when your task context matches, or you can use `skill_search` to find them manually.
+
+If any skill is missing for this project, the system auto-loads it from the template bank.
