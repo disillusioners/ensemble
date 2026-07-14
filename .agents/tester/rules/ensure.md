@@ -33,14 +33,20 @@ Validated on every test request, scoped to the change set's packs.
 ## Release Gate (slow — big/critical/architecture changes ONLY)
 Run ONLY when blast-radius determines the change is big/critical (cross-module, architecture refactor, release). Each item must still run under a `timeout` wrapper; prefer converting each to a mock-test pack (daemon mocked) so it runs under the 5-min cap without `./dev.sh`.
 
+### Prerequisites
+- Daemon running: `./dev.sh` (health at `localhost:8079`)
+- SSL certs clean: `unset SSL_CERT_FILE SSL_CERT_DIR` before each run
+- Timeout override: `PYTEST_TIMEOUT=280` + `--override-ini="timeout=280"` (pyproject default `timeout=30` kills E2E prematurely)
+- Run tests **one by one** (each makes real LLM calls; combined exceeds 5-min cap)
+
 ### Critical (release-gate)
 - [ ] Full non-integration suite green (excluding QUARANTINE.md)
   - Validation: run ALL non-integration packs (see PACKS.md) in parallel, each with the 5-min cap; quarantined tests skipped. NOT a bare `pytest tests/` — run via the packs.
 - [ ] E2E: Normal parent→child workflow completes (happy path)
-  - Validation: `timeout 300 pytest tests/e2e/test_e2e_workflows.py::test_parent_child_workflow_happy_path -m integration` (requires `./dev.sh`) — or mock-test pack equivalent
+  - Validation: `timeout 300 bash test/packs/e2e_workflows_ensure_test.sh` or `PYTEST_TIMEOUT=280 timeout 300 .venv/bin/pytest tests/e2e/test_e2e_workflows.py --override-ini="addopts=" --override-ini="timeout=280" -m integration -k "test_parent_child_workflow_happy_path" --tb=short -q`
 - [ ] E2E: Pause after spawn, then resume works correctly
-  - Validation: `timeout 300 pytest tests/e2e/test_e2e_workflows.py::test_pause_after_spawn_then_resume -m integration` — or mock-test pack equivalent
+  - Validation: same pattern, `-k "test_pause_after_spawn_then_resume"`
 - [ ] E2E: Terminate after spawn, then revive documented
-  - Validation: `timeout 300 pytest tests/e2e/test_e2e_workflows.py::test_terminate_after_spawn_then_revive -m integration` — or mock-test pack equivalent
+  - Validation: same pattern, `-k "test_terminate_after_spawn_then_revive"`
 - [ ] E2E: Wave spawn (2 children) + defer queue ordering + cross-system
-  - Validation: `timeout 300 pytest tests/e2e/test_e2e_workflows.py::test_wave_spawn_with_defer_queue -m integration` — or mock-test pack equivalent
+  - Validation: same pattern, `-k "test_wave_spawn_with_defer_queue"`

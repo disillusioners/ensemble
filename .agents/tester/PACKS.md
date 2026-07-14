@@ -305,3 +305,9 @@ Update after each test run:
 | injection_sse_unit_test | tests/test_injection_sse.py | Injection SSE event tests: user_message SSE emission on injection consumption, event ordering (user_message before injection_consumed), payload correctness (role=user, instance_id, content), live_hub None guard, serialize_message try/except guard, multiple sequential injections, normal path regression | 2 min | 2026-07-14 | ✅ PASS (13/13, 0.69s, feature/injection-sse-echo-fix, commit 0f4f5a00, 0 failures) |
 | injection_api_unit_test | tests/test_injection_api.py | Injection API tests: send_message injection path, state-aware API, SSE events, GET /injection endpoint | 2 min | 2026-07-14 | ✅ PASS (27/27, ~1.04s, feature/injection-sse-echo-fix, commit 0f4f5a00, 0 failures) |
 | injection_graph_unit_test | tests/test_injection_graph.py | Graph integration tests: injection consumption in LangGraph agent node, RAM slot, factory closure, compaction fixes | 2 min | 2026-07-14 | ✅ PASS (9/9, 0.71s, feature/injection-sse-echo-fix, commit 0f4f5a00, 0 failures) |
+
+## E2E ensure.md Pack
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | 4 E2E workflow tests from ensure.md Release Gate: parent-child happy path, pause/resume, terminate/revive, wave spawn + defer queue. Requires live daemon at localhost:8079 (./dev.sh). Real LLM calls. NOTE: All 4 tests together exceed 5-min cap (~450s). Must run individually via -k filter. | 5 min per test (run individually) | 2026-07-14 | ⚠️ PARTIAL (3/4 PASS, test 4 FAIL — deferred job stuck pending) |
