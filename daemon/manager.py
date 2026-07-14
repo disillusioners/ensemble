@@ -3074,6 +3074,30 @@ class InstanceManager:
                 ")"
             ),
             "CREATE INDEX IF NOT EXISTS ix_skill_bank_project_id ON skill_bank(project_id)",
+            # ── Widen job_queues.queue_type CHECK constraint (2026-07-14) ──
+            # The job_queues.queue_type column must accept 'defer' and
+            # 'background' values in addition to 'fifo' and 'parallel' so
+            # system_defer_queue and system_background_queue provisioning
+            # can succeed (both queue types were added in Phase 3 of the
+            # job-as-queue-proxy refactor but the original 2026-04-09
+            # migration only declared 'fifo' and 'parallel'). The JobQueue
+            # SQLModel already declares the wider constraint
+            # (``CheckConstraint("queue_type IN ('fifo', 'parallel',
+            # 'defer', 'background')", name="ck_job_queues_queue_type")``)
+            # so fresh PG databases created by
+            # ``SQLModel.metadata.create_all()`` get the wider constraint
+            # automatically; existing PG databases need an explicit drop +
+            # re-add here because the .sql migration runner is a NO-OP on
+            # PostgreSQL (runner.py lines 446-448).
+            #
+            # The SQLite path lives in
+            # ``daemon/migrations/versions/20260714_000001_widen_job_queue_type_constraint.sql``.
+            # Both statements are idempotent via DROP CONSTRAINT IF EXISTS
+            # (no-op once the wider constraint is already in place) and
+            # the constraint name matches the model's CheckConstraint
+            # name so subsequent re-runs converge on a single state.
+            "ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type",
+            "ALTER TABLE job_queues ADD CONSTRAINT ck_job_queues_queue_type CHECK (queue_type IN ('fifo', 'parallel', 'defer', 'background'))",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
