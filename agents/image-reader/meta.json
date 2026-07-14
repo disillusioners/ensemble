@@ -10,6 +10,6 @@
   "innate_skills": [],
   "team_members": [],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
+    "allow": ["time", "self", "help", "knowledge", "mcp", "context"]
   }
 }
