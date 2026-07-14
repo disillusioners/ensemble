@@ -546,6 +546,105 @@ def append_user_language(system_prompt: str, language: str) -> str:
     return system_prompt + language_section
 
 
+def append_auto_load_skills(
+    system_prompt: str,
+    agent_id: str,
+    project_id: str | None,
+    manager: Any,
+) -> str:
+    """Append auto-load skills to a system prompt (post-cache).
+
+    Post-processing step (like ``append_context_key`` and
+    ``append_current_time``) — runs AFTER the cached prompt is loaded,
+    so auto_load skill changes do NOT invalidate the prompt cache.
+
+    Queries the skills table for active skills where ``auto_load=true``
+    for the given ``project_id``. If found, formats them as a prompt
+    section and appends to the system prompt. If none found, returns
+    the original prompt unchanged.
+
+    Before querying, triggers clone-on-miss to ensure the project has
+    auto_load skills cloned from the skill_bank templates.
+
+    Args:
+        system_prompt: The base system prompt to append to.
+        agent_id: The agent identifier (e.g. 'tester'). Used for
+            clone-on-miss template lookup.
+        project_id: Current project ID. None or empty = no auto_load
+            skills (returns prompt unchanged).
+        manager: InstanceManager reference — used to access
+            ``_skill_repo`` and ``_skill_clone_service``.
+
+    Returns:
+        The system prompt with auto_load skills section appended,
+        or the original system_prompt unchanged when no skills found
+        or skill_evolution not configured.
+    """
+    # No project → no auto_load section.
+    if not project_id:
+        return system_prompt
+
+    skill_repo = getattr(manager, "_skill_repo", None)
+    if skill_repo is None:
+        # skill_evolution not configured — auto_load not available.
+        return system_prompt
+
+    # ── Clone-on-miss: ensure auto_load skills exist in project scope ──
+    # Before querying, clone any missing auto_load skills from skill_bank
+    # templates. This is the bridge between the isolated bank and the
+    # evolution system. Idempotent — fast no-op after first run.
+    clone_service = getattr(manager, "_skill_clone_service", None)
+    if clone_service is not None:
+        try:
+            clone_service.ensure_auto_load_skills_sync(
+                agent_id=agent_id,
+                project_id=project_id,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Clone-on-miss for auto_load skills failed "
+                f"(agent={agent_id}, project={project_id[:8]}...): {e}"
+            )
+
+    # ── Query auto_load skills for this project ──
+    try:
+        skills_list = skill_repo.get_auto_load_skills(project_id)
+    except Exception as e:
+        logger.warning(
+            f"Failed to load auto_load skills for project "
+            f"{project_id[:8]}...: {e}"
+        )
+        return system_prompt
+
+    if not skills_list:
+        return system_prompt
+
+    # ── Format skills as prompt sections ──
+    # Skip skills with empty content — a blank skill adds a
+    # divider without value.
+    sections: list[str] = []
+    for skill in skills_list:
+        content = (skill.content or "").strip()
+        if content:
+            sections.append(content)
+
+    if not sections:
+        return system_prompt
+
+    auto_load_section = (
+        f"\n---\n\n## Auto-Loaded Skills (Evolvable)\n\n"
+        f"These foundational skills are always available. They evolve "
+        f"over time via feedback and A/B testing.\n\n"
+        + "\n\n---\n\n".join(sections)
+    )
+
+    logger.info(
+        f"Appended {len(sections)} auto_load skill(s) to prompt "
+        f"(agent={agent_id}, project={project_id[:8]}...)"
+    )
+    return system_prompt + auto_load_section
+
+
 class InstanceLifecycleService:
     """Service for managing instance lifecycle (spawn, terminate, restore).
     
@@ -853,9 +952,9 @@ class InstanceLifecycleService:
         agent_path = Path(resolved_agent_dir)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
-        # Phase 5 hook point: append_auto_load_skills() will be called here
-        # to materialize auto_load templates via SkillCloneService.
-        # See Phase 4 plan §4.4 — service is on manager._skill_clone_service.
+        # Phase 5: auto_load skills are appended below via
+        # append_auto_load_skills() — keeps the PromptCache free of
+        # project-scoped content.
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=parent_id)
@@ -876,6 +975,17 @@ class InstanceLifecycleService:
         # Append user language preference (post-cache; does not invalidate PromptCache)
         user_language = get_language_preference(project_repository)
         system_prompt = append_user_language(system_prompt, user_language)
+
+        # Append auto_load skills (post-cache; does not invalidate PromptCache).
+        # Queries project-scoped skills where auto_load=true and appends them
+        # to the prompt. Triggers clone-on-miss to ensure skills exist in
+        # project scope before querying.
+        system_prompt = append_auto_load_skills(
+            system_prompt,
+            agent_id=resolved_agent_id,
+            project_id=project_id,
+            manager=self._manager,
+        )
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
@@ -2132,9 +2242,9 @@ class InstanceLifecycleService:
         agent_path = Path(agent_meta.path)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
-        # Phase 5 hook point: append_auto_load_skills() will be called here
-        # to materialize auto_load templates via SkillCloneService.
-        # See Phase 4 plan §4.4 — service is on manager._skill_clone_service.
+        # Phase 5: auto_load skills are appended below via
+        # append_auto_load_skills() — keeps the PromptCache free of
+        # project-scoped content.
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)
@@ -2156,6 +2266,16 @@ class InstanceLifecycleService:
         # Append user language preference (post-cache; does not invalidate PromptCache)
         user_language = get_language_preference(project_repository)
         system_prompt = append_user_language(system_prompt, user_language)
+
+        # Append auto_load skills (post-cache; does not invalidate PromptCache).
+        # Uses meta.project_id so the restored instance sees the same
+        # project-scoped auto_load set it had before the daemon restart.
+        system_prompt = append_auto_load_skills(
+            system_prompt,
+            agent_id=resolved_agent_id,
+            project_id=meta.project_id,
+            manager=self._manager,
+        )
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
