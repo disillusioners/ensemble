@@ -86,6 +86,7 @@ from .services.skill_job_dispatcher import SkillJobDispatcher
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
 from .services.skill_seed_service import SkillSeedService
+from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
 from .services.todo_manager import TodoManager
 from .cancellation import (
@@ -1045,6 +1046,15 @@ class InstanceManager:
             self._skill_metrics_service.set_evolution_service(
                 self._skill_evolution_service
             )
+            # Phase 4: SkillCloneService — bridges skill_bank templates
+            # to project-scoped skills. Used by the injection pipeline
+            # to clone-on-miss and by Phase 5's append_auto_load_skills
+            # to materialize the auto-load set.
+            self._skill_clone_service = SkillCloneService(
+                skill_repo=self._skill_repo,
+                skill_bank_repo=self._skill_bank_repo,
+                embedding_service=self._skill_embedding_service,
+            )
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
@@ -1053,6 +1063,7 @@ class InstanceManager:
             self._skill_trigger_engine = None
             self._skill_injection_service = None
             self._skill_evolution_service = None
+            self._skill_clone_service = None  # Phase 4: clone-on-miss service
             # ``_skill_job_dispatcher`` is initialized in
             # ``set_job_queue_service`` — guard against the rare
             # case where that setter is never called so attribute

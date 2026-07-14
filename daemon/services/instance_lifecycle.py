@@ -853,6 +853,10 @@ class InstanceLifecycleService:
         agent_path = Path(resolved_agent_dir)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
+        # Phase 5 hook point: append_auto_load_skills() will be called here
+        # to materialize auto_load templates via SkillCloneService.
+        # See Phase 4 plan §4.4 — service is on manager._skill_clone_service.
+
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=parent_id)
 
@@ -2127,6 +2131,10 @@ class InstanceLifecycleService:
         from ..manager import load_and_cache_prompt
         agent_path = Path(agent_meta.path)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
+
+        # Phase 5 hook point: append_auto_load_skills() will be called here
+        # to materialize auto_load templates via SkillCloneService.
+        # See Phase 4 plan §4.4 — service is on manager._skill_clone_service.
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)

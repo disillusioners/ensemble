@@ -1922,6 +1922,33 @@ class InstanceMessagingService:
                                     )
                                 )
 
+                            # ── Clone-on-miss (Phase 4) ──────────────────
+                            # Ensure all agent skills exist in project
+                            # scope BEFORE BM25 search runs. This makes
+                            # freshly-cloned templates discoverable to
+                            # SkillSearchService on the very first
+                            # injection. Cloning is idempotent — existing
+                            # skills are returned, not re-cloned.
+                            clone_service = getattr(
+                                self._manager,
+                                "_skill_clone_service",
+                                None,
+                            )
+                            if (
+                                clone_service is not None
+                                and skill_project_id is not None
+                            ):
+                                try:
+                                    await clone_service.ensure_all_skills_async(
+                                        agent_id=skill_instance_meta.agent_id,
+                                        project_id=skill_project_id,
+                                    )
+                                except Exception as clone_exc:
+                                    logger.warning(
+                                        f"Clone-on-miss failed for "
+                                        f"{instance_id[:8]}...: {clone_exc}"
+                                    )
+
                             injection_service = getattr(
                                 self._manager,
                                 "_skill_injection_service",
