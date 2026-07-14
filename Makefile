@@ -48,8 +48,8 @@ help:
 
 # Sync dependencies with uv
 sync:
-	@echo "$(GREEN)Syncing dependencies...$(NC)"
-	uv sync
+	@echo "$(GREEN)Syncing dependencies (incl. dev extras for pytest-timeout)...$(NC)"
+	uv sync --extra dev
 	@echo "$(GREEN)Dependencies synced!$(NC)"
 
 # Stop the daemon
