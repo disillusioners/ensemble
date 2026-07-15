@@ -42,6 +42,63 @@ Key shape: **blast-radius gate first** (scope down unless warranted), **parallel
 
 ---
 
+## Skill-Per-Worker Dispatch Pattern
+
+The tester coordinates testing but delegates execution to specialists. For tests that need a specific skill, spawn a **worker instance** and load the skill on the worker via a `<meta>` tag — never run the skill yourself. For generic test execution without a specific skill, fall back to opencode sessions as before.
+
+### Dispatch Pattern
+
+```
+Task: Run unit tests on auth module
+Skill needed: unit-test
+
+→ spawn_instance(agent="worker")
+→ send_message(
+    instance_id=worker_id,
+    message="Run unit tests on the auth module. Execute the test packs and report results.\n<meta>{\"load_skill\": \"unit-test\"}</meta>"
+  )
+```
+
+**How to use:**
+1. `spawn_instance(agent="worker")` to create the worker
+2. Compose the message with the task body, then add a `<meta>` block on its own line at the END of the message text
+3. The worker loads the named skill automatically and executes with full skill guidance
+4. Collect the worker's report back into your aggregation
+
+### Skill Selection Guide
+
+| Task Type | Skill to Load | Meta Tag |
+|-----------|---------------|----------|
+| Unit testing | unit-test | `<meta>{"load_skill": "unit-test"}</meta>` |
+| Mock testing | mock-test | `<meta>{"load_skill": "mock-test"}</meta>` |
+| Pack execution | test-pack-execution | `<meta>{"load_skill": "test-pack-execution"}</meta>` |
+| Integration testing | integration-test | `<meta>{"load_skill": "integration-test"}</meta>` |
+| E2E testing | e2e-test | `<meta>{"load_skill": "e2e-test"}</meta>` |
+| Validation | ensure-validation | `<meta>{"load_skill": "ensure-validation"}</meta>` |
+| Flaky test mgmt | flaky-test-management | `<meta>{"load_skill": "flaky-test-management"}</meta>` |
+| Quick fix | quick-fix | `<meta>{"load_skill": "quick-fix"}</meta>` |
+
+**Meta tag format:** the `<meta>...</meta>` block must be on its own line at the END of the message text, with valid JSON inside. The tag tells the worker to load the named skill before processing the task.
+
+### When to Use Workers vs Opencode Sessions
+
+| Use Workers (skill-per-worker) | Use Opencode Sessions |
+|-------------------------------|----------------------|
+| Task needs a specific evolvable skill | Generic test execution (no skill needed) |
+| Want clean skill metrics attribution | Quick one-off test runs |
+| Skill evolution data collection | Infrastructure setup / teardown |
+| Parallel skill-specific testing | Test script creation |
+
+**Default:** Use workers for skill-specific tasks. Use opencode for infrastructure and non-skill tasks.
+
+### Decision Points
+
+- Need to run unit tests with skill attribution? → Spawn worker with `<meta>{"load_skill": "unit-test"}</meta>`
+- Need to run mock tests with skill attribution? → Spawn worker with `<meta>{"load_skill": "mock-test"}</meta>`
+- Need skill-specific test execution for evolution data? → Always use worker dispatch (not opencode) for clean 1:1 attribution
+
+---
+
 ## Planning Phase (Do This First!)
 
 **Before spawning any sessions, plan how to execute the work.**
@@ -1016,6 +1073,9 @@ Session IDs: [list of opencode session IDs used]
 - **ensure.md critical requirements failing?** → Testing is NOT complete until they pass
 - **ensure.md requirement contradicts my rules?** → Honor the intent, validate my way (scoped pack + dual-layer timeout), and add an Improvement Notice to the report for the user to update ensure.md
 - **Code changes made?** → **MANDATORY**: Commit all changes before sending report to leader
+- **Need to run unit tests with skill attribution?** → Spawn worker with `<meta>{"load_skill": "unit-test"}</meta>`
+- **Need to run mock tests with skill attribution?** → Spawn worker with `<meta>{"load_skill": "mock-test"}</meta>`
+- **Need skill-specific test execution for evolution data?** → Always use worker dispatch (not opencode) for clean 1:1 attribution
 
 ---
 

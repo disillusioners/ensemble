@@ -2,23 +2,23 @@
 agent_id: tester
 skills:
   - name: test-strategy
-    version: "1.0.0"
+    version: "1.1.0"
     auto_load: true
     category: testing-strategy
     description: "Blast radius analysis, change-set derivation, test pack planning"
   - name: test-pack-execution
     version: "1.0.0"
-    auto_load: true
+    auto_load: false
     category: execution
     description: "Pack lifecycle, TTQA optimization, splitting heuristics, output format"
   - name: mock-test
     version: "1.0.0"
-    auto_load: true
+    auto_load: false
     category: execution
     description: "Mock test design: spec template, port allocation, what-to-mock, 5-phase workflow"
   - name: unit-test
     version: "1.0.0"
-    auto_load: true
+    auto_load: false
     category: execution
     description: "Unit test discovery, delegation, analysis, coverage documentation"
   - name: integration-test
@@ -50,4 +50,4 @@ skills:
 
 # Tester Agent — Skill Set
 
-The tester agent coordinates testing as a Test Leader. Opencode sessions execute all code/test/file work. This skill set contains nine skills: four auto-loaded for everyday planning and execution, plus five on-demand skills for specific testing modes (integration, e2e, ensure validation, flaky-test management, quick fixes). Auto-loaded skills are always in context; on-demand skills are injected when the task matches. Skill content is evolvable — it builds on the invariant test-pack foundations defined by the innate `test-pack` skill (5-min cap, dual-layer timeout, naming convention).
+The tester agent coordinates testing as a Test Leader + Dispatcher. It keeps `test-strategy` auto-loaded for planning decisions, and dispatches execution to worker instances — each loaded with a single skill via `<meta>{"load_skill": "..."}</meta>` for clean 1:1 attribution. Skill content is evolvable.
