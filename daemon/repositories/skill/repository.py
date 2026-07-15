@@ -76,6 +76,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _empty_stats() -> dict[str, Any]:
+    """Return the zeroed stats dict used by skill-usage aggregation.
+
+    Centralizes the shape returned when an aggregate query has no
+    matching rows (empty table, zero-count filter, etc.). Keeps the
+    return contract of :meth:`SkillUsageRepository.get_stats_filtered`
+    — callers can rely on every key being present with a numeric
+    default (``0`` / ``0.0``).
+    """
+    return {
+        "total": 0,
+        "selected": 0,
+        "applied": 0,
+        "completions": 0,
+        "fallbacks": 0,
+        "completion_rate": 0.0,
+        "fallback_rate": 0.0,
+        "applied_rate": 0.0,
+        "avg_iterations": 0.0,
+        "avg_duration": 0.0,
+    }
+
+
 # Whitelisted counter columns for
 # :meth:`SkillRepository.increment_counter`. Validated against
 # this set before being interpolated into the raw-SQL UPDATE
@@ -1116,34 +1139,16 @@ class SkillUsageRepository:
             )
         with Session(self.engine) as session:
             row = session.exec(stmt).first()
+        # `select(...)` with no GROUP BY always yields one aggregate row,
+        # even when the underlying table is empty (all aggregates are
+        # NULL/0). The minimal `row is None` guard below is purely
+        # defensive — kept only for unexpected empty-result edge cases.
         if row is None:
-            return {
-                "total": 0,
-                "selected": 0,
-                "applied": 0,
-                "completions": 0,
-                "fallbacks": 0,
-                "avg_iterations": 0.0,
-                "avg_duration": 0.0,
-                "completion_rate": 0.0,
-                "applied_rate": 0.0,
-                "fallback_rate": 0.0,
-            }
+            return _empty_stats()
         total, selected, applied, completions, fallbacks, avg_it, avg_dur = row
         total = int(total or 0)
         if total == 0:
-            return {
-                "total": 0,
-                "selected": 0,
-                "applied": 0,
-                "completions": 0,
-                "fallbacks": 0,
-                "avg_iterations": 0.0,
-                "avg_duration": 0.0,
-                "completion_rate": 0.0,
-                "applied_rate": 0.0,
-                "fallback_rate": 0.0,
-            }
+            return _empty_stats()
         selected = int(selected or 0)
         applied = int(applied or 0)
         completions = int(completions or 0)

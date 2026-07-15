@@ -707,10 +707,7 @@ class SkillMetricsService:
             # Soft-fail: a missing column on older schemas or a
             # transient DB error must not block the metrics path.
             _ab_group: Optional[str] = None
-            try:
-                _ab_group = getattr(skill, "ab_test_group", None)
-            except Exception:
-                _ab_group = None
+            _ab_group = getattr(skill, "ab_test_group", None)
 
             self.usage_repo.create(
                 skill_id=skill_id,
@@ -1255,28 +1252,6 @@ class SkillMetricsService:
         # Final clamp — a misconfigured config (e.g. weights
         # summing to 1.1) could push the score above 1.0.
         return max(0.0, min(1.0, score))
-
-    def _completion_rate_for(self, skill_id: str) -> float:
-        """Compute completion rate from ``skill_usage_records``.
-
-        Sync helper — wraps the lightweight aggregation that
-        :meth:`SkillUsageRepository.get_stats` already
-        performs. Returns ``0.0`` when the skill has no
-        records yet (consistent with the repo convention).
-
-        Args:
-            skill_id: The skill to compute the rate for.
-
-        Returns:
-            ``completions / total`` in ``[0.0, 1.0]``. ``0.0``
-            when no records exist.
-        """
-        stats = self.usage_repo.get_stats(skill_id)
-        total = int(stats.get("total", 0) or 0)
-        if total == 0:
-            return 0.0
-        completions = int(stats.get("completions", 0) or 0)
-        return completions / total
 
     # --------------------------------------------------------
     # Superseded records (worker reuse / orphan sweep)

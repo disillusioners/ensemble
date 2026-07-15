@@ -11,7 +11,6 @@ user and `extract_load_skill` to read the most common control field.
 import json
 import logging
 import re
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
