@@ -672,7 +672,10 @@ class SkillMetricsService:
             current_failures = int(
                 getattr(skill, "consecutive_failures", 0) or 0
             )
-            fallback = (current_failures > 0) and (not task_succeeded)
+            # Option C (D20): Fallback is determined by worker's explicit
+            # skill_feedback call (applied=False), NOT by task
+            # success/failure. Neutral default here.
+            fallback = False
 
             # Best-effort lookup of skill's ab_test_group for
             # test-period tagging. When the skill is part of an
@@ -708,10 +711,9 @@ class SkillMetricsService:
                 self.skill_repo.increment_counter(
                     skill_id, "total_completions", amount=1
                 )
-            if fallback:
-                self.skill_repo.increment_counter(
-                    skill_id, "total_fallbacks", amount=1
-                )
+            # Option C: total_fallbacks counter now managed by
+            # record_feedback() based on worker's applied=False
+            # judgment, not task completion.
 
             if task_succeeded:
                 # Successful application resets the streak.
@@ -877,81 +879,42 @@ class SkillMetricsService:
     # --------------------------------------------------------
 
     async def get_skill_stats(self, skill_id: str) -> dict[str, Any]:
-        """Compute aggregate stats for a skill.
+        """Get aggregated stats for a skill.
 
-        Reads the denormalized counter columns directly from
-        the ``skills`` row (cheap — one indexed point lookup)
-        and computes the derived rates. Used by the trigger
-        engine to decide which skills to flag.
+        Delegates to the usage repository's aggregation query
+        (``get_stats_filtered``) which provides ``avg_iterations``,
+        ``avg_duration``, and ``applied_rate``. Also augments with
+        ``consecutive_failures`` from the skill row counter, which
+        is not available from the usage-record aggregation shape.
 
-        Rates are computed as ``counter / total_selections``
-        so they cover only the selected-skills universe (the
-        denominator matches the Phase 1 ``SkillUsageRepository.get_stats``
-        convention). ``0.0`` is returned when
-        ``total_selections == 0`` to avoid division-by-zero.
+        ``0``/``0.0`` values are returned when no records match
+        so callers can detect "new skill" via ``total == 0``.
 
         Args:
             skill_id: The skill to compute stats for.
 
         Returns:
-            Dict with keys: ``total_selections``, ``total_applied``,
-            ``total_completions``, ``total_fallbacks``,
-            ``completion_rate``, ``fallback_rate``,
-            ``applied_rate``, ``consecutive_failures``.
-            ``total_selections == 0`` yields all-zero rates and
-            counters; the caller can detect "new skill" via
-            ``total_selections == 0``.
+            Dict with keys: ``total``, ``selected``, ``applied``,
+            ``completions``, ``fallbacks``, ``avg_iterations``,
+            ``avg_duration``, ``completion_rate``, ``applied_rate``,
+            ``fallback_rate``, ``consecutive_failures``. All counts
+            and rates default to ``0``/``0.0`` when no rows match.
         """
 
         def _read() -> dict[str, Any]:
+            stats = self.usage_repo.get_stats_filtered(
+                skill_id, ab_test_group=None
+            )
+            # Augment with skill-row counter not available from
+            # usage-record aggregation.
             skill = self.skill_repo.get(skill_id)
-            if skill is None:
-                # Return a zeroed dict — the trigger engine
-                # can use ``total_selections == 0`` to skip a
-                # missing skill without special-casing.
-                return {
-                    "total_selections": 0,
-                    "total_applied": 0,
-                    "total_completions": 0,
-                    "total_fallbacks": 0,
-                    "completion_rate": 0.0,
-                    "fallback_rate": 0.0,
-                    "applied_rate": 0.0,
-                    "consecutive_failures": 0,
-                }
-            selections = int(
-                getattr(skill, "total_selections", 0) or 0
-            )
-            completions = int(
-                getattr(skill, "total_completions", 0) or 0
-            )
-            fallbacks = int(
-                getattr(skill, "total_fallbacks", 0) or 0
-            )
-            applied = int(
-                getattr(skill, "total_applied", 0) or 0
-            )
-            failures = int(
-                getattr(skill, "consecutive_failures", 0) or 0
-            )
-            if selections == 0:
-                completion_rate = 0.0
-                fallback_rate = 0.0
-                applied_rate = 0.0
+            if skill is not None:
+                stats["consecutive_failures"] = int(
+                    getattr(skill, "consecutive_failures", 0) or 0
+                )
             else:
-                completion_rate = completions / selections
-                fallback_rate = fallbacks / selections
-                applied_rate = applied / selections
-            return {
-                "total_selections": selections,
-                "total_applied": applied,
-                "total_completions": completions,
-                "total_fallbacks": fallbacks,
-                "completion_rate": completion_rate,
-                "fallback_rate": fallback_rate,
-                "applied_rate": applied_rate,
-                "consecutive_failures": failures,
-            }
+                stats["consecutive_failures"] = 0
+            return stats
 
         return await asyncio.to_thread(_read)
 

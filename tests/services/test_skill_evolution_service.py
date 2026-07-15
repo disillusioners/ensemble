@@ -101,10 +101,13 @@ def fake_metrics_service():
     )
     svc.get_skill_stats = AsyncMock(
         return_value={
-            "total_selections": 0,
-            "total_applied": 0,
-            "total_completions": 0,
-            "total_fallbacks": 0,
+            "total": 0,
+            "selected": 0,
+            "applied": 0,
+            "completions": 0,
+            "fallbacks": 0,
+            "avg_iterations": 0.0,
+            "avg_duration": 0.0,
             "completion_rate": 0.0,
             "fallback_rate": 0.0,
             "applied_rate": 0.0,
@@ -1115,7 +1118,7 @@ class TestGetSkillMetrics:
         assert result["ab_test"]["ab_test_group"] == ab_group
         assert result["ab_test"]["comparisons"] == 7
         # stats comes from the mocked metrics service.
-        assert result["stats"]["total_selections"] == 0
+        assert result["stats"]["total"] == 0
         fake_metrics_service.get_skill_stats.assert_awaited_once_with(skill.id)
 
     async def test_get_skill_metrics_missing(self, evolution_service):

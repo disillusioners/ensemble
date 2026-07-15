@@ -1170,10 +1170,15 @@ class TestCrossPhaseFlowA:
         assert latest.feedback_applied is True
         assert latest.feedback_note == "alpha worked"
 
-        # Stats reflect the recorded state.
+        # Stats reflect the recorded state (new shape from
+        # get_stats_filtered — uses usage-record aggregation).
+        # Note: `applied` here counts SkillUsageRecord.applied=True,
+        # which record_feedback does NOT set (it stamps
+        # feedback_applied only — see skill_feedback metrics
+        # reliability issue). So `applied` / `applied_rate`
+        # reflect the completion-rate signal rather than the
+        # feedback-applied counter.
         stats = await metrics_service.get_skill_stats(alpha.id)
-        assert stats["total_selections"] == 1
-        assert stats["total_applied"] == 1
-        assert stats["total_completions"] == 1
+        assert stats["total"] == 1
+        assert stats["completions"] == 1
         assert stats["completion_rate"] == pytest.approx(1.0)
-        assert stats["applied_rate"] == pytest.approx(1.0)

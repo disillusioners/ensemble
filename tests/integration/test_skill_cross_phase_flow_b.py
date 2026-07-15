@@ -155,10 +155,13 @@ def fake_metrics_service():
     )
     svc.get_skill_stats = AsyncMock(
         return_value={
-            "total_selections": 0,
-            "total_applied": 0,
-            "total_completions": 0,
-            "total_fallbacks": 0,
+            "total": 0,
+            "selected": 0,
+            "applied": 0,
+            "completions": 0,
+            "fallbacks": 0,
+            "avg_iterations": 0.0,
+            "avg_duration": 0.0,
             "completion_rate": 0.0,
             "fallback_rate": 0.0,
             "applied_rate": 0.0,
@@ -259,11 +262,26 @@ def _make_skill(skill_repo, project_id: str, name: str, **kwargs: Any):
 def _seed_poor_metrics(repos, skill, completed: int = 3, total: int = 10) -> None:
     """Stamp the skill row with a low completion rate.
 
-    Bumps denormalized counters directly via ``increment_counter`` —
-    the same way ``SkillMetricsService`` would during a real task.
+    Bumps denormalized counters AND creates matching usage records
+    — the same way ``SkillMetricsService`` would during a real
+    task. This keeps both the counter-reading trigger engine
+    (uses ``skill.total_*`` columns directly) and the
+    record-aggregating ``get_skill_stats`` (uses
+    ``skill_usage_records``) consistent.
     """
     repos.skill.increment_counter(skill.id, "total_selections", amount=total)
     repos.skill.increment_counter(skill.id, "total_completions", amount=completed)
+    # Mirror the counters in usage records so the new
+    # aggregation-based get_skill_stats sees the same shape.
+    for i in range(total):
+        repos.usage.create(
+            skill_id=skill.id,
+            project_id=PROJECT_ID,
+            instance_id=f"seed-inst-{skill.id}-{i}",
+            agent_id="seed-agent",
+            selected=True,
+            task_succeeded=(i < completed),
+        )
 
 
 def _seed_low_completion_rate_trigger(repos) -> None:
@@ -316,8 +334,8 @@ class TestStep1PoorMetricsSetup:
         _seed_poor_metrics(repos, skill, completed=3, total=10)
 
         stats = await svc.get_skill_stats(skill.id)
-        assert stats["total_selections"] == 10
-        assert stats["total_completions"] == 3
+        assert stats["total"] == 10
+        assert stats["completions"] == 3
         assert stats["completion_rate"] == pytest.approx(0.3)
 
 
@@ -345,9 +363,11 @@ class TestStep2TriggerEngineFlagsSkill:
         assert entry["trigger_name"] == "low_cr_flow_b"
         assert entry["trigger_action"] == "analyze"
         assert "low_completion_rate" in entry["reason"]
-        # Stats payload carried through.
-        assert entry["stats"]["total_selections"] == 10
-        assert entry["stats"]["total_completions"] == 2
+        # Stats payload carried through (new shape aggregates
+        # from skill_usage_records; _seed_poor_metrics writes
+        # both counters and records so values match).
+        assert entry["stats"]["total"] == 10
+        assert entry["stats"]["completions"] == 2
 
     async def test_healthy_skill_not_flagged(
         self, repos, trigger_engine

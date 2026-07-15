@@ -538,8 +538,8 @@ class TestSkillMetricsRecording:
         # Phase 6 polish: flat SkillMetrics shape — no ``{"skill_id",
         # "found", "stats", "usage_recent_count", "ab_test"}`` bundle.
         body = response.json()
-        assert body["total_selections"] == 1
-        assert body["total_completions"] == 1
+        assert body["total"] == 1
+        assert body["completions"] == 1
         assert "completion_rate" in body
 
     def test_metrics_zero_stats_for_unknown_skill(self, app):
@@ -551,8 +551,8 @@ class TestSkillMetricsRecording:
         response = app.get("/api/skills/does-not-exist/metrics")
         assert response.status_code == 200
         body = response.json()
-        assert body["total_selections"] == 0
-        assert body["total_completions"] == 0
+        assert body["total"] == 0
+        assert body["completions"] == 0
 
 
 class TestSkillFix:

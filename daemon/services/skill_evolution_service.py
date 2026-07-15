@@ -1092,7 +1092,9 @@ class SkillEvolutionService:
         avg_iterations = stats.get("avg_iterations", 0.0)
         avg_duration = stats.get("avg_duration", 0.0)
         total = stats.get("total", 0)
-        consecutive_failures = stats.get("consecutive_failures", 0)
+        # Read consecutive_failures from skill row (not in
+        # get_stats_filtered aggregation shape).
+        consecutive_failures = getattr(skill, "consecutive_failures", 0) or 0
 
         recent_lines: list[str] = []
         for rec in usage_records[:10]:

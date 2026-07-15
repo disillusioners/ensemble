@@ -554,13 +554,13 @@ class SkillTriggerEngine:
             return (
                 f"{ctype}: {name} — "
                 f"consecutive_failures="
-                f"{stats['consecutive_failures']} >= "
+                f"{getattr(skill, 'consecutive_failures', 0)} >= "
                 f"{trigger.condition_json.get('threshold', 3)}"
             )
         if ctype == "task_count_scan":
             return (
                 f"{ctype}: {name} — total_selections="
-                f"{stats['total_selections']} >= "
+                f"{getattr(skill, 'total_selections', 0)} >= "
                 f"{trigger.condition_json.get('threshold', 20)}"
             )
         if ctype == "periodic_scan":

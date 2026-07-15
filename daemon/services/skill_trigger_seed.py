@@ -69,7 +69,10 @@ DEFAULT_TRIGGERS: list[dict[str, Any]] = [
         "name": "consecutive_failures",
         "condition_type": "consecutive_failures",
         "condition_json": {"threshold": 3},
-        "action": "evolve_fix",
+        # Route through Tier 2 analysis first so the LLM can decide
+        # if the skill is genuinely broken or just unlucky. The LLM
+        # may skip evolution if failures are spurious.
+        "action": "analyze",
     },
     {
         "name": "periodic_scan",
@@ -84,6 +87,37 @@ DEFAULT_TRIGGERS: list[dict[str, Any]] = [
         "action": "analyze",
     },
 ]
+
+
+# ============================================================
+# Migration helper
+# ============================================================
+
+
+def _update_consecutive_failures_action(trigger_repo: Any) -> int:
+    """Update existing ``consecutive_failures`` trigger rows from
+    ``"evolve_fix"`` to ``"analyze"``.
+
+    Idempotent guard: only updates rows where ``action`` is currently
+    ``"evolve_fix"``. This is a one-time migration for databases
+    that already have the old seed.
+    """
+    updated = 0
+    try:
+        triggers = trigger_repo.list(enabled_only=False)
+        for t in triggers:
+            if (
+                getattr(t, "condition_type", None) == "consecutive_failures"
+                and getattr(t, "action", None) == "evolve_fix"
+            ):
+                trigger_repo.update(t.id, action="analyze")
+                updated += 1
+                logger.info(
+                    "Updated consecutive_failures trigger action: evolve_fix → analyze"
+                )
+    except Exception as exc:
+        logger.warning(f"Failed to migrate consecutive_failures trigger action: {exc}")
+    return updated
 
 
 # ============================================================
@@ -149,4 +183,8 @@ async def seed_default_triggers(
             f"Seeded default skill triggers: project_id={project_id}, "
             f"inserted={inserted}"
         )
+
+    # Migration (W4): update existing consecutive_failures rows to 'analyze' action
+    await asyncio.to_thread(_update_consecutive_failures_action, trigger_repo)
+
     return inserted

@@ -691,13 +691,16 @@ async def get_skill(
                 metrics_exc,
             )
             detail["metrics"] = {
-                "total_selections": 0,
-                "total_applied": 0,
-                "total_completions": 0,
-                "total_fallbacks": 0,
+                "total": 0,
+                "selected": 0,
+                "applied": 0,
+                "completions": 0,
+                "fallbacks": 0,
+                "avg_iterations": 0.0,
+                "avg_duration": 0.0,
                 "completion_rate": 0.0,
-                "fallback_rate": 0.0,
                 "applied_rate": 0.0,
+                "fallback_rate": 0.0,
                 "consecutive_failures": 0,
             }
         return detail

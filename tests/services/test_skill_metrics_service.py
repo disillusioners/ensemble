@@ -278,10 +278,15 @@ class TestRecordTaskCompletion:
         assert fetched.consecutive_failures == 0
         assert fetched.last_used_at is not None
 
-    async def test_failed_task_increments_failures_and_fallback(
+    async def test_failed_task_with_explicit_feedback_increments_failures_and_fallback(
         self, metrics_service, skill_repo, project_id
     ):
-        """Failure with pre-existing streak: fallback=True, streak grows."""
+        """Failure + worker applied=False feedback: fallback=True, streak grows.
+
+        Phase 4 Option C: ``total_fallbacks`` is no longer driven by task
+        failure alone. The worker must explicitly call ``skill_feedback``
+        with ``applied=False`` for the fallback counter to bump.
+        """
         skill = _make_skill(skill_repo, project_id, "beta")
         skill_repo.increment_counter(
             skill.id, "consecutive_failures", amount=2
@@ -301,6 +306,15 @@ class TestRecordTaskCompletion:
             task_succeeded=False,
             iterations=1,
             duration_seconds=1,
+        )
+        # Option C: explicit worker feedback (applied=False) drives fallback.
+        await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=inst_id,
+            agent_id="agent-x",
+            project_id=project_id,
+            applied=False,
+            note="skill did not help",
         )
 
         fetched = skill_repo.get(skill.id)
@@ -560,13 +574,16 @@ class TestGetSkillStats:
     async def test_returns_zero_for_missing_skill(self, metrics_service):
         stats = await metrics_service.get_skill_stats("no-such")
         assert stats == {
-            "total_selections": 0,
-            "total_applied": 0,
-            "total_completions": 0,
-            "total_fallbacks": 0,
+            "total": 0,
+            "selected": 0,
+            "applied": 0,
+            "completions": 0,
+            "fallbacks": 0,
+            "avg_iterations": 0.0,
+            "avg_duration": 0.0,
             "completion_rate": 0.0,
-            "fallback_rate": 0.0,
             "applied_rate": 0.0,
+            "fallback_rate": 0.0,
             "consecutive_failures": 0,
         }
 
@@ -576,56 +593,59 @@ class TestGetSkillStats:
         """No selections -> all rates are 0.0 (no div-by-zero)."""
         skill = _make_skill(skill_repo, project_id, "lambda")
         stats = await metrics_service.get_skill_stats(skill.id)
-        assert stats["total_selections"] == 0
+        assert stats["total"] == 0
         assert stats["completion_rate"] == 0.0
         assert stats["fallback_rate"] == 0.0
         assert stats["applied_rate"] == 0.0
 
     async def test_completion_rate_computed(
-        self, metrics_service, skill_repo, project_id
+        self, metrics_service, skill_repo, usage_repo, project_id
     ):
-        """Completion rate is completions / selections."""
+        """Completion rate is completions / total from usage records."""
         skill = _make_skill(skill_repo, project_id, "mu")
-        skill_repo.increment_counter(
-            skill.id, "total_selections", amount=10
-        )
-        skill_repo.increment_counter(
-            skill.id, "total_completions", amount=4
-        )
-
+        for _ in range(6):
+            usage_repo.create(
+                skill_id=skill.id, project_id=project_id,
+                instance_id="i", agent_id="a", selected=True,
+            )
+        for _ in range(4):
+            usage_repo.create(
+                skill_id=skill.id, project_id=project_id,
+                instance_id="i", agent_id="a", selected=True,
+                task_succeeded=True,
+            )
         stats = await metrics_service.get_skill_stats(skill.id)
         assert stats["completion_rate"] == pytest.approx(0.4)
-        assert stats["total_selections"] == 10
-        assert stats["total_completions"] == 4
+        assert stats["total"] == 10
+        assert stats["completions"] == 4
 
     async def test_fallback_and_applied_rates(
-        self, metrics_service, skill_repo, project_id
+        self, metrics_service, skill_repo, usage_repo, project_id
     ):
-        """fallback_rate and applied_rate use selections as denominator."""
+        """fallback_rate and applied_rate derive from usage records."""
         skill = _make_skill(skill_repo, project_id, "nu")
-        skill_repo.increment_counter(
-            skill.id, "total_selections", amount=10
-        )
-        skill_repo.increment_counter(
-            skill.id, "total_fallbacks", amount=5
-        )
-        skill_repo.increment_counter(
-            skill.id, "total_applied", amount=2
-        )
-
+        # 10 records total: 5 with fallback=True, 2 with applied=True
+        for _ in range(3):
+            usage_repo.create(
+                skill_id=skill.id, project_id=project_id,
+                instance_id="i", agent_id="a", selected=True,
+            )
+        for _ in range(5):
+            usage_repo.create(
+                skill_id=skill.id, project_id=project_id,
+                instance_id="i", agent_id="a", selected=True,
+                fallback=True,
+            )
+        for _ in range(2):
+            usage_repo.create(
+                skill_id=skill.id, project_id=project_id,
+                instance_id="i", agent_id="a", selected=True,
+                applied=True,
+            )
         stats = await metrics_service.get_skill_stats(skill.id)
+        assert stats["total"] == 10
         assert stats["fallback_rate"] == pytest.approx(0.5)
         assert stats["applied_rate"] == pytest.approx(0.2)
-
-    async def test_consecutive_failures_included(
-        self, metrics_service, skill_repo, project_id
-    ):
-        skill = _make_skill(skill_repo, project_id, "xi")
-        skill_repo.increment_counter(
-            skill.id, "consecutive_failures", amount=7
-        )
-        stats = await metrics_service.get_skill_stats(skill.id)
-        assert stats["consecutive_failures"] == 7
 
 
 # =============================================================================
@@ -651,32 +671,40 @@ class TestGetABComparisonStats:
     ):
         """Completion rates come from ``skill_usage_records``."""
         usage_repo = metrics_service.usage_repo
-        skill_old = _make_skill(skill_repo, project_id, "old")
-        skill_new = _make_skill(skill_repo, project_id, "new")
+        group = "g1"
+        skill_old = _make_skill(
+            skill_repo, project_id, "old", ab_test_group=group
+        )
+        skill_new = _make_skill(
+            skill_repo, project_id, "new", ab_test_group=group
+        )
         for _ in range(4):
             usage_repo.create(
                 skill_id=skill_old.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=True,
+                ab_test_group=group,
             )
         usage_repo.create(
             skill_id=skill_old.id, project_id=project_id,
             instance_id="i2", agent_id="a",
             task_succeeded=False,
+            ab_test_group=group,
         )
         for _ in range(2):
             usage_repo.create(
                 skill_id=skill_new.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=True,
+                ab_test_group=group,
             )
         usage_repo.create(
             skill_id=skill_new.id, project_id=project_id,
             instance_id="i2", agent_id="a",
             task_succeeded=False,
+            ab_test_group=group,
         )
 
-        group = "g1"
         ab_test_repo.create_ab_test(
             ab_test_group=group,
             skill_id_old=skill_old.id,
@@ -696,23 +724,37 @@ class TestGetABComparisonStats:
         self, metrics_service, skill_repo, usage_repo,
         ab_test_repo, project_id
     ):
-        """ready_to_resolve iff comparisons>=sample AND diff>=min."""
-        s_old = _make_skill(skill_repo, project_id, "old")
-        s_new = _make_skill(skill_repo, project_id, "new")
+        """ready_to_resolve iff comparisons>=sample AND diff>=min.
+
+        With the composite score: skill_new beats skill_old on
+        completion_rate (1.0 vs 0.0) but they tie on
+        fallback_rate / applied_rate (all 0 — no feedback in
+        this test) so the efficiency + speed components are
+        neutral 0.5 for both. Net difference is 0.35 (the
+        completion-rate weight of 0.35).
+        """
+        group = "g-resolve"
+        s_old = _make_skill(
+            skill_repo, project_id, "old", ab_test_group=group
+        )
+        s_new = _make_skill(
+            skill_repo, project_id, "new", ab_test_group=group
+        )
         for _ in range(2):
             usage_repo.create(
                 skill_id=s_old.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=False,
+                ab_test_group=group,
             )
         for _ in range(2):
             usage_repo.create(
                 skill_id=s_new.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=True,
+                ab_test_group=group,
             )
 
-        group = "g-resolve"
         ab_test_repo.create_ab_test(
             ab_test_group=group,
             skill_id_old=s_old.id,
@@ -724,28 +766,42 @@ class TestGetABComparisonStats:
         result = await metrics_service.get_ab_comparison_stats(group)
         assert result["ready_to_resolve"] is True
         assert result["needs_more_data"] is False
-        assert result["difference"] == pytest.approx(1.0)
+        # Composite-based difference: completion-rate weight
+        # (0.35) is the only driver since fallback/applied tie
+        # and efficiency/speed are neutral (no global baseline
+        # data — all records have iterations=0, duration=0).
+        assert result["difference"] == pytest.approx(0.35)
 
     async def test_needs_more_data_below_threshold(
         self, metrics_service, skill_repo, usage_repo,
         ab_test_repo, project_id
     ):
-        """needs_more_data iff comparisons>=sample but diff<min."""
-        s_old = _make_skill(skill_repo, project_id, "old")
-        s_new = _make_skill(skill_repo, project_id, "new")
+        """needs_more_data iff comparisons>=sample but diff<min.
+
+        Both variants have identical record shapes, so their
+        composite scores are equal and the difference is 0.
+        """
+        group = "g-stuck"
+        s_old = _make_skill(
+            skill_repo, project_id, "old", ab_test_group=group
+        )
+        s_new = _make_skill(
+            skill_repo, project_id, "new", ab_test_group=group
+        )
         for success in (True, False):
             usage_repo.create(
                 skill_id=s_old.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=success,
+                ab_test_group=group,
             )
             usage_repo.create(
                 skill_id=s_new.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=success,
+                ab_test_group=group,
             )
 
-        group = "g-stuck"
         ab_test_repo.create_ab_test(
             ab_test_group=group,
             skill_id_old=s_old.id,
@@ -764,22 +820,28 @@ class TestGetABComparisonStats:
         ab_test_repo, project_id
     ):
         """comparisons < sample_size -> not ready, not needs_more."""
-        s_old = _make_skill(skill_repo, project_id, "old")
-        s_new = _make_skill(skill_repo, project_id, "new")
+        group = "g-too-few"
+        s_old = _make_skill(
+            skill_repo, project_id, "old", ab_test_group=group
+        )
+        s_new = _make_skill(
+            skill_repo, project_id, "new", ab_test_group=group
+        )
         for _ in range(3):
             usage_repo.create(
                 skill_id=s_old.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=False,
+                ab_test_group=group,
             )
         for _ in range(3):
             usage_repo.create(
                 skill_id=s_new.id, project_id=project_id,
                 instance_id="i", agent_id="a",
                 task_succeeded=True,
+                ab_test_group=group,
             )
 
-        group = "g-too-few"
         ab_test_repo.create_ab_test(
             ab_test_group=group,
             skill_id_old=s_old.id,

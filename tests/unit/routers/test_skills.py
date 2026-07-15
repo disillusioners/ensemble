@@ -192,10 +192,13 @@ def skill_app_with_mock_services():
 
     metrics.get_skill_stats = AsyncMock(
         return_value={
-            "total_selections": 0,
-            "total_applied": 0,
-            "total_completions": 0,
-            "total_fallbacks": 0,
+            "total": 0,
+            "selected": 0,
+            "applied": 0,
+            "completions": 0,
+            "fallbacks": 0,
+            "avg_iterations": 0.0,
+            "avg_duration": 0.0,
             "completion_rate": 0.0,
             "fallback_rate": 0.0,
             "applied_rate": 0.0,
@@ -514,10 +517,13 @@ class TestMetrics:
         metrics = skill_app_with_mock_services["metrics"]
         metrics.get_skill_stats = AsyncMock(
             return_value={
-                "total_selections": 5,
-                "total_applied": 3,
-                "total_completions": 2,
-                "total_fallbacks": 1,
+                "total": 5,
+                "selected": 5,
+                "applied": 3,
+                "completions": 2,
+                "fallbacks": 1,
+                "avg_iterations": 0.0,
+                "avg_duration": 0.0,
                 "completion_rate": 0.4,
                 "fallback_rate": 0.2,
                 "applied_rate": 0.6,
@@ -528,8 +534,8 @@ class TestMetrics:
         assert response.status_code == 200
         body = response.json()
         # SkillMetrics shape — counters + derived rates directly.
-        assert body["total_selections"] == 5
-        assert body["total_completions"] == 2
+        assert body["total"] == 5
+        assert body["completions"] == 2
         assert body["completion_rate"] == 0.4
         metrics.get_skill_stats.assert_awaited_once()
 

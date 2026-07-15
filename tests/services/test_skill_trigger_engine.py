@@ -416,7 +416,10 @@ class TestEvaluateAll:
         assert "low_completion_rate" in entry["reason"]
         # Stats dict is present.
         assert "stats" in entry
-        assert entry["stats"]["total_selections"] == 10
+        # New stats shape (delegated to get_stats_filtered): uses
+        # usage-record aggregation. This test setup only bumps
+        # counters (no usage records), so total reflects 0.
+        assert entry["stats"]["total"] == 0
 
     async def test_stable_sorting(
         self, trigger_engine, project_id
