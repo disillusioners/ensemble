@@ -503,9 +503,18 @@ class SkillEvolutionConfig(BaseSettings):
     metric_scan_interval_hours: float = Field(default=24.0)
 
     # A/B testing
-    ab_sample_size: int = Field(default=10)
+    ab_sample_size: int = Field(default=20)  # Changed from 10 (D15 — silent upgrade)
     ab_min_difference: float = Field(default=0.15)  # Loser must be at least 15% worse
     max_extensions: int = Field(default=3)
+
+    # ── Multi-metric composite scoring (Milestone 2 Phase 3) ──
+    # Weights for the 5-metric composite A/B winner score.
+    # All weights should sum to 1.0.
+    ab_weight_completion: float = Field(default=0.35)
+    ab_weight_applied: float = Field(default=0.20)
+    ab_weight_efficiency: float = Field(default=0.20)
+    ab_weight_fallback: float = Field(default=0.15)
+    ab_weight_speed: float = Field(default=0.10)
 
     # Capture
     capture_min_iterations: int = Field(default=5)

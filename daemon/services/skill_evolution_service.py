@@ -185,7 +185,7 @@ class SkillEvolutionService:
         """
         if stats is None:
             stats = await asyncio.to_thread(
-                self._usage_repo.get_stats, skill_id
+                self._usage_repo.get_stats_filtered, skill_id, None
             )
 
         skill = await asyncio.to_thread(self._skill_repo.get, skill_id)
@@ -697,18 +697,21 @@ class SkillEvolutionService:
                 "extension_count": extension_count,
             }
 
-        # Helper: pick the winner by raw completion_rate.
+        # Helper: pick the winner by composite score.
+        # Tie-breaking favors the challenger (B/new) so the new variant
+        # wins ties — inverted from the old incumbent-wins-ties rule.
         def _pick_winner() -> tuple[Optional[str], Optional[str]]:
-            rate_a = float(stats.get("completion_rate_a", 0.0) or 0.0)
-            rate_b = float(stats.get("completion_rate_b", 0.0) or 0.0)
-            if rate_a >= rate_b:
+            score_a = float(stats.get("composite_score_a", 0.0) or 0.0)
+            score_b = float(stats.get("composite_score_b", 0.0) or 0.0)
+            # Tie-breaking: challenger (B/new) wins ties — changed from incumbent-wins-ties
+            if score_b >= score_a:
                 return (
-                    stats.get("skill_id_a"),
-                    stats.get("skill_id_b"),
+                    stats.get("skill_id_b"),  # winner = new variant
+                    stats.get("skill_id_a"),  # loser = old variant
                 )
             return (
-                stats.get("skill_id_b"),
-                stats.get("skill_id_a"),
+                stats.get("skill_id_a"),  # winner = old variant
+                stats.get("skill_id_b"),  # loser = new variant
             )
 
         # Path 2: threshold met.
@@ -1084,7 +1087,10 @@ class SkillEvolutionService:
         stats = stats or {}
         content = (getattr(skill, "content", "") or "")[:1500]
         completion_rate = stats.get("completion_rate", 0.0)
+        applied_rate = stats.get("applied_rate", 0.0)
         fallback_rate = stats.get("fallback_rate", 0.0)
+        avg_iterations = stats.get("avg_iterations", 0.0)
+        avg_duration = stats.get("avg_duration", 0.0)
         total = stats.get("total", 0)
         consecutive_failures = stats.get("consecutive_failures", 0)
 
@@ -1092,8 +1098,11 @@ class SkillEvolutionService:
         for rec in usage_records[:10]:
             ok = getattr(rec, "task_succeeded", None)
             note = getattr(rec, "feedback_note", "") or ""
+            iters = getattr(rec, "iterations", "?")
+            dur = getattr(rec, "duration_seconds", "?")
+            applied_rec = getattr(rec, "applied", None)
             recent_lines.append(
-                f"- succeeded={ok} feedback={note!r}"
+                f"- succeeded={ok} iterations={iters} duration={dur}s applied={applied_rec} feedback={note!r}"
             )
         recent_block = "\n".join(recent_lines) or "(no recent records)"
 
@@ -1105,7 +1114,10 @@ class SkillEvolutionService:
             f"Stats:\n"
             f"- total selections: {total}\n"
             f"- completion_rate: {completion_rate}\n"
+            f"- applied_rate: {applied_rate}\n"
             f"- fallback_rate: {fallback_rate}\n"
+            f"- avg_iterations: {avg_iterations}\n"
+            f"- avg_duration: {avg_duration}s\n"
             f"- consecutive_failures: {consecutive_failures}\n\n"
             f"Reason for this analysis: {reason or '(none)'}\n\n"
             f"Recent usage (up to 10 records):\n{recent_block}\n\n"

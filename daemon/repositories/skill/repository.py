@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 from math import log
 from typing import Any, Optional
 
-from sqlalchemy import func, text
+from sqlalchemy import case, func, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
@@ -1065,42 +1065,163 @@ class SkillUsageRepository:
             "fallback_rate": fallbacks / total,
         }
 
+    def get_stats_filtered(
+        self,
+        skill_id: str,
+        ab_test_group: str | None = None,
+    ) -> dict[str, Any]:
+        """Compute aggregated stats via SQL aggregation.
+
+        When ``ab_test_group`` is provided (not ``None``), filters to
+        ONLY records tagged with that group — enabling A/B test-period
+        isolation (W6).
+
+        C2: ALWAYS excludes superseded records (``WHERE superseded =
+        FALSE``). Superseded records are neutral outcomes from worker
+        reuse and must not pollute the completion-rate signal.
+
+        When ``ab_test_group`` is ``None``, includes ALL non-superseded
+        records (general stats). When ``ab_test_group`` is a specific
+        value, includes ONLY records tagged with that group.
+
+        Args:
+            skill_id: The skill whose stats to compute.
+            ab_test_group: Optional A/B test period isolation UUID.
+                ``None`` (default) returns stats across all
+                non-superseded records; a specific UUID returns
+                stats scoped to that A/B window only.
+
+        Returns:
+            Dict with keys: ``total``, ``selected``, ``applied``,
+            ``completions``, ``fallbacks``, ``avg_iterations``,
+            ``avg_duration``, ``completion_rate``, ``applied_rate``,
+            ``fallback_rate``. All counts and rates default to ``0``
+            / ``0.0`` when no rows match.
+        """
+        stmt = select(
+            func.count(),
+            func.sum(case((SkillUsageRecord.selected == True, 1), else_=0)),
+            func.sum(case((SkillUsageRecord.applied == True, 1), else_=0)),
+            func.sum(case((SkillUsageRecord.task_succeeded == True, 1), else_=0)),
+            func.sum(case((SkillUsageRecord.fallback == True, 1), else_=0)),
+            func.avg(SkillUsageRecord.iterations),
+            func.avg(SkillUsageRecord.duration_seconds),
+        ).where(
+            SkillUsageRecord.skill_id == skill_id,
+            SkillUsageRecord.superseded == False,  # noqa: E712
+        )
+        if ab_test_group is not None:
+            stmt = stmt.where(
+                SkillUsageRecord.ab_test_group == ab_test_group
+            )
+        with Session(self.engine) as session:
+            row = session.exec(stmt).first()
+        if row is None:
+            return {
+                "total": 0,
+                "selected": 0,
+                "applied": 0,
+                "completions": 0,
+                "fallbacks": 0,
+                "avg_iterations": 0.0,
+                "avg_duration": 0.0,
+                "completion_rate": 0.0,
+                "applied_rate": 0.0,
+                "fallback_rate": 0.0,
+            }
+        total, selected, applied, completions, fallbacks, avg_it, avg_dur = row
+        total = int(total or 0)
+        if total == 0:
+            return {
+                "total": 0,
+                "selected": 0,
+                "applied": 0,
+                "completions": 0,
+                "fallbacks": 0,
+                "avg_iterations": 0.0,
+                "avg_duration": 0.0,
+                "completion_rate": 0.0,
+                "applied_rate": 0.0,
+                "fallback_rate": 0.0,
+            }
+        selected = int(selected or 0)
+        applied = int(applied or 0)
+        completions = int(completions or 0)
+        fallbacks = int(fallbacks or 0)
+        return {
+            "total": total,
+            "selected": selected,
+            "applied": applied,
+            "completions": completions,
+            "fallbacks": fallbacks,
+            "avg_iterations": float(avg_it) if avg_it is not None else 0.0,
+            "avg_duration": float(avg_dur) if avg_dur is not None else 0.0,
+            "completion_rate": completions / total,
+            "applied_rate": applied / total,
+            "fallback_rate": fallbacks / total,
+        }
+
+    def get_global_averages(self) -> dict[str, float]:
+        """Compute global avg iterations + duration across all records.
+
+        Used as normalization baseline for composite score
+        efficiency/speed. Excludes superseded rows (C2).
+
+        Returns:
+            Dict with ``avg_iterations`` and ``avg_duration`` floats.
+            Both default to ``0.0`` when no non-superseded records
+            exist (e.g. fresh database before any usage events).
+        """
+        stmt = select(
+            func.avg(SkillUsageRecord.iterations),
+            func.avg(SkillUsageRecord.duration_seconds),
+        ).where(SkillUsageRecord.superseded == False)  # noqa: E712
+        with Session(self.engine) as session:
+            row = session.exec(stmt).one_or_none()
+        if row is None:
+            return {"avg_iterations": 0.0, "avg_duration": 0.0}
+        avg_it, avg_dur = row
+        return {
+            "avg_iterations": float(avg_it) if avg_it is not None else 0.0,
+            "avg_duration": float(avg_dur) if avg_dur is not None else 0.0,
+        }
+
     def update_feedback(
         self,
         record_id: str,
         applied: bool,
         note: str,
+        fallback: bool | None = None,
     ) -> SkillUsageRecord | None:
         """Stamp feedback onto an existing usage record.
 
         Args:
             record_id: The record to update.
-            applied: Whether the feedback was applied
-                (``True``) or recorded-but-not-applied
-                (``False``). ``None`` is intentionally NOT
-                accepted here — the post-mortem service always
-                commits to one outcome.
+            applied: Whether the feedback was applied (``True``)
+                or recorded-but-not-applied (``False``).
             note: Free-form note attached to the feedback.
+            fallback: When provided (not None), sets the fallback flag
+                based on worker judgment (Option C). None = no change.
 
         Returns:
-            The updated :class:`SkillUsageRecord`, or ``None``
-            if no row with that ID exists.
+            The updated SkillUsageRecord, or None if not found.
         """
         with Session(self.engine) as session:
             record = session.get(SkillUsageRecord, record_id)
             if record is None:
                 logger.warning(
-                    f"Skill usage record not found for feedback: "
-                    f"id={record_id}"
+                    f"Skill usage record not found for feedback: id={record_id}"
                 )
                 return None
             record.feedback_applied = applied
             record.feedback_note = note
+            if fallback is not None:
+                record.fallback = fallback
             session.commit()
             session.refresh(record)
             logger.debug(
                 f"Updated skill usage feedback: id={record_id}, "
-                f"applied={applied}"
+                f"applied={applied}, fallback={fallback}"
             )
             return record
 

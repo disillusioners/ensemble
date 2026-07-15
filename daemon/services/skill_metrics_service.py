@@ -60,12 +60,27 @@ A/B comparison
 --------------
 
 :meth:`get_ab_comparison_stats` reads persistent state from
-``skill_ab_tests`` and computes completion rates from
-``skill_usage_records``. A test is ``ready_to_resolve`` iff
-``comparisons >= ab_sample_size`` AND
-``abs(diff) >= ab_min_difference``; otherwise it's flagged
-``needs_more_data`` (the engine bumps ``extension_count``
-once max_extensions is exhausted — handled by Phase 5).
+``skill_ab_tests`` and computes per-variant stats from
+``skill_usage_records`` filtered by ``ab_test_group``
+(records are auto-tagged with the skill's
+``ab_test_group`` at insertion time). Two scores feed the
+resolution decision:
+
+* **completion_rate_a/b** — raw ``completions / total``
+  (kept for back-compat with downstream consumers).
+* **composite_score_a/b** — weighted 5-metric blend
+  (``ab_weight_completion`` / ``ab_weight_applied`` /
+  ``ab_weight_efficiency`` / ``ab_weight_fallback`` /
+  ``ab_weight_speed``) computed by
+  :meth:`_composite_score` against the global baselines
+  from :meth:`_get_global_baselines`.
+
+``difference`` is ``abs(composite_score_a - composite_score_b)``.
+A test is ``ready_to_resolve`` iff ``comparisons >=
+ab_sample_size`` AND ``abs(diff) >= ab_min_difference``;
+otherwise it's flagged ``needs_more_data`` (the engine bumps
+``extension_count`` once ``max_extensions`` is exhausted —
+handled by Phase 5).
 """
 
 from __future__ import annotations
@@ -659,6 +674,18 @@ class SkillMetricsService:
             )
             fallback = (current_failures > 0) and (not task_succeeded)
 
+            # Best-effort lookup of skill's ab_test_group for
+            # test-period tagging. When the skill is part of an
+            # active A/B test, the usage row inherits the group
+            # UUID so the A/B stats query can isolate it (W6).
+            # Soft-fail: a missing column on older schemas or a
+            # transient DB error must not block the metrics path.
+            _ab_group: Optional[str] = None
+            try:
+                _ab_group = getattr(skill, "ab_test_group", None)
+            except Exception:
+                _ab_group = None
+
             self.usage_repo.create(
                 skill_id=skill_id,
                 project_id=project_id,
@@ -670,6 +697,7 @@ class SkillMetricsService:
                 iterations=iterations,
                 duration_seconds=duration_seconds,
                 fallback=fallback,
+                ab_test_group=_ab_group,
             )
 
             # Denormalized counters — atomic via raw SQL.
@@ -774,11 +802,42 @@ class SkillMetricsService:
                     f"instance={instance_id}"
                 )
                 return None
-            self.usage_repo.update_feedback(
-                record_id=record.id,
-                applied=bool(applied_bool) if applied_bool is not None else False,
-                note=note or "",
-            )
+
+            # Option C (D20): Fallback is driven by worker's applied judgment.
+            # Capture previous fallback state to detect state transitions.
+            _prev_fallback = bool(getattr(record, "fallback", False))
+
+            if applied_bool is False:
+                # Worker explicitly said skill was NOT applied/helpful -> real fallback signal
+                self.usage_repo.update_feedback(
+                    record_id=record.id,
+                    applied=False,
+                    note=note or "",
+                    fallback=True,
+                )
+                # Issue 6: Increment total_fallbacks ONLY on state change (False->True)
+                if not _prev_fallback:
+                    self.skill_repo.increment_counter(skill_id, "total_fallbacks", 1)
+
+            elif applied_bool is True:
+                self.usage_repo.update_feedback(
+                    record_id=record.id,
+                    applied=True,
+                    note=note or "",
+                    fallback=False,
+                )
+                # Issue 6: Decrement total_fallbacks if this reverses a previous fallback
+                if _prev_fallback:
+                    self.skill_repo.increment_counter(skill_id, "total_fallbacks", -1)
+
+            else:
+                # applied is None — no worker judgment, leave fallback unchanged
+                self.usage_repo.update_feedback(
+                    record_id=record.id,
+                    applied=False,  # stored as False when None
+                    note=note or "",
+                )
+
             return record.id
 
         try:
@@ -907,13 +966,13 @@ class SkillMetricsService:
         """Compute A/B comparison stats for a test group.
 
         Reads persistent state from ``skill_ab_tests`` and the
-        completion-rate columns on ``skill_usage_records`` to
-        compute per-variant rates plus the resolution
-        decision:
+        per-record aggregation from ``skill_usage_records`` to
+        compute per-variant composite scores plus the
+        resolution decision:
 
         * ``ready_to_resolve`` — comparisons have hit
-          ``ab_sample_size`` AND the absolute difference has
-          hit ``ab_min_difference``.
+          ``ab_sample_size`` AND the absolute **composite**
+          difference has hit ``ab_min_difference``.
         * ``needs_more_data`` — comparisons have hit
           ``ab_sample_size`` but the difference is still
           below threshold; the engine will bump
@@ -926,7 +985,17 @@ class SkillMetricsService:
         count / total records per variant) — they reflect
         the actual observed outcomes, independent of the
         denormalized counters (which the metrics service
-        bumps asynchronously).
+        bumps asynchronously). The **composite score**
+        extends this with applied-rate, efficiency, fallback
+        rate and speed against a global baseline, so a
+        variant can win on speed/efficiency even when raw
+        completion rates tie.
+
+        The A/B-scoped stats use
+        :meth:`SkillUsageRepository.get_stats_filtered` with
+        the ``ab_test_group`` filter so superseded rows
+        (worker reuse) and pre/post-test rows are excluded
+        from the comparison.
 
         Args:
             ab_test_group: The shared UUID grouping old + new
@@ -935,7 +1004,9 @@ class SkillMetricsService:
         Returns:
             Dict with keys: ``skill_id_a`` (old), ``skill_id_b``
             (new), ``completion_rate_a``, ``completion_rate_b``,
-            ``difference``, ``comparisons``, ``extension_count``,
+            ``composite_score_a``, ``composite_score_b``,
+            ``difference`` (now composite-based),
+            ``comparisons``, ``extension_count``,
             ``ready_to_resolve``, ``needs_more_data``.
 
             Returns zeros + ``None`` for the skill IDs when no
@@ -958,6 +1029,8 @@ class SkillMetricsService:
                     "skill_id_b": None,
                     "completion_rate_a": 0.0,
                     "completion_rate_b": 0.0,
+                    "composite_score_a": 0.0,
+                    "composite_score_b": 0.0,
                     "difference": 0.0,
                     "comparisons": 0,
                     "extension_count": 0,
@@ -965,9 +1038,26 @@ class SkillMetricsService:
                     "needs_more_data": False,
                 }
 
-            rate_a = self._completion_rate_for(test.skill_id_old)
-            rate_b = self._completion_rate_for(test.skill_id_new)
-            difference = abs(rate_a - rate_b)
+            # A/B-scoped stats — only records tagged with this
+            # group (and not superseded) participate. The repo
+            # method already returns rates + averages so we
+            # don't need a separate ``_completion_rate_for``
+            # round-trip.
+            stats_a = self.usage_repo.get_stats_filtered(
+                test.skill_id_old, ab_test_group=ab_test_group
+            )
+            stats_b = self.usage_repo.get_stats_filtered(
+                test.skill_id_new, ab_test_group=ab_test_group
+            )
+
+            # Global baselines normalize efficiency + speed
+            # across all skills so the composite score is
+            # comparable run-over-run (a "fast" variant on a
+            # slow day is still relatively fast).
+            baselines = self._get_global_baselines()
+            score_a = self._composite_score(stats_a, baselines)
+            score_b = self._composite_score(stats_b, baselines)
+            difference = abs(score_a - score_b)
 
             comparisons = int(
                 getattr(test, "comparisons", 0) or 0
@@ -987,8 +1077,14 @@ class SkillMetricsService:
             return {
                 "skill_id_a": test.skill_id_old,
                 "skill_id_b": test.skill_id_new,
-                "completion_rate_a": rate_a,
-                "completion_rate_b": rate_b,
+                "completion_rate_a": float(
+                    stats_a.get("completion_rate", 0.0)
+                ),
+                "completion_rate_b": float(
+                    stats_b.get("completion_rate", 0.0)
+                ),
+                "composite_score_a": score_a,
+                "composite_score_b": score_b,
                 "difference": difference,
                 "comparisons": comparisons,
                 "extension_count": extension_count,
@@ -997,6 +1093,178 @@ class SkillMetricsService:
             }
 
         return await asyncio.to_thread(_compute)
+
+    def _get_global_baselines(self) -> dict[str, float]:
+        """Compute global average iterations + duration across all skills.
+
+        Used as the normalization baseline for the
+        :meth:`_composite_score` efficiency + speed components.
+        A variant whose ``avg_iterations`` is below the global
+        average gets a positive efficiency contribution
+        (``baseline / actual > 1.0`` capped at ``1.0``); a
+        variant above average gets a smaller contribution.
+
+        Soft-fail: any DB error is swallowed and the baselines
+        fall back to ``0.0`` so the A/B path still computes a
+        composite score (using the neutral ``0.5`` default for
+        efficiency/speed in :meth:`_composite_score`).
+
+        Returns:
+            Dict with ``avg_iterations`` and ``avg_duration``
+            floats. Both default to ``0.0`` when no
+            non-superseded records exist (fresh database).
+        """
+        try:
+            baselines = self.usage_repo.get_global_averages()
+            # Defensive: clamp to non-negative in case a stale
+            # schema yields negative averages (shouldn't happen,
+            # but the composite math assumes >= 0).
+            return {
+                "avg_iterations": max(
+                    0.0, float(baselines.get("avg_iterations", 0.0))
+                ),
+                "avg_duration": max(
+                    0.0, float(baselines.get("avg_duration", 0.0))
+                ),
+            }
+        except Exception as exc:
+            logger.warning(
+                f"SkillMetricsService: get_global_averages "
+                f"failed: {exc}"
+            )
+            return {"avg_iterations": 0.0, "avg_duration": 0.0}
+
+    def _composite_score(
+        self,
+        stats: dict[str, Any],
+        global_baselines: dict[str, float],
+    ) -> float:
+        """Compute the weighted 5-metric composite score.
+
+        The composite blends five signals into a single number
+        in ``[0.0, 1.0]`` so the A/B winner picker can compare
+        two variants on more than raw completion rate:
+
+        1. ``completion_rate`` — fraction of records that
+           succeeded.
+        2. ``applied_rate`` — fraction of records the agent
+           actually consumed (vs. just had injected).
+        3. ``efficiency_score`` — ``baseline_avg_iterations /
+           actual_avg_iterations`` capped to ``[0.0, 1.0]``;
+           ``0.5`` (neutral) when baseline or actual is ``<= 0``.
+        4. ``low_fallback_rate`` — ``1.0 - fallback_rate``
+           (higher is better).
+        5. ``speed_score`` — ``baseline_avg_duration /
+           actual_avg_duration`` capped to ``[0.0, 1.0]``;
+           ``0.5`` (neutral) when baseline or actual is ``<= 0``.
+
+        Weights come from :class:`SkillEvolutionConfig`
+        (``ab_weight_completion`` / ``ab_weight_applied`` /
+        ``ab_weight_efficiency`` / ``ab_weight_fallback`` /
+        ``ab_weight_speed``) and default to the values used
+        during the milestone config: ``0.35 / 0.20 / 0.20 /
+        0.15 / 0.10``. ``getattr`` with defaults keeps the
+        helper decoupled from the typed config — tests can
+        pass any object with the right attributes (or none).
+
+        Args:
+            stats: A single skill's stats dict as returned by
+                :meth:`SkillUsageRepository.get_stats_filtered`.
+                Must contain at least ``completion_rate``,
+                ``applied_rate``, ``fallback_rate``,
+                ``avg_iterations``, ``avg_duration``.
+            global_baselines: ``{"avg_iterations": float,
+                "avg_duration": float}`` as returned by
+                :meth:`_get_global_baselines`.
+
+        Returns:
+            Composite score in ``[0.0, 1.0]`` (weights are
+            non-negative and the components are clamped /
+            neutral-defaulted, so the result is bounded).
+            Returns ``0.0`` for an empty ``stats`` dict
+            (``total == 0``) — there's nothing to score.
+        """
+        # No data → no score. Returning 0.0 (rather than
+        # blindly summing neutral 0.5s) avoids rewarding
+        # untested variants when one side has records and the
+        # other doesn't.
+        total = int(stats.get("total", 0) or 0)
+        if total == 0:
+            return 0.0
+
+        # Weights — getattr with defaults so the helper
+        # tolerates a config stub missing the weight fields.
+        w_completion = float(
+            getattr(self.config, "ab_weight_completion", 0.35) or 0.35
+        )
+        w_applied = float(
+            getattr(self.config, "ab_weight_applied", 0.20) or 0.20
+        )
+        w_efficiency = float(
+            getattr(self.config, "ab_weight_efficiency", 0.20) or 0.20
+        )
+        w_fallback = float(
+            getattr(self.config, "ab_weight_fallback", 0.15) or 0.15
+        )
+        w_speed = float(
+            getattr(self.config, "ab_weight_speed", 0.10) or 0.10
+        )
+
+        # Component 1 — completion rate (already in [0, 1]).
+        completion_rate = float(
+            stats.get("completion_rate", 0.0) or 0.0
+        )
+        # Component 2 — applied rate (already in [0, 1]).
+        applied_rate = float(stats.get("applied_rate", 0.0) or 0.0)
+        # Component 4 — low fallback rate (1 - rate).
+        fallback_rate = float(
+            stats.get("fallback_rate", 0.0) or 0.0
+        )
+        low_fallback_rate = max(0.0, min(1.0, 1.0 - fallback_rate))
+
+        # Component 3 — efficiency vs global baseline. A
+        # variant using FEWER iterations than average scores
+        # > 1.0 raw (capped at 1.0). When either side is
+        # non-positive, we can't normalize → use 0.5 (neutral)
+        # so the variant isn't unfairly penalized or rewarded.
+        baseline_avg_it = float(
+            global_baselines.get("avg_iterations", 0.0) or 0.0
+        )
+        actual_avg_it = float(
+            stats.get("avg_iterations", 0.0) or 0.0
+        )
+        if baseline_avg_it <= 0.0 or actual_avg_it <= 0.0:
+            efficiency_score = 0.5
+        else:
+            efficiency_score = max(
+                0.0, min(1.0, baseline_avg_it / actual_avg_it)
+            )
+
+        # Component 5 — speed vs global baseline. Same shape
+        # as efficiency but on duration.
+        baseline_avg_dur = float(
+            global_baselines.get("avg_duration", 0.0) or 0.0
+        )
+        actual_avg_dur = float(
+            stats.get("avg_duration", 0.0) or 0.0
+        )
+        if baseline_avg_dur <= 0.0 or actual_avg_dur <= 0.0:
+            speed_score = 0.5
+        else:
+            speed_score = max(
+                0.0, min(1.0, baseline_avg_dur / actual_avg_dur)
+            )
+
+        score = (
+            completion_rate * w_completion
+            + applied_rate * w_applied
+            + efficiency_score * w_efficiency
+            + low_fallback_rate * w_fallback
+            + speed_score * w_speed
+        )
+        # Final clamp — a misconfigured config (e.g. weights
+        # summing to 1.1) could push the score above 1.0.
+        return max(0.0, min(1.0, score))
 
     def _completion_rate_for(self, skill_id: str) -> float:
         """Compute completion rate from ``skill_usage_records``.
