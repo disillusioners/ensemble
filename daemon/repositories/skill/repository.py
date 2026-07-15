@@ -1215,6 +1215,14 @@ class SkillUsageRepository:
                 return None
             record.feedback_applied = applied
             record.feedback_note = note
+            # Mirror feedback_applied=True onto the ``applied`` column so
+            # ``get_stats_filtered`` (which aggregates ``applied``) computes
+            # ``applied_rate`` correctly. The record is created with
+            # ``applied=False`` at insertion time (we don't know yet if the
+            # skill was actually used); worker feedback is the confirmation
+            # signal. Monotonic — never reset to False on later updates.
+            if applied:
+                record.applied = True
             if fallback is not None:
                 record.fallback = fallback
             session.commit()

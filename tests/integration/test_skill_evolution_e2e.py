@@ -315,7 +315,7 @@ def _set_injected_metrics(metrics_service, instance_id, skill_ids):
     metrics_service._instance_repo.get = MagicMock(return_value=inst)
 
 
-def _seed_usage(repos, skill_id, instance_id, agent_id, applied=False, succeeded=True):
+def _seed_usage(repos, skill_id, instance_id, agent_id, applied=False, succeeded=True, ab_test_group=None):
     """Insert a usage record directly via the repo."""
     return repos.usage.create(
         skill_id=skill_id,
@@ -329,6 +329,7 @@ def _seed_usage(repos, skill_id, instance_id, agent_id, applied=False, succeeded
         iterations=10,
         duration_seconds=120,
         fallback=False,
+        ab_test_group=ab_test_group,
     )
 
 
@@ -598,20 +599,22 @@ class TestSkillABTesting:
         repos.ab_test.create_ab_test(group, old_skill["id"], new_skill["id"])
 
         # Seed many usage records for the new variant — make it win clearly.
-        # completion_rate >= sample_size (10) means 100% wins.
+        # completion_rate >= sample_size (20) means 100% wins.
+        # Records must be tagged with ``ab_test_group=group`` so
+        # ``get_stats_filtered`` includes them in A/B-scoped stats.
         for i in range(15):
             _seed_usage(
                 repos, new_skill["id"], f"inst-new-{i}", "developer",
-                applied=True, succeeded=True,
+                applied=True, succeeded=True, ab_test_group=group,
             )
         # Old variant: no completions, 5 records.
         for i in range(5):
             _seed_usage(
                 repos, old_skill["id"], f"inst-old-{i}", "developer",
-                applied=True, succeeded=False,
+                applied=True, succeeded=False, ab_test_group=group,
             )
-        # Comparisons must be >= ab_sample_size (10) to even enter resolution.
-        for _ in range(10):
+        # Comparisons must be >= ab_sample_size (20) to even enter resolution.
+        for _ in range(20):
             repos.ab_test.increment_comparison(group)
 
         result = await evolution_service.check_ab_test_resolution(group)
@@ -653,7 +656,7 @@ class TestSkillABTesting:
                         applied=True, succeeded=True)
             _seed_usage(repos, old_skill["id"], f"ext-old-{i}", "developer",
                         applied=True, succeeded=True)
-        for _ in range(10):
+        for _ in range(20):
             repos.ab_test.increment_comparison(group)
 
         result = await evolution_service.check_ab_test_resolution(group)

@@ -16,7 +16,7 @@ services:
 * **Phase 5** — ``SkillEvolutionService.evolve_skill`` (FIX path)
   creates a new-generation row, records a ``SkillLineage`` edge,
   and writes a ``SkillABTest`` row pairing old + new variants.
-* **Phase 5** — After ``ab_sample_size`` (10) comparisons,
+* **Phase 5** — After ``ab_sample_size`` (20) comparisons,
   ``SkillEvolutionService.check_ab_test_resolution`` resolves the
   A/B test: deactivates the loser, activates the winner, clears
   the ``ab_test_group``, and stamps ``resolved_at`` on the row.
@@ -82,7 +82,7 @@ PROJECT_ID: str = "test-project-flow-b"
 PARALLEL_QUEUE_ID: str = "q-parallel-flow-b"
 
 # A/B test thresholds mirror SkillEvolutionConfig defaults.
-AB_SAMPLE_SIZE: int = 10
+AB_SAMPLE_SIZE: int = 20
 AB_MIN_DIFFERENCE: float = 0.15
 
 
@@ -119,7 +119,7 @@ def repos(engine):
 
 @pytest.fixture
 def config():
-    """Default SkillEvolutionConfig — ab_sample_size=10 (matches repo default)."""
+    """Default SkillEvolutionConfig — ab_sample_size=20 (matches repo default)."""
     return SkillEvolutionConfig()
 
 
