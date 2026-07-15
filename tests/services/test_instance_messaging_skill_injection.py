@@ -107,22 +107,44 @@ def _make_injection_service(
     injection_text: str | None = "[System Inject] skill context",
     skill_ids: list[str] | None = None,
     raise_on_inject: Exception | None = None,
+    explicit_text: str | None = "[System Inject] explicit skill",
+    explicit_skill_ids: list[str] | None = None,
+    raise_on_explicit: Exception | None = None,
 ) -> MagicMock:
     """Build a :class:`SkillInjectionService` mock.
 
-    ``inject_skills`` returns ``(injection_text, skill_ids)`` by
-    default. Pass ``injection_text=None`` to simulate "no skills
-    matched" (the empty-result early-out). Pass ``raise_on_inject``
-    to simulate a transient search/DB error.
+    The hook has two skill-injection entry points:
+
+    * :meth:`SkillInjectionService.inject_skills` — the
+      auto-load search path used by the first-attempt block.
+      Returns ``(injection_text, skill_ids)`` by default.
+      Pass ``injection_text=None`` to simulate "no skills
+      matched" (the empty-result early-out). Pass
+      ``raise_on_inject`` to simulate a transient search/DB
+      error.
+    * :meth:`SkillInjectionService.inject_explicit_skill` —
+      the REPLACE path used by the ``<meta>`` tag block.
+      Returns ``(explicit_text, explicit_skill_ids)`` by
+      default. Same optional ``raise_on_explicit`` knob.
+
+    Both paths share the :meth:`track_injection` metric hook.
     """
     if skill_ids is None:
         skill_ids = ["skill-A", "skill-B"]
+    if explicit_skill_ids is None:
+        explicit_skill_ids = ["skill-explicit-X"]
     svc = MagicMock()
     if raise_on_inject is not None:
         svc.inject_skills = AsyncMock(side_effect=raise_on_inject)
     else:
         svc.inject_skills = AsyncMock(
             return_value=(injection_text, skill_ids),
+        )
+    if raise_on_explicit is not None:
+        svc.inject_explicit_skill = AsyncMock(side_effect=raise_on_explicit)
+    else:
+        svc.inject_explicit_skill = AsyncMock(
+            return_value=(explicit_text, explicit_skill_ids),
         )
     svc.track_injection = MagicMock()
     return svc
@@ -193,6 +215,7 @@ async def _invoke_hook(
     message_source: str | None = None,
     agent_meta: SimpleNamespace | None,
     injection_service: object = None,
+    message: str = "hello",
 ) -> tuple[dict | None, MagicMock]:
     """Drive ``_process_message_with_tracking`` once with the
     given gate flags and return ``(captured_graph_input, manager)``.
@@ -203,6 +226,11 @@ async def _invoke_hook(
     ``graph.astream`` was never invoked (e.g. when the function
     aborts early — not expected for the gate cases, but
     defensively typed).
+
+    ``message`` defaults to ``"hello"`` for the existing gate
+    tests; override to drive a payload that includes a
+    ``<meta>`` directive so the explicit REPLACE branch is
+    reached (Fix 1/2 tests).
     """
     captured: dict = {}
     graph = _make_capturing_graph(captured)
@@ -219,7 +247,7 @@ async def _invoke_hook(
         svc = _make_service(manager)
         await svc._process_message_with_tracking(
             instance_id="inst-1",
-            message="hello",
+            message=message,
             message_id="msg-1",
             is_retry=is_retry,
             message_source=message_source,
@@ -618,3 +646,106 @@ class TestSkillInjectionGates:
         # ``track_injection`` is gated by ``if injection_text:`` —
         # the empty result path must not call it.
         manager._skill_injection_service.track_injection.assert_not_called()
+
+    # ── <meta> tag REPLACE gate (Fix 1 + 2, line ~2072) ──────
+
+    async def test_meta_tag_skipped_on_completion_report(self) -> None:
+        """CRITICAL Fix 1: ``<meta>`` REPLACE blocked on completion reports.
+
+        A child agent's completion report may incidentally contain
+        a ``<meta>`` directive (e.g. the child ran ``load_skill``
+        during its work and the report echoes it). Triggering the
+        REPLACE side-effect here would hijack the parent
+        instance's skill state — finalizing the parent's existing
+        skills as SUPERSEDED and injecting the child's skill into
+        the parent's graph. The guard ``if is_completion_report
+        or is_retry:`` (line 2073) short-circuits the entire
+        REPLACE block.
+
+        Verification:
+
+        * ``inject_explicit_skill`` is NEVER awaited — the
+          REPLACE path is fully gated off.
+        * No skill ``HumanMessage`` is prepended (the
+          first-attempt ``inject_skills`` block also gates on
+          the same completion-report flag).
+        * The user message is the cleaned string (the
+          ``<meta>`` tag was stripped by ``parse_meta_tag`` at
+          the top of the method, regardless of the gate).
+        """
+        injection_service = _make_injection_service()
+        message = 'task complete <meta>{"load_skill": "child-skill"}</meta>'
+
+        captured_input, manager = await _invoke_hook(
+            is_retry=False,
+            message_source="internal_report:child-7",
+            agent_meta=SimpleNamespace(agent_id="leader", skill_injection=True),
+            injection_service=injection_service,
+            message=message,
+        )
+
+        assert captured_input is not None
+        msgs = captured_input["messages"]
+
+        # No skill message at all — both the auto-load and
+        # explicit REPLACE paths are short-circuited.
+        assert len(msgs) == 1
+        assert msgs[0].id == "msg-1"
+
+        # The <meta> tag was stripped by parse_meta_tag at the
+        # top of _process_message_with_tracking — the user sees
+        # the cleaned text regardless of the gate.
+        assert msgs[0].content == "task complete"
+        assert "<meta>" not in msgs[0].content
+        assert "child-skill" not in msgs[0].content
+
+        # CRITICAL: the REPLACE path must not be invoked.
+        manager._skill_injection_service.inject_explicit_skill.assert_not_awaited()
+        # The auto-load path is also gated off on completion
+        # reports — guard against a regression that re-enables it.
+        manager._skill_injection_service.inject_skills.assert_not_awaited()
+        manager._skill_injection_service.track_injection.assert_not_called()
+
+    async def test_meta_tag_skipped_on_retry(self) -> None:
+        """CRITICAL Fix 2: ``<meta>`` REPLACE blocked on retry.
+
+        On retry, the original message is replayed with the same
+        ``<meta>`` directive. Re-running the REPLACE side-effect
+        would create a duplicate SUPERSEDED record for every
+        prior-injected skill on every retry attempt, skewing the
+        completion-rate aggregation and forcing the orphan sweep
+        to clean up the noise. The guard ``if is_completion_report
+        or is_retry:`` (line 2073) short-circuits the REPLACE
+        block before ``inject_explicit_skill`` is awaited.
+
+        Verification:
+
+        * ``inject_explicit_skill`` is NEVER awaited.
+        * No skill ``HumanMessage`` is prepended (retry also
+          gates the first-attempt ``inject_skills`` block — the
+          LangGraph ``add_messages`` reducer re-attaches the
+          original skill message from the checkpoint).
+        * The user message is the cleaned text.
+        """
+        injection_service = _make_injection_service()
+        message = 'retry <meta>{"load_skill": "skill-a"}</meta>'
+
+        captured_input, manager = await _invoke_hook(
+            is_retry=True,
+            message_source="telegram:user-1",
+            agent_meta=SimpleNamespace(agent_id="leader", skill_injection=True),
+            injection_service=injection_service,
+            message=message,
+        )
+
+        assert captured_input is not None
+        msgs = captured_input["messages"]
+
+        # Only the user message — no skill message prepended.
+        assert len(msgs) == 1
+        assert msgs[0].id == "msg-1"
+        assert msgs[0].content == "retry"
+
+        # CRITICAL: the REPLACE path must not be invoked on retry.
+        manager._skill_injection_service.inject_explicit_skill.assert_not_awaited()
+        manager._skill_injection_service.inject_skills.assert_not_awaited()

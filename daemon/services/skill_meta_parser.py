@@ -24,6 +24,10 @@ _META_TAG_RE = re.compile(r"<meta>(.*?)</meta>", re.DOTALL | re.IGNORECASE)
 # smuggle arbitrary fields into the control plane.
 _ALLOWED_META_KEYS: frozenset[str] = frozenset({"load_skill"})
 
+# Cap on raw <meta> content size to prevent memory exhaustion from
+# pathological payloads (e.g. a 10MB JSON blob).
+_MAX_META_BYTES = 64 * 1024  # 64KB
+
 
 def parse_meta_tag(message: str) -> tuple[str, dict | None]:
     """Strip all <meta> tags from ``message`` and return the parsed payload.
@@ -45,6 +49,13 @@ def parse_meta_tag(message: str) -> tuple[str, dict | None]:
     for index, match in enumerate(matches, start=1):
         raw_content = match.group(1)
         tag_label = f"#{index}/{len(matches)}"
+
+        # Size guard: prevent memory exhaustion from huge payloads
+        if len(raw_content.encode("utf-8")) > _MAX_META_BYTES:
+            logger.warning(
+                f"<meta> tag {tag_label} exceeds {_MAX_META_BYTES} bytes, skipping"
+            )
+            continue
 
         try:
             data = json.loads(raw_content)

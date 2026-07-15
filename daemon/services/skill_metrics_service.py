@@ -427,6 +427,29 @@ class SkillMetricsService:
                 f"{exc}"
             )
 
+        # Also clear ``explicitly_replaced_ids`` — set during the
+        # finalize-on-replace flow to blocklist a skill ID from
+        # the next auto_load injection. Without this clear, the
+        # blocklist persists for the lifetime of the instance
+        # (permanently disabling auto_load for the replaced
+        # skill), which is wrong: the task has completed, so
+        # the blocklist should reset too. Best-effort, same
+        # shape as the ``last_injected_skill_ids`` clear above —
+        # the key may not exist on instances that never went
+        # through a finalize-on-replace, which is fine.
+        try:
+            await asyncio.to_thread(
+                self.instance_repo.delete_metadata,
+                instance_id,
+                "explicitly_replaced_ids",
+            )
+        except Exception as exc:
+            logger.warning(
+                f"SkillMetricsService: failed to clear "
+                f"explicitly_replaced_ids metadata for instance "
+                f"{instance_id}: {exc}"
+            )
+
         # CAPTURED-flow eligibility check. Runs AFTER metrics
         # recording so even if capture fails (or is skipped)
         # the denormalized counters are already up to date.
@@ -978,10 +1001,10 @@ class SkillMetricsService:
             checking existence.
         """
         sample_size = int(
-            getattr(self.config, "ab_sample_size", 10) or 10
+            getattr(self.config, "ab_sample_size", 10)
         )
         min_diff = float(
-            getattr(self.config, "ab_min_difference", 0.15) or 0.15
+            getattr(self.config, "ab_min_difference", 0.15)
         )
 
         def _compute() -> dict[str, Any]:
@@ -1157,20 +1180,24 @@ class SkillMetricsService:
 
         # Weights — getattr with defaults so the helper
         # tolerates a config stub missing the weight fields.
+        # No ``or default`` fallback: ``0.0`` is a valid operator
+        # override to disable a metric, and ``or`` would silently
+        # swap it back to the default. ``float()`` then handles
+        # int-valued configs (e.g. ``0``) the same way.
         w_completion = float(
-            getattr(self.config, "ab_weight_completion", 0.35) or 0.35
+            getattr(self.config, "ab_weight_completion", 0.35)
         )
         w_applied = float(
-            getattr(self.config, "ab_weight_applied", 0.20) or 0.20
+            getattr(self.config, "ab_weight_applied", 0.20)
         )
         w_efficiency = float(
-            getattr(self.config, "ab_weight_efficiency", 0.20) or 0.20
+            getattr(self.config, "ab_weight_efficiency", 0.20)
         )
         w_fallback = float(
-            getattr(self.config, "ab_weight_fallback", 0.15) or 0.15
+            getattr(self.config, "ab_weight_fallback", 0.15)
         )
         w_speed = float(
-            getattr(self.config, "ab_weight_speed", 0.10) or 0.10
+            getattr(self.config, "ab_weight_speed", 0.10)
         )
 
         # Component 1 — completion rate (already in [0, 1]).
@@ -1279,8 +1306,16 @@ class SkillMetricsService:
         ``duration_seconds=0``, ``fallback=False``,
         ``superseded=True``) — the skill was selected (it was
         about to be dropped), but no outcome was ever
-        observed. ``total_selections`` on the skill row is
-        bumped alongside the insert.
+        observed.
+
+        ``SUPERSEDED`` records are **neutral markers** and do NOT
+        bump any denormalized counter on the skill row. The
+        trigger engine reads ``total_selections`` without filtering
+        on ``superseded``, so inflating it here would trigger
+        spurious evolution evaluations. The usage record row
+        itself (with ``superseded=True``) is sufficient for the
+        audit trail; the completion-rate aggregation already
+        excludes superseded rows.
 
         Soft-fail: any per-skill DB error is logged and
         swallowed so one bad skill doesn't block the others.
@@ -1326,9 +1361,11 @@ class SkillMetricsService:
                         fallback=False,
                         superseded=True,
                     )
-                    self.skill_repo.increment_counter(
-                        skill_id, "total_selections", amount=1
-                    )
+                    # SUPERSEDED rows are neutral markers — no
+                    # counter bump. Inflating ``total_selections``
+                    # would trigger false-positive evolution
+                    # evaluations (the trigger engine does not
+                    # filter on ``superseded``).
                     inserted += 1
                 except Exception as exc:
                     logger.warning(

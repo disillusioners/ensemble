@@ -11,7 +11,8 @@ Coverage:
 
 * :class:`TestFinalizeSupersededSkills` — verifies
   :meth:`SkillMetricsService.finalize_superseded_skills` writes the
-  ``SUPERSEDED`` usage record, bumps ``total_selections``, short-circuits on
+  ``SUPERSEDED`` usage record, does NOT bump ``total_selections``
+  (superseded rows are neutral markers), short-circuits on
   empty input, handles multiple dropped skills in one call, and soft-fails
   per skill when the DB raises.
 * :class:`TestMetaTagFinalizeIntegration` — pure-logic checks for the
@@ -81,8 +82,11 @@ class TestFinalizeSupersededSkills:
 
         The record must carry ``superseded=True``, ``selected=True``, and all
         outcome flags zeroed (``applied``, ``task_succeeded``, ``fallback``,
-        ``iterations``, ``duration_seconds``). ``total_selections`` on the
-        skill row is bumped alongside the insert.
+        ``iterations``, ``duration_seconds``). SUPERSEDED rows are neutral
+        markers — they MUST NOT bump any denormalized counter on the skill
+        row (the trigger engine reads ``total_selections`` without filtering
+        on ``superseded``, so inflating it would cause false-positive
+        evolution triggers).
         """
         service, usage_repo, skill_repo = _build_service()
 
@@ -107,9 +111,8 @@ class TestFinalizeSupersededSkills:
             fallback=False,
             superseded=True,
         )
-        skill_repo.increment_counter.assert_called_once_with(
-            "skill_a", "total_selections", amount=1
-        )
+        # SUPERSEDED rows must NOT bump any counter.
+        skill_repo.increment_counter.assert_not_called()
 
     def test_same_skill_no_finalize(self) -> None:
         """Empty ``dropped_skill_ids`` short-circuits to ``0`` with no DB calls.
@@ -132,11 +135,13 @@ class TestFinalizeSupersededSkills:
         skill_repo.increment_counter.assert_not_called()
 
     def test_multiple_dropped_all_finalized(self) -> None:
-        """All three dropped skills get a SUPERSEDED record and counter bump.
+        """All three dropped skills get a SUPERSEDED record, but no counter bumps.
 
         Order is preserved: the loop processes ``a`` first, then ``b``,
-        then ``c``. Each one gets exactly one usage insert and exactly
-        one ``total_selections`` counter bump.
+        then ``c``. Each one gets exactly one usage insert. SUPERSEDED
+        rows MUST NOT bump ``total_selections`` (or any other counter) —
+        the completion-rate aggregation already filters on
+        ``superseded=False``, so the counter stays neutral.
         """
         service, usage_repo, skill_repo = _build_service()
 
@@ -160,12 +165,8 @@ class TestFinalizeSupersededSkills:
         for c in usage_repo.create.call_args_list:
             assert c.kwargs["superseded"] is True
 
-        assert skill_repo.increment_counter.call_count == 3
-        assert skill_repo.increment_counter.call_args_list == [
-            call("a", "total_selections", amount=1),
-            call("b", "total_selections", amount=1),
-            call("c", "total_selections", amount=1),
-        ]
+        # SUPERSEDED rows are neutral markers — no counter bumps at all.
+        skill_repo.increment_counter.assert_not_called()
 
     def test_individual_failure_soft_fail(self) -> None:
         """One bad skill does not block the others; returns only successes.
@@ -173,8 +174,8 @@ class TestFinalizeSupersededSkills:
         ``usage_repo.create`` is programmed to raise on the FIRST call
         (``a``). The per-skill ``try/except`` swallows the error, so ``b``
         and ``c`` proceed normally. The return value reflects ONLY the
-        successful inserts (``2``), and ``increment_counter`` is never
-        called for ``a`` because the insert failed before the bump.
+        successful inserts (``2``). SUPERSEDED rows never bump any
+        counter, so ``increment_counter`` is not called at all.
         """
         service, usage_repo, skill_repo = _build_service()
         usage_repo.create.side_effect = [Exception("boom"), None, None]
@@ -192,13 +193,8 @@ class TestFinalizeSupersededSkills:
         # value per call.
         assert usage_repo.create.call_count == 3
 
-        # Counter bumps only happened for the two successful inserts.
-        assert skill_repo.increment_counter.call_count == 2
-        incremented_ids = [
-            c.args[0] for c in skill_repo.increment_counter.call_args_list
-        ]
-        assert incremented_ids == ["b", "c"]
-        assert "a" not in incremented_ids
+        # No counter bumps at all — SUPERSEDED rows are neutral markers.
+        skill_repo.increment_counter.assert_not_called()
 
 
 # =============================================================================

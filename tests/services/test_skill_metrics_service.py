@@ -374,13 +374,23 @@ class TestRecordTaskCompletion:
     async def test_clears_injected_skills_metadata(
         self, metrics_service, skill_repo, project_id
     ):
-        """``last_injected_skill_ids`` is cleared after recording."""
+        """``last_injected_skill_ids`` and ``explicitly_replaced_ids`` are cleared.
+
+        Both metadata keys are wiped from the instance after the
+        completion hook returns — ``last_injected_skill_ids`` so
+        the next task starts with a fresh injection set, and
+        ``explicitly_replaced_ids`` so the finalize-on-replace
+        blocklist doesn't permanently disable auto_load for
+        the replaced skill(s). Other keys (``other_key``) are
+        preserved untouched.
+        """
         skill = _make_skill(skill_repo, project_id, "delta")
         inst_id = "inst-clear"
         fake_inst = FakeInstance(
             inst_id,
             metadata={
                 "last_injected_skill_ids": [skill.id],
+                "explicitly_replaced_ids": [skill.id],
                 "other_key": "preserved",
             },
         )
@@ -398,6 +408,9 @@ class TestRecordTaskCompletion:
         assert "last_injected_skill_ids" not in (
             fake_inst.instance_metadata
         )
+        assert "explicitly_replaced_ids" not in (
+            fake_inst.instance_metadata
+        )
         assert fake_inst.instance_metadata.get("other_key") == "preserved"
         cleared_keys = [
             key
@@ -406,6 +419,7 @@ class TestRecordTaskCompletion:
             )
         ]
         assert "last_injected_skill_ids" in cleared_keys
+        assert "explicitly_replaced_ids" in cleared_keys
 
     async def test_per_skill_isolation(
         self, metrics_service, skill_repo, project_id
