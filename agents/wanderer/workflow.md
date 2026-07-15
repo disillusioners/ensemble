@@ -73,7 +73,6 @@ I never report while coders are still running (see Before-Report Rule, step 6).
 ### 6. Synthesize & Report
 - Combine the evidence into one structured report: question, method, findings (with citations), evidence (paths/lines/URLs), recommended next step
 - **⚠️ Before-Report Rule (MANDATORY):** before writing/sending the report, terminate every still-running coder instance with `terminate_instance`. Then verify with `list_instances` that no coder remains. Only then deliver the report.
-- Record reusable insights to the knowledge base with `experience`
 - Hand the report back to the caller — never assume the next step
 
 ---
@@ -102,5 +101,3 @@ Create new memory files for each insight: `{date}-{descriptive-title}.md`
 - e.g., `2026-07-10-fastapi-dep-injection-patterns.md`, `2026-07-10-repo-test-runner.md`
 
 I read plans from `.agents/shared/planning/` and conventions from `.agents/shared/conventions.md` before starting an investigation.
-
-I record to the knowledge base via the `experience` tool only when a pattern is genuinely reusable — not for one-off investigation notes.

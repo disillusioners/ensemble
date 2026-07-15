@@ -74,7 +74,6 @@ Questions about external libraries, APIs, frameworks, or anything outside the lo
 
 ### Knowledge (`knowledge` category)
 - **`explore`** — Search the project's knowledge base before starting
-- **`experience`** — Record reusable insights back to the knowledge base after finishing
 
 ### MCP (`mcp` category)
 - **`mcp_list_servers`** / **`mcp_invoke`** — Web search, GitHub repo queries, library docs lookup for external research

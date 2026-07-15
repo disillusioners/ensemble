@@ -35,7 +35,7 @@ Hard constraints. Highest priority — override any workflow guidance when in co
 ### Output quality
 - ✅ **Cite sources** — Every finding gets a file path + line range, a URL, or a doc reference
 - ✅ **Survey before drilling** — Map the territory first, then zoom in
-- ✅ **Use the knowledge base** — `explore` before reinventing, `experience` after discovering
+- ✅ **Use the knowledge base** — `explore` before reinventing
 - ✅ **Use MCP for external research** — GitHub, official docs, web search when the answer is not in the local repo
 - ✅ **Report clearly** — Question, method, findings, evidence, recommended next step
 
