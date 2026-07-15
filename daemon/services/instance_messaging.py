@@ -27,6 +27,7 @@ from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
 from .messaging_types import AsyncMessageResult
 from .project_normalizer import normalize_project_id
+from .skill_meta_parser import extract_load_skill, parse_meta_tag
 from .skill_metrics_service import INJECTED_SKILLS_METADATA_KEY
 
 if TYPE_CHECKING:
@@ -1578,7 +1579,23 @@ class InstanceMessagingService:
             OperationCancelledError: If cancellation is requested.
         """
         from ..manager import MessageResult
-        
+
+        # ── <meta> tag parsing (Phase 1: explicit skill loading) ────────
+        # Strip ``<meta>...</meta>`` control blocks from the raw message
+        # BEFORE any other processing. The agent must never see the
+        # control data — only the cleaned text plus the parsed
+        # ``load_skill`` directive (which is handled by the C3 block
+        # further down). ``_meta_skill`` stays in scope for that block.
+        _meta_skill: str | None = None
+        if message and isinstance(message, str):
+            message, _meta = parse_meta_tag(message)
+            _meta_skill = extract_load_skill(_meta)
+            if _meta_skill is not None:
+                logger.info(
+                    f"[MetaTag] Extracted load_skill='{_meta_skill}' "
+                    f"for instance {instance_id[:8]}..."
+                )
+
         # Get instance graph (will lazy-load from DB if needed)
         # Note: get_instance() now handles MCP preload internally
         graph = await self._manager.get_instance(instance_id)
@@ -2019,6 +2036,166 @@ class InstanceMessagingService:
                         f"Skill injection failed for {instance_id[:8]}...: {e}"
                     )
                     _skill_injection_msg = None
+
+        # ── C3 INVARIANT: Explicit <meta> injection runs FIRST (REPLACE
+        # ── semantics). Auto_load DEDUP-MERGE runs SECOND (additive onto
+        # ── the explicit set). This block is the explicit path — the
+        # ── the auto_load side lives in ``instance_lifecycle.py`` and
+        # ── honors the REPLACE by skipping any ``explicitly_replaced_ids``.
+        #
+        # Runs on ANY message that carried a ``<meta load_skill="...">``
+        # tag in its raw body — NOT gated on ``is_retry`` (an explicit
+        # user instruction should be honored at any time) and NOT gated
+        # on ``is_completion_report`` (a ``<meta>`` inside an internal
+        # report would be unusual but is acceptable — the resolver
+        # returns ``(None, [])`` early if the skill isn't found).
+        #
+        # Key difference from the first-attempt block above: REPLACE
+        # ``last_injected_skill_ids`` instead of dedup-merge. ``<meta>``
+        # is the authoritative skill directive for this message and any
+        # previously-injected skills that are NOT in the new set get a
+        # ``SUPERSEDED`` usage record via ``finalize_superseded_skills``
+        # so they stop skewing the completion-rate aggregation.
+        if _meta_skill is not None:
+            try:
+                # Resolve the instance row once for both project_id and
+                # agent_id below. Sync DB read — wrap in ``asyncio.to_thread``
+                # (same deadlock-avoidance pattern used elsewhere in
+                # this method).
+                _meta_instance = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
+                _meta_project_id: str | None = None
+                _meta_agent_id: str = (
+                    getattr(_meta_instance, "agent_id", "") or ""
+                    if _meta_instance is not None
+                    else ""
+                )
+                if _meta_instance is not None and _meta_instance.instance_metadata:
+                    _meta_project_id = (
+                        _meta_instance.instance_metadata.get("project_id")
+                    )
+
+                injection_service = getattr(
+                    self._manager, "_skill_injection_service", None
+                )
+                # Pre-declare so the persist block below can read
+                # ``_meta_skill_ids`` even when the injection service
+                # isn't wired (older manager / pre-Phase 4 test
+                # fixtures).
+                _meta_skill_ids: list[str] = []
+                _meta_injection_text: str | None = None
+                if injection_service is not None:
+                    (
+                        _meta_injection_text,
+                        _meta_skill_ids,
+                    ) = await injection_service.inject_explicit_skill(
+                        skill_name=_meta_skill,
+                        project_id=_meta_project_id,
+                        instance_id=instance_id,
+                        message_id=message_id,
+                        agent_id=_meta_agent_id,
+                    )
+                    # Override the skill injection HumanMessage — the
+                    # explicit directive is more authoritative than any
+                    # default the first-attempt block set. The variable
+                    # name matches the one the three graph_input sites
+                    # below already consume.
+                    if _meta_injection_text:
+                        _skill_injection_msg = HumanMessage(
+                            content=_meta_injection_text,
+                            id=str(uuid.uuid4()),
+                        )
+                    # Phase 4 metrics attribution. Same API the
+                    # first-attempt block uses.
+                    injection_service.track_injection(
+                        instance_id, message_id, _meta_skill_ids
+                    )
+
+                # C2 FIX — Finalize-on-Replace. If we have new IDs to
+                # stamp, compute the dropped set (anything previously
+                # tracked that isn't in the new set), stamp SUPERSEDED
+                # usage rows for them, then REPLACE
+                # ``last_injected_skill_ids`` (not merge). Skipping
+                # metadata persistence when the new set is empty keeps
+                # the existing checkpoint untouched — a ``<meta>`` tag
+                # that failed to resolve (skill not found) shouldn't
+                # erase the previously-injected set.
+                if _meta_skill_ids:
+                    def _finalize_and_replace(
+                        _iid: str = instance_id,
+                        _new_ids: list[str] = list(_meta_skill_ids),
+                        _pid: str | None = _meta_project_id,
+                        _aid: str = _meta_agent_id,
+                    ) -> None:
+                        inst = self._manager._instance_repository.get(_iid)
+                        existing: list[str] = []
+                        if inst is not None and inst.instance_metadata:
+                            raw = inst.instance_metadata.get(
+                                INJECTED_SKILLS_METADATA_KEY
+                            ) or []
+                            if isinstance(raw, list):
+                                existing = [str(x) for x in raw if x]
+                        new_set = {_new_id for _new_id in _new_ids if _new_id}
+                        dropped = [
+                            s for s in existing if s not in new_set
+                        ]
+                        # Stamp SUPERSEDED for dropped skills BEFORE the
+                        # REPLACE so the audit trail captures which IDs
+                        # were orphaned by this directive.
+                        if dropped:
+                            metrics_service = getattr(
+                                self._manager, "_skill_metrics_service", None
+                            )
+                            if metrics_service is not None:
+                                try:
+                                    metrics_service.finalize_superseded_skills(
+                                        instance_id=_iid,
+                                        agent_id=_aid,
+                                        project_id=_pid or "",
+                                        dropped_skill_ids=dropped,
+                                    )
+                                except Exception as final_exc:
+                                    logger.warning(
+                                        f"Failed to finalize superseded "
+                                        f"skills for {_iid[:8]}...: "
+                                        f"{final_exc}"
+                                    )
+                        # REPLACE — explicit <meta> sets the authoritative
+                        # current skill set. No dedup-merge here; that
+                        # additive write happens later in
+                        # ``instance_lifecycle.append_auto_load_skills``.
+                        self._manager._instance_repository.set_metadata(
+                            _iid,
+                            INJECTED_SKILLS_METADATA_KEY,
+                            list(new_set),
+                        )
+                        # Persist the dropped IDs as
+                        # ``explicitly_replaced_ids`` so the auto_load
+                        # dedup-merge in ``instance_lifecycle.py`` skips
+                        # them across checkpoint restores (Issue 2).
+                        if dropped:
+                            self._manager._instance_repository.set_metadata(
+                                _iid,
+                                "explicitly_replaced_ids",
+                                dropped,
+                            )
+                        logger.info(
+                            f"[MetaTag] REPLACE skill set for "
+                            f"{_iid[:8]}...: old={len(existing)}, "
+                            f"new={len(new_set)}, dropped={len(dropped)}"
+                        )
+
+                    await asyncio.to_thread(_finalize_and_replace)
+            except Exception as e:
+                # Soft-fail — never block message processing on a
+                # meta-tag parse / lookup / persist error. The cleaned
+                # ``message`` text the top-of-function parse produced
+                # still flows through normally.
+                logger.warning(
+                    f"Meta-tag skill loading failed for "
+                    f"{instance_id[:8]}...: {e}"
+                )
 
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:

@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -1019,3 +1019,170 @@ class SkillMetricsService:
             return 0.0
         completions = int(stats.get("completions", 0) or 0)
         return completions / total
+
+    # --------------------------------------------------------
+    # Superseded records (worker reuse / orphan sweep)
+    # --------------------------------------------------------
+
+    def finalize_superseded_skills(
+        self,
+        instance_id: str,
+        agent_id: str,
+        project_id: str,
+        dropped_skill_ids: list[str],
+    ) -> int:
+        """Record ``SUPERSEDED`` usage rows for dropped skills.
+
+        Called when a worker is reused with a different skill via
+        a ``<meta>`` tag — the old skill's scope is REPLACED,
+        not appended. Before the replacement takes effect, each
+        dropped skill gets a usage record stamped with
+        ``superseded=True`` so the standard completion-rate
+        aggregation excludes them but the audit trail is
+        preserved.
+
+        For each dropped skill ID the method writes a
+        :class:`SkillUsageRecord` with ``selected=True`` and all
+        other signal flags zeroed (``applied=False``,
+        ``task_succeeded=False``, ``iterations=0``,
+        ``duration_seconds=0``, ``fallback=False``,
+        ``superseded=True``) — the skill was selected (it was
+        about to be dropped), but no outcome was ever
+        observed. ``total_selections`` on the skill row is
+        bumped alongside the insert.
+
+        Soft-fail: any per-skill DB error is logged and
+        swallowed so one bad skill doesn't block the others.
+        The whole method is also wrapped in a try/except —
+        metrics code must never raise out of the caller.
+
+        Args:
+            instance_id: The instance whose worker was rebound.
+            agent_id: The agent that owned the worker.
+            project_id: Project scope (``None`` is coerced to
+                ``""`` to satisfy the NOT NULL constraint on
+                ``SkillUsageRecord.project_id``).
+            dropped_skill_ids: Skill IDs being replaced. Empty
+                list short-circuits to ``0``.
+
+        Returns:
+            Number of ``SUPERSEDED`` usage records actually
+            inserted. ``0`` when ``dropped_skill_ids`` is empty
+            or every insert failed.
+        """
+        if not dropped_skill_ids:
+            return 0
+
+        # SkillUsageRecord.project_id is NOT NULL; coerce
+        # ``None`` to ``""`` so the insert doesn't blow up the
+        # metrics path on older callers.
+        usage_project_id = project_id or ""
+
+        try:
+            inserted = 0
+            for skill_id in dropped_skill_ids:
+                try:
+                    self.usage_repo.create(
+                        skill_id=skill_id,
+                        project_id=usage_project_id,
+                        instance_id=instance_id,
+                        agent_id=agent_id,
+                        selected=True,
+                        applied=False,
+                        task_succeeded=False,
+                        iterations=0,
+                        duration_seconds=0,
+                        fallback=False,
+                        superseded=True,
+                    )
+                    self.skill_repo.increment_counter(
+                        skill_id, "total_selections", amount=1
+                    )
+                    inserted += 1
+                except Exception as exc:
+                    logger.warning(
+                        f"[SkillMetrics] Failed to finalize "
+                        f"SUPERSEDED record for skill "
+                        f"{skill_id[:8]}...: {exc}"
+                    )
+
+            if inserted > 0:
+                logger.info(
+                    f"[SkillMetrics] Finalized {inserted} "
+                    f"SUPERSEDED record(s) for instance "
+                    f"{instance_id[:8]}..."
+                )
+
+            return inserted
+        except Exception as exc:
+            logger.warning(
+                f"[SkillMetrics] finalize_superseded_skills "
+                f"outer error: {exc}"
+            )
+            return 0
+
+    async def sweep_orphaned_skill_records(
+        self, max_age_hours: int = 24
+    ) -> int:
+        """Sweep stale pending usage records that escaped finalization.
+
+        Periodic sweep run from the scheduler: find
+        :class:`SkillUsageRecord` rows that still look "pending"
+        (no feedback, no completion, no iterations, not already
+        superseded) and are older than ``max_age_hours``, then
+        flip them to ``superseded=True`` so they stop skewing
+        the completion-rate aggregation.
+
+        The threshold is a UTC ISO-8601 string. ``created_at``
+        is stored as ISO-8601 text, so lexicographic comparison
+        is correct as long as both sides use a UTC
+        tz-aware ISO format (which ``datetime.now(timezone.utc)
+        .isoformat()`` produces). Bound via SQLModel/SQLAlchemy
+        parameters — never interpolated into the SQL string.
+
+        Soft-fail: any DB error is logged and swallowed so a
+        broken sweep never blocks the rest of the metrics
+        pipeline.
+
+        Args:
+            max_age_hours: Age in hours beyond which a pending
+                record is considered orphaned (default ``24``).
+
+        Returns:
+            Number of records flipped to ``superseded=True``.
+            ``0`` when the sweep ran cleanly and found nothing
+            to clean up, OR when the sweep itself errored.
+        """
+        try:
+            threshold = datetime.now(timezone.utc) - timedelta(
+                hours=max_age_hours
+            )
+            threshold_iso = threshold.isoformat()
+
+            def _do_sweep() -> int:
+                stale = self.usage_repo.find_stale_pending(
+                    threshold_iso
+                )
+                swept = 0
+                for record in stale:
+                    updated = self.usage_repo.update_superseded(
+                        record.id
+                    )
+                    if updated is not None:
+                        swept += 1
+                return swept
+
+            swept = await asyncio.to_thread(_do_sweep)
+
+            if swept > 0:
+                logger.info(
+                    f"[SkillMetrics] Orphan sweep: finalized "
+                    f"{swept} stale record(s)"
+                )
+
+            return swept
+        except Exception as exc:
+            logger.warning(
+                f"[SkillMetrics] Orphan sweep failed: {exc}"
+            )
+            return 0

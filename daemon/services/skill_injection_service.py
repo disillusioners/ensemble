@@ -138,6 +138,15 @@ class SkillInjectionService:
             Expected method: ``get_ab_variants(ab_test_group)
             -> list[Skill]`` (synchronous; wrapped in
             ``asyncio.to_thread``).
+        _clone_service: Duck-typed
+            :class:`~daemon.services.skill_clone_service.SkillCloneService`
+            or ``None``. Wired in AFTER construction via
+            :meth:`set_clone_service` to avoid the manager-init
+            chicken-and-egg (clone service needs the embedding
+            service, which itself depends on Phase 2 wiring that
+            the injection service also needs). When ``None``,
+            explicit-skill injection falls back to a direct
+            repository lookup.
         _injected_skills: In-memory
             ``{instance_id: {message_id: [skill_ids]}}`` cache
             for Phase 4 metrics attribution. Not persisted — a
@@ -165,10 +174,39 @@ class SkillInjectionService:
         self._config = config
         self._ab_test_repo = ab_test_repo
         self._skill_repo = skill_repo
+        # Injected post-construction via ``set_clone_service`` —
+        # the manager builds the clone service after this service
+        # (it depends on the embedding service that the injection
+        # service itself doesn't need at init time). Keeping this
+        # ``None`` here means explicit-skill injection falls back
+        # to a direct ``get_by_name`` lookup when the clone path
+        # hasn't been wired yet (e.g. older test fixtures).
+        self._clone_service: Any = None
         # Per-instance, per-message — the Phase 4 metrics service
         # queries this to attribute a feedback signal back to
         # the skills that were offered for the task.
         self._injected_skills: dict[str, dict[str, list[str]]] = {}
+
+    # --------------------------------------------------------
+    # Construction-time setters (avoid init-order chicken-and-egg)
+    # --------------------------------------------------------
+
+    def set_clone_service(self, clone_service: Any) -> None:
+        """Inject the ``SkillCloneService`` after construction (W1 fix).
+
+        Called by :class:`EnsembleManager` once the clone service
+        exists. Avoids the chicken-and-egg where the injection
+        service would need the clone service at construction
+        time but the clone service is built later in the manager
+        init sequence (it depends on the embedding service which
+        is itself constructed between the two).
+
+        Args:
+            clone_service: :class:`SkillCloneService` instance.
+                Typically ``self._skill_clone_service`` on the
+                manager.
+        """
+        self._clone_service = clone_service
 
     # --------------------------------------------------------
     # Public API
@@ -259,6 +297,126 @@ class SkillInjectionService:
             if item.get("skill") is not None
             and getattr(item["skill"], "id", None) is not None
         ]
+
+        return (injection_text, skill_ids)
+
+    async def inject_explicit_skill(
+        self,
+        skill_name: str,
+        project_id: str | None,
+        instance_id: str,
+        message_id: str,
+        agent_id: str,
+    ) -> tuple[str | None, list[str]]:
+        """Bypass search; directly inject a named skill via clone-on-miss.
+
+        Resolves the skill through :class:`SkillCloneService`
+        (preferred — clone-on-miss from the bank) or a direct
+        repository lookup as a fallback. Then runs the same A/B
+        routing + formatting pipeline as :meth:`inject_skills`,
+        but skips the BM25→embedding→LLM search and forces a
+        score of ``1.0`` (the caller asked for this skill by
+        name, so relevance is presumed).
+
+        Used when an agent (or the manager) needs to surface a
+        specific skill without paying the search cost — e.g.
+        forcing ``dynamic-skill`` at the start of a session, or
+        auto-loading a skill the prompt composition pipeline
+        flagged as required for this agent+project pair.
+
+        Args:
+            skill_name: The skill name to inject (lookup key in
+                both the ``skills`` and ``skill_bank`` tables).
+            project_id: Project scope. ``None`` or empty
+                short-circuits to ``(None, [])`` — explicit
+                injection always needs a project scope.
+            instance_id: The receiving instance. Used as part
+                of the deterministic A/B hash.
+            message_id: Queue message ID. Paired with
+                ``instance_id`` for A/B determinism.
+            agent_id: Owning agent — used by
+                :meth:`SkillCloneService.clone_on_miss_sync` to
+                disambiguate the bank-template lookup (multiple
+                agents can own templates with the same name).
+
+        Returns:
+            Tuple ``(injection_text, injected_skill_ids)``.
+            ``(None, [])`` when ``skill_name``/``project_id`` is
+            empty or the skill cannot be resolved from the
+            project scope or skill bank.
+        """
+        # Early-exit — explicit injection always needs a
+        # project scope and a name to look up. Keeping the
+        # rest of the method focused on the happy path.
+        if not project_id or not skill_name:
+            return (None, [])
+
+        # Stage 1 — resolve the skill. Prefer the clone
+        # service so a miss in the project scope gets
+        # materialized from the bank automatically; fall back
+        # to a direct lookup when the clone service hasn't
+        # been wired (older manager init paths, test fixtures,
+        # or pre-Phase 4 deployments).
+        try:
+            if self._clone_service is not None:
+                skill = await asyncio.to_thread(
+                    self._clone_service.clone_on_miss_sync,
+                    skill_name, agent_id, project_id,
+                )
+            else:
+                skill = await asyncio.to_thread(
+                    self._skill_repo.get_by_name,
+                    project_id, skill_name, 0,
+                )
+        except Exception as e:
+            if self._clone_service is not None:
+                logger.warning(
+                    f"[SkillInjection] clone-on-miss failed for "
+                    f"'{skill_name}' (agent={agent_id}): {e}"
+                )
+            else:
+                logger.warning(
+                    f"[SkillInjection] skill lookup failed for "
+                    f"'{skill_name}': {e}"
+                )
+            return (None, [])
+
+        if skill is None:
+            logger.warning(
+                f"[SkillInjection] Skill '{skill_name}' not "
+                f"found in project {project_id[:8]}... or "
+                f"skill bank"
+            )
+            return (None, [])
+
+        # Stage 2 — A/B variant routing. Same pattern as
+        # ``inject_skills``: deterministic per-(instance,
+        # message) pick with best-effort fallback to the
+        # original skill. A ``selected`` that resolves back to
+        # ``skill`` (no A/B active, or DB error) is fine — the
+        # formatter and ID collection both handle that.
+        selected = await self._select_ab_variant(
+            skill, instance_id, message_id
+        )
+
+        # Stage 3 — format. Explicit injection forces a 1.0
+        # score since relevance is presumed (caller asked by
+        # name); ``low_match`` is empty because we did not run
+        # the search pipeline.
+        injection_text = self._format_injection(
+            {
+                "injected": [{"skill": selected, "score": 1.0}],
+                "low_match": [],
+            }
+        )
+
+        # ``getattr`` on ``id`` so a mock skill without an id
+        # attribute (test fixture) doesn't crash the injector —
+        # matches the defensive pattern in ``inject_skills``.
+        selected_id = getattr(selected, "id", None)
+        skill_ids: list[str] = (
+            [str(selected_id)] if selected_id is not None else []
+        )
 
         return (injection_text, skill_ids)
 

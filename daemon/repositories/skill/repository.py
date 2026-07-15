@@ -1231,6 +1231,66 @@ class SkillUsageRepository:
             )
             return session.exec(stmt).first() is not None
 
+    def find_stale_pending(self, threshold_iso: str) -> list[SkillUsageRecord]:
+        """Return pending usage records older than the threshold.
+
+        "Pending" = rows that look like they escaped finalization:
+        ``task_succeeded=False``, ``applied=False``, ``iterations=0``,
+        ``superseded=False``. The ``created_at`` string is ISO-8601 so
+        lexicographic comparison against ``threshold_iso`` is correct
+        provided both use UTC tz-aware ISO format.
+
+        Args:
+            threshold_iso: ISO-8601 cutoff string. Rows with
+                ``created_at < threshold_iso`` are returned.
+
+        Returns:
+            List of :class:`SkillUsageRecord` rows matching the
+            stale-pending filter. Empty when none match.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(SkillUsageRecord)
+                .where(SkillUsageRecord.created_at < threshold_iso)
+                .where(SkillUsageRecord.task_succeeded == False)  # noqa: E712
+                .where(SkillUsageRecord.applied == False)  # noqa: E712
+                .where(SkillUsageRecord.iterations == 0)
+                .where(SkillUsageRecord.superseded == False)  # noqa: E712
+            )
+            return list(session.exec(stmt))
+
+    def update_superseded(self, record_id: str) -> SkillUsageRecord | None:
+        """Mark a usage record as superseded.
+
+        Used by the orphan sweep to finalize stale pending rows
+        that escaped the normal completion-hook flow. The
+        ``superseded=True`` flag excludes the row from
+        completion-rate aggregation but keeps it queryable for
+        audit.
+
+        Args:
+            record_id: The usage record's UUID4 ID.
+
+        Returns:
+            The updated :class:`SkillUsageRecord`, or ``None`` if
+            no row with that ID exists.
+        """
+        with Session(self.engine) as session:
+            record = session.get(SkillUsageRecord, record_id)
+            if record is None:
+                logger.warning(
+                    f"Skill usage record not found for superseded "
+                    f"update: id={record_id}"
+                )
+                return None
+            record.superseded = True
+            session.commit()
+            session.refresh(record)
+            logger.debug(
+                f"Marked skill usage record superseded: id={record_id}"
+            )
+            return record
+
 
 # ============================================================
 # SkillTriggerRepository

@@ -1055,6 +1055,18 @@ class InstanceManager:
                 skill_bank_repo=self._skill_bank_repo,
                 embedding_service=self._skill_embedding_service,
             )
+            # Phase 4 (W1 fix): wire the clone service back into the
+            # injection service so ``inject_explicit_skill`` can use
+            # the clone-on-miss path. This must come AFTER
+            # ``_skill_clone_service`` is assigned (it's the dependency)
+            # but is otherwise order-free — the injection service
+            # uses the clone service lazily on the next inject call,
+            # not at this point. Guarded with ``hasattr`` so test
+            # managers that skip Phase 3 init don't crash here.
+            if getattr(self, "_skill_injection_service", None) is not None:
+                self._skill_injection_service.set_clone_service(
+                    self._skill_clone_service
+                )
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
@@ -1698,6 +1710,19 @@ class InstanceManager:
                 self._run_skill_metric_scan,
             )
 
+            # Belt-and-suspenders: sweep stale pending usage records that
+            # escaped finalization (counter crash, kill -9 mid-record, etc.).
+            # Mirrors the ``skill_metric_scan`` registration above; uses the
+            # same interval knob so operators have one dial to tune. The
+            # wrapper ``_run_skill_orphan_sweep`` lives next to
+            # ``_run_skill_metric_scan`` so all skill-evolution maintenance
+            # callbacks sit together.
+            self._maintenance_service.register(
+                "skill_orphan_sweep",
+                self.config.skill_evolution.metric_scan_interval_hours,
+                self._run_skill_orphan_sweep,
+            )
+
         await self._maintenance_service.start()
 
         # ── Skill Bank seeding (Phase 3: versioned templates) ──────────
@@ -2021,6 +2046,54 @@ class InstanceManager:
         ``_graph_tasks``.
         """
         self._last_context_usage.pop(instance_id, None)
+
+    async def _run_skill_orphan_sweep(self) -> None:
+        """Periodic sweep of stale ``selected=True`` usage records.
+
+        Belt-and-suspenders maintenance job for the Phase 4 metrics
+        pipeline. The completion-time counter bumps in
+        :meth:`SkillMetricsService.record_task_completion` can leave
+        "pending" usage rows behind when a daemon is killed mid-write
+        or the async task crashes before finalization. This sweep
+        finds any :class:`SkillUsageRecord` rows older than 24h that
+        are still in the pending state (``selected=True``,
+        ``feedback_applied=False``, ``superseded=False``, no
+        iterations) and flips them to ``superseded=True`` so they
+        stop skewing the completion-rate aggregation.
+
+        The actual sweep logic lives on
+        :meth:`SkillMetricsService.sweep_orphaned_skill_records`; this
+        wrapper only guards the ``_skill_metrics_service is None``
+        edge case (partial-init during early boot or in tests that
+        don't wire the metrics service).
+
+        Registered with :class:`MaintenanceService` so the
+        ``_is_idle`` gate keeps it from running while there's
+        in-flight work. ``max_age_hours=24`` matches the orphan
+        threshold used by the metrics service internally — anything
+        older than 24h and still pending is, by definition, an
+        artifact.
+        """
+        svc = getattr(self, "_skill_metrics_service", None)
+        if svc is None:
+            logger.debug(
+                "_run_skill_orphan_sweep: no skill_metrics_service "
+                "wired — skipping"
+            )
+            return
+        try:
+            swept = await svc.sweep_orphaned_skill_records()
+            if swept > 0:
+                logger.info(
+                    f"_run_skill_orphan_sweep: finalized {swept} "
+                    f"orphan usage record(s)"
+                )
+        except Exception as exc:
+            # Soft-fail: a broken sweep must never break the
+            # maintenance loop. The next cycle retries cleanly.
+            logger.warning(
+                f"_run_skill_orphan_sweep failed: {exc}"
+            )
 
     async def _run_skill_metric_scan(self) -> None:
         """Periodic Phase 4 trigger scan — enqueues analysis jobs.
