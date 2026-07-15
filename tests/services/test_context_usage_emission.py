@@ -192,7 +192,14 @@ class TestEmitContextUsageDedup:
 
 
 class TestEmitContextUsageForInstance:
-    """The public wrapper used by the SSE connect handler."""
+    """The public wrapper used by the SSE connect handler.
+
+    Reads raw LangChain ``BaseMessage`` objects directly from the checkpointer
+    state so token counts on initial page load match what the SSE update path
+    computes (no lossy ``serialize_message`` round-trip that would skip
+    ``ToolMessage`` entries, strip thinking content, or rewrite tool-call arg
+    keys).
+    """
 
     def _make_service(self):
         from daemon.services.instance_messaging import InstanceMessagingService
@@ -205,23 +212,37 @@ class TestEmitContextUsageForInstance:
         service._manager.config = MagicMock()
         service._manager.config.llm.model = "gpt-4o"
         service._manager.config.compaction = MagicMock()
+        service._manager.get_instance = AsyncMock(return_value=object())
+        # Adapter with a raw_saver that returns the checkpoint state.
+        raw_saver = MagicMock()
+        adapter = MagicMock()
+        adapter.raw_saver = raw_saver
+        service._manager._checkpointer = adapter
+        service._raw_saver = raw_saver
         service._get_system_prompt_tokens = AsyncMock(return_value=0)
         return service
 
     @pytest.mark.asyncio
     async def test_loads_messages_and_emits(self):
+        """Reads raw checkpoint messages via saver.aget and emits context usage."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
         service = self._make_service()
 
-        # get_messages returns serialized dicts (as it does in production).
-        async def fake_get_messages(_id):
-            return [
-                {"role": "user", "content": "hello", "id": "m1"},
-                {"role": "assistant", "content": "hi there", "id": "m2"},
-            ]
+        # Raw state from the checkpointer (matches aget() return shape).
+        raw_messages = [
+            HumanMessage(content="hello", id="m1"),
+            AIMessage(content="hi there", id="m2"),
+        ]
+        state = {"channel_values": {"messages": raw_messages}}
+        service._raw_saver.aget = AsyncMock(return_value=state)
 
-        service.get_messages = fake_get_messages
         await service.emit_context_usage_for_instance("inst-1")
 
+        # saver.aget was called with the thread_id config the SSE path uses.
+        service._raw_saver.aget.assert_awaited_once_with(
+            {"configurable": {"thread_id": "inst-1"}}
+        )
         # Should have produced exactly one broadcast with non-zero tokens.
         service._manager._live_hub.stream_context_usage.assert_awaited_once()
         kwargs = service._manager._live_hub.stream_context_usage.await_args.kwargs
@@ -231,13 +252,102 @@ class TestEmitContextUsageForInstance:
         assert kwargs["context_window"] > 0
 
     @pytest.mark.asyncio
-    async def test_silent_on_get_messages_failure(self):
+    async def test_includes_tool_messages_in_token_count(self):
+        """ToolMessages from the checkpoint state must contribute to tokens.
+
+        Regression: previously the path went through ``get_messages`` which
+        strips ``ToolMessage`` entries (``daemon/persistence.py``), causing
+        the initial-load token count to be artificially low compared to the
+        SSE update path.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
         service = self._make_service()
 
-        async def boom(_id):
+        raw_messages = [
+            HumanMessage(content="run ls", id="m1"),
+            AIMessage(
+                content="",
+                id="m2",
+                tool_calls=[{"id": "tc-1", "name": "ls", "args": {"path": "/"}}],
+            ),
+            ToolMessage(
+                content="file1.txt\nfile2.txt",
+                tool_call_id="tc-1",
+                name="ls",
+                id="m3",
+            ),
+        ]
+        service._raw_saver.aget = AsyncMock(
+            return_value={"channel_values": {"messages": raw_messages}}
+        )
+
+        await service.emit_context_usage_for_instance("inst-1")
+        service._manager._live_hub.stream_context_usage.assert_awaited_once()
+
+        tokens = service._manager._live_hub.stream_context_usage.await_args.kwargs["tokens"]
+        assert tokens > 0
+
+        # Compare against the same message list without the ToolMessage —
+        # tokens must be strictly higher when ToolMessage is included.
+        service._manager._live_hub.stream_context_usage.reset_mock()
+        service._manager._last_context_usage.pop("inst-1", None)
+        service._raw_saver.aget = AsyncMock(
+            return_value={
+                "channel_values": {"messages": raw_messages[:2]},  # no ToolMessage
+            }
+        )
+        await service.emit_context_usage_for_instance("inst-1")
+        tokens_without_tool = service._manager._live_hub.stream_context_usage.await_args.kwargs["tokens"]
+        assert tokens > tokens_without_tool, (
+            f"ToolMessage should add tokens: with={tokens}, without={tokens_without_tool}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_silent_on_checkpointer_failure(self):
+        """A checkpointer failure must not raise — it must be swallowed silently."""
+        service = self._make_service()
+
+        async def boom(_config):
             raise RuntimeError("checkpoint store down")
 
-        service.get_messages = boom
+        service._raw_saver.aget = boom
         # Must not raise.
         await service.emit_context_usage_for_instance("inst-1")
         service._manager._live_hub.stream_context_usage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_silent_on_instance_lookup_failure(self):
+        """A missing instance must not poke the checkpointer."""
+        service = self._make_service()
+
+        async def boom(_id):
+            raise KeyError("not found")
+
+        service._manager.get_instance = boom
+        # Must not raise and must not call the checkpointer.
+        await service.emit_context_usage_for_instance("inst-1")
+        # _raw_saver.aget was never created as AsyncMock by default, so
+        # assert the underlying mock was never called instead.
+        service._raw_saver.aget.assert_not_called()
+        service._manager._live_hub.stream_context_usage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_silent_when_no_checkpointer(self):
+        """A missing checkpointer (early startup) must be a no-op."""
+        service = self._make_service()
+        service._manager._checkpointer = None
+
+        await service.emit_context_usage_for_instance("inst-1")
+        service._manager._live_hub.stream_context_usage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_state_still_emits_zero_tokens(self):
+        """A checkpointer with no state must still broadcast (force=True)."""
+        service = self._make_service()
+        service._raw_saver.aget = AsyncMock(return_value=None)
+
+        await service.emit_context_usage_for_instance("inst-1")
+        # The force=True path means we still broadcast even if tokens == 0.
+        service._manager._live_hub.stream_context_usage.assert_awaited_once()
+        assert service._manager._live_hub.stream_context_usage.await_args.kwargs["tokens"] == 0

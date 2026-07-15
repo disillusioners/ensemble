@@ -478,40 +478,53 @@ class InstanceMessagingService:
         immediately on connect, before any user interaction. Any failure
         is logged at debug level and swallowed so a transient checkpointer
         hiccup never breaks the SSE connection.
+
+        Reads raw LangGraph state messages directly from the checkpoint,
+        matching the SSE path (``all_state_messages`` in the astream loop).
+        Going through ``get_messages`` would route messages through
+        ``serialize_message`` and ``get_instance_messages``, which (a) skip
+        ``ToolMessage`` entries entirely, (b) strip thinking content, and
+        (c) rewrite tool-call arg keys from ``args`` to ``arguments``,
+        producing an inflated-by-omission or otherwise incorrect token
+        count on initial page load. Passing raw ``BaseMessage`` objects
+        straight to ``estimate_messages_tokens`` keeps the snapshot in sync
+        with what the SSE update path computes.
         """
+        # Verify instance exists first so a missing instance returns
+        # silently without poking the checkpointer.
         try:
-            messages = await self.get_messages(instance_id)
+            await self._manager.get_instance(instance_id)
         except Exception as e:
-            logger.debug(f"emit_context_usage_for_instance: get_messages failed for {instance_id[:8]}...: {e}")
+            logger.debug(
+                f"emit_context_usage_for_instance: instance lookup failed for "
+                f"{instance_id[:8]}...: {e}"
+            )
             return
 
-        # get_messages returns dicts; convert to lightweight LangChain messages
-        # so estimate_messages_tokens can read .content / .tool_calls / .name.
-        from langchain_core.messages import (
-            AIMessage,
-            HumanMessage,
-            SystemMessage,
-            ToolMessage,
-        )
-        _cls_for_role = {
-            "user": HumanMessage,
-            "assistant": AIMessage,
-            "system": SystemMessage,
-            "tool": ToolMessage,
-        }
-        adapted = []
-        for raw in messages or []:
-            cls = _cls_for_role.get(raw.get("role", "user"), HumanMessage)
-            msg = cls(content=raw.get("content", "") or "")
-            if raw.get("id"):
-                msg.id = raw["id"]
-            if raw.get("tool_calls"):
-                msg.tool_calls = raw["tool_calls"]
-            if raw.get("name"):
-                msg.name = raw["name"]
-            adapted.append(msg)
+        # The service-level ``_checkpointer`` property already unwraps a
+        # ``CheckpointerAdapter`` to its raw saver (see the property below)
+        # so SQLite and PostgreSQL backends are both supported without any
+        # extra plumbing here.
+        saver = self._checkpointer
+        if saver is None:
+            return
 
-        await self._emit_context_usage(instance_id, adapted, force=True)
+        try:
+            config = {"configurable": {"thread_id": instance_id}}
+            state = await saver.aget(config)
+            if state is None:
+                await self._emit_context_usage(instance_id, [], force=True)
+                return
+            channel_values = state.get("channel_values", {}) or {}
+            messages = channel_values.get("messages", []) or []
+        except Exception as e:
+            logger.debug(
+                f"emit_context_usage_for_instance: raw checkpoint read failed for "
+                f"{instance_id[:8]}...: {e}"
+            )
+            return
+
+        await self._emit_context_usage(instance_id, messages, force=True)
 
     def _fetch_critical_notes_safe(self, project_id: str) -> list[dict]:
         """Fetch critical notes for a project, returning empty list on failure."""
