@@ -31,6 +31,7 @@ from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
 from .language_utils import get_language_preference, is_auto_language
 from .project_normalizer import normalize_project_id
+from .skill_metrics_service import INJECTED_SKILLS_METADATA_KEY
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -551,6 +552,8 @@ def append_auto_load_skills(
     agent_id: str,
     project_id: str | None,
     manager: Any,
+    instance_id: str | None = None,
+    instance_repository: Any = None,
 ) -> str:
     """Append auto-load skills to a system prompt (post-cache).
 
@@ -574,6 +577,16 @@ def append_auto_load_skills(
             skills (returns prompt unchanged).
         manager: InstanceManager reference — used to access
             ``_skill_repo`` and ``_skill_clone_service``.
+        instance_id: Optional instance ID. When provided with
+            ``instance_repository``, the auto_load skill IDs are
+            written to the instance's ``last_injected_skill_ids``
+            metadata (DEDUP-MERGE) so ``SkillMetricsService`` can
+            attribute usage records at task completion. Default
+            ``None`` = skip tracking (backward compatible).
+        instance_repository: Optional instance repository used
+            for the metadata write. Same semantics as
+            ``instance_id`` — both must be provided for tracking
+            to fire. Default ``None`` = skip tracking.
 
     Returns:
         The system prompt with auto_load skills section appended,
@@ -642,6 +655,78 @@ def append_auto_load_skills(
         f"Appended {len(sections)} auto_load skill(s) to prompt "
         f"(agent={agent_id}, project={project_id[:8]}...)"
     )
+    # ── Track auto_load skills in instance metadata (C3: DEDUP-MERGE) ──
+    # Write skill IDs to last_injected_skill_ids so the metrics
+    # service can attribute usage records at task completion.
+    #
+    # C3 INVARIANT: Uses DEDUP-MERGE (not replace). This preserves
+    # explicit skills set by Phase 1's <meta> tag injection. If both
+    # an explicit skill AND auto_load skills are active, ALL are tracked.
+    # Explicit skills are authoritative; auto_load is additive.
+    #
+    # Issue 2 FIX: Read explicitly_replaced_ids from metadata. Any
+    # auto_load skill that was explicitly REPLACED via <meta> tag
+    # (and thus is in this set) is SKIPPED — do not re-introduce it.
+    # This preserves REPLACE semantics across checkpoint restores.
+    if instance_id and instance_repository and skills_list:
+        try:
+            # Single read for both metadata keys (Issue 2 + C3)
+            inst = instance_repository.get(instance_id)
+            inst_meta = inst.instance_metadata if (inst is not None and inst.instance_metadata) else {}
+
+            # Issue 2: Read explicitly_replaced_ids set
+            _replaced_ids: set[str] = set()
+            _raw_replaced = inst_meta.get("explicitly_replaced_ids") or []
+            if isinstance(_raw_replaced, list):
+                _replaced_ids = {str(x) for x in _raw_replaced if x}
+
+            # Filter out skills that were explicitly replaced (Issue 2)
+            trackable_skill_ids = [
+                str(s.id)
+                for s in skills_list
+                if getattr(s, "id", None) and str(s.id) not in _replaced_ids
+            ]
+            if _replaced_ids:
+                _skipped = [
+                    s.name for s in skills_list
+                    if getattr(s, "id", None) and str(s.id) in _replaced_ids
+                ]
+                if _skipped:
+                    logger.info(
+                        f"Auto_load skipped {len(_skipped)} explicitly-replaced "
+                        f"skill(s): {_skipped} (instance={instance_id[:8]}...)"
+                    )
+            if trackable_skill_ids:
+                # Read existing metadata from the SAME snapshot (may contain explicit <meta> skills)
+                existing: list[str] = []
+                raw = inst_meta.get(INJECTED_SKILLS_METADATA_KEY) or []
+                if isinstance(raw, list):
+                    existing = [str(x) for x in raw if x]
+                # Dedup-merge preserving order — existing (explicit) first,
+                # then auto_load IDs appended
+                merged = list(dict.fromkeys(existing + trackable_skill_ids))
+                instance_repository.set_metadata(
+                    instance_id,
+                    INJECTED_SKILLS_METADATA_KEY,
+                    merged,
+                )
+                logger.info(
+                    f"Tracked {len(trackable_skill_ids)} auto_load skill(s) in "
+                    f"instance metadata (instance={instance_id[:8]}..., "
+                    f"existing={len(existing)}, merged={len(merged)})"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to track auto_load skills in metadata "
+                f"(instance={instance_id[:8]}...): {e}"
+            )
+            # Soft-fail — auto_load skills are still in the prompt,
+            # just not tracked. Don't break prompt composition.
+
+            # NOTE: read-modify-write is not transactional, but the race is
+            # benign — meta-tag REPLACE writes (Phase 1) happen at message
+            # time and win; auto_load MERGE is commutative and idempotent.
+
     return system_prompt + auto_load_section
 
 
@@ -701,6 +786,8 @@ def _apply_post_cache_appends(
             agent_id=agent_id,
             project_id=project_id,
             manager=manager,
+            instance_id=instance_id,
+            instance_repository=instance_repository,
         ),
         user_language,
     )
