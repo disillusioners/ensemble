@@ -57,7 +57,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Column, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlmodel import Field, PrimaryKeyConstraint, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
@@ -360,6 +360,8 @@ class SkillUsageRecord(SQLModel, table=True):
         Index("ix_skill_usage_records_skill_id", "skill_id"),
         Index("ix_skill_usage_records_instance_id", "instance_id"),
         Index("ix_skill_usage_records_instance_feedback", "instance_id", "feedback_applied"),
+        Index("ix_skill_usage_records_ab_group", "ab_test_group"),
+        Index("ix_skill_usage_records_skill_created", "skill_id", "created_at"),
     )
 
     id: str = Field(
@@ -390,6 +392,35 @@ class SkillUsageRecord(SQLModel, table=True):
 
     created_at: str = Field(default_factory=_now_iso)
 
+    # Phase: Skill-worker milestone. Both columns follow the dual-driver
+    # CREATE pattern: declared here on the model, added to existing SQLite
+    # databases via the .sql migration in
+    # ``daemon/migrations/versions/20260715_000001_skill_usage_new_columns.sql``,
+    # and added to existing PostgreSQL databases via the ALTER statements
+    # in ``daemon/manager.py::_ensure_postgres_columns``. Fresh databases
+    # of either flavor pick up the columns from SQLModel.metadata.create_all.
+    ab_test_group: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        sa_column=Column(Text, nullable=True),
+        description=(
+            "A/B test period isolation. NULL = 'not under test' "
+            "(excluded from A/B-scoped queries). Set to the same UUID "
+            "as the skills.ab_test_group for usage rows collected during "
+            "an A/B comparison window."
+        ),
+    )
+    superseded: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, default=False),
+        description=(
+            "Marks usage records as superseded when a worker is reused "
+            "with a new skill (e.g. A/B test promotion, hot-swap). "
+            "Superseded rows are excluded from the standard "
+            "completion-rate aggregation but remain queryable for audit."
+        ),
+    )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe view of the row."""
         return {
@@ -408,6 +439,8 @@ class SkillUsageRecord(SQLModel, table=True):
             "feedback_applied": self.feedback_applied,
             "feedback_note": self.feedback_note,
             "created_at": self.created_at,
+            "ab_test_group": self.ab_test_group,
+            "superseded": self.superseded,
         }
 
 

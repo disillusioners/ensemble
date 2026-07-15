@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from daemon.repositories.skill.models import SkillUsageRecord
+
 
 # =============================================================================
 # Helpers
@@ -868,6 +870,154 @@ class TestSkillUsage:
         # Sanity: feedback was truly not applied.
         items, _ = usage_repo.get_by_skill(skill.id)
         assert items[0].feedback_applied is None
+
+
+class TestSkillUsageNewColumns:
+    """Tests for the ab_test_group + superseded columns added in
+    Phase: Skill-worker milestone (2026-07-15). Verifies schema
+    presence, defaults, round-trip CRUD, and ORM-level filtering on
+    the two new columns plus their indexes.
+    """
+
+    def test_columns_exist_on_model(self):
+        """SkillUsageRecord exposes the two new attributes declared on the model."""
+        from daemon.repositories.skill.models import SkillUsageRecord
+
+        # Both attributes are present on the model class.
+        assert hasattr(SkillUsageRecord, "ab_test_group")
+        assert hasattr(SkillUsageRecord, "superseded")
+
+    def test_default_values(self, usage_repo, skill_repo, project_id):
+        """A freshly-created record has ab_test_group=None and superseded=False."""
+        skill = _make_skill(skill_repo, project_id, "defaults")
+
+        record = usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-defaults",
+            agent_id="a",
+        )
+
+        assert record.ab_test_group is None
+        assert record.superseded is False
+
+    def test_create_with_ab_test_group(self, usage_repo, skill_repo, project_id):
+        """``ab_test_group`` round-trips through create() and is queryable from get_by_skill."""
+        import uuid
+
+        skill = _make_skill(skill_repo, project_id, "ab")
+        group = str(uuid.uuid4())
+
+        record = usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-ab",
+            agent_id="a",
+            ab_test_group=group,
+        )
+
+        assert record.ab_test_group == group
+        # Persisted value matches — round-trip through the DB.
+        items, _ = usage_repo.get_by_skill(skill.id)
+        assert len(items) == 1
+        assert items[0].ab_test_group == group
+
+    def test_create_with_superseded_true(self, usage_repo, skill_repo, project_id):
+        """``superseded=True`` round-trips through create() and is queryable."""
+        skill = _make_skill(skill_repo, project_id, "sup")
+
+        record = usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-sup",
+            agent_id="a",
+            superseded=True,
+        )
+
+        assert record.superseded is True
+        items, _ = usage_repo.get_by_skill(skill.id)
+        assert items[0].superseded is True
+
+    def test_filter_by_ab_test_group(self, usage_repo, skill_repo, project_id):
+        """Records can be filtered by ``ab_test_group`` using a direct SELECT.
+
+        Note: the repository does NOT yet expose a ``get_by_ab_test_group``
+        method — the Phase 1 Task 1.0 scope is schema-only. The filter is
+        exercised via a raw ``select(SkillUsageRecord)`` here so the
+        ``ix_skill_usage_records_ab_group`` index path is tested at the
+        SQLAlchemy level (the index will be used by PostgreSQL's planner
+        for this predicate shape).
+        """
+        import uuid
+        from sqlmodel import Session, select
+
+        skill = _make_skill(skill_repo, project_id, "filt-ab")
+        group_a = str(uuid.uuid4())
+        group_b = str(uuid.uuid4())
+
+        usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="i1", agent_id="a", ab_test_group=group_a,
+        )
+        usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="i2", agent_id="a", ab_test_group=group_a,
+        )
+        usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="i3", agent_id="a", ab_test_group=group_b,
+        )
+        usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="i4", agent_id="a", ab_test_group=None,
+        )
+
+        # Filter by group_a — only the two matching records should come back.
+        with Session(usage_repo.engine) as session:
+            stmt = select(SkillUsageRecord).where(
+                SkillUsageRecord.ab_test_group == group_a
+            )
+            rows = list(session.exec(stmt))
+
+        assert len(rows) == 2
+        assert {r.instance_id for r in rows} == {"i1", "i2"}
+        assert all(r.ab_test_group == group_a for r in rows)
+
+    def test_filter_by_superseded_false(self, usage_repo, skill_repo, project_id):
+        """The common-case filter ``superseded=False`` returns only active records.
+
+        ``superseded=False`` is the default for every new record, so this
+        query mirrors the production completion-rate aggregation path
+        (excludes superseded rows from the denominator). Verified here
+        with a raw SELECT to exercise the column on the read path.
+        """
+        from sqlmodel import Session, select
+
+        skill = _make_skill(skill_repo, project_id, "filt-sup")
+
+        # 3 active records (superseded=False, the default) + 1 superseded.
+        for i in range(3):
+            usage_repo.create(
+                skill_id=skill.id, project_id=project_id,
+                instance_id=f"active-{i}", agent_id="a",
+            )
+        usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="dead", agent_id="a",
+            superseded=True,
+        )
+
+        with Session(usage_repo.engine) as session:
+            stmt = select(SkillUsageRecord).where(
+                SkillUsageRecord.superseded == False  # noqa: E712
+            )
+            active_rows = list(session.exec(stmt))
+
+        assert len(active_rows) == 3
+        assert {r.instance_id for r in active_rows} == {
+            "active-0", "active-1", "active-2"
+        }
+        assert all(r.superseded is False for r in active_rows)
 
 
 # =============================================================================

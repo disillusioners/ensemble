@@ -3141,6 +3141,26 @@ class InstanceManager:
             "ALTER TABLE skills ADD COLUMN IF NOT EXISTS auto_load BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE skills ADD COLUMN IF NOT EXISTS source_skill_bank_id TEXT",
             "CREATE INDEX IF NOT EXISTS ix_skills_auto_load ON skills(auto_load)",
+            # ── Skill usage records: ab_test_group + superseded (2026-07-15) ──
+            # Phase: Skill-worker milestone prerequisite. Two columns on the
+            # ``skill_usage_records`` table backing per-worker A/B period
+            # isolation (``ab_test_group``, nullable TEXT — NULL means "not
+            # under test") and worker-reuse audit (``superseded``, BOOLEAN
+            # NOT NULL DEFAULT false — set to true when the row was
+            # superseded by a fresh skill binding for the same worker).
+            # Two indexes support the per-group aggregation and the
+            # time-bucketed completion-rate rollup queries. SQLite counterpart
+            # lives in
+            # ``daemon/migrations/versions/20260715_000001_skill_usage_new_columns.sql``.
+            # Fresh PG databases pick up the columns + indexes from
+            # ``SQLModel.metadata.create_all()`` via the SkillUsageRecord
+            # model ``__table_args__`` declarations; existing PG databases
+            # rely on these statements because the .sql migration runner is
+            # a NO-OP on PostgreSQL (runner.py lines 446-448).
+            "ALTER TABLE skill_usage_records ADD COLUMN IF NOT EXISTS ab_test_group TEXT",
+            "ALTER TABLE skill_usage_records ADD COLUMN IF NOT EXISTS superseded BOOLEAN NOT NULL DEFAULT false",
+            "CREATE INDEX IF NOT EXISTS ix_skill_usage_records_ab_group ON skill_usage_records(ab_test_group)",
+            "CREATE INDEX IF NOT EXISTS ix_skill_usage_records_skill_created ON skill_usage_records(skill_id, created_at)",
             # ── Widen job_queues.queue_type CHECK constraint (2026-07-14) ──
             # The job_queues.queue_type column must accept 'defer' and
             # 'background' values in addition to 'fifo' and 'parallel' so

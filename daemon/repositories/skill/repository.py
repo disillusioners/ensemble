@@ -903,6 +903,8 @@ class SkillUsageRepository:
         iterations: int = 0,
         duration_seconds: int = 0,
         fallback: bool = False,
+        ab_test_group: Optional[str] = None,
+        superseded: bool = False,
     ) -> SkillUsageRecord:
         """Insert a new usage record.
 
@@ -929,6 +931,17 @@ class SkillUsageRepository:
                 spent while this skill was active.
             fallback: Whether the skill execution fell back to
                 a different path.
+            ab_test_group: A/B test period isolation UUID. ``None``
+                means the row was not collected under an active A/B
+                test (and therefore is excluded from A/B-scoped
+                queries). When set, must match the
+                ``skills.ab_test_group`` of the skill that produced
+                this row.
+            superseded: Whether this usage record has been
+                superseded by a worker-reuse event (the same worker
+                was rebound to a new skill). Superseded rows stay in
+                the table for audit but are excluded from the
+                standard completion-rate aggregation.
 
         Returns:
             The newly created :class:`SkillUsageRecord`
@@ -946,6 +959,8 @@ class SkillUsageRepository:
             iterations=iterations,
             duration_seconds=duration_seconds,
             fallback=fallback,
+            ab_test_group=ab_test_group,
+            superseded=superseded,
         )
         with Session(self.engine) as session:
             session.add(record)
