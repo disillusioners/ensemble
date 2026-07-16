@@ -21,6 +21,32 @@
 // Timestamps are always ISO-8601 strings — the frontend never parses
 // datetimes into ``Date`` in the model layer (see work.model.ts for
 // the same convention).
+//
+// All interfaces use snake_case to match the backend verbatim — no
+// HTTP interceptor transforms field names (verified against
+// ``app.config.ts`` which calls ``provideHttpClient()`` with no
+// arguments). See planning doc [S1].
+//
+// Phase 2 (skill-evolution-ui): interfaces were tightened to match
+// the verified backend payload shapes from
+// ``daemon/routers/skills.py`` and
+// ``daemon/services/skill_metrics_service.py``. The most important
+// changes:
+//
+// * ``SkillMetrics`` field names fixed — backend returns
+//   ``selected`` / ``applied`` / ``completions`` / ``fallbacks``,
+//   NOT ``total_selections`` / ``total_applied`` / etc. The old
+//   names are GONE. Template bindings that referenced them are
+//   updated in the same change set (see skill-detail.component.html).
+// * New ``total`` / ``avg_iterations`` / ``avg_duration`` fields added
+//   so the FE can render the per-skill averages without a second
+//   call.
+// * ``SkillLineage.parents`` / ``children`` upgraded to
+//   ``SkillLineageNode[]`` so consumers can read edge metadata
+//   (``change_summary`` / ``content_diff`` / ``edge_created_at``)
+//   directly off the node, not a sibling side-channel.
+// * New interfaces for usage records, A/B test stats, and trigger
+//   CRUD — each is wired to a single backend endpoint.
 
 // ── Core record ──────────────────────────────────────────────────────────
 
@@ -31,6 +57,15 @@
  * the detail page extends it with ``SkillDetail`` below. All counters
  * are integers maintained by the backend (the Metrics endpoint exposes
  * derived ratios on top).
+ *
+ * Field additions vs the previous version (verified against
+ * ``daemon/repositories/skill/models.py:Skill.to_dict``):
+ *
+ * * ``auto_load`` — clone-side counterpart of the skill_bank template
+ *   flag. ``true`` means the skill is loaded into the system prompt
+ *   before every task.
+ * * ``source_skill_bank_id`` — the bank template this row was cloned
+ *   from (``null`` for manually-created or evolved skills).
  */
 export interface Skill {
   id: string;
@@ -43,6 +78,8 @@ export interface Skill {
   lineage_origin: string;
   generation: number;
   ab_test_group: string | null;
+  auto_load: boolean;
+  source_skill_bank_id: string | null;
   total_selections: number;
   total_applied: number;
   total_completions: number;
@@ -59,33 +96,46 @@ export interface Skill {
  * Detail view shape returned by ``GET /api/skills/{id}``.
  *
  * Adds the Markdown ``content`` body, a pre-computed ``metrics``
- * bundle, and a nested ``lineage`` projection that already resolves
- * the immediate parents and children into full ``Skill`` records so
- * the detail page does not have to round-trip twice.
+ * bundle, and a nested ``lineage`` projection. The detail endpoint
+ * populates ``lineage`` by calling
+ * :meth:`SkillStoreService.view_skill`, which embeds the raw
+ * :meth:`SkillLineage.to_dict` rows (parent → child edges) — NOT
+ * enriched lineage nodes with Skill fields. For the enriched
+ * lineage view (with ``name`` / ``generation`` / ``category`` …)
+ * call ``GET /api/skills/{id}/lineage`` and consume the standalone
+ * :class:`SkillLineage` shape instead.
  */
 export interface SkillDetail extends Skill {
   content: string;
-  lineage: { parents: Skill[]; children: Skill[] };
+  lineage: { parents: SkillLineageEdge[]; children: SkillLineageEdge[] };
   metrics: SkillMetrics;
 }
 
 /**
  * Metrics bundle returned by ``GET /api/skills/{id}/metrics``.
  *
+ * **Breaking change (C2) — field renames**: the backend returns
+ * ``selected`` / ``applied`` / ``completions`` / ``fallbacks`` (see
+ * ``daemon/services/skill_metrics_service.py:get_skill_stats``),
+ * NOT ``total_selections`` / ``total_applied`` /
+ * ``total_completions`` / ``total_fallbacks``. The old names were
+ * always ``undefined`` against the live API. Templates are updated
+ * alongside this change.
+ *
  * Ratios are floats in ``0.0..1.0``; ``formatSuccessRate`` below
  * converts them to the integer-percent strings the UI renders.
- *
- * Field naming is intentionally the same as the ``Skill`` counters so
- * consumers can spread the bundle onto a row without renaming.
  */
 export interface SkillMetrics {
-  total_selections: number;
-  total_applied: number;
-  total_completions: number;
-  total_fallbacks: number;
+  total: number;
+  selected: number;
+  applied: number;
+  completions: number;
+  fallbacks: number;
+  avg_iterations: number;
+  avg_duration: number;
   completion_rate: number; // 0.0–1.0
-  fallback_rate: number;   // 0.0–1.0
   applied_rate: number;    // 0.0–1.0
+  fallback_rate: number;   // 0.0–1.0
   consecutive_failures: number;
 }
 
@@ -282,17 +332,266 @@ export interface SkillFixResponse {
 // ── Lineage ──────────────────────────────────────────────────────────────
 
 /**
+ * Raw lineage-edge row — a single ``(skill_id, parent_skill_id)``
+ * tuple plus the change metadata recorded when the edge was
+ * inserted.
+ *
+ * This is the shape produced by
+ * ``daemon/repositories/skill/models.py:SkillLineage.to_dict`` and
+ * embedded (without enrichment) into ``SkillDetail.lineage`` by
+ * ``GET /api/skills/{id}`` via
+ * ``SkillStoreService.view_skill``. Notably this row does NOT
+ * carry Skill fields (no ``name``, ``generation``, ``category``,
+ * …) — only edge metadata. For an enriched view that merges in
+ * Skill fields use :class:`SkillLineageNode` from the standalone
+ * ``GET /api/skills/{id}/lineage`` endpoint.
+ *
+ * Field set verified against
+ * ``daemon/repositories/skill/models.py:SkillLineage.to_dict``
+ * (5 fields). ``change_summary`` / ``content_diff`` default to
+ * the empty string when the edge row was inserted without
+ * metadata.
+ *
+ * The ``skill_id`` field is the descendant (child) and
+ * ``parent_skill_id`` is the ancestor. For a given skill, the
+ * same descendant id appears on every row in both ``parents``
+ * and ``children`` — the relationship direction is what differs.
+ */
+export interface SkillLineageEdge {
+  skill_id: string;
+  parent_skill_id: string;
+  change_summary: string;
+  content_diff: string;
+  created_at: string;
+}
+
+/**
+ * A lineage node — a ``Skill`` plus edge metadata.
+ *
+ * Returned only by the standalone ``GET /api/skills/{id}/lineage``
+ * endpoint. ``SkillDetail.lineage`` (the lineage embedded inside
+ * the ``GET /api/skills/{id}`` detail payload) carries the
+ * narrower :class:`SkillLineageEdge` shape instead — raw edge
+ * rows without Skill fields. Always consume ``SkillLineageNode``
+ * via the dedicated lineage endpoint, not via the detail
+ * payload. The backend merges the linked ``Skill.to_dict()``
+ * payload with the edge's ``change_summary`` / ``content_diff``
+ * / ``created_at`` so the FE can render a sibling tile without
+ * a per-row detail fetch.
+ *
+ * * ``change_summary`` — one-line description of what changed.
+ * * ``content_diff`` — unified diff of the content body (text).
+ * * ``edge_created_at`` — ISO timestamp of when the lineage edge
+ *   was created (distinct from the skill's own ``created_at`` —
+ *   a skill can be much older than the edge that links it into
+ *   the DAG). Optional because orphaned-edge fallbacks may
+ *   omit it.
+ *
+ * Defined here as ``extends Skill`` so consumers that only cared
+ * about the underlying ``Skill`` fields keep type-checking without
+ * changes (the Skill fields are still all present at runtime).
+ */
+export interface SkillLineageNode extends Skill {
+  change_summary: string;
+  content_diff: string;
+  edge_created_at?: string;
+}
+
+/**
  * Skinny lineage shape returned by ``GET /api/skills/{id}/lineage``.
  *
  * Used by the lineage view on the detail page. ``SkillDetail.lineage``
  * mirrors this but excludes ``generation`` / ``origin`` because those
  * are already on the parent record itself.
+ *
+ * ``parents`` / ``children`` are ``SkillLineageNode[]`` so consumers
+ * can read ``change_summary`` / ``content_diff`` off each entry
+ * without a second fetch.
  */
 export interface SkillLineage {
-  parents: Skill[];
-  children: Skill[];
+  skill_id: string;
+  parents: SkillLineageNode[];
+  children: SkillLineageNode[];
   generation: number;
   origin: string;
+}
+
+// ── Usage records ────────────────────────────────────────────────────────
+
+/**
+ * Per-event usage record returned by
+ * ``GET /api/skills/{id}/usage-records``.
+ *
+ * Field set verified against
+ * ``daemon/repositories/skill/models.py:SkillUsageRecord.to_dict``.
+ * ``task_message`` is optional — the agent may not always forward
+ * the originating prompt. ``feedback_applied`` is a three-state
+ * nullable boolean: ``null`` = no feedback yet, ``true`` =
+ * recorded-and-applied, ``false`` = recorded-but-not-applied.
+ * ``superseded`` flags rows that should be excluded from
+ * standard completion-rate aggregation (worker reuse, hot-swap).
+ */
+export interface SkillUsageRecord {
+  id: string;
+  skill_id: string;
+  project_id: string | null;
+  instance_id: string;
+  agent_id: string;
+  task_message: string | null;
+  selected: boolean;
+  applied: boolean;
+  task_succeeded: boolean;
+  iterations: number;
+  duration_seconds: number;
+  fallback: boolean;
+  feedback_applied: boolean | null;
+  feedback_note: string | null;
+  ab_test_group: string | null;
+  superseded: boolean;
+  created_at: string;
+}
+
+/**
+ * Paginated usage-record response from
+ * ``GET /api/skills/{id}/usage-records?limit=&offset=``.
+ *
+ * The backend returns ``{skill_id, records, total, limit, offset}``
+ * (see ``daemon/routers/skills.py:get_usage_records``). ``total``
+ * is the unfiltered row count so callers can render pagination
+ * without a second ``COUNT(*)`` call.
+ */
+export interface SkillUsageRecordsResponse {
+  skill_id: string;
+  records: SkillUsageRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// ── A/B comparison stats ─────────────────────────────────────────────────
+
+/**
+ * A/B comparison stats returned by
+ * ``GET /api/skills/{id}/ab-test/stats``.
+ *
+ * Field set verified against
+ * ``daemon/services/skill_metrics_service.py:get_ab_comparison_stats``.
+ *
+ * **Field naming**: the on-the-wire skill ids are ``skill_id_a`` /
+ * ``skill_id_b``. The backend maps them from the test row's
+ * ``skill_id_old`` (incumbent) → ``skill_id_a`` and
+ * ``skill_id_new`` (candidate) → ``skill_id_b``. The a/b suffix is
+ * kept on the wire so the FE does not have to guess which side is
+ * the old variant.
+ *
+ * ``difference`` is the absolute composite-score difference
+ * (``abs(composite_score_a - composite_score_b)``). ``sample_size``
+ * is the configured threshold (NOT a hardcoded constant) — the
+ * actual comparisons-so-far counter is ``comparisons``.
+ *
+ * Per-variant rates (``*_a`` / ``*_b``) cover completion, applied,
+ * fallback, average iterations and average duration; the composite
+ * score blends five signals via configurable weights (see
+ * ``SkillEvolutionConfig``).
+ */
+export interface SkillAbTestStats {
+  skill_id_a: string | null;
+  skill_id_b: string | null;
+  completion_rate_a: number;
+  completion_rate_b: number;
+  applied_rate_a: number;
+  applied_rate_b: number;
+  fallback_rate_a: number;
+  fallback_rate_b: number;
+  avg_iterations_a: number;
+  avg_iterations_b: number;
+  avg_duration_a: number;
+  avg_duration_b: number;
+  composite_score_a: number;
+  composite_score_b: number;
+  difference: number;
+  comparisons: number;
+  extension_count: number;
+  sample_size: number;
+  ready_to_resolve: boolean;
+  needs_more_data: boolean;
+}
+
+/**
+ * A/B stats response envelope from
+ * ``GET /api/skills/{id}/ab-test/stats``.
+ *
+ * ``ab_test_group`` is ``null`` when the skill is not enrolled in
+ * a test; ``stats`` is ``null`` in that same case (rather than
+ * returning a zero-stats dict) so the FE can distinguish "no test"
+ * from "test exists but stats unavailable".
+ */
+export interface SkillAbTestStatsResponse {
+  skill_id: string;
+  ab_test_group: string | null;
+  stats: SkillAbTestStats | null;
+}
+
+// ── Triggers ─────────────────────────────────────────────────────────────
+
+/**
+ * Skill trigger — declarative condition → action rule.
+ *
+ * Returned by ``GET /api/skills/triggers`` and the corresponding
+ * create / update / delete endpoints.
+ *
+ * **Field naming**: the backend uses ``condition_type`` and
+ * ``condition_json`` (see
+ * ``daemon/repositories/skill/models.py:SkillTrigger``). The older
+ * ``trigger_type`` / ``trigger_config`` pair is NOT used anywhere on
+ * the wire — do not introduce those names here.
+ *
+ * ``project_id`` is nullable: ``null`` = global trigger (applies
+ * to every project). ``condition_json`` is a free-form ``Record``
+ * whose shape depends on ``condition_type`` (e.g.
+ * ``{keyword: 'deploy'}``, ``{regex: '^run\\s+tests?$'}``, …).
+ */
+export interface SkillTrigger {
+  id: string;
+  project_id: string | null;
+  name: string;
+  condition_type: string;
+  condition_json: Record<string, unknown>;
+  action: string;
+  is_enabled: boolean;
+  created_at: string;
+}
+
+/**
+ * Create payload for ``POST /api/skills/triggers``.
+ *
+ * ``project_id`` is optional; ``null`` / omitted creates a global
+ * trigger. ``condition_json`` is a free-form dict (see
+ * ``SkillTrigger.condition_json``).
+ */
+export interface SkillTriggerCreate {
+  name: string;
+  condition_type: string;
+  condition_json: Record<string, unknown>;
+  action: string;
+  is_enabled?: boolean;
+  project_id?: string | null;
+}
+
+/**
+ * Update payload for ``PUT /api/skills/triggers/{id}``.
+ *
+ * All fields optional — partial updates are sent with omitted keys
+ * rather than ``null`` tokens (the backend uses
+ * ``exclude_none=True`` and treats ``null`` as a real clear).
+ */
+export interface SkillTriggerUpdate {
+  name?: string;
+  condition_type?: string;
+  condition_json?: Record<string, unknown>;
+  action?: string;
+  is_enabled?: boolean;
+  project_id?: string | null;
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────

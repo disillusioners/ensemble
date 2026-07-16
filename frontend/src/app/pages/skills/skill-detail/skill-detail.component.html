@@ -110,19 +110,19 @@
             </div>
             <div class="metric-tile">
               <div class="metric-label">Selections</div>
-              <div class="metric-value">{{ m.total_selections }}</div>
+              <div class="metric-value">{{ m.selected }}</div>
             </div>
             <div class="metric-tile">
               <div class="metric-label">Applied</div>
-              <div class="metric-value">{{ m.total_applied }}</div>
+              <div class="metric-value">{{ m.applied }}</div>
             </div>
             <div class="metric-tile">
               <div class="metric-label">Completions</div>
-              <div class="metric-value">{{ m.total_completions }}</div>
+              <div class="metric-value">{{ m.completions }}</div>
             </div>
             <div class="metric-tile">
               <div class="metric-label">Fallbacks</div>
-              <div class="metric-value" [class.warn]="m.total_fallbacks > 0">{{ m.total_fallbacks }}</div>
+              <div class="metric-value" [class.warn]="m.fallbacks > 0">{{ m.fallbacks }}</div>
               <div class="metric-sub">{{ fallbackRateDisplay() }} of selections</div>
             </div>
             <div class="metric-tile">

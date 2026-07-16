@@ -4,6 +4,11 @@
 // skill evolution system — there is no A/B testing, no metrics, no
 // lineage. The shape mirrors the backend `SkillBankItemResponse`.
 //
+// Phase 2 (skill-evolution-ui): ``SkillBankItem`` was extended with
+// ``template_version`` / ``agent_id`` / ``auto_load`` — all three
+// fields are returned by ``daemon/repositories/skill/models.py:
+// SkillBankItem.to_dict()`` and were previously missing here.
+//
 // Timestamps are ISO-8601 strings (same convention as skill.model.ts).
 
 /** A skill-bank entry — a user-managed skill template. */
@@ -14,6 +19,22 @@ export interface SkillBankItem {
   description: string;
   content: string;
   category: string;
+  /**
+   * Semver version of this template (string, e.g. ``"1.0.0"``).
+   * Bumped when the source skill-template file changes so startup
+   * seeding can detect and refresh stale bank copies.
+   */
+  template_version: string;
+  /**
+   * Owning agent id (e.g. ``"tester"``) when the template is
+   * agent-scoped; ``null`` means a generic / shared template.
+   */
+  agent_id: string | null;
+  /**
+   * Whether skills cloned from this template should have
+   * ``auto_load=true`` — source of truth from skill-set.md.
+   */
+  auto_load: boolean;
   created_at: string;
   updated_at: string;
 }

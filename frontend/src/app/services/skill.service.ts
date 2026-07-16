@@ -14,6 +14,11 @@ import {
   SkillMetrics,
   SkillLineage,
   AbTestStatus,
+  SkillUsageRecordsResponse,
+  SkillAbTestStatsResponse,
+  SkillTrigger,
+  SkillTriggerCreate,
+  SkillTriggerUpdate,
 } from '../models/skill.model';
 
 /**
@@ -621,5 +626,225 @@ export class SkillService {
    */
   clearError(): void {
     this.error.set(null);
+  }
+
+  /**
+   * GET /api/skills/{id}/usage-records?limit=&offset=
+   *
+   * Returns the most-recent paginated usage history for the skill
+   * (one :class:`SkillUsageRecord` per event, ordered by
+   * ``created_at`` descending) plus the total row count and the
+   * effective ``limit`` / ``offset`` used for the slice. Used by
+   * the detail page's "recent activity" timeline.
+   *
+   * The backend clamps ``limit`` to ``200`` server-side; callers
+   * asking for more still get a 200 with 200 rows instead of a
+   * 422. ``limit`` and ``offset`` are omitted from the URL when
+   * not supplied so the backend defaults (``50`` / ``0``) apply.
+   *
+   * Args:
+   *     id: Skill UUID.
+   *     limit: Optional page size. Sent as-is, server clamps.
+   *     offset: Optional skip-N offset.
+   *
+   * Returns:
+   *     Observable<SkillUsageRecordsResponse> — re-thrown on error.
+   */
+  getUsageRecords(
+    id: string,
+    limit?: number,
+    offset?: number,
+  ): Observable<SkillUsageRecordsResponse> {
+    let params = new HttpParams();
+    if (limit !== undefined) {
+      params = params.set('limit', String(limit));
+    }
+    if (offset !== undefined) {
+      params = params.set('offset', String(offset));
+    }
+    return this.http
+      .get<SkillUsageRecordsResponse>(
+        `${this.API_BASE}/${encodeURIComponent(id)}/usage-records`,
+        { params }
+      )
+      .pipe(
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to fetch skill usage records');
+          throw err;
+        })
+      );
+  }
+
+  /**
+   * GET /api/skills/{id}/ab-test/stats
+   *
+   * Returns the per-variant comparison stats for the skill's A/B
+   * test group. The backend yields ``stats: null`` when the skill
+   * is not enrolled in a test, so callers receive an explicit
+   * "no test" envelope rather than a zero-stats dict — the FE can
+   * render an empty-state card without special-casing 404s.
+   *
+   * Args:
+   *     id: Skill UUID.
+   *
+   * Returns:
+   *     Observable<SkillAbTestStatsResponse> — re-thrown on error.
+   *     ``ab_test_group`` and ``stats`` may both be ``null`` when
+   *     the skill is not in a test.
+   */
+  getAbTestStats(id: string): Observable<SkillAbTestStatsResponse> {
+    return this.http
+      .get<SkillAbTestStatsResponse>(
+        `${this.API_BASE}/${encodeURIComponent(id)}/ab-test/stats`
+      )
+      .pipe(
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to fetch A/B test stats');
+          throw err;
+        })
+      );
+  }
+
+  /**
+   * GET /api/skills/triggers?project_id=&enabled_only=
+   *
+   * Returns the trigger list (both global and project-scoped)
+   * unwrapped from the backend ``{items: [...]}`` envelope. When
+   * ``projectId`` is omitted the backend defaults to global-only;
+   * ``enabledOnly`` defaults to ``true`` to mirror the backend
+   * default and avoid pulling soft-disabled rows by accident.
+   *
+   * Args:
+   *     projectId: Optional project scope; ``null`` / ``undefined``
+   *         is omitted so the backend returns globals.
+   *     enabledOnly: Optional ``enabled_only`` filter (default
+   *         ``true``).
+   *
+   * Returns:
+   *     Observable<SkillTrigger[]> — re-thrown on error.
+   */
+  listTriggers(
+    projectId?: string | null,
+    enabledOnly?: boolean,
+  ): Observable<SkillTrigger[]> {
+    let params = new HttpParams();
+    if (projectId) {
+      params = params.set('project_id', projectId);
+    }
+    if (enabledOnly !== undefined) {
+      params = params.set('enabled_only', enabledOnly ? 'true' : 'false');
+    } else {
+      // Match the backend default (enabled_only=true) explicitly so
+      // the URL on the wire matches what the server will treat as the
+      // default even after a future flag flip.
+      params = params.set('enabled_only', 'true');
+    }
+    return this.http
+      .get<{ items?: SkillTrigger[] } | SkillTrigger[]>(
+        `${this.API_BASE}/triggers`,
+        { params }
+      )
+      .pipe(
+        map((res: any) =>
+          (Array.isArray(res) ? res : (res?.items ?? [])) as SkillTrigger[]
+        ),
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to list skill triggers');
+          throw err;
+        })
+      );
+  }
+
+  /**
+   * POST /api/skills/triggers
+   *
+   * Creates a new trigger rule. The backend wraps the created row
+   * in ``{trigger: {...}}`` — we unwrap here so callers see the
+   * :class:`SkillTrigger` shape directly.
+   *
+   * Args:
+   *     data: Trigger create payload (name, condition_type,
+   *         condition_json, action, optional project_id / is_enabled).
+   *
+   * Returns:
+   *     Observable<SkillTrigger> — re-thrown on error.
+   */
+  createTrigger(data: SkillTriggerCreate): Observable<SkillTrigger> {
+    return this.http
+      .post<{ trigger?: SkillTrigger } | SkillTrigger>(
+        `${this.API_BASE}/triggers`,
+        data
+      )
+      .pipe(
+        map((res: any) => (res?.trigger ?? res) as SkillTrigger),
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to create skill trigger');
+          throw err;
+        })
+      );
+  }
+
+  /**
+   * PUT /api/skills/triggers/{id}
+   *
+   * Partial update on a trigger rule. The backend uses ``PUT``
+   * (not ``PATCH``) and strips ``None`` fields server-side, so
+   * callers can omit optional keys without accidentally clearing
+   * columns. The updated row comes back wrapped in
+   * ``{trigger: {...}}`` — we unwrap here.
+   *
+   * Args:
+   *     id: Trigger UUID.
+   *     data: Partial trigger update payload.
+   *
+   * Returns:
+   *     Observable<SkillTrigger> — re-thrown on error. The backend
+   *     raises 404 when no row matches, which the catchError
+   *     forwards to the subscriber.
+   */
+  updateTrigger(
+    id: string,
+    data: SkillTriggerUpdate,
+  ): Observable<SkillTrigger> {
+    return this.http
+      .put<{ trigger?: SkillTrigger } | SkillTrigger>(
+        `${this.API_BASE}/triggers/${encodeURIComponent(id)}`,
+        data
+      )
+      .pipe(
+        map((res: any) => (res?.trigger ?? res) as SkillTrigger),
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to update skill trigger');
+          throw err;
+        })
+      );
+  }
+
+  /**
+   * DELETE /api/skills/triggers/{id}
+   *
+   * Hard-delete a trigger rule. The backend returns
+   * ``{deleted: bool}`` (``true`` when a row was removed,
+   * ``false`` when no row matched) — we surface the full envelope
+   * so the caller can distinguish "idempotent no-op" from "real
+   * delete" without a follow-up GET.
+   *
+   * Args:
+   *     id: Trigger UUID.
+   *
+   * Returns:
+   *     Observable<{deleted: boolean}> — re-thrown on error.
+   */
+  deleteTrigger(id: string): Observable<{ deleted: boolean }> {
+    return this.http
+      .delete<{ deleted: boolean }>(
+        `${this.API_BASE}/triggers/${encodeURIComponent(id)}`
+      )
+      .pipe(
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to delete skill trigger');
+          throw err;
+        })
+      );
   }
 }
