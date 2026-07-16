@@ -1,0 +1,117 @@
+// Skill Triggers page styling (Phase 6 integration).
+//
+// Mirrors the Skill Bank page shell so the three Skills surfaces
+// (My Skills / Skill Bank / Skill Triggers) read consistently.
+
+:host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  min-height: 0;
+}
+
+.skill-triggers-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+// Skill section sub-nav (My Skills / Skill Bank / Skill Triggers tabs).
+.skills-subnav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  background: var(--surface-color, #252526);
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+
+  .subnav-link {
+    color: var(--text-secondary, #9e9e9e);
+    mat-icon { margin-right: 8px; }
+
+    &.active {
+      color: var(--text-color, #e0e0e0);
+      background: var(--background-color, #1e1e1e);
+    }
+  }
+}
+
+.triggers-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  background: var(--surface-color, #1e1e1e);
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  flex-wrap: wrap;
+  gap: 12px;
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .page-title {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--text-color, #e0e0e0);
+  }
+
+  .header-count {
+    color: var(--text-secondary, #9e9e9e);
+    font-size: 14px;
+  }
+
+  .header-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .spinning {
+    animation: spin 1s linear infinite;
+  }
+}
+
+.triggers-main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 0;
+  color: var(--text-secondary, #9e9e9e);
+}
+
+.error-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-secondary, #9e9e9e);
+
+  .error-icon {
+    font-size: 36px;
+    width: 36px;
+    height: 36px;
+    color: #d32f2f;
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

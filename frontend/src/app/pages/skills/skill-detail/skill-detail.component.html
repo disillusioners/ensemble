@@ -133,84 +133,78 @@
         } @else {
           <p class="metrics-placeholder">No metrics available</p>
         }
+        <!-- Composite score is gated only on ``compositeScore()`` (which
+             derives from ``abTestStats()`` + ``skillId()``) so it
+             renders even when the metrics endpoint failed. Placed in
+             its own grid so the tile stays aligned with the regular
+             metric tiles when shown alone. -->
+        @if (compositeScore(); as cs) {
+          <div class="metrics-grid composite-score-grid">
+            <div class="metric-tile composite-score-tile">
+              <div class="metric-label">Composite Score (Variant {{ cs.variant }})</div>
+              <div class="metric-value">{{ (cs.score * 100).toFixed(1) }}%</div>
+              <div class="metric-sub">A/B test in progress</div>
+            </div>
+          </div>
+        }
       </mat-card-content>
     </mat-card>
 
-    <!-- A/B testing panel -->
-    @if (hasAbTest()) {
-      <mat-card class="ab-test-card">
-        <mat-card-header>
-          <mat-card-title><mat-icon>science</mat-icon> A/B Test Status</mat-card-title>
-        </mat-card-header>
-        <mat-card-content>
-          @if (abTest(); as ab) {
-            <div class="ab-grid">
-              <div class="ab-row"><span class="ab-key">Group:</span><span class="ab-value">{{ ab.group }}</span></div>
-              <div class="ab-row"><span class="ab-key">Comparisons:</span><span class="ab-value">{{ ab.comparison_count }}</span></div>
-              <div class="ab-row"><span class="ab-key">Extensions:</span><span class="ab-value">{{ ab.extension_count }}</span></div>
-              <div class="ab-row"><span class="ab-key">Variants:</span><span class="ab-value">{{ ab.variant_ids.length }}</span></div>
-              <div class="ab-row"><span class="ab-key">Started:</span><span class="ab-value">{{ formatDate(ab.started_at) }}</span></div>
-              @if (ab.resolved_at) {
-                <div class="ab-row"><span class="ab-key">Resolved:</span><span class="ab-value">{{ formatDate(ab.resolved_at) }}</span></div>
-              }
-            </div>
-            @if (!ab.resolved_at && ab.variant_ids.length > 0) {
-              <mat-divider></mat-divider>
-              <div class="ab-actions">
-                <p>Promote a variant to winner:</p>
-                <div class="ab-variant-buttons">
-                  <button mat-stroked-button (click)="onResolveAbTest(s.id)">Keep current</button>
-                  @for (vid of ab.variant_ids; track vid) {
-                    @if (vid !== s.id) {
-                      <button mat-flat-button color="primary" (click)="onResolveAbTest(vid)">
-                        Promote {{ vid.substring(0, 8) }}
-                      </button>
-                    }
-                  }
-                </div>
-              </div>
-            }
-          }
-        </mat-card-content>
-      </mat-card>
-    }
+    <!-- A/B testing dashboard -->
+    <mat-card class="ab-test-card">
+      <mat-card-header>
+        <mat-card-title><mat-icon>science</mat-icon> A/B Test</mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        @if (abTestStats()) {
+          <app-ab-test-dashboard
+            [stats]="abTestStats()"
+            [skillName]="s.name"
+            (resolve)="onResolveAbTest()" />
+        } @else {
+          <div class="ab-test-empty">
+            <mat-icon>science</mat-icon>
+            <p>No active A/B test for this skill.</p>
+          </div>
+        }
+      </mat-card-content>
+    </mat-card>
 
-    <!-- Lineage -->
+    <!-- Lineage tree (interactive graph) -->
     @if (hasLineage()) {
       <mat-card class="lineage-card">
         <mat-card-header><mat-card-title>Lineage</mat-card-title></mat-card-header>
         <mat-card-content>
           @if (lineage(); as l) {
-            @if (l.parents.length > 0) {
-              <div class="lineage-section">
-                <h4><mat-icon>arrow_upward</mat-icon> Parents</h4>
-                <div class="lineage-list">
-                  @for (parent of l.parents; track parent.id) {
-                    <div class="lineage-item">
-                      <span class="lineage-name">{{ parent.name }}</span>
-                      <span class="lineage-meta">Gen {{ parent.generation }}</span>
-                    </div>
-                  }
-                </div>
-              </div>
-            }
-            @if (l.children.length > 0) {
-              <div class="lineage-section">
-                <h4><mat-icon>arrow_downward</mat-icon> Children</h4>
-                <div class="lineage-list">
-                  @for (child of l.children; track child.id) {
-                    <div class="lineage-item">
-                      <span class="lineage-name">{{ child.name }}</span>
-                      <span class="lineage-meta">Gen {{ child.generation }}</span>
-                    </div>
-                  }
-                </div>
-              </div>
-            }
+            <app-skill-lineage-tree
+              [lineage]="l"
+              [currentSkillId]="skillId()"
+              (navigateTo)="onNavigateTo($event)" />
           }
         </mat-card-content>
       </mat-card>
     }
+
+    <!-- Usage history (paginated self-fetching table) -->
+    <mat-expansion-panel class="usage-history-panel" hideToggle>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon>history</mat-icon>
+          Usage History
+        </mat-panel-title>
+        <mat-panel-description>
+          Recent task executions that used this skill
+        </mat-panel-description>
+      </mat-expansion-panel-header>
+      <app-skill-usage-table [skillId]="skillId()" />
+    </mat-expansion-panel>
+
+    <!-- Trigger management (CRUD for skill-evolution trigger rules) -->
+    <app-skill-trigger-list
+      [triggers]="triggers()"
+      (create)="onCreateTrigger($event)"
+      (update)="onUpdateTrigger($event)"
+      (delete)="onDeleteTrigger($event)" />
 
     <!-- Skill Content (markdown source) -->
     <mat-card class="content-card">

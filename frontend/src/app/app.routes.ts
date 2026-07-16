@@ -13,6 +13,8 @@ export const routes: Routes = [
   { path: 'skills', loadComponent: () => import('./pages/skills/skills.component').then(m => m.SkillsComponent) },
   // /skills/bank MUST come before /skills/:id — Angular first-match wins
   { path: 'skills/bank', loadComponent: () => import('./pages/skill-bank/skill-bank.component').then(m => m.SkillBankComponent) },
+  // /skills/triggers MUST come before /skills/:id — Angular first-match wins
+  { path: 'skills/triggers', loadComponent: () => import('./pages/skills/skill-triggers/skill-triggers.page.component').then(m => m.SkillTriggersPageComponent), title: 'Skill Triggers' },
   { path: 'skills/:id', loadComponent: () => import('./pages/skills/skill-detail/skill-detail.component').then(m => m.SkillDetailComponent) },
   { path: 'schedules', loadComponent: () => import('./pages/schedules/schedules.component').then(m => m.SchedulesComponent) },
   { path: 'mcp-servers', loadComponent: () => import('./components/mcp-server-list/mcp-server-list.component').then(m => m.McpServerListComponent) },
