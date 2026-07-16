@@ -1,0 +1,529 @@
+// ── A/B Test Dashboard styles ──────────────────────────────────────
+//
+// Phase 4 (Skill Evolution UI). Uses the same dark theme palette
+// conventions as `skill-card.component.scss` and
+// `job-card.component.scss` so the dashboard blends into the
+// Skills page without a hard visual seam.
+//
+// Layout notes:
+//
+// * `.variants-row` is a 3-column CSS grid (A | vs | B). On narrow
+//   screens it stacks vertically and the versus divider becomes
+//   horizontal — keeps the comparison story read cleanly on a
+//   phone.
+// * Status colours mirror Angular Material semantic palette
+//   tokens (`primary` / `accent` / `warn`) and keep contrast high
+//   in either light or dark theme.
+// * Composite-score progress bars use thresholds (> 0.7 /
+//   0.4–0.7 / < 0.4) consistent with the backend's
+//   "needs-attention" buckets (see `getSuccessRateColor` in
+//   `skill.model.ts`).
+
+:host {
+  display: block;
+}
+
+.ab-dashboard {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.ab-dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ab-dashboard-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  .ab-dashboard-title-icon {
+    font-size: 28px;
+    width: 28px;
+    height: 28px;
+    color: #3b82f6; // matches .ab-test-chip in skill-card
+  }
+}
+
+.extension-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  background-color: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+}
+
+.ab-dashboard-content {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+// ── Empty / collecting states ─────────────────────────────────────
+
+.empty-state {
+  text-align: center;
+  padding: 48px 16px;
+  color: rgba(255, 255, 255, 0.55);
+
+  mat-icon {
+    font-size: 48px;
+    width: 48px;
+    height: 48px;
+    margin-bottom: 12px;
+    color: rgba(255, 255, 255, 0.35);
+  }
+
+  h3 {
+    margin: 0 0 6px 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0;
+    font-size: 13px;
+  }
+}
+
+.collecting-state {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.10) 50%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  background-size: 200% 100%;
+  animation: ab-skeleton-shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+
+.skeleton-variants {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 16px;
+  align-items: stretch;
+
+  .skeleton-card {
+    height: 120px;
+  }
+}
+
+.skeleton-table {
+  height: 220px;
+}
+
+.collecting-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+
+  mat-icon {
+    animation: ab-spin 1.4s linear infinite;
+  }
+
+  .comparisons-count {
+    margin-left: 8px;
+    color: rgba(255, 255, 255, 0.45);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes ab-skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes ab-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+// ── Variant header row ────────────────────────────────────────────
+
+.variants-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.variant-card {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  background-color: rgba(255, 255, 255, 0.02);
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    transform 0.2s ease;
+
+  &.winner {
+    border-color: #10b981;
+    background-color: rgba(16, 185, 129, 0.08);
+    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35);
+  }
+
+  &.loser {
+    opacity: 0.65;
+  }
+
+  &.tied {
+    border-color: #f59e0b;
+    background-color: rgba(245, 158, 11, 0.06);
+  }
+}
+
+.variant-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.variant-role {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+  font-weight: 500;
+}
+
+.variant-id {
+  font-family: monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  word-break: break-all;
+}
+
+.variant-status-chip {
+  margin-top: 4px;
+
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 12px;
+    font-weight: 500;
+
+    mat-icon {
+      font-size: 14px;
+      width: 14px;
+      height: 14px;
+    }
+  }
+
+  .status-primary {
+    background-color: rgba(16, 185, 129, 0.18);
+    color: #10b981;
+  }
+  .status-accent {
+    background-color: rgba(245, 158, 11, 0.18);
+    color: #f59e0b;
+  }
+  .status-warn {
+    background-color: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+  }
+}
+
+.versus-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  .vs-label {
+    font-size: 14px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.35);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+}
+
+// ── Composite section ─────────────────────────────────────────────
+
+.section-title {
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.tie-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px 0;
+  padding: 8px 12px;
+  background-color: rgba(245, 158, 11, 0.10);
+  border-left: 3px solid #f59e0b;
+  border-radius: 4px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    color: #f59e0b;
+  }
+}
+
+.composite-bar-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.composite-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.composite-bar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.composite-bar-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.composite-bar-value {
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.difference-readout {
+  margin-top: 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+
+  strong {
+    font-variant-numeric: tabular-nums;
+    color: rgba(255, 255, 255, 0.95);
+  }
+
+  .difference-formula {
+    margin-left: 8px;
+    color: rgba(255, 255, 255, 0.45);
+    font-style: italic;
+    font-size: 11px;
+  }
+}
+
+// ── Per-metric table ──────────────────────────────────────────────
+
+.metrics-table {
+  width: 100%;
+  background: transparent;
+
+  th, td {
+    color: rgba(255, 255, 255, 0.85);
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  th {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(255, 255, 255, 0.55);
+    font-weight: 600;
+  }
+
+  td.metric-winner {
+    background-color: rgba(16, 185, 129, 0.08);
+    font-weight: 600;
+    color: #10b981;
+  }
+
+  td.metric-loser {
+    opacity: 0.55;
+  }
+
+  .weight-contribution {
+    display: block;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.45);
+    margin-top: 2px;
+  }
+}
+
+.metrics-formula-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+
+  code {
+    font-family: monospace;
+    font-size: 11px;
+    background-color: rgba(255, 255, 255, 0.06);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+}
+
+.winner-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+
+  mat-icon {
+    font-size: 12px;
+    width: 12px;
+    height: 12px;
+  }
+
+  &.winner-a {
+    background-color: rgba(59, 130, 246, 0.18);
+    color: #60a5fa;
+  }
+  &.winner-b {
+    background-color: rgba(139, 92, 246, 0.18);
+    color: #c084fc;
+  }
+  &.winner-tie {
+    background-color: rgba(245, 158, 11, 0.18);
+    color: #fbbf24;
+  }
+}
+
+// ── Status banner ─────────────────────────────────────────────────
+
+.status-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  border-left: 4px solid rgba(255, 255, 255, 0.2);
+  background-color: rgba(255, 255, 255, 0.04);
+
+  mat-icon {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+  }
+
+  .status-banner-text {
+    flex: 1;
+  }
+
+  &.banner-ready {
+    background-color: rgba(16, 185, 129, 0.10);
+    border-left-color: #10b981;
+    color: #d1fae5;
+
+    mat-icon {
+      color: #10b981;
+    }
+  }
+
+  &.banner-needs-more {
+    background-color: rgba(59, 130, 246, 0.10);
+    border-left-color: #3b82f6;
+    color: #dbeafe;
+
+    mat-icon {
+      color: #3b82f6;
+    }
+  }
+
+  &.banner-collecting {
+    background-color: rgba(255, 255, 255, 0.06);
+    border-left-color: rgba(255, 255, 255, 0.35);
+    color: rgba(255, 255, 255, 0.65);
+  }
+}
+
+// ── Actions ───────────────────────────────────────────────────────
+
+.ab-dashboard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 16px 16px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+
+  .resolve-button {
+    mat-icon {
+      margin-right: 4px;
+    }
+  }
+}
+
+// ── Responsive ────────────────────────────────────────────────────
+
+@media (max-width: 720px) {
+  .variants-row {
+    grid-template-columns: 1fr;
+
+    > .versus-divider {
+      order: 2;
+    }
+  }
+
+  .versus-divider {
+    padding: 4px 0;
+  }
+
+  .composite-bar-grid {
+    gap: 16px;
+  }
+}

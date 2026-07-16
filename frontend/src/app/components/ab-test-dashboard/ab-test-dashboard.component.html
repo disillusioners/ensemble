@@ -1,0 +1,269 @@
+<mat-card class="ab-dashboard" data-testid="ab-test-dashboard">
+  <mat-card-header class="ab-dashboard-header">
+    <div class="ab-dashboard-title">
+      <mat-icon class="ab-dashboard-title-icon">science</mat-icon>
+      <div>
+        <mat-card-title>A/B Test Dashboard</mat-card-title>
+        @if (skillName()) {
+          <mat-card-subtitle>{{ skillName() }}</mat-card-subtitle>
+        }
+      </div>
+    </div>
+    @if (stats(); as s) {
+      @if (s.extension_count > 0) {
+        <span
+          class="extension-chip"
+          matTooltip="Number of times the test has been auto-extended because the threshold was not met">
+          <mat-icon>schedule</mat-icon>
+          {{ s.extension_count }} extension{{ s.extension_count === 1 ? '' : 's' }}
+        </span>
+      }
+    }
+  </mat-card-header>
+
+  <mat-card-content class="ab-dashboard-content">
+    @switch (testState()) {
+      @case ('no_data') {
+        <div class="empty-state" data-testid="empty-state">
+          <mat-icon>science_off</mat-icon>
+          <h3>No active A/B test</h3>
+          <p>This skill is not currently enrolled in any A/B comparison.</p>
+        </div>
+      }
+
+      @case ('collecting') {
+        <div class="collecting-state" data-testid="collecting-state">
+          <div class="skeleton skeleton-variants">
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+          </div>
+          <div class="skeleton skeleton-table"></div>
+          <div class="collecting-message">
+            <mat-icon>hourglass_empty</mat-icon>
+            <span>Collecting data…</span>
+            @if (stats(); as s) {
+              <span class="comparisons-count">
+                {{ s.comparisons }} / {{ s.sample_size }} comparisons
+              </span>
+            }
+          </div>
+        </div>
+      }
+
+      @default {
+        @if (stats(); as s) {
+          <!-- Variant header row -->
+          <div class="variants-row" data-testid="variants-row">
+            <div
+              class="variant-card"
+              [class.winner]="winnerVariant() === 'A'"
+              [class.loser]="winnerVariant() === 'B'"
+              [class.tied]="winnerVariant() === 'tie'">
+              <div class="variant-label">Variant A</div>
+              <div class="variant-role">Incumbent</div>
+              <div class="variant-id" [matTooltip]="s.skill_id_a">
+                {{ shortId(s.skill_id_a) }}
+              </div>
+              <div class="variant-status-chip">
+                <span [class]="'status-chip status-' + variantStatusColor('A').toLowerCase()">
+                  <mat-icon>
+                    {{
+                      variantStatus('A') === 'Winner'
+                        ? 'emoji_events'
+                        : variantStatus('A') === 'Loser'
+                          ? 'trending_down'
+                          : variantStatus('A') === 'Tied'
+                            ? 'horizontal_rule'
+                            : 'hourglass_top'
+                    }}
+                  </mat-icon>
+                  {{ variantStatus('A') }}
+                </span>
+              </div>
+            </div>
+
+            <div class="versus-divider" aria-hidden="true">
+              <span class="vs-label">vs</span>
+            </div>
+
+            <div
+              class="variant-card"
+              [class.winner]="winnerVariant() === 'B'"
+              [class.loser]="winnerVariant() === 'A'"
+              [class.tied]="winnerVariant() === 'tie'">
+              <div class="variant-label">Variant B</div>
+              <div class="variant-role">Challenger</div>
+              <div class="variant-id" [matTooltip]="s.skill_id_b">
+                {{ shortId(s.skill_id_b) }}
+              </div>
+              <div class="variant-status-chip">
+                <span [class]="'status-chip status-' + variantStatusColor('B').toLowerCase()">
+                  <mat-icon>
+                    {{
+                      variantStatus('B') === 'Winner'
+                        ? 'emoji_events'
+                        : variantStatus('B') === 'Loser'
+                          ? 'trending_down'
+                          : variantStatus('B') === 'Tied'
+                            ? 'horizontal_rule'
+                            : 'hourglass_top'
+                    }}
+                  </mat-icon>
+                  {{ variantStatus('B') }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Composite score comparison -->
+          <section class="composite-section" data-testid="composite-section">
+            <h4 class="section-title">Composite Score</h4>
+            @if (winnerVariant() === 'tie') {
+              <p
+                class="tie-note"
+                matTooltip="Per backend tie-breaking rule (skill_evolution_service._pick_winner), the challenger wins ties — so a tie would resolve to Variant B.">
+                <mat-icon>info</mat-icon>
+                Tied — challenger (Variant B) wins ties per backend rule.
+              </p>
+            }
+            <div class="composite-bar-grid">
+              <div class="composite-bar">
+                <div class="composite-bar-header">
+                  <span class="composite-bar-label">Variant A</span>
+                  <span class="composite-bar-value">{{ formatScore(s.composite_score_a) }}</span>
+                </div>
+                <mat-progress-bar
+                  mode="determinate"
+                  [value]="scoreBarValue(s.composite_score_a)"
+                  [color]="scoreBarColor(s.composite_score_a)">
+                </mat-progress-bar>
+              </div>
+              <div class="composite-bar">
+                <div class="composite-bar-header">
+                  <span class="composite-bar-label">Variant B</span>
+                  <span class="composite-bar-value">{{ formatScore(s.composite_score_b) }}</span>
+                </div>
+                <mat-progress-bar
+                  mode="determinate"
+                  [value]="scoreBarValue(s.composite_score_b)"
+                  [color]="scoreBarColor(s.composite_score_b)">
+                </mat-progress-bar>
+              </div>
+            </div>
+            <div class="difference-readout" data-testid="difference-readout">
+              Difference: <strong>{{ formatScore(s.difference) }}</strong>
+              <span class="difference-formula">(composite_score_a − composite_score_b)</span>
+            </div>
+          </section>
+
+          <!-- Per-metric breakdown table -->
+          <section class="metrics-section" data-testid="metrics-section">
+            <h4 class="section-title">Per-Metric Breakdown</h4>
+            <table mat-table [dataSource]="metricRows()" class="metrics-table">
+              <ng-container matColumnDef="name">
+                <th mat-header-cell *matHeaderCellDef>Metric</th>
+                <td mat-cell *matCellDef="let row">{{ row.name }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="weight">
+                <th mat-header-cell *matHeaderCellDef>Weight</th>
+                <td mat-cell *matCellDef="let row">
+                  {{ (row.weight * 100).toFixed(0) }}%
+                  <span class="weight-contribution">
+                    contributes {{ (row.scoreA * row.weight * 100).toFixed(1) }}% /
+                    {{ (row.scoreB * row.weight * 100).toFixed(1) }}%
+                  </span>
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="a">
+                <th mat-header-cell *matHeaderCellDef>Variant A</th>
+                <td
+                  mat-cell
+                  *matCellDef="let row"
+                  [class.metric-winner]="row.winner === 'A'"
+                  [class.metric-loser]="row.winner === 'B'">
+                  {{ row.displayA }}
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="b">
+                <th mat-header-cell *matHeaderCellDef>Variant B</th>
+                <td
+                  mat-cell
+                  *matCellDef="let row"
+                  [class.metric-winner]="row.winner === 'B'"
+                  [class.metric-loser]="row.winner === 'A'">
+                  {{ row.displayB }}
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="winner">
+                <th mat-header-cell *matHeaderCellDef>Winner</th>
+                <td mat-cell *matCellDef="let row">
+                  @if (row.winner === 'tie') {
+                    <span
+                      class="winner-badge winner-tie"
+                      matTooltip="Tied on this metric — see per-metric score">
+                      <mat-icon>horizontal_rule</mat-icon> Tie
+                    </span>
+                  } @else if (row.winner === 'A') {
+                    <span class="winner-badge winner-a">
+                      <mat-icon>check_circle</mat-icon> A
+                    </span>
+                  } @else {
+                    <span class="winner-badge winner-b">
+                      <mat-icon>check_circle</mat-icon> B
+                    </span>
+                  }
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+              <tr mat-row *matRowDef="let row; columns: displayedColumns"></tr>
+            </table>
+            <p class="metrics-formula-note">
+              <mat-icon>info</mat-icon>
+              Efficiency and Speed use <code>1 / (1 + x)</code> normalisation (display-only);
+              canonical composite scores are computed by the backend.
+            </p>
+          </section>
+
+          <!-- Status banner -->
+          <div
+            class="status-banner"
+            [class.banner-ready]="testState() === 'ready'"
+            [class.banner-needs-more]="testState() === 'needs_more'"
+            [class.banner-collecting]="testState() === 'collecting'"
+            data-testid="status-banner">
+            <mat-icon>
+              {{
+                testState() === 'ready'
+                  ? 'task_alt'
+                  : testState() === 'needs_more'
+                    ? 'pending'
+                    : 'hourglass_empty'
+              }}
+            </mat-icon>
+            <span class="status-banner-text">{{ bannerText() }}</span>
+          </div>
+        }
+      }
+    }
+  </mat-card-content>
+
+  @if (stats(); as s) {
+    <mat-card-actions class="ab-dashboard-actions">
+      <button
+        mat-button
+        color="primary"
+        [disabled]="!s.ready_to_resolve"
+        (click)="onResolve()"
+        class="resolve-button"
+        data-testid="resolve-button">
+        <mat-icon>flag</mat-icon>
+        Resolve
+      </button>
+    </mat-card-actions>
+  }
+</mat-card>
