@@ -113,11 +113,6 @@ export class SkillDetailComponent {
   readonly feedbackText = signal('');
   readonly feedbackSubmitting = signal(false);
 
-  readonly hasLineage = computed(() => {
-    const l = this.lineage();
-    return !!(l && (l.parents.length > 0 || l.children.length > 0));
-  });
-
   readonly statusColor = computed(() =>
     this.skill() ? getStatusColor(this.skill()!.status) : '#9ca3af',
   );

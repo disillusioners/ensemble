@@ -173,20 +173,21 @@
       </mat-card-content>
     </mat-card>
 
-    <!-- Lineage tree (interactive graph) -->
-    @if (hasLineage()) {
-      <mat-card class="lineage-card">
-        <mat-card-header><mat-card-title>Lineage</mat-card-title></mat-card-header>
-        <mat-card-content>
-          @if (lineage(); as l) {
-            <app-skill-lineage-tree
-              [lineage]="l"
-              [currentSkillId]="skillId()"
-              (navigateTo)="onNavigateTo($event)" />
-          }
-        </mat-card-content>
-      </mat-card>
-    }
+    <!-- Lineage tree (interactive graph) — always rendered for
+         empty-state consistency with the A/B test and usage history
+         sections. SkillLineageTreeComponent shows a "No evolution
+         history" message when lineage is empty. -->
+    <mat-card class="lineage-card">
+      <mat-card-header><mat-card-title>Lineage</mat-card-title></mat-card-header>
+      <mat-card-content>
+        @if (lineage(); as l) {
+          <app-skill-lineage-tree
+            [lineage]="l"
+            [currentSkillId]="skillId()"
+            (navigateTo)="onNavigateTo($event)" />
+        }
+      </mat-card-content>
+    </mat-card>
 
     <!-- Usage history (paginated self-fetching table) -->
     <mat-expansion-panel class="usage-history-panel">
