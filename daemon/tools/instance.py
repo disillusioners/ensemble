@@ -1,6 +1,7 @@
 """Instance management tools for multi-agent orchestration."""
 
 import asyncio
+import json
 import logging
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Callable
@@ -674,8 +675,44 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     
     @register_tool_category("instance")
     @tool
-    async def send_message(instance_id: str, message: str) -> str:
-        """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
+    async def send_message(
+        instance_id: str,
+        message: str,
+        load_skill: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional skill name to load on the recipient instance "
+                    "(e.g., 'unit-test'). When provided, a <meta>{\"load_skill\": "
+                    "\"<name>\"}</meta> tag is appended to the message so the "
+                    "skill is injected into the recipient's context for clean 1:1 "
+                    "attribution. Omit or pass None for backward-compatible "
+                    "behavior."
+                ),
+            ),
+        ] = None,
+    ) -> str:
+        """Send a message to another instance's input queue. Use tool_help("send_message") for details.
+
+        Args:
+            instance_id: The ID of the target instance.
+            message: The message content to send.
+            load_skill: Optional skill name (e.g. 'unit-test'). When provided, a
+                ``<meta>{"load_skill": "<name>"}</meta>`` tag is appended to the
+                message so the skill is injected into the recipient's context for
+                clean 1:1 attribution. Omit or pass None for backward-compatible
+                behavior (no meta-tag appended).
+        """
+        # ── load_skill sugar: append <meta> tag before enqueue ─────────────
+        # This is purely syntactic sugar. The existing meta-tag parser
+        # (daemon/services/skill_meta_parser.py) and injection pipeline
+        # (daemon/services/instance_messaging.py) consume the tag. We do NOT
+        # touch those modules — we only generate the tag string here.
+        if load_skill is not None and str(load_skill).strip():
+            _payload = json.dumps({"load_skill": str(load_skill).strip()})
+            message = message + f"\n<meta>{_payload}</meta>"
+
         # Validate instance exists with fuzzy matching for typos
         try:
             await _resolve_instance_id(manager, instance_id)
@@ -826,6 +863,11 @@ back if it's a child instance.
 Args:
     instance_id: The ID of the target instance to send the message to
     message: The message content to send
+    load_skill: Optional skill name (e.g. 'unit-test'). When provided,
+        a ``<meta>{"load_skill": "<name>"}</meta>`` tag is appended to the
+        message so the skill is injected into the recipient's context for
+        clean 1:1 attribution. Omit or pass None for backward-compatible
+        behavior (no meta-tag appended).
 
 Returns:
     The message_id for tracking (queue is async, response comes later)

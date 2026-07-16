@@ -50,4 +50,4 @@ skills:
 
 # Tester Agent — Skill Set
 
-The tester agent coordinates testing as a Test Leader + Dispatcher. It keeps `test-strategy` auto-loaded for planning decisions, and dispatches execution to worker instances — each loaded with a single skill via `<meta>{"load_skill": "..."}</meta>` for clean 1:1 attribution. Skill content is evolvable.
+The tester agent coordinates testing as a Test Leader + Dispatcher. It keeps `test-strategy` auto-loaded for planning decisions, and dispatches execution to worker instances — each loaded with a single skill via the `load_skill` parameter of `send_message(...)` for clean 1:1 attribution. Skill content is evolvable.

@@ -8,7 +8,7 @@ auto_load: true
 
 Decide WHAT to test and HOW to scope it. The default is the smallest scope that covers the change.
 
-**I am the Test Leader + Dispatcher.** Planning answers WHAT to test. Dispatching answers WHO runs each piece — I never execute tests myself. Each worker instance receives exactly ONE skill via `<meta>{"load_skill": "<skill_name>"}</meta>` so attribution stays clean and per-skill guidance is loaded for the actual execution. My own `test-strategy` skill is for my planning only; never embed it in a worker dispatch.
+**I am the Test Leader + Dispatcher.** Planning answers WHAT to test. Dispatching answers WHO runs each piece — I never execute tests myself. Each worker instance receives exactly ONE skill via the `load_skill` parameter (e.g. `send_message(..., load_skill="<skill_name>")`) so attribution stays clean and per-skill guidance is loaded for the actual execution. My own `test-strategy` skill is for my planning only; never embed it in a worker dispatch.
 
 ## Blast Radius Control (Run First, Always)
 
@@ -62,7 +62,7 @@ Before listing packs, derive the change set. **Even on an explicit "full test su
 
 ## Worker Skill Selection (Dispatcher Contract)
 
-Planning determines WHAT to test. Dispatching determines WHICH skill each worker receives. **The tester never executes tests directly** — every worker instance is spawned with exactly ONE skill embedded in the message via `<meta>{"load_skill": "<skill_name>"}</meta>`. This keeps attribution 1:1 (one skill, one worker, one responsibility).
+Planning determines WHAT to test. Dispatching determines WHICH skill each worker receives. **The tester never executes tests directly** — every worker instance is spawned with exactly ONE skill embedded in the message via the `load_skill` parameter of `send_message(...)`. This keeps attribution 1:1 (one skill, one worker, one responsibility).
 
 ### Skill Selection by Task Type
 
@@ -95,17 +95,22 @@ When spawning a worker for a planned task:
 
 <full message body — see test-pack-execution or relevant skill template>
 
-<meta>{"load_skill": "<selected skill from table above>"}</meta>
+→ spawn_instance(agent="worker")
+→ send_message(
+    instance_id=worker_id,
+    message="<full message body — see test-pack-execution or relevant skill template>",
+    load_skill="<selected skill from table above>"
+  )
 ```
 
-The `<meta>` tag is parsed by the worker runtime so the worker loads only the skill needed for its task. The tester's own skill stack is untouched.
+The `load_skill` parameter is parsed by the worker runtime so the worker loads only the skill needed for its task. The tester's own skill stack is untouched.
 
 ### Pre-Dispatch Self-Check (dispatcher-level)
 
 Before every `send_message` to a worker, in addition to the skill's own Pre-Send Self-Check:
 
 - [ ] **Worker skill selected** from the table above (matches task type)
-- [ ] **Exactly one** `<meta>{"load_skill": "..."}</meta>` tag in the message
+- [ ] **Exactly one** `load_skill="..."` parameter on the `send_message(...)` call
 - [ ] **`test-strategy` NOT embedded** in the worker message (tester-only planning skill)
 - [ ] **Skill ↔ task match verified** (e.g., running a pack → `test-pack-execution`; not `unit-test` or `e2e-test`)
 - [ ] **todo_graph node updated** to `in_progress` before the dispatch lands
