@@ -1,0 +1,83 @@
+<div class="trigger-list-panel">
+  <!-- Header -->
+  <div class="trigger-list-header">
+    <div class="header-title">
+      <mat-icon>auto_awesome</mat-icon>
+      <span>Evolution Triggers</span>
+    </div>
+    <div class="header-actions">
+      <button
+        mat-flat-button
+        color="primary"
+        class="new-trigger-btn"
+        (click)="openCreateDialog()">
+        <mat-icon>add</mat-icon>
+        New Trigger
+      </button>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="trigger-list-content">
+    @if (triggers().length === 0) {
+      <div class="empty-state">
+        <mat-icon>auto_awesome</mat-icon>
+        <p>No trigger rules configured</p>
+        <button
+          mat-flat-button
+          color="primary"
+          (click)="openCreateDialog()">
+          <mat-icon>add</mat-icon>
+          Create one
+        </button>
+      </div>
+    } @else {
+      <div class="trigger-cards">
+        @for (trigger of triggers(); track trackById($index, trigger)) {
+          <mat-card class="trigger-card" [class.disabled]="!trigger.is_enabled">
+            <div class="trigger-card-header">
+              <div class="trigger-info">
+                <div class="trigger-name">{{ trigger.name }}</div>
+                <div class="trigger-subtitle">{{ conditionTypeLabel(trigger.condition_type) }}</div>
+              </div>
+              <mat-slide-toggle
+                [checked]="trigger.is_enabled"
+                (change)="onToggle(trigger, $event.checked)"
+                color="primary"
+                [matTooltip]="trigger.is_enabled ? 'Disable trigger' : 'Enable trigger'">
+              </mat-slide-toggle>
+            </div>
+
+            <mat-card-content class="trigger-card-content">
+              <div class="trigger-config">
+                <span class="config-label">Config:</span>
+                <span class="config-value">{{ formatConfigSummary(trigger.condition_json) }}</span>
+              </div>
+              <div class="trigger-action">
+                <span class="action-label">Action:</span>
+                <span class="action-badge">{{ actionLabel(trigger.action) }}</span>
+              </div>
+            </mat-card-content>
+
+            <mat-card-actions class="trigger-card-actions">
+              <button
+                mat-button
+                color="primary"
+                (click)="openEditDialog(trigger)">
+                <mat-icon>edit</mat-icon>
+                Edit
+              </button>
+              <button
+                mat-button
+                color="warn"
+                (click)="onDelete(trigger)">
+                <mat-icon>delete</mat-icon>
+                Delete
+              </button>
+            </mat-card-actions>
+          </mat-card>
+        }
+      </div>
+    }
+  </div>
+</div>

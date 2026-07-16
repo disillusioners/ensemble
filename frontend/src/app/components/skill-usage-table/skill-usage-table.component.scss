@@ -1,0 +1,204 @@
+// SkillUsageTableComponent — paginated usage-history table styling.
+//
+// Uses the dark-theme palette from the rest of the app (see
+// `frontend/src/app/components/queue-list/queue-list.component.scss`)
+// so the table slots in alongside the queue / skill-card surfaces
+// without colour clash.
+
+.skill-usage-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+
+  // ── Generic state blocks (loading / empty / error) ───────────
+
+  .state-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 16px;
+    color: rgba(255, 255, 255, 0.65);
+    text-align: center;
+    gap: 12px;
+
+    mat-icon {
+      font-size: 36px;
+      height: 36px;
+      width: 36px;
+      opacity: 0.6;
+    }
+
+    .state-label {
+      font-size: 0.85rem;
+    }
+  }
+
+  .error-state {
+    color: #ef4444;
+
+    .error-message {
+      margin: 0;
+      max-width: 420px;
+      font-size: 0.9rem;
+    }
+  }
+
+  // ── "All records superseded" banner ──────────────────────────
+
+  .all-superseded-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(245, 158, 11, 0.08);
+    border-left: 3px solid #f59e0b;
+    border-radius: 2px;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.85rem;
+
+    mat-icon {
+      font-size: 18px;
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  // ── Table ────────────────────────────────────────────────────
+
+  table.usage-table {
+    width: 100%;
+    background: transparent;
+
+    th.mat-mdc-header-cell {
+      color: rgba(255, 255, 255, 0.65);
+      font-weight: 500;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom-color: rgba(255, 255, 255, 0.08);
+    }
+
+    td.mat-mdc-cell {
+      color: rgba(255, 255, 255, 0.95);
+      font-size: 0.88rem;
+      border-bottom-color: rgba(255, 255, 255, 0.05);
+    }
+
+    tr.mat-mdc-row {
+      cursor: pointer;
+      transition: background-color 0.15s ease;
+
+      &:hover {
+        background-color: rgba(255, 255, 255, 0.04);
+      }
+    }
+
+    // Row state classes — at most one of these is true per row in
+    // practice, but the template uses [ngClass] so they compose
+    // cleanly (e.g. a superseded failure row gets both muted text
+    // and line-through). The order below matches the legend in
+    // `rowClass()`.
+
+    tr.row-success td.mat-mdc-cell {
+      background-color: rgba(16, 185, 129, 0.08);
+    }
+
+    tr.row-failure td.mat-mdc-cell {
+      color: rgba(255, 255, 255, 0.45);
+    }
+
+    tr.row-fallback td.mat-mdc-cell {
+      background-color: rgba(245, 158, 11, 0.12);
+    }
+
+    tr.row-superseded td.mat-mdc-cell {
+      color: rgba(255, 255, 255, 0.4);
+      text-decoration: line-through;
+    }
+
+    // Cell-level styling
+
+    .agent-cell {
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+
+    .task-cell {
+      max-width: 240px;
+    }
+
+    .task-truncate {
+      display: inline-block;
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
+
+    .icon-yes {
+      color: #10b981;
+      font-size: 18px;
+      height: 18px;
+      width: 18px;
+    }
+
+    .icon-no {
+      color: rgba(255, 255, 255, 0.25);
+      font-size: 18px;
+      height: 18px;
+      width: 18px;
+    }
+
+    .fallback-chip {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background-color: rgba(245, 158, 11, 0.18);
+      color: #f59e0b;
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+    }
+
+    .muted {
+      color: rgba(255, 255, 255, 0.25);
+    }
+  }
+
+  // ── Detail panel (expanded row) ─────────────────────────────
+
+  .detail-row td.detail-cell {
+    background-color: rgba(255, 255, 255, 0.04);
+    padding: 16px 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .detail-panel dl {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 8px 16px;
+    margin: 0;
+
+    dt {
+      color: rgba(255, 255, 255, 0.55);
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+
+    dd {
+      margin: 0;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 0.85rem;
+      word-break: break-word;
+
+      &.mono {
+        font-family: monospace;
+        font-size: 0.78rem;
+        color: rgba(255, 255, 255, 0.75);
+      }
+    }
+  }
+}

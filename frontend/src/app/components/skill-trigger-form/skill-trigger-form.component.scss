@@ -1,0 +1,374 @@
+// Skill Trigger Form Styles - Dark theme compatible
+$bg-primary: #0f172a;
+$bg-card: #1e293b;
+$bg-card-hover: #334155;
+$border-color: #334155;
+$text-primary: #f1f5f9;
+$text-secondary: #94a3b8;
+$text-muted: #64748b;
+
+$accent-cyan: #10a7f7;
+$accent-rose: #f43f5e;
+
+:host {
+  display: block;
+}
+
+// Modal container
+.modal-container {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+// Backdrop
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+// Modal content
+.modal-content {
+  position: relative;
+  background-color: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 1rem;
+  width: 100%;
+  max-width: 36rem;
+  margin: 1rem;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+// Animation
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out;
+}
+
+// Header
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid $border-color;
+}
+
+// Typography
+.font-display {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.text-xl {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+}
+
+.font-semibold {
+  font-weight: 600;
+}
+
+.text-dark-50 {
+  color: $text-primary;
+}
+
+.text-accent-rose {
+  color: $accent-rose;
+}
+
+// Close button
+.close-btn {
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  color: $text-secondary;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:hover {
+    color: $text-primary;
+    background-color: $bg-card-hover;
+  }
+
+  svg {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+}
+
+// Form
+.modal-form {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.form-label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: $text-secondary;
+  margin-bottom: 0.5rem;
+}
+
+.form-hint {
+  font-size: 0.75rem;
+  color: $text-muted;
+  margin-top: 0.375rem;
+}
+
+.form-error {
+  font-size: 0.75rem;
+  color: $accent-rose;
+  margin-top: 0.375rem;
+}
+
+// Form inputs
+.form-input,
+.form-textarea {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  background-color: $bg-primary;
+  border: 1px solid $border-color;
+  border-radius: 0.5rem;
+  color: $text-primary;
+  font-size: 0.875rem;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  outline: none;
+  box-sizing: border-box;
+
+  &::placeholder {
+    color: $text-muted;
+  }
+
+  &:focus {
+    border-color: $accent-cyan;
+    box-shadow: 0 0 0 2px rgba($accent-cyan, 0.2);
+  }
+
+  &.ng-invalid.ng-touched {
+    border-color: $accent-rose;
+
+    &:focus {
+      box-shadow: 0 0 0 2px rgba($accent-rose, 0.2);
+    }
+  }
+}
+
+.form-textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.full-width {
+  width: 100%;
+}
+
+// Dynamic config section
+.dynamic-config {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed $border-color;
+  border-radius: 0.5rem;
+}
+
+// Enabled row
+.enabled-row {
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: $text-primary;
+  }
+}
+
+// Angular Material form field overrides for dark theme
+::ng-deep {
+  .modal-content {
+    .mat-mdc-form-field {
+      width: 100%;
+
+      .mdc-text-field {
+        background-color: $bg-primary !important;
+        border-radius: 0.5rem;
+      }
+
+      .mat-mdc-form-field-subscript-wrapper {
+        display: none;
+      }
+
+      &.mat-form-field-appearance-outline {
+        .mdc-notched-outline {
+          border-color: $border-color;
+        }
+
+        .mdc-notched-outline__leading,
+        .mdc-notched-outline__notch,
+        .mdc-notched-outline__trailing {
+          border-color: $border-color;
+        }
+
+        &:hover .mdc-notched-outline__leading,
+        &:hover .mdc-notched-outline__notch,
+        &:hover .mdc-notched-outline__trailing {
+          border-color: $text-muted;
+        }
+
+        &.mdc-text-field--focused {
+          .mdc-notched-outline__leading,
+          .mdc-notched-outline__notch,
+          .mdc-notched-outline__trailing {
+            border-color: $accent-cyan;
+          }
+        }
+      }
+
+      .mat-mdc-form-field-flex {
+        height: 44px;
+      }
+
+      .mat-mdc-select {
+        color: $text-primary;
+      }
+
+      .mat-mdc-select-trigger {
+        color: $text-primary;
+      }
+
+      input.mat-mdc-input-element {
+        color: $text-primary;
+
+        &::placeholder {
+          color: $text-muted;
+        }
+      }
+    }
+
+    .mat-mdc-select-panel {
+      background-color: $bg-card !important;
+      border: 1px solid $border-color;
+      border-radius: 0.5rem;
+
+      .mat-mdc-option {
+        color: $text-primary;
+        font-size: 0.875rem;
+
+        &:hover {
+          background-color: $bg-card-hover;
+        }
+
+        &.mat-mdc-option-active {
+          background-color: rgba($accent-cyan, 0.15);
+        }
+
+        &.mdc-list-item--selected {
+          background-color: rgba($accent-cyan, 0.2);
+
+          .mdc-list-item__primary-text {
+            color: $accent-cyan;
+          }
+        }
+      }
+    }
+
+    .mat-mdc-slide-toggle {
+      // Make the toggle a bit smaller to fit inline with the label.
+      --mdc-switch-track-height: 20px;
+      --mdc-switch-track-width: 36px;
+    }
+  }
+}
+
+// Form actions
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+  margin-top: 0.5rem;
+  border-top: 1px solid $border-color;
+}
+
+.cancel-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  color: $text-secondary;
+  background-color: $bg-card-hover;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 0.875rem;
+
+  &:hover:not(:disabled) {
+    background-color: #475569;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.submit-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  color: white;
+  background-color: $accent-cyan;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+
+  &:hover:not(:disabled) {
+    background-color: rgba($accent-cyan, 0.85);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.w-5 {
+  width: 1.25rem;
+}
+
+.h-5 {
+  height: 1.25rem;
+}

@@ -1,0 +1,193 @@
+<div class="modal-container">
+  <!-- Backdrop -->
+  <div class="modal-backdrop" (click)="handleClose()"></div>
+
+  <!-- Modal -->
+  <div class="modal-content animate-fade-in">
+    <!-- Header -->
+    <div class="modal-header">
+      <h2 class="font-display text-xl font-semibold text-dark-50">
+        {{ isEditMode ? 'Edit Trigger' : 'New Evolution Trigger' }}
+      </h2>
+      <button (click)="handleClose()" class="close-btn" type="button">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Form -->
+    <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
+      <!-- Name -->
+      <div class="form-group">
+        <label class="form-label">
+          Name <span class="text-accent-rose">*</span>
+        </label>
+        <input
+          type="text"
+          formControlName="name"
+          placeholder="e.g. Weekly skill health check"
+          class="form-input"
+          [class.ng-invalid]="nameControl?.invalid && nameControl?.touched"
+          [class.ng-touched]="nameControl?.touched"
+        />
+        @if (nameControl?.touched && nameControl?.errors?.['required']) {
+          <p class="form-error">Name is required</p>
+        }
+        @if (nameControl?.touched && nameControl?.errors?.['maxlength']) {
+          <p class="form-error">Name must be at most 120 characters</p>
+        }
+      </div>
+
+      <!-- Condition Type -->
+      <div class="form-group">
+        <label class="form-label">
+          Condition Type <span class="text-accent-rose">*</span>
+        </label>
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-select formControlName="condition_type">
+            @for (opt of conditionTypeOptions; track opt.value) {
+              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+        <p class="form-hint">
+          @switch (conditionType) {
+            @case ('low_completion_rate') {
+              Triggered when a skill's completion rate drops below a threshold.
+            }
+            @case ('high_fallback_rate') {
+              Triggered when fallback usage exceeds a threshold.
+            }
+            @case ('consecutive_failures') {
+              Triggered after a run of consecutive task failures.
+            }
+            @case ('task_count_scan') {
+              Triggered after a configured number of tasks have been observed.
+            }
+            @case ('periodic_scan') {
+              Triggered on a periodic interval (days).
+            }
+          }
+        </p>
+      </div>
+
+      <!-- Dynamic config fields -->
+      <div class="dynamic-config">
+        @if (showsThreshold) {
+          <div class="form-group">
+            <label class="form-label">
+              Threshold <span class="text-accent-rose">*</span>
+            </label>
+            <mat-form-field appearance="outline" class="full-width">
+              <input
+                matInput
+                type="number"
+                formControlName="threshold"
+                [min]="thresholdMin"
+                [step]="thresholdStep"
+              />
+            </mat-form-field>
+            <p class="form-hint">
+              @if (conditionType === 'low_completion_rate' || conditionType === 'high_fallback_rate') {
+                A ratio between 0.0 and 1.0 (e.g. 0.3 = 30%).
+              } @else {
+                A positive integer (count of failures or tasks).
+              }
+            </p>
+            @if (thresholdControl?.touched && thresholdControl?.errors?.['required']) {
+              <p class="form-error">Threshold is required</p>
+            }
+            @if (thresholdControl?.touched && thresholdControl?.errors?.['min']) {
+              <p class="form-error">Threshold must be at least {{ thresholdMin }}</p>
+            }
+          </div>
+        }
+
+        @if (showsMinSelections) {
+          <div class="form-group">
+            <label class="form-label">
+              Min Selections <span class="text-accent-rose">*</span>
+            </label>
+            <mat-form-field appearance="outline" class="full-width">
+              <input
+                matInput
+                type="number"
+                formControlName="min_selections"
+                min="1"
+                step="1"
+              />
+            </mat-form-field>
+            <p class="form-hint">
+              Minimum number of selections before the trigger evaluates.
+            </p>
+            @if (minSelectionsControl?.touched && minSelectionsControl?.errors?.['required']) {
+              <p class="form-error">Min selections is required</p>
+            }
+            @if (minSelectionsControl?.touched && minSelectionsControl?.errors?.['min']) {
+              <p class="form-error">Min selections must be at least 1</p>
+            }
+          </div>
+        }
+
+        @if (showsIntervalDays) {
+          <div class="form-group">
+            <label class="form-label">
+              Interval (days) <span class="text-accent-rose">*</span>
+            </label>
+            <mat-form-field appearance="outline" class="full-width">
+              <input
+                matInput
+                type="number"
+                formControlName="interval_days"
+                min="1"
+                step="1"
+              />
+            </mat-form-field>
+            <p class="form-hint">How often the periodic scan runs.</p>
+            @if (intervalDaysControl?.touched && intervalDaysControl?.errors?.['required']) {
+              <p class="form-error">Interval is required</p>
+            }
+            @if (intervalDaysControl?.touched && intervalDaysControl?.errors?.['min']) {
+              <p class="form-error">Interval must be at least 1 day</p>
+            }
+          </div>
+        }
+      </div>
+
+      <!-- Action -->
+      <div class="form-group">
+        <label class="form-label">
+          Action <span class="text-accent-rose">*</span>
+        </label>
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-select formControlName="action">
+            @for (opt of actionOptions; track opt.value) {
+              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+        <p class="form-hint">
+          Analyze inspects the affected skill; Evolve (Fix) attempts an automatic rewrite.
+        </p>
+      </div>
+
+      <!-- Enabled -->
+      <div class="form-group enabled-row">
+        <label class="toggle-label">
+          <span>Enabled</span>
+          <mat-slide-toggle formControlName="is_enabled" color="primary"></mat-slide-toggle>
+        </label>
+        <p class="form-hint">Disabled triggers are saved but never evaluated.</p>
+      </div>
+
+      <!-- Actions -->
+      <div class="form-actions">
+        <button type="button" (click)="handleClose()" class="cancel-btn">Cancel</button>
+        <button type="submit" [disabled]="isSubmitDisabled()" class="submit-btn">
+          {{ isEditMode ? 'Save Changes' : 'Create Trigger' }}
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
