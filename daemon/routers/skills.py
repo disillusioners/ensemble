@@ -1256,6 +1256,8 @@ async def get_usage_records(
             "limit": effective_limit,
             "offset": effective_offset,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise _to_http_500(e, "get_usage_records")
 

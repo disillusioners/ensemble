@@ -924,6 +924,16 @@ class TestUsageRecords:
         # resets the singleton before the next test runs — no
         # manual restore needed here.
 
+    def test_limit_zero_returns_422(self, skill_app_with_mock_services):
+        """``limit=0`` is rejected by the ``Query(ge=1)`` validator
+        on the route — callers must request at least one row.
+        FastAPI surfaces the validation failure as 422."""
+        client = skill_app_with_mock_services["client"]
+        response = client.get(
+            "/api/skills/skill-abc/usage-records?limit=0"
+        )
+        assert response.status_code == 422
+
 
 class TestABTestStats:
     """``GET /api/skills/{skill_id}/ab-test/stats`` — per-variant metrics."""
@@ -956,6 +966,24 @@ class TestABTestStats:
         store = skill_app_with_mock_services["store"]
         store.get_skill = AsyncMock(
             return_value=_skill_object(skill_id="skill-abc", ab_test_group=None)
+        )
+        response = client.get("/api/skills/skill-abc/ab-test/stats")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["skill_id"] == "skill-abc"
+        assert body["ab_test_group"] is None
+        assert body["stats"] is None
+
+    def test_empty_string_group_returns_null_stats_envelope(
+        self, skill_app_with_mock_services
+    ):
+        """An empty-string ``ab_test_group`` is treated the same as
+        ``None`` — the router's ``if not ab_group`` check catches
+        both, so the response envelope matches the null case."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(
+            return_value=_skill_object(skill_id="skill-abc", ab_test_group="")
         )
         response = client.get("/api/skills/skill-abc/ab-test/stats")
         assert response.status_code == 200
@@ -1112,6 +1140,129 @@ class TestLineageEdgeEnrichment:
         assert "content" not in child
         # The child edge's ``skill_id`` is preserved.
         assert child["skill_id"] == "c-1"
+
+    def test_parent_entry_surfaces_edge_created_at(
+        self, skill_app_with_mock_services
+    ):
+        """The edge's ``created_at`` is surfaced under a dedicated
+        ``edge_created_at`` key on the enriched entry — distinct
+        from the related Skill's own ``created_at`` (the edge is
+        recorded at evolution time, the skill at import time)."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        edge_ts = "2025-01-15T10:30:00Z"
+        store.get_skill = AsyncMock(
+            side_effect=lambda related_id: _skill_object(
+                skill_id=related_id,
+                name=f"parent-of-{related_id}",
+                ab_test_group=None,
+            )
+        )
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [
+                        {
+                            "parent_skill_id": "p-1",
+                            "change_summary": "cs",
+                            "content_diff": "diff",
+                            "content": "stripped",
+                            "created_at": edge_ts,
+                        }
+                    ],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        parent = response.json()["parents"][0]
+        # Edge ``created_at`` is forwarded under the dedicated key.
+        assert parent["edge_created_at"] == edge_ts
+        # Skill metadata + edge metadata still merged in.
+        assert parent["parent_skill_id"] == "p-1"
+        assert parent["name"] == "parent-of-p-1"
+
+    def test_malformed_edge_without_related_id_falls_back_to_stripped_dict(
+        self, skill_app_with_mock_services
+    ):
+        """An edge missing its related-skill pointer
+        (``parent_skill_id`` absent or empty) cannot be enriched —
+        the helper short-circuits to a stripped dict so the row
+        still surfaces without crashing on the lookup."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [
+                        {
+                            # Missing ``parent_skill_id`` entirely.
+                            "change_summary": "orphan",
+                            "content_diff": "-stale",
+                            "content": "stripped",
+                        }
+                    ],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        parent = response.json()["parents"][0]
+        # Stripped fallback: edge metadata kept, ``content`` dropped.
+        assert parent["change_summary"] == "orphan"
+        assert parent["content_diff"] == "-stale"
+        assert "content" not in parent
+        # No related Skill lookup happened — ``name`` must be absent.
+        assert "name" not in parent
+        # ``get_skill`` should NOT have been called for this malformed
+        # edge (no related_id to look up).
+        store.get_skill.assert_not_called()
+
+    def test_enrichment_lookup_failure_does_not_500(
+        self, skill_app_with_mock_services
+    ):
+        """When the related-Skill lookup raises (DB blip, etc.),
+        the enrichment falls back to the stripped edge dict instead
+        of propagating the exception as a 500. The endpoint must
+        remain best-effort for orphan-style failures."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(
+            side_effect=RuntimeError("DB connection lost")
+        )
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [
+                        {
+                            "parent_skill_id": "p-1",
+                            "change_summary": "cs",
+                            "content_diff": "diff",
+                            "content": "stripped",
+                        }
+                    ],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        # Endpoint must NOT 500 on the lookup failure — the
+        # enrichment helper's best-effort ``except Exception``
+        # catches the error and falls back to the stripped dict.
+        assert response.status_code == 200
+        parent = response.json()["parents"][0]
+        # Stripped fallback: edge id + metadata preserved, no
+        # related-Skill fields (since the lookup failed).
+        assert parent["parent_skill_id"] == "p-1"
+        assert parent["change_summary"] == "cs"
+        assert parent["content_diff"] == "diff"
+        assert "name" not in parent
+        assert "content" not in parent
 
     def test_existing_skill_fields_preserved_after_enrichment(
         self, skill_app_with_mock_services
