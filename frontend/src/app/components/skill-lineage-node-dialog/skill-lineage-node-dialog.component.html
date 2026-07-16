@@ -1,0 +1,56 @@
+<div class="dialog-shell">
+  <header class="dialog-header">
+    <div class="dialog-title-block">
+      <h2 class="dialog-title">{{ nodeName }}</h2>
+      <span class="dialog-subtitle">
+        Generation {{ nodeGeneration }}
+        @if (nodeStatus) {
+          · {{ nodeStatus }}
+        }
+      </span>
+    </div>
+    <button
+      type="button"
+      mat-icon-button
+      class="dialog-close-btn"
+      aria-label="Close"
+      (click)="onClose()">
+      ✕
+    </button>
+  </header>
+
+  @if (isCurrentNode) {
+    <section class="current-node-note" role="status">
+      <p>
+        This is the skill you're currently viewing. Click any parent
+        or child in the lineage tree to inspect its edge metadata.
+      </p>
+    </section>
+  } @else {
+    <section class="dialog-section">
+      <h3 class="section-label">Change summary</h3>
+      <p class="change-summary">{{ changeSummaryDisplay }}</p>
+    </section>
+
+    <section class="dialog-section">
+      <h3 class="section-label">Created at</h3>
+      <p class="edge-created-at">{{ createdAtDisplay }}</p>
+    </section>
+
+    @if (contentDiffDisplay) {
+      <section class="dialog-section">
+        <h3 class="section-label">Content diff</h3>
+        <pre class="content-diff"><code>{{ contentDiffDisplay }}</code></pre>
+      </section>
+    } @else {
+      <section class="dialog-section">
+        <h3 class="section-label">Content diff</h3>
+        <p class="empty-diff">No content diff recorded for this edge.</p>
+      </section>
+    }
+  }
+
+  <footer class="dialog-footer">
+    <button type="button" mat-stroked-button (click)="onClose()">Close</button>
+  </footer>
+</div>

@@ -1,0 +1,120 @@
+// SkillLineageTreeComponent — wraps MermaidGraphComponent + fallback
+// navigation. Dark-theme-aware; uses the project's existing CSS tokens
+// (background / panel colours) so it blends with the rest of the app.
+
+:host {
+  display: block;
+  width: 100%;
+}
+
+.skill-lineage-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.large-tree-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  background-color: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 6px;
+  color: #fde68a;
+  font-size: 0.875rem;
+  line-height: 1.35rem;
+}
+
+.large-tree-icon {
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.large-tree-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.lineage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  background-color: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+}
+
+.lineage-legend-label {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  margin-right: 0.25rem;
+  letter-spacing: 0.02em;
+}
+
+.lineage-legend-btn {
+  --mdc-outlined-button-label-text-color: #e2e8f0;
+  --mdc-outlined-button-outline-color: #334155;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 0.4rem !important;
+  font-size: 0.8rem !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  line-height: 1.4rem !important;
+  padding: 0 0.6rem !important;
+  height: 32px !important;
+  min-width: 0 !important;
+
+  &:hover {
+    --mdc-outlined-button-label-text-color: #f8fafc;
+    --mdc-outlined-button-outline-color: #475569;
+  }
+}
+
+.lineage-legend-name {
+  max-width: 16rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineage-legend-gen {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  background-color: #1e293b;
+  border-radius: 4px;
+  padding: 0 0.35rem;
+}
+
+.no-lineage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 2rem;
+  border: 1px dashed #334155;
+  border-radius: 8px;
+  background-color: rgba(15, 23, 42, 0.5);
+  color: #94a3b8;
+  text-align: center;
+}
+
+.no-lineage-icon {
+  font-size: 2rem;
+  width: 2rem;
+  height: 2rem;
+  color: #475569;
+}
+
+.no-lineage-message {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #cbd5e1;
+}

@@ -1,0 +1,75 @@
+// MermaidGraphComponent — toolbar + scroll wrapper for re-usable Mermaid surface.
+
+:host {
+  display: block;
+  width: 100%;
+}
+
+.mermaid-graph-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background-color: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mermaid-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #1e293b;
+  background-color: #0b1220;
+}
+
+.mermaid-graph-title {
+  font-weight: 500;
+  font-size: 0.95rem;
+  color: #e2e8f0;
+  letter-spacing: 0.01em;
+}
+
+.mermaid-toolbar-spacer {
+  flex: 1 1 auto;
+}
+
+.mermaid-toolbar-btn {
+  --mdc-outlined-button-label-text-color: #94a3b8;
+  --mdc-outlined-button-outline-color: #334155;
+  font-size: 0.85rem !important;
+  letter-spacing: normal !important;
+  text-transform: none !important;
+  min-width: 0 !important;
+  padding: 0 0.75rem !important;
+  line-height: 1.5rem !important;
+  height: 32px !important;
+
+  &:hover {
+    --mdc-outlined-button-label-text-color: #e2e8f0;
+    --mdc-outlined-button-outline-color: #475569;
+  }
+}
+
+// Horizontal scroll wrapper so wide graphs don't break the layout.
+.mermaid-scroll-wrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.75rem;
+  background-color: #0f172a;
+  min-height: 60px;
+}
+
+// Style the markdown-rendered `.mermaid` block — the markdown module
+// emits a `<div class="mermaid">` wrapper that contains the SVG.
+:host ::ng-deep .mermaid {
+  display: inline-block;
+  min-width: 100%;
+}
+
+:host ::ng-deep .mermaid svg {
+  max-width: none;
+  height: auto;
+  display: block;
+}

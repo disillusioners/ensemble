@@ -1,0 +1,41 @@
+<section class="skill-lineage-tree">
+  @if (graphSource()) {
+    @if (isLargeTree()) {
+      <div class="large-tree-banner" role="status">
+        <mat-icon class="large-tree-icon">info</mat-icon>
+        <div class="large-tree-text">
+          <strong>Large lineage tree</strong>
+          <span>This skill has more than 20 nodes / 5 generations of history. Use the Fullscreen button above for a larger view.</span>
+        </div>
+      </div>
+    }
+
+    <app-mermaid-graph
+      [graphSource]="graphSource()"
+      title="Evolution Lineage"
+      fullscreenTitle="Skill Lineage — Full Tree"
+      [nodeClicked]="onMermaidNodeClicked.bind(this)"
+    ></app-mermaid-graph>
+
+    <nav class="lineage-legend" aria-label="Lineage navigation">
+      <span class="lineage-legend-label">Quick navigate:</span>
+      @for (node of allRelatedNodes(); track node.id) {
+        <button
+          type="button"
+          mat-stroked-button
+          class="lineage-legend-btn"
+          (click)="onFallbackClick(node)"
+          [attr.aria-label]="'Open lineage node ' + node.name"
+        >
+          <span class="lineage-legend-name">{{ node.name || node.id }}</span>
+          <span class="lineage-legend-gen">Gen {{ node.generation }}</span>
+        </button>
+      }
+    </nav>
+  } @else {
+    <div class="no-lineage" role="status">
+      <mat-icon class="no-lineage-icon">account_tree</mat-icon>
+      <p class="no-lineage-message">This skill has no evolution history.</p>
+    </div>
+  }
+</section>

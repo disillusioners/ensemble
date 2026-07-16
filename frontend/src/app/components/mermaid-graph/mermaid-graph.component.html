@@ -1,0 +1,42 @@
+<div
+  #hostEl
+  class="mermaid-graph-container"
+  (click)="onHostClick($event)"
+>
+  <div class="mermaid-toolbar">
+    @if (title()) {
+      <span class="mermaid-graph-title">{{ title() }}</span>
+    }
+    <span class="mermaid-toolbar-spacer"></span>
+    <button
+      type="button"
+      mat-stroked-button
+      class="mermaid-toolbar-btn"
+      (click)="onAction('image')"
+      aria-label="Copy chart as image">
+      Copy SVG/PNG
+    </button>
+    <button
+      type="button"
+      mat-stroked-button
+      class="mermaid-toolbar-btn"
+      (click)="onAction('source')"
+      aria-label="Copy Mermaid source">
+      Copy Source
+    </button>
+    <button
+      type="button"
+      mat-stroked-button
+      class="mermaid-toolbar-btn"
+      (click)="onAction('fullscreen')"
+      aria-label="Open chart fullscreen">
+      Fullscreen
+    </button>
+  </div>
+
+  <div class="mermaid-scroll-wrapper">
+    @if (graphSource()) {
+      <markdown [data]="graphSource()" mermaid></markdown>
+    }
+  </div>
+</div>
