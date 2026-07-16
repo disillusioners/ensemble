@@ -73,30 +73,33 @@
 .metric-sub { font-size: 11px; color: rgba(255,255,255,0.5); }
 // A/B test
 .ab-test-card { max-width: 900px; }
-.ab-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-.ab-row { display: flex; font-size: 13px; }
-.ab-key { flex: 0 0 120px; color: rgba(255,255,255,0.5); }
-.ab-value { color: rgba(255,255,255,0.9); }
-.ab-actions { margin-top: 16px; }
-.ab-variant-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+// Centered, muted empty-state shown when the skill is not enrolled
+// in an active A/B test (handled by ``ab-test-card`` card body).
+.ab-test-empty {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 8px;
+  padding: 32px 16px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.55);
+
+  mat-icon {
+    font-size: 36px; width: 36px; height: 36px;
+    color: rgba(255, 255, 255, 0.35);
+  }
+  p { margin: 0; font-size: 13px; }
+}
+
+// Composite-score tile — rendered in its own grid row when the
+// skill is enrolled in an active A/B test. Reuses the base
+// ``.metric-tile`` styling; this class is a hook for any variant
+// visuals (e.g. a coloured left border) without re-declaring the
+// shared tile shape.
+.composite-score-tile {
+  border-left: 3px solid #3b82f6;
+}
 
 // Lineage
 .lineage-card { max-width: 900px; }
-.lineage-section { margin-bottom: 16px; }
-.lineage-section h4 {
-  display: flex; align-items: center; gap: 6px;
-  margin: 0 0 8px 0; font-size: 14px; font-weight: 600;
-  color: rgba(255,255,255,0.9);
-  mat-icon { font-size: 18px; width: 18px; height: 18px; color: rgba(255,255,255,0.7); }
-}
-.lineage-list { display: flex; flex-direction: column; gap: 6px; }
-.lineage-item {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 12px; background: rgba(255,255,255,0.03);
-  border-radius: 4px; font-size: 13px;
-}
-.lineage-name { color: rgba(255,255,255,0.9); font-weight: 500; }
-.lineage-meta { font-size: 11px; color: rgba(255,255,255,0.5); }
 
 // Content
 .content-card { max-width: 900px; }
@@ -128,3 +131,27 @@
   padding: 48px 24px; text-align: center; max-width: 400px; margin: 64px auto;
 }
 .error-icon { font-size: 48px; width: 48px; height: 48px; color: #f44336; margin-bottom: 16px; }
+
+// Usage history — collapsible panel containing the paginated usage
+// table. Sized to match the other cards so the layout reads as a
+// single column. The expansion indicator is left visible (the
+// ``hideToggle`` attribute is removed in the template) so users get
+// a standard Material affordance for opening / collapsing the panel.
+.usage-history-panel {
+  max-width: 900px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  box-sizing: border-box;
+
+  mat-panel-title {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: rgba(255, 255, 255, 0.9);
+    mat-icon {
+      font-size: 18px; width: 18px; height: 18px;
+      color: rgba(255, 255, 255, 0.7);
+    }
+  }
+  mat-panel-description {
+    color: rgba(255, 255, 255, 0.55);
+  }
+}

@@ -13,7 +13,6 @@ import {
   SkillFixResponse,
   SkillMetrics,
   SkillLineage,
-  AbTestStatus,
   SkillUsageRecordsResponse,
   SkillAbTestStatsResponse,
   SkillTrigger,
@@ -70,7 +69,7 @@ export interface DeactivationResponse {
  *
  * Plus the side-panel helpers used by the detail view:
  * ``search``, ``getMetrics``, ``getLineage``, ``submitFeedback``,
- * ``requestFix``, ``getAbTestStatus`` and ``resolveAbTest``.
+ * ``requestFix`` and ``resolveAbTest``.
  *
  * Failure handling follows ``WorkService``: ``list`` swallows the
  * error and returns an empty array (so the table can keep
@@ -491,33 +490,6 @@ export class SkillService {
       .pipe(
         catchError((err) => {
           this.error.set(err?.message || 'Failed to request skill fix');
-          throw err;
-        })
-      );
-  }
-
-  /**
-   * GET /api/skills/{id}/ab-test
-   *
-   * Returns the skill's current A/B test state. The backend yields
-   * ``null`` when the skill is not part of an active test, so the
-   * observable is typed as ``AbTestStatus | null`` to make the empty
-   * case explicit at the call site.
-   *
-   * Args:
-   *     id: Skill UUID.
-   *
-   * Returns:
-   *     Observable<AbTestStatus | null> — re-thrown on error.
-   */
-  getAbTestStatus(id: string): Observable<AbTestStatus | null> {
-    return this.http
-      .get<AbTestStatus | null>(
-        `${this.API_BASE}/${encodeURIComponent(id)}/ab-test`
-      )
-      .pipe(
-        catchError((err) => {
-          this.error.set(err?.message || 'Failed to fetch A/B test status');
           throw err;
         })
       );

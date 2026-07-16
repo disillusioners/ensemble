@@ -273,25 +273,6 @@ export const SKILL_STATUSES: SkillStatus[] = [
 
 // ── A/B test ─────────────────────────────────────────────────────────────
 
-/**
- * A/B test status returned by ``GET /api/skills/{id}/ab-test``.
- *
- * The Skills page renders this as a banner above the skill detail
- * when ``group`` is non-null. ``variant_ids`` are sibling skill ids
- * participating in the same test; ``winner_id`` is null until the
- * test is resolved.
- */
-export interface AbTestStatus {
-  skill_id: string;
-  group: string;
-  comparison_count: number;
-  extension_count: number;
-  variant_ids: string[];       // sibling skill ids in the test
-  started_at: string;
-  resolved_at: string | null;
-  winner_id: string | null;
-}
-
 // ── Feedback / fix requests ──────────────────────────────────────────────
 
 /**

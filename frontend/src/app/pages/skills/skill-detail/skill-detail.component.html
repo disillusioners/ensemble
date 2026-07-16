@@ -26,8 +26,11 @@
     </div>
   </div>
 
-  <!-- Loading -->
-  @if (loading() && !skill()) {
+  <!-- Loading — shown whenever loading() is true so subsequent
+       navigations get a fresh spinner instead of stale data from the
+       previous skill. The skill() branch below continues to render
+       alongside the spinner until the next detail resolves. -->
+  @if (loading()) {
     <div class="loading-container">
       <mat-spinner></mat-spinner>
     </div>
@@ -186,7 +189,7 @@
     }
 
     <!-- Usage history (paginated self-fetching table) -->
-    <mat-expansion-panel class="usage-history-panel" hideToggle>
+    <mat-expansion-panel class="usage-history-panel">
       <mat-expansion-panel-header>
         <mat-panel-title>
           <mat-icon>history</mat-icon>

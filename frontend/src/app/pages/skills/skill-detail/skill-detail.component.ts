@@ -5,12 +5,9 @@ import {
   inject,
   DestroyRef,
   effect,
-  output,
 } from '@angular/core';
 import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
-import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
-import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
@@ -49,8 +46,6 @@ import {
   selector: 'app-skill-detail',
   standalone: true,
   imports: [
-    CommonModule,
-    FormsModule,
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
@@ -91,12 +86,6 @@ export class SkillDetailComponent {
     { initialValue: '' },
   );
 
-  readonly closed = output<void>();
-  readonly edit = output<string>();
-  readonly fix = output<string>();
-  readonly share = output<string>();
-  readonly deactivate = output<string>();
-
   readonly skill = signal<SkillDetail | null>(null);
   readonly metrics = signal<SkillMetrics | null>(null);
   readonly lineage = signal<SkillLineage | null>(null);
@@ -106,6 +95,16 @@ export class SkillDetailComponent {
   readonly triggers = signal<SkillTrigger[]>([]);
   readonly loading = signal(true);
   readonly error = signal<string | null>(null);
+
+  /**
+   * Monotonic counter incremented on every ``loadAll`` call. Each
+   * subscriber captures the value at subscription time and discards
+   * its response if the counter has advanced — i.e. the user has
+   * navigated to another skill while this request was in flight. This
+   * prevents a late response from skill A from clobbering fresh data
+   * from skill B on rapid navigation.
+   */
+  private generation = 0;
 
   // Show full content vs collapsed (toggle button)
   readonly contentExpanded = signal(false);
@@ -184,10 +183,15 @@ export class SkillDetailComponent {
   protected loadAll(id: string): void {
     this.loading.set(true);
     this.error.set(null);
+    // Bump the generation token — every subscription below captures
+    // the current value and discards its response if the counter has
+    // advanced (i.e. the user navigated to another skill).
+    const gen = ++this.generation;
 
     // Load detail
     this.skillService.get(id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (detail) => {
+        if (gen !== this.generation) return;
         this.skill.set(detail);
         this.loading.set(false);
         // Trigger load depends on the skill's project scope — fire
@@ -195,9 +199,10 @@ export class SkillDetailComponent {
         // service method filters by ``project_id`` (or returns
         // globals when omitted); we forward the skill's project so
         // the detail page shows triggers relevant to its scope.
-        this.loadTriggers(detail.project_id ?? null);
+        this.loadTriggers(detail.project_id ?? null, gen);
       },
       error: (err: Error) => {
+        if (gen !== this.generation) return;
         console.error('Failed to load skill detail:', err);
         this.error.set(err.message || 'Failed to load skill');
         this.loading.set(false);
@@ -209,7 +214,10 @@ export class SkillDetailComponent {
       .getMetrics(id)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (m) => this.metrics.set(m),
+        next: (m) => {
+          if (gen !== this.generation) return;
+          this.metrics.set(m);
+        },
         error: () => {
           /* non-fatal */
         },
@@ -220,7 +228,10 @@ export class SkillDetailComponent {
       .getLineage(id)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (l) => this.lineage.set(l),
+        next: (l) => {
+          if (gen !== this.generation) return;
+          this.lineage.set(l);
+        },
         error: () => {
           /* non-fatal */
         },
@@ -228,22 +239,28 @@ export class SkillDetailComponent {
 
     // Load A/B test comparison stats (non-fatal — most skills are
     // not enrolled in a test so the envelope yields ``stats: null``).
-    this.loadAbTestStats(id);
+    this.loadAbTestStats(id, gen);
   }
 
   /** Re-fetch the A/B comparison stats for the current skill. */
-  private loadAbTestStats(id: string): void {
+  private loadAbTestStats(id: string, gen = this.generation): void {
     this.skillService
       .getAbTestStats(id)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (response) => this.abTestStats.set(response.stats ?? null),
-        error: () => this.abTestStats.set(null),
+        next: (response) => {
+          if (gen !== this.generation) return;
+          this.abTestStats.set(response.stats ?? null);
+        },
+        error: () => {
+          if (gen !== this.generation) return;
+          this.abTestStats.set(null);
+        },
       });
   }
 
   /** Re-fetch triggers for the skill's project scope. */
-  private loadTriggers(projectId: string | null): void {
+  private loadTriggers(projectId: string | null, gen = this.generation): void {
     // ``undefined`` makes the backend return globals; a non-null
     // ``projectId`` scopes to that project. We pass
     // ``projectId ?? undefined`` so a ``null`` skill scope yields
@@ -257,29 +274,97 @@ export class SkillDetailComponent {
       .listTriggers(projectId ?? undefined, false)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (triggers) => this.triggers.set(triggers),
-        error: () => this.triggers.set([]),
+        next: (triggers) => {
+          if (gen !== this.generation) return;
+          this.triggers.set(triggers);
+        },
+        error: () => {
+          if (gen !== this.generation) return;
+          this.triggers.set([]);
+        },
       });
   }
 
   protected onBack(): void {
-    this.closed.emit();
+    this.router.navigate(['/skills']);
   }
 
   protected onEdit(): void {
-    this.edit.emit(this.skillId());
+    // Edit UI is out of scope for this phase — surface a friendly
+    // notice so the button is visibly wired without claiming the
+    // feature exists yet.
+    this.snackBar.open('Edit feature coming soon', 'Close', {
+      duration: 3000,
+      panelClass: 'info-snackbar',
+    });
   }
 
   protected onFix(): void {
-    this.fix.emit(this.skillId());
+    // The detail page does not collect an issue description — the
+    // backend requires ``issue_description`` so we forward a
+    // placeholder that explains where the request originated. A
+    // dedicated fix form is out of scope for this phase.
+    this.skillService
+      .requestFix(this.skillId(), {
+        issue_description: 'User requested fix via skill detail UI',
+      })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (result) => {
+          this.snackBar.open(`Fix requested (job: ${result.job_id})`, 'Close', {
+            duration: 4000,
+            panelClass: 'success-snackbar',
+          });
+        },
+        error: (err: Error) => {
+          this.snackBar.open(err.message || 'Failed to request fix', 'Dismiss', {
+            duration: 5000,
+            panelClass: 'error-snackbar',
+          });
+        },
+      });
   }
 
   protected onShare(): void {
-    this.share.emit(this.skillId());
+    this.skillService
+      .shareToGlobal(this.skillId())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          this.snackBar.open('Skill shared to global scope', 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar',
+          });
+          this.loadAll(this.skillId());
+        },
+        error: (err: Error) => {
+          this.snackBar.open(err.message || 'Failed to share skill', 'Dismiss', {
+            duration: 5000,
+            panelClass: 'error-snackbar',
+          });
+        },
+      });
   }
 
   protected onDeactivate(): void {
-    this.deactivate.emit(this.skillId());
+    this.skillService
+      .deactivate(this.skillId())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          this.snackBar.open('Skill deactivated', 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar',
+          });
+          this.router.navigate(['/skills']);
+        },
+        error: (err: Error) => {
+          this.snackBar.open(err.message || 'Failed to deactivate skill', 'Dismiss', {
+            duration: 5000,
+            panelClass: 'error-snackbar',
+          });
+        },
+      });
   }
 
   protected onToggleContent(): void {
