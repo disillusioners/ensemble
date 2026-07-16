@@ -987,9 +987,13 @@ class SkillMetricsService:
         Returns:
             Dict with keys: ``skill_id_a`` (old), ``skill_id_b``
             (new), ``completion_rate_a``, ``completion_rate_b``,
+            ``applied_rate_a``, ``applied_rate_b``,
+            ``fallback_rate_a``, ``fallback_rate_b``,
+            ``avg_iterations_a``, ``avg_iterations_b``,
+            ``avg_duration_a``, ``avg_duration_b``,
             ``composite_score_a``, ``composite_score_b``,
             ``difference`` (now composite-based),
-            ``comparisons``, ``extension_count``,
+            ``comparisons``, ``extension_count``, ``sample_size``,
             ``ready_to_resolve``, ``needs_more_data``.
 
             Returns zeros + ``None`` for the skill IDs when no
@@ -1012,11 +1016,20 @@ class SkillMetricsService:
                     "skill_id_b": None,
                     "completion_rate_a": 0.0,
                     "completion_rate_b": 0.0,
+                    "applied_rate_a": 0.0,
+                    "applied_rate_b": 0.0,
+                    "fallback_rate_a": 0.0,
+                    "fallback_rate_b": 0.0,
+                    "avg_iterations_a": 0.0,
+                    "avg_iterations_b": 0.0,
+                    "avg_duration_a": 0.0,
+                    "avg_duration_b": 0.0,
                     "composite_score_a": 0.0,
                     "composite_score_b": 0.0,
                     "difference": 0.0,
                     "comparisons": 0,
                     "extension_count": 0,
+                    "sample_size": sample_size,
                     "ready_to_resolve": False,
                     "needs_more_data": False,
                 }
@@ -1066,11 +1079,36 @@ class SkillMetricsService:
                 "completion_rate_b": float(
                     stats_b.get("completion_rate", 0.0)
                 ),
+                "applied_rate_a": float(
+                    stats_a.get("applied_rate", 0.0)
+                ),
+                "applied_rate_b": float(
+                    stats_b.get("applied_rate", 0.0)
+                ),
+                "fallback_rate_a": float(
+                    stats_a.get("fallback_rate", 0.0)
+                ),
+                "fallback_rate_b": float(
+                    stats_b.get("fallback_rate", 0.0)
+                ),
+                "avg_iterations_a": float(
+                    stats_a.get("avg_iterations", 0.0)
+                ),
+                "avg_iterations_b": float(
+                    stats_b.get("avg_iterations", 0.0)
+                ),
+                "avg_duration_a": float(
+                    stats_a.get("avg_duration", 0.0)
+                ),
+                "avg_duration_b": float(
+                    stats_b.get("avg_duration", 0.0)
+                ),
                 "composite_score_a": score_a,
                 "composite_score_b": score_b,
                 "difference": difference,
                 "comparisons": comparisons,
                 "extension_count": extension_count,
+                "sample_size": sample_size,
                 "ready_to_resolve": ready,
                 "needs_more_data": needs_more,
             }

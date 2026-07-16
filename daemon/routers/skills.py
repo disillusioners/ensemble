@@ -80,6 +80,7 @@ Error-handling conventions:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -91,7 +92,10 @@ from daemon.services.skill_store_service import SkillStoreService
 from daemon.services.skill_search_service import SkillSearchService
 from daemon.services.skill_metrics_service import SkillMetricsService
 from daemon.services.skill_evolution_service import SkillEvolutionService
-from daemon.repositories.skill import SkillTriggerRepository
+from daemon.repositories.skill import (
+    SkillTriggerRepository,
+    SkillUsageRepository,
+)
 from daemon.utils import (
     create_service_dependency,
     raise_service_unavailable,
@@ -112,6 +116,7 @@ if TYPE_CHECKING:
     from daemon.services.skill_search_service import SkillSearchService
     from daemon.services.skill_metrics_service import SkillMetricsService
     from daemon.services.skill_evolution_service import SkillEvolutionService
+    from daemon.repositories.skill import SkillUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +158,7 @@ get_evolution = create_service_dependency(SkillEvolutionService)
 
 _skill_trigger_repo: SkillTriggerRepository | None = None
 _skill_job_dispatcher: SkillJobDispatcher | None = None
+_skill_usage_repo: SkillUsageRepository | None = None
 
 
 def set_skill_trigger_repo(repo: SkillTriggerRepository) -> None:
@@ -182,6 +188,21 @@ def set_skill_job_dispatcher(dispatcher: SkillJobDispatcher) -> None:
     """
     global _skill_job_dispatcher
     _skill_job_dispatcher = dispatcher
+
+
+def set_skill_usage_repo(repo: SkillUsageRepository) -> None:
+    """Inject the :class:`SkillUsageRepository` singleton.
+
+    Called from ``daemon/api.py`` lifespan startup after the engine
+    factory has constructed the repo. Idempotent — calling more
+    than once replaces the previously-set instance.
+
+    Args:
+        repo: The SkillUsageRepository bound to the project
+            engine.
+    """
+    global _skill_usage_repo
+    _skill_usage_repo = repo
 
 
 def _get_skill_trigger_repo() -> SkillTriggerRepository:
@@ -224,6 +245,32 @@ def _require_skill_dispatcher() -> SkillJobDispatcher:
             },
         )
     return _skill_job_dispatcher
+
+
+def _get_skill_usage_repo() -> SkillUsageRepository:
+    """Return the wired-in SkillUsageRepository, else 503.
+
+    Used by ``GET /api/skills/{id}/usage-records`` to load the
+    per-skill usage history rows. Same DI shape as
+    :func:`_get_skill_trigger_repo` — module-level global +
+    setter + accessor that raises 503 if the global is unset.
+
+    Returns:
+        The SkillUsageRepository instance.
+
+    Raises:
+        HTTPException: 503 if :func:`set_skill_usage_repo` was
+            not called during app startup.
+    """
+    if _skill_usage_repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Service not initialized",
+                "message": "SkillUsageRepository not initialized",
+            },
+        )
+    return _skill_usage_repo
 
 
 # ============================================================
@@ -275,6 +322,13 @@ def _flatten_lineage_view(bundle: dict | None, skill_id: str) -> dict[str, Any]:
     The result matches :class:`daemon.models.skill.SkillLineage`:
     ``{skill_id, parents, children, generation, origin}``.
 
+    The function does NOT enrich entries with the related Skill's
+    metadata — that's a separate concern handled by
+    :func:`_enrich_lineage_entries`, called by the lineage
+    endpoint after this projection. Keeping the two steps separate
+    means the projection remains a pure function (trivially
+    testable) and the enrichment can be opted in/out per request.
+
     Args:
         bundle: The ``view_skill`` payload (``{"skill": …,
             "lineage": …}``), or ``None`` if the skill is missing.
@@ -308,6 +362,103 @@ def _flatten_lineage_view(bundle: dict | None, skill_id: str) -> dict[str, Any]:
         "parents": [_strip(p) for p in parents_raw],
         "children": [_strip(c) for c in children_raw],
     }
+
+
+async def _enrich_lineage_entries(
+    entries: list[Any],
+    related_id_key: str,
+    skill_lookup: Any,
+) -> list[Any]:
+    """Merge Skill metadata + edge fields for each lineage entry.
+
+    Each entry in ``entries`` is the ``SkillLineage.to_dict()``
+    row produced by :func:`_flatten_lineage_view` — it carries
+    edge-only fields (``skill_id``, ``parent_skill_id``,
+    ``change_summary``, ``content_diff``, ``created_at``). For a
+    given entry the related Skill's primary key is one of those
+    fields depending on which side of the edge we're rendering:
+
+    * ``"parent_skill_id"`` for the ``parents`` list (each edge
+      points from the central skill into its ancestor; the
+      ancestor's id is on ``parent_skill_id``).
+    * ``"skill_id"`` for the ``children`` list (each edge points
+      from the central skill out to a descendant; the
+      descendant's id is on ``skill_id``).
+
+    The enrichment loads the related Skill via ``skill_lookup``
+    (a :class:`SkillStoreService` instance — its async
+    ``get_skill(id)`` method handles missing rows by returning
+    ``None``) and merges ``Skill.to_dict()`` with the edge's
+    ``change_summary`` / ``content_diff``. ``content`` is dropped
+    so the lineage payload stays compact.
+
+    Best-effort: a missing related Skill (deleted / orphaned edge)
+    falls back to the stripped edge dict so the response shape
+    never explodes because of an FK cascade.
+
+    Args:
+        entries: Lineage edge dicts from
+            :func:`_flatten_lineage_view`.
+        related_id_key: Which key on the edge holds the related
+            Skill's id (``"parent_skill_id"`` or ``"skill_id"``).
+        skill_lookup: Object exposing ``async get_skill(id)``.
+            Typically the :class:`SkillStoreService` instance.
+
+    Returns:
+        A new list with each entry replaced by the merged
+        ``{...skill_fields, change_summary, content_diff}`` dict.
+        Non-dict entries are passed through untouched so the
+        function is safe against test mocks that hand back raw
+        SQLModel objects instead of dicts.
+    """
+    enriched: list[Any] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            enriched.append(entry)
+            continue
+        related_id = entry.get(related_id_key)
+        if not related_id:
+            # Malformed edge (no related-skill pointer) — keep
+            # the stripped dict so the row still surfaces.
+            enriched.append({k: v for k, v in entry.items() if k != "content"})
+            continue
+        skill: Any = None
+        try:
+            skill = await skill_lookup.get_skill(related_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[SkillsRouter] lineage enrichment lookup failed for "
+                "related_id=%s: %s",
+                related_id,
+                exc,
+            )
+            skill = None
+        if skill is None:
+            enriched.append({k: v for k, v in entry.items() if k != "content"})
+            continue
+        merged = _skill_to_dict(skill) or {}
+        # Strip content so the lineage payload stays compact.
+        merged.pop("content", None)
+        # Preserve the edge-level identifiers so callers can
+        # still read ``parent_skill_id`` / ``skill_id`` off a
+        # lineage entry — backward-compatible with the
+        # pre-enrichment shape. ``change_summary`` /
+        # ``content_diff`` are appended last so they win on key
+        # collision (none expected — edge-only columns are
+        # exactly these two).
+        merged[related_id_key] = related_id
+        merged["change_summary"] = entry.get("change_summary", "")
+        merged["content_diff"] = entry.get("content_diff", "")
+        # ``created_at`` on the edge row can differ from the
+        # skill's own ``created_at`` (the edge is recorded at
+        # evolution time, the skill at import time). Surface the
+        # edge timestamp under a dedicated key so the FE can show
+        # "this edge was created at" without overwriting the
+        # skill's own ``created_at``.
+        if "created_at" in entry:
+            merged["edge_created_at"] = entry["created_at"]
+        enriched.append(merged)
+    return enriched
 
 
 def _trigger_to_dict(trigger: Any) -> dict[str, Any] | None:
@@ -922,12 +1073,22 @@ async def get_lineage(
     the payload compact; callers needing the central node's body
     should fetch ``GET /api/skills/{id}``.
 
+    Each parent / child entry is enriched with the linked
+    :class:`Skill`'s metadata (name, status, generation, …)
+    merged with the edge's ``change_summary`` / ``content_diff``,
+    so the FE can render sibling / ancestor tiles without
+    per-row detail fetches. The enrichment is best-effort —
+    orphaned edges (the related Skill was deleted) fall back to
+    the stripped edge dict so the response never 500s on an FK
+    cascade.
+
     Args:
         skill_id: The skill to summarise.
         store: Injected SkillStoreService via Depends.
 
     Returns:
-        Flat ``SkillLineage`` dict.
+        Flat ``SkillLineage`` dict. Each parent / child entry is
+        ``{...skill_fields, change_summary, content_diff}``.
 
     Raises:
         HTTPException: 404 if no row matches; 500 on unexpected
@@ -940,7 +1101,22 @@ async def get_lineage(
                 status_code=404,
                 detail={"error": "Skill not found", "skill_id": skill_id},
             )
-        return _flatten_lineage_view(bundle, skill_id)
+        flat = _flatten_lineage_view(bundle, skill_id)
+        # Enrich parents / children with linked Skill metadata +
+        # edge ``change_summary`` / ``content_diff``. Routed
+        # through the store's async ``get_skill`` (which already
+        # wraps the sync repo in ``asyncio.to_thread``). The
+        # enrichment step is purely additive — when ``get_skill``
+        # returns ``None`` (orphaned edge) we fall back to the
+        # stripped edge dict, preserving backward compat with
+        # callers that expected the pre-enrichment shape.
+        flat["parents"] = await _enrich_lineage_entries(
+            flat["parents"], "parent_skill_id", store
+        )
+        flat["children"] = await _enrich_lineage_entries(
+            flat["children"], "skill_id", store
+        )
+        return flat
     except HTTPException:
         raise
     except Exception as e:
@@ -1010,6 +1186,78 @@ async def get_usage(
         return {"skill_id": skill_id, "stats": stats}
     except Exception as e:
         raise _to_http_500(e, "get_usage")
+
+
+@router.get("/{skill_id}/usage-records")
+async def get_usage_records(
+    skill_id: str,
+    limit: int = Query(
+        default=50,
+        ge=1,
+        description=(
+            "Maximum number of usage records to return. Clamped "
+            "to 200 when exceeded."
+        ),
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Number of records to skip (most-recent-first ordering).",
+    ),
+) -> dict[str, Any]:
+    """Return per-event usage records for a skill.
+
+    Returns the most-recent usage history for the skill as a
+    page of :class:`SkillUsageRecord` dicts — ordered by
+    ``created_at`` descending — plus the total row count and the
+    effective ``limit`` / ``offset`` used for the slice.
+
+    The endpoint complements :func:`get_usage`, which returns
+    only the aggregate counters; this one surfaces the per-event
+    rows the FE needs for a usage history timeline.
+
+    Args:
+        skill_id: The skill whose usage history to fetch.
+        limit: Page size (default ``50``, clamped to ``200``).
+        offset: Skip-N offset (default ``0``).
+
+    Returns:
+        ``{"skill_id": skill_id, "records": [...],
+        "total": int, "limit": int, "offset": int}``. Each
+        record is a :class:`SkillUsageRecord.to_dict()` payload.
+
+    Raises:
+        HTTPException: 503 if the usage repo was never wired in;
+            500 on unexpected failure.
+    """
+    repo = _get_skill_usage_repo()
+    # Clamp limit so callers can't accidentally request an
+    # unbounded page. The ``Query(ge=1)`` validator handles the
+    # lower bound — the upper bound is enforced here so a caller
+    # asking for ``limit=10000`` still gets a 200 with 200 rows
+    # instead of a 422.
+    effective_limit = min(int(limit), 200)
+    effective_offset = max(int(offset), 0)
+    try:
+        items, total = await asyncio.to_thread(
+            repo.get_by_skill,
+            skill_id,
+            effective_limit,
+            effective_offset,
+        )
+        records = [
+            (item.to_dict() if hasattr(item, "to_dict") else item)
+            for item in items
+        ]
+        return {
+            "skill_id": skill_id,
+            "records": records,
+            "total": int(total),
+            "limit": effective_limit,
+            "offset": effective_offset,
+        }
+    except Exception as e:
+        raise _to_http_500(e, "get_usage_records")
 
 
 @router.post("/{skill_id}/feedback")
@@ -1168,6 +1416,75 @@ async def get_ab_test(
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:
         raise _to_http_500(e, "get_ab_test")
+
+
+@router.get("/{skill_id}/ab-test/stats")
+async def get_ab_test_stats(
+    skill_id: str,
+    store: SkillStoreService = Depends(get_store),
+    metrics: SkillMetricsService = Depends(get_metrics),
+) -> dict[str, Any]:
+    """Return A/B comparison stats for the skill's test group.
+
+    Steps:
+
+    1. Load the skill row via :meth:`SkillStoreService.get_skill`
+       so a 404 on the lookup surfaces as a 404 here.
+    2. Read ``ab_test_group`` off the row. When ``None`` or empty
+       the skill is not enrolled in a test — return an explicit
+       ``stats=None`` envelope so the FE can distinguish "not in a
+       test" from "test exists but stats unavailable".
+    3. Otherwise, call
+       :meth:`SkillMetricsService.get_ab_comparison_stats` and
+       pass the result through verbatim. The service is being
+       enriched in parallel with more fields (composite score,
+       avg iterations, avg duration, …) — the endpoint does NOT
+       hardcode field names so it picks up every new field
+       automatically.
+
+    Args:
+        skill_id: The skill whose A/B comparison to read.
+        store: Injected SkillStoreService via Depends.
+        metrics: Injected SkillMetricsService via Depends.
+
+    Returns:
+        ``{"skill_id": skill_id, "ab_test_group": str | None,
+        "stats": dict | None}``. ``stats`` is the verbatim
+        output of
+        :meth:`SkillMetricsService.get_ab_comparison_stats`.
+
+    Raises:
+        HTTPException: 404 if no skill matches; 500 on
+            unexpected failure.
+    """
+    try:
+        skill = await store.get_skill(skill_id)
+        if skill is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "Skill not found", "skill_id": skill_id},
+            )
+        skill_dict = _skill_to_dict(skill) or {}
+        ab_group = skill_dict.get("ab_test_group")
+        if not ab_group:
+            # Skill is not enrolled in an A/B test — return an
+            # explicit null stats envelope so callers can
+            # distinguish "no test" from "test exists".
+            return {
+                "skill_id": skill_id,
+                "ab_test_group": None,
+                "stats": None,
+            }
+        stats = await metrics.get_ab_comparison_stats(ab_group)
+        return {
+            "skill_id": skill_id,
+            "ab_test_group": ab_group,
+            "stats": stats,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _to_http_500(e, "get_ab_test_stats")
 
 
 @router.post("/{skill_id}/ab-test/resolve")

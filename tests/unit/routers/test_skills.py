@@ -177,6 +177,7 @@ def skill_app_with_mock_services():
     evolution = MagicMock()
     trigger_repo = MagicMock()
     dispatcher = MagicMock()
+    usage_repo = MagicMock()
 
     # Async defaults
     store.create_skill = AsyncMock(return_value=_skill_object())
@@ -206,6 +207,33 @@ def skill_app_with_mock_services():
         }
     )
     metrics.record_feedback = AsyncMock(return_value=True)
+    # Default for ``get_ab_comparison_stats`` — the ``ab-test/stats``
+    # endpoint forwards the service output verbatim, so the test
+    # only needs to assert that the dict lands inside the envelope.
+    metrics.get_ab_comparison_stats = AsyncMock(
+        return_value={
+            "skill_id_a": "skill-old",
+            "skill_id_b": "skill-new",
+            "completion_rate_a": 0.4,
+            "completion_rate_b": 0.6,
+            "applied_rate_a": 0.5,
+            "applied_rate_b": 0.7,
+            "fallback_rate_a": 0.2,
+            "fallback_rate_b": 0.1,
+            "avg_iterations_a": 3.5,
+            "avg_iterations_b": 2.5,
+            "avg_duration_a": 12.0,
+            "avg_duration_b": 8.0,
+            "composite_score_a": 0.42,
+            "composite_score_b": 0.61,
+            "difference": 0.19,
+            "comparisons": 12,
+            "extension_count": 0,
+            "sample_size": 10,
+            "ready_to_resolve": False,
+            "needs_more_data": False,
+        }
+    )
 
     evolution.get_skill_metrics = AsyncMock(
         return_value={
@@ -238,12 +266,18 @@ def skill_app_with_mock_services():
 
     dispatcher.dispatch_fix = AsyncMock(return_value="job-xyz")
 
+    # Usage repo default — the ``usage-records`` endpoint runs
+    # ``get_by_skill`` synchronously inside ``asyncio.to_thread`` so
+    # the default ``MagicMock.return_value`` is replaced per-test.
+    usage_repo.get_by_skill = MagicMock(return_value=([], 0))
+
     skills_module.get_store.set_service(store)
     skills_module.get_search.set_service(search)
     skills_module.get_metrics.set_service(metrics)
     skills_module.get_evolution.set_service(evolution)
     skills_module.set_skill_trigger_repo(trigger_repo)
     skills_module.set_skill_job_dispatcher(dispatcher)
+    skills_module.set_skill_usage_repo(usage_repo)
 
     yield {
         "client": client,
@@ -253,6 +287,7 @@ def skill_app_with_mock_services():
         "evolution": evolution,
         "trigger_repo": trigger_repo,
         "dispatcher": dispatcher,
+        "usage_repo": usage_repo,
     }
 
     # Teardown — clear singleton state so the next test gets a fresh slate.
@@ -262,6 +297,7 @@ def skill_app_with_mock_services():
     skills_module.get_evolution.set_service(None)
     skills_module.set_skill_trigger_repo(None)
     skills_module.set_skill_job_dispatcher(None)
+    skills_module.set_skill_usage_repo(None)
 
 
 class TestListSkills:
@@ -750,6 +786,418 @@ class TestTriggers:
         response = client.delete("/api/skills/triggers/tr-1")
         assert response.status_code == 200
         assert response.json() == {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Group 2b — New endpoints: usage-records, ab-test/stats, lineage
+# enrichment. Phase 7 additions.
+# ---------------------------------------------------------------------------
+
+
+def _usage_record_dict(**overrides: Any) -> dict[str, Any]:
+    """Return a serializable SkillUsageRecord.to_dict() payload."""
+    base = {
+        "id": "rec-1",
+        "skill_id": "skill-abc",
+        "project_id": "proj-1",
+        "instance_id": "inst-1",
+        "agent_id": "developer",
+        "task_message": "implement feature X",
+        "selected": True,
+        "applied": True,
+        "task_succeeded": True,
+        "iterations": 3,
+        "duration_seconds": 12.5,
+        "fallback": False,
+        "feedback_applied": None,
+        "feedback_note": "",
+        "created_at": "2026-07-16T10:00:00+00:00",
+    }
+    base.update(overrides)
+    return base
+
+
+def _usage_record_object(**overrides: Any) -> Any:
+    """Return a duck-typed SkillUsageRecord exposing ``to_dict()``."""
+    obj = MagicMock()
+    obj.to_dict = MagicMock(return_value=_usage_record_dict(**overrides))
+    return obj
+
+
+class TestUsageRecords:
+    """``GET /api/skills/{skill_id}/usage-records`` — per-event timeline."""
+
+    def test_envelope_shape(self, skill_app_with_mock_services):
+        """The endpoint returns ``{skill_id, records, total,
+        limit, offset}`` — no surprise envelope keys."""
+        client = skill_app_with_mock_services["client"]
+        repo = skill_app_with_mock_services["usage_repo"]
+        record = _usage_record_object(id="rec-1")
+        # Repo contract: returns ``(items, total)``.
+        repo.get_by_skill = MagicMock(return_value=([record], 1))
+        response = client.get("/api/skills/skill-abc/usage-records")
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body.keys()) == {"skill_id", "records", "total", "limit", "offset"}
+        assert body["skill_id"] == "skill-abc"
+        assert body["total"] == 1
+        # Defaults
+        assert body["limit"] == 50
+        assert body["offset"] == 0
+
+    def test_pagination_forwarded_to_repo(self, skill_app_with_mock_services):
+        """``limit`` / ``offset`` query params are forwarded to the
+        repo via ``get_by_skill(skill_id, limit, offset)``."""
+        client = skill_app_with_mock_services["client"]
+        repo = skill_app_with_mock_services["usage_repo"]
+        repo.get_by_skill = MagicMock(return_value=([], 0))
+        response = client.get(
+            "/api/skills/skill-abc/usage-records?limit=25&offset=100"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["limit"] == 25
+        assert body["offset"] == 100
+        # Check repo was called with the forwarded args.
+        repo.get_by_skill.assert_called_once()
+        call_args = repo.get_by_skill.call_args
+        assert call_args.args[0] == "skill-abc"
+        assert call_args.args[1] == 25
+        assert call_args.args[2] == 100
+
+    def test_limit_clamped_to_200(self, skill_app_with_mock_services):
+        """Asking for ``limit=10000`` clamps to ``200`` — no 422."""
+        client = skill_app_with_mock_services["client"]
+        repo = skill_app_with_mock_services["usage_repo"]
+        repo.get_by_skill = MagicMock(return_value=([], 0))
+        response = client.get(
+            "/api/skills/skill-abc/usage-records?limit=10000"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["limit"] == 200
+        # The repo must have been called with the clamped value,
+        # not the raw 10000 the caller asked for.
+        repo.get_by_skill.assert_called_once()
+        assert repo.get_by_skill.call_args.args[1] == 200
+
+    def test_record_payload_includes_core_fields(self, skill_app_with_mock_services):
+        """Each record is a ``SkillUsageRecord.to_dict()`` payload
+        — the FE timeline relies on these keys directly."""
+        client = skill_app_with_mock_services["client"]
+        repo = skill_app_with_mock_services["usage_repo"]
+        record = _usage_record_object(id="rec-42")
+        repo.get_by_skill = MagicMock(return_value=([record], 1))
+        response = client.get("/api/skills/skill-abc/usage-records")
+        assert response.status_code == 200
+        records = response.json()["records"]
+        assert len(records) == 1
+        first = records[0]
+        # Core signal booleans + identity fields.
+        assert first["id"] == "rec-42"
+        assert first["skill_id"] == "skill-abc"
+        assert first["agent_id"] == "developer"
+        assert first["task_message"] == "implement feature X"
+        assert first["selected"] is True
+        assert first["applied"] is True
+        assert first["task_succeeded"] is True
+        assert first["fallback"] is False
+
+    def test_usage_records_503_when_repo_missing(self):
+        """Without a usage repo wired in, the endpoint returns 503."""
+        from daemon.routers import skills as skills_module
+
+        # Reset the repo singleton so the 503 path is reached.
+        skills_module.set_skill_usage_repo(None)  # type: ignore[arg-type]
+
+        app = FastAPI()
+        app.state.manager = MagicMock(is_write_paused=False)
+        api = APIRouter(prefix="/api")
+        api.include_router(skills_module.router)
+        app.include_router(api)
+
+        with TestClient(app) as client:
+            response = client.get("/api/skills/skill-abc/usage-records")
+            assert response.status_code == 503
+
+        # Fixture teardown for ``skill_app_with_mock_services``
+        # resets the singleton before the next test runs — no
+        # manual restore needed here.
+
+
+class TestABTestStats:
+    """``GET /api/skills/{skill_id}/ab-test/stats`` — per-variant metrics."""
+
+    def test_active_group_returns_stats_envelope(
+        self, skill_app_with_mock_services
+    ):
+        """When the skill is enrolled in an A/B test, the response
+        carries the service's stats dict verbatim."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(
+            return_value=_skill_object(skill_id="skill-abc", ab_test_group="group-7")
+        )
+        response = client.get("/api/skills/skill-abc/ab-test/stats")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["skill_id"] == "skill-abc"
+        assert body["ab_test_group"] == "group-7"
+        # Stats is the verbatim service output (mocked).
+        assert isinstance(body["stats"], dict)
+        assert body["stats"]["skill_id_a"] == "skill-old"
+
+    def test_missing_group_returns_null_stats_envelope(
+        self, skill_app_with_mock_services
+    ):
+        """When ``ab_test_group`` is None, the envelope returns
+        ``ab_test_group=None, stats=None``."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(
+            return_value=_skill_object(skill_id="skill-abc", ab_test_group=None)
+        )
+        response = client.get("/api/skills/skill-abc/ab-test/stats")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["skill_id"] == "skill-abc"
+        assert body["ab_test_group"] is None
+        assert body["stats"] is None
+
+    def test_stats_include_per_variant_metrics_and_sample_size(
+        self, skill_app_with_mock_services
+    ):
+        """The stats dict carries the enriched per-variant fields
+        (applied/fallback rate, avg iterations/duration) plus the
+        ``sample_size`` knob."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        metrics = skill_app_with_mock_services["metrics"]
+        store.get_skill = AsyncMock(
+            return_value=_skill_object(skill_id="skill-abc", ab_test_group="group-7")
+        )
+        # Override the default mock with a known-value dict — only
+        # assert that the service output is forwarded verbatim.
+        metrics.get_ab_comparison_stats = AsyncMock(
+            return_value={
+                "applied_rate_a": 0.55,
+                "applied_rate_b": 0.78,
+                "fallback_rate_a": 0.20,
+                "fallback_rate_b": 0.12,
+                "avg_iterations_a": 4.0,
+                "avg_iterations_b": 3.0,
+                "avg_duration_a": 15.0,
+                "avg_duration_b": 10.0,
+                "sample_size": 10,
+            }
+        )
+        response = client.get("/api/skills/skill-abc/ab-test/stats")
+        assert response.status_code == 200
+        stats = response.json()["stats"]
+        # Per-variant a/b fields surfaced verbatim.
+        assert stats["applied_rate_a"] == 0.55
+        assert stats["applied_rate_b"] == 0.78
+        assert stats["fallback_rate_a"] == 0.20
+        assert stats["fallback_rate_b"] == 0.12
+        assert stats["avg_iterations_a"] == 4.0
+        assert stats["avg_iterations_b"] == 3.0
+        assert stats["avg_duration_a"] == 15.0
+        assert stats["avg_duration_b"] == 10.0
+        assert stats["sample_size"] == 10
+
+    def test_ab_test_stats_404_when_skill_missing(
+        self, skill_app_with_mock_services
+    ):
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(return_value=None)
+        response = client.get("/api/skills/missing/ab-test/stats")
+        assert response.status_code == 404
+        assert response.json()["detail"]["skill_id"] == "missing"
+
+
+class TestLineageEdgeEnrichment:
+    """``GET /api/skills/{skill_id}/lineage`` — edge metadata enrichment.
+
+    Each parent / child entry now carries
+    ``change_summary`` / ``content_diff`` from the
+    :class:`SkillLineage` edge plus the related Skill's
+    metadata. The pre-enrichment shape (id-only rows) is
+    preserved as a fallback for orphaned edges.
+    """
+
+    def test_parent_entries_include_change_summary_and_content_diff(
+        self, skill_app_with_mock_services
+    ):
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        # Side-effect the lookup so the parent + child resolve
+        # to distinct skill bodies — the enrichment merges the
+        # related Skill's metadata with the edge metadata.
+        store.get_skill = AsyncMock(
+            side_effect=lambda related_id: _skill_object(
+                skill_id=related_id,
+                name=f"parent-of-{related_id}",
+                ab_test_group=None,
+            )
+        )
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [
+                        {
+                            "parent_skill_id": "p-1",
+                            "change_summary": "tightened fallback",
+                            "content_diff": "+a -b",
+                            "content": "should be stripped",
+                        }
+                    ],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["parents"]) == 1
+        parent = body["parents"][0]
+        # Edge metadata survived the enrichment.
+        assert parent["change_summary"] == "tightened fallback"
+        assert parent["content_diff"] == "+a -b"
+        # Related Skill metadata was merged in — the FE uses the
+        # name to render the ancestor tile.
+        assert parent["name"] == "parent-of-p-1"
+        # The ``content`` body stays stripped.
+        assert "content" not in parent
+        # Edge id-key preserved.
+        assert parent["parent_skill_id"] == "p-1"
+
+    def test_child_entries_include_change_summary_and_content_diff(
+        self, skill_app_with_mock_services
+    ):
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(
+            side_effect=lambda related_id: _skill_object(
+                skill_id=related_id,
+                name=f"child-{related_id}",
+                ab_test_group=None,
+            )
+        )
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [],
+                    "children": [
+                        {
+                            "skill_id": "c-1",
+                            "change_summary": "split retry path",
+                            "content_diff": "@@ -1 +1 @@",
+                            "content": "should be stripped",
+                        }
+                    ],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["children"]) == 1
+        child = body["children"][0]
+        assert child["change_summary"] == "split retry path"
+        assert child["content_diff"] == "@@ -1 +1 @@"
+        assert child["name"] == "child-c-1"
+        assert "content" not in child
+        # The child edge's ``skill_id`` is preserved.
+        assert child["skill_id"] == "c-1"
+
+    def test_existing_skill_fields_preserved_after_enrichment(
+        self, skill_app_with_mock_services
+    ):
+        """The enrichment merges the related Skill's metadata, so
+        the lineage payload now carries every Skill field the FE
+        renders in ancestor / descendant tiles (status,
+        generation, counters, …)."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        store.get_skill = AsyncMock(
+            side_effect=lambda related_id: _skill_object(
+                skill_id=related_id,
+                name="ancestor",
+                status="active",
+                generation=1,
+                ab_test_group=None,
+                total_selections=42,
+            )
+        )
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [
+                        {
+                            "parent_skill_id": "p-1",
+                            "change_summary": "cs",
+                            "content_diff": "diff",
+                            "content": "stripped",
+                        }
+                    ],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        parent = response.json()["parents"][0]
+        # Pre-existing Skill fields still present.
+        assert parent["name"] == "ancestor"
+        assert parent["status"] == "active"
+        assert parent["generation"] == 1
+        assert parent["total_selections"] == 42
+        # New edge metadata added.
+        assert parent["change_summary"] == "cs"
+        assert parent["content_diff"] == "diff"
+
+    def test_orphaned_edge_falls_back_to_stripped_dict(
+        self, skill_app_with_mock_services
+    ):
+        """When the related Skill has been deleted (FK cascade),
+        the related_id lookup returns ``None`` — the enrichment
+        should fall back to the edge-only dict so the response
+        shape never explodes on missing rows."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        # Related skill missing — orphaned edge scenario.
+        store.get_skill = AsyncMock(return_value=None)
+        store.view_skill = AsyncMock(
+            return_value={
+                "skill": _skill_dict(),
+                "lineage": {
+                    "parents": [
+                        {
+                            "parent_skill_id": "p-gone",
+                            "change_summary": "lost skill",
+                            "content_diff": "-only",
+                            "content": "stripped",
+                        }
+                    ],
+                    "children": [],
+                },
+            }
+        )
+        response = client.get("/api/skills/skill-abc/lineage")
+        assert response.status_code == 200
+        parent = response.json()["parents"][0]
+        # Fallback dict: edge id preserved + edge metadata kept.
+        assert parent["parent_skill_id"] == "p-gone"
+        assert parent["change_summary"] == "lost skill"
+        assert parent["content_diff"] == "-only"
+        # Skill-only fields like ``name`` absent (no related Skill).
+        assert "name" not in parent
+        # ``content`` still stripped.
+        assert "content" not in parent
 
 
 # ---------------------------------------------------------------------------

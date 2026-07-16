@@ -627,10 +627,11 @@ async def lifespan(app: FastAPI):
 
     # Wire skills router services (Phase 6 Task 2 — REST API surface).
     # The skills router uses 4 service DI accessors (created via
-    # ``create_service_dependency``) plus 2 module-level globals
-    # (trigger repo, job dispatcher). Both patterns are pulled from
-    # manager attributes that were initialized earlier in this lifespan
-    # block — see ``manager._skill_*`` wiring in daemon/manager.py.
+    # ``create_service_dependency``) plus module-level globals
+    # (trigger repo, job dispatcher, usage repo, lineage repo).
+    # Both patterns are pulled from manager attributes that were
+    # initialized earlier in this lifespan block — see
+    # ``manager._skill_*`` wiring in daemon/manager.py.
     from daemon.routers.skills import (
         get_store,
         get_search,
@@ -638,6 +639,7 @@ async def lifespan(app: FastAPI):
         get_evolution,
         set_skill_trigger_repo,
         set_skill_job_dispatcher,
+        set_skill_usage_repo,
     )
 
     # Phase 2 services — create_service_dependency accessors.
@@ -665,15 +667,23 @@ async def lifespan(app: FastAPI):
     if getattr(manager, "_skill_job_dispatcher", None) is not None:
         set_skill_job_dispatcher(manager._skill_job_dispatcher)
 
+    # Usage repository — module-level global + setter. The
+    # ``GET /api/skills/{id}/usage-records`` endpoint reads through
+    # this repo for per-event usage history (vs. the metrics
+    # service's aggregate view).
+    if getattr(manager, "_skill_usage_repo", None) is not None:
+        set_skill_usage_repo(manager._skill_usage_repo)
+
     logger.info(
         "Skills router wired: store=%s search=%s metrics=%s evolution=%s "
-        "triggers=%s dispatcher=%s",
+        "triggers=%s dispatcher=%s usage_repo=%s",
         manager._skill_store_service is not None,
         manager._skill_search_service is not None,
         manager._skill_metrics_service is not None,
         manager._skill_evolution_service is not None,
         manager._skill_trigger_repo is not None,
         manager._skill_job_dispatcher is not None,
+        manager._skill_usage_repo is not None,
     )
 
     # Start StreamableHTTP session manager within lifespan
