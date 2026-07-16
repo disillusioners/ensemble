@@ -210,14 +210,25 @@ function formatNodeLabel(node: SkillLineageNode): string {
 
 /**
  * Sanitize a label so Mermaid's parser doesn't choke. Pipes end the
- * node declaration early; double-quotes end the label string; newlines
- * break the single-line declaration. We replace each with a Unicode
- * look-alike so the rendered output stays readable.
+ * node declaration early; double-quotes end the label string; angle
+ * brackets look like HTML tag delimiters (especially under
+ * ``securityLevel: 'strict'``); backslashes can introduce escape
+ * sequences; newlines break the single-line declaration. We replace
+ * each with a Unicode look-alike so the rendered output stays
+ * readable.
  */
 function sanitizeLabelText(text: string): string {
   return text
+    // Backslash FIRST (defensive ordering) — use U+29F5 ⧵
+    // (reverse-solidus) for visual fidelity; it's inert inside a
+    // Mermaid quoted-string label.
+    .replace(/\\/g, '⧵')
     .replace(/\|/g, '∣')
     .replace(/"/g, '″')
+    // Angle brackets → single-pointing angle quotes (U+2039 / U+203A)
+    // so Mermaid strict-mode HTML detection treats them as text.
+    .replace(/</g, '‹')
+    .replace(/>/g, '›')
     .replace(/\r?\n/g, ' ')
     .trim();
 }
@@ -461,22 +472,6 @@ export class SkillLineageTreeComponent {
     );
     for (const node of sortedChildren) {
       map[`node${idx++}`] = node.id;
-    }
-    return map;
-  });
-
-  /**
-   * Map from skill id → ``SkillLineageNode``. Used to look up the
-   * edge metadata for the dialog when a node is clicked.
-   */
-  private readonly nodeById = computed<Record<string, SkillLineageNode>>(() => {
-    const map: Record<string, SkillLineageNode> = {};
-    const lin = this.lineage();
-    if (!lin) {
-      return map;
-    }
-    for (const node of [...lin.parents, ...lin.children]) {
-      map[node.id] = node;
     }
     return map;
   });

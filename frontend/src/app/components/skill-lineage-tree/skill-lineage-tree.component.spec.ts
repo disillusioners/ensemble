@@ -303,6 +303,91 @@ describe('buildLineageGraph', () => {
     expect(out).not.toMatch(/Has "quoted"/);
   });
 
+  it('sanitizes backslash characters in node labels', () => {
+    const parent = makeNode({
+      id: 'parent-1',
+      name: 'path\\to\\skill',
+      generation: 0,
+      change_summary: 'auto',
+      lineage_origin: 'parent-1',
+    });
+    const lineage = makeLineage({
+      parents: [parent],
+      origin: 'parent-1',
+    });
+
+    const out = buildLineageGraph(lineage, 'current');
+
+    // The Unicode reverse-solidus glyph (U+29F5 ⧵) must replace the
+    // raw backslashes — raw `\` would otherwise be a Mermaid escape
+    // introducer inside a quoted-string label.
+    expect(out).toContain('path⧵to⧵skill');
+    // Raw backslashes must not leak into the rendered source.
+    expect(out).not.toContain('path\\to\\skill');
+  });
+
+  it('sanitizes angle-bracket characters in node labels', () => {
+    const parent = makeNode({
+      id: 'parent-1',
+      name: 'Skill <with> brackets',
+      generation: 0,
+      change_summary: 'auto',
+      lineage_origin: 'parent-1',
+    });
+    const lineage = makeLineage({
+      parents: [parent],
+      origin: 'parent-1',
+    });
+
+    const out = buildLineageGraph(lineage, 'current');
+
+    // Angle brackets become single-pointing angle quotes (U+2039 /
+    // U+203A) so Mermaid's strict-mode HTML-tag detection treats
+    // them as text rather than the boundary of a tag.
+    expect(out).toContain('Skill ‹with› brackets');
+    // Raw angle brackets must not survive sanitization.
+    expect(out).not.toContain('Skill <with> brackets');
+  });
+
+  it('applies all label sanitizers to a mixed-danger-character input', () => {
+    // Exercise every sanitizer branch in a single input so any
+    // single-pass regression is caught.
+    const parent = makeNode({
+      id: 'parent-1',
+      name: '"foo <bar> | baz\\"',
+      generation: 0,
+      change_summary: 'auto',
+      lineage_origin: 'parent-1',
+    });
+    const lineage = makeLineage({
+      parents: [parent],
+      origin: 'parent-1',
+    });
+
+    const out = buildLineageGraph(lineage, 'current');
+
+    // The full graph string legitimately contains `>` (in `-->` arrow
+    // syntax) and `|` (in `|...|` edge-label delimiters). Whole-string
+    // not.toContain('<') / not.toContain('>') / not.toContain('|')
+    // therefore can't hold. Extract just the node0 label substring and
+    // assert the sanitization happened there.
+    const node0Line = out.split('\n').find((l) => /^\s*node0\[/.test(l));
+    expect(node0Line).toBeDefined();
+    const label = node0Line!.match(/\["(.*)"\]/)![1];
+
+    // Each substitution glyph must appear in the label.
+    expect(label).toContain('″');
+    expect(label).toContain('‹');
+    expect(label).toContain('›');
+    expect(label).toContain('∣');
+    expect(label).toContain('⧵');
+    // None of the raw danger characters may survive in the label.
+    expect(label).not.toContain('<');
+    expect(label).not.toContain('>');
+    expect(label).not.toContain('|');
+    expect(label).not.toMatch(/[^⧵]\\/); // bare `\` that isn't part of the glyph
+  });
+
   it('connects parents to the current node and current node to children', () => {
     const parent = makeNode({
       id: 'parent-1',
