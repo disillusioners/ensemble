@@ -40,6 +40,21 @@ import { SkillUsageRecord, SkillUsageRecordsResponse } from '../../models/skill.
  * Expansion is local — only one row can be expanded at a time.
  * Clicking a row toggles its detail panel; clicking the same row
  * again collapses it.
+ *
+ * Integration (self-fetching — Option A):
+ *
+ * This component owns its own data and pagination. The parent only
+ * provides `skillId` via the required input signal; `SkillService
+ * .getUsageRecords()` is called internally on `skillId` change
+ * (constructor `effect()`) and on paginator `pageIndex` / `pageSize`
+ * change (`onPageChange`). There is no `loadMore` output, no event
+ * to subscribe to, and no fetch-state to wire up. The external read
+ * surface for parents is `records()`, `total()`, `pageIndex()`,
+ * `pageSize()`, `loading()`, `error()`. To force a refresh, change
+ * the `skillId` input (or call `onRetry()` programmatically).
+ *
+ * Phase 6 integrators: drop this component into skill-detail, bind
+ * `[skillId]="someId"`, and it handles its own paging.
  */
 @Component({
   selector: 'app-skill-usage-table',
@@ -187,6 +202,11 @@ export class SkillUsageTableComponent {
 
   // ── Loading ───────────────────────────────────────────────────────
 
+  /**
+   * Internal fetch — invoked on `skillId` change (constructor
+   * `effect()`) and on paginator change (`onPageChange` / `onRetry`).
+   * Never called by parents; the component is self-fetching.
+   */
   private loadRecords(skillId: string, limit: number, offset: number): void {
     this.loading.set(true);
     this.error.set(null);

@@ -8,6 +8,13 @@ import type {
   SkillTriggerUpdate,
 } from '../../models/skill.model';
 
+import {
+  buildConditionJson,
+  CONDITION_TYPE_DEFAULTS,
+  ConditionType,
+  pickNumber,
+} from './form-helpers';
+
 // ===========================================================================
 // Testable mirror of `SkillTriggerFormComponent`.
 //
@@ -28,58 +35,6 @@ class MockMatDialogRef {
   close(result?: unknown): void {
     this.closeSpy(result);
   }
-}
-
-// ---- Helpers (copied from production source) ----
-
-type ConditionType =
-  | 'low_completion_rate'
-  | 'high_fallback_rate'
-  | 'consecutive_failures'
-  | 'task_count_scan'
-  | 'periodic_scan';
-
-const CONDITION_TYPE_DEFAULTS: Record<ConditionType, Record<string, number>> = {
-  low_completion_rate: { threshold: 0.3, min_selections: 5 },
-  high_fallback_rate: { threshold: 0.5, min_selections: 5 },
-  consecutive_failures: { threshold: 3 },
-  task_count_scan: { threshold: 20 },
-  periodic_scan: { interval_days: 7 },
-};
-
-function buildConditionJson(
-  conditionType: string,
-  formValue: Record<string, unknown>,
-): Record<string, unknown> {
-  switch (conditionType as ConditionType) {
-    case 'low_completion_rate':
-    case 'high_fallback_rate':
-      return {
-        threshold: toNumber(formValue['threshold']),
-        min_selections: toNumber(formValue['min_selections']),
-      };
-    case 'consecutive_failures':
-    case 'task_count_scan':
-      return { threshold: toNumber(formValue['threshold']) };
-    case 'periodic_scan':
-      return { interval_days: toNumber(formValue['interval_days']) };
-    default:
-      return {};
-  }
-}
-
-function toNumber(value: unknown): number {
-  if (typeof value === 'number') return value;
-  if (typeof value === 'string') return Number(value);
-  return 0;
-}
-
-function pickNumber(value: unknown, fallback: number | null): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
-    return Number(value);
-  }
-  return fallback;
 }
 
 // ---- Testable component ----
