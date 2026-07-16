@@ -1593,14 +1593,30 @@ class InstanceMessagingService:
         """
         from ..manager import MessageResult
 
-        # ── <meta> tag parsing (Phase 1: explicit skill loading) ────────
-        # Strip ``<meta>...</meta>`` control blocks from the raw message
-        # BEFORE any other processing. The agent must never see the
-        # control data — only the cleaned text plus the parsed
-        # ``load_skill`` directive (which is handled by the C3 block
-        # further down). ``_meta_skill`` stays in scope for that block.
+        # ── <meta> tag parsing (parent-dispatch only) ────────────
+        # Strip ``<meta>...</meta>`` control blocks ONLY when the
+        # message came from a parent agent dispatching to this child
+        # worker — i.e. ``message_source`` starts with
+        # ``internal_agent:`` and is NOT a job-event ping
+        # (``internal_agent:job_event:``). User / API / telegram /
+        # ``internal_report:`` / ``internal_error_report:`` / None
+        # all pass through untouched: stripping their tags would
+        # leak control-plane syntax into the user-visible message
+        # and create a hijack surface where a child LLM's stray
+        # ``<meta>`` could mutate the parent's skill set.
+        #
+        # The carve-out mirrors the inverse of the C3
+        # ``is_completion_report`` carve-out below — same prefixes,
+        # opposite selection (parent dispatch vs. internal pings).
+        # ``_meta_skill`` stays ``None`` for non-parent sources and
+        # is consumed by the C3 block further down.
         _meta_skill: str | None = None
-        if message and isinstance(message, str):
+        _is_parent_dispatch = (
+            message_source is not None
+            and message_source.startswith("internal_agent:")
+            and not message_source.startswith("internal_agent:job_event:")
+        )
+        if _is_parent_dispatch and message and isinstance(message, str):
             message, _meta = parse_meta_tag(message)
             _meta_skill = extract_load_skill(_meta)
             if _meta_skill is not None:
@@ -2072,8 +2088,12 @@ class InstanceMessagingService:
         #     is re-processed with the same ``<meta>`` directive,
         #     which would create duplicate SUPERSEDED records.
         # The ``parse_meta_tag`` at the top of the method already
-        # stripped ``<meta>...</meta>`` from ``message`` regardless, so
-        # downstream code still sees a clean string. Only the
+        # stripped ``<meta>...</meta>`` from ``message`` for parent
+        # dispatches (``internal_agent:``-prefixed, non-job-event
+        # sources). For other sources the message passes through
+        # verbatim — including any literal ``<meta>...</meta>`` the
+        # user typed — so ``_meta_skill`` stays ``None`` and this
+        # entire C3 block is skipped naturally. Only the
         # authoritative REPLACE side-effects are gated.
         #
         # Key difference from the first-attempt block above: REPLACE
