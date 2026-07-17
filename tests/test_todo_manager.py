@@ -183,20 +183,20 @@ class TestTodoManagerUpdate:
         """When marking done and the item has no comment, reminder has no prefix.
 
         Default reminder is ``"\\n\\n⏭️ Next: ..."`` or ``"\\n\\nAll items completed! ✅"``.
-        No ``"User commented:"`` prefix should appear.
+        No ``"User added new high priority request:"`` prefix should appear.
         """
         mgr = TodoManager()
         mgr.create("inst-1", ["A", "B"])
         result = mgr.update_by_index("inst-1", 0, "done")
 
         assert result is not None
-        assert "User commented:" not in result["reminder"]
+        assert "User added new high priority request:" not in result["reminder"]
         assert "Next:" in result["reminder"]
         assert "B" in result["reminder"]
 
     def test_update_to_done_with_comment_prefixes_reminder(self):
         """When marking done and the item has a non-empty comment, the reminder
-        is prefixed with ``"User commented: {comment}\\n..."`` followed by the
+        is prefixed with ``"User added new high priority request: {comment}\\n..."`` followed by the
         original next-pending reminder.
         """
         mgr = TodoManager()
@@ -205,7 +205,7 @@ class TestTodoManagerUpdate:
         result = mgr.update_by_index("inst-1", 0, "done")
 
         assert result is not None
-        assert "User commented:\n---\nLooks good!\n---\n" in result["reminder"]
+        assert "User added new high priority request:\n---\nLooks good!\n---\n" in result["reminder"]
         # The base next-pending reminder still follows.
         assert "Next:" in result["reminder"]
         assert "B" in result["reminder"]
@@ -220,7 +220,7 @@ class TestTodoManagerUpdate:
         result = mgr.update_by_index("inst-1", 0, "done")
 
         assert result is not None
-        assert "User commented:\n---\nApproved\n---\n" in result["reminder"]
+        assert "User added new high priority request:\n---\nApproved\n---\n" in result["reminder"]
         assert "All items completed!" in result["reminder"]
         # No next-pending pointer.
         assert "Next:" not in result["reminder"]
@@ -238,20 +238,20 @@ class TestTodoManagerUpdate:
         result = mgr.update_by_index("inst-1", 0, "in_progress")
 
         assert result is not None
-        assert "User commented:" not in result["reminder"]
+        assert "User added new high priority request:" not in result["reminder"]
         # DAG-aware waiting reminder (B is blocked because A is in_progress,
         # not done) — replaces the legacy flat-list "Next:" pointer.
         assert "blocked" in result["reminder"]
 
     def test_update_with_empty_comment_skips_user_commented_prefix(self):
-        """An empty comment never produces the ``User commented:`` prefix."""
+        """An empty comment never produces the ``User added new high priority request:`` prefix."""
         mgr = TodoManager()
         mgr.create("inst-1", ["A", "B"])
         mgr.set_comment_by_index("inst-1", 0, "")
         result = mgr.update_by_index("inst-1", 0, "done")
 
         assert result is not None
-        assert "User commented:" not in result["reminder"]
+        assert "User added new high priority request:" not in result["reminder"]
         assert "Next:" in result["reminder"]
 
 
@@ -867,7 +867,7 @@ class TestTodoGraphManagerComputeReminder:
       1. A **base reminder** describing graph state (ready nodes, all
          blocked, or all done).
       2. An optional **comment-fence prefix** that wraps any non-empty
-         user comment in ``"User commented:\\n---\\n...\\n---\\n"``
+         user comment in ``"User added new high priority request:\\n---\\n...\\n---\\n"``
          markers — preserving the prompt-injection guard from the
          legacy ``TodoManager``.
     """
@@ -926,7 +926,7 @@ class TestTodoGraphManagerComputeReminder:
 
         result = mgr.update_by_index("inst-1", 0, "done")
 
-        assert result["reminder"].startswith("User commented:\n---\nuser note\n---\n")
+        assert result["reminder"].startswith("User added new high priority request:\n---\nuser note\n---\n")
 
     def test_compute_reminder_with_empty_comment_on_done_node(self):
         """An empty comment on a done node does not produce the fence prefix."""
@@ -936,7 +936,7 @@ class TestTodoGraphManagerComputeReminder:
 
         result = mgr.update_by_index("inst-1", 0, "done")
 
-        assert "User commented:" not in result["reminder"]
+        assert "User added new high priority request:" not in result["reminder"]
 
     def test_compute_reminder_on_non_done_status_no_fence(self):
         """An in_progress status surfaces the comment is NEVER fenced.
@@ -950,7 +950,7 @@ class TestTodoGraphManagerComputeReminder:
 
         result = mgr.update_by_index("inst-1", 0, "in_progress")
 
-        assert "User commented:" not in result["reminder"]
+        assert "User added new high priority request:" not in result["reminder"]
 
     def test_compute_reminder_comment_fence_with_all_done(self):
         """Fence + all-done suffix coexist on a complete single-node graph.
@@ -964,7 +964,7 @@ class TestTodoGraphManagerComputeReminder:
 
         result = mgr.update_by_index("inst-1", 0, "done")
 
-        assert "User commented:\n---\n" in result["reminder"]
+        assert "User added new high priority request:\n---\n" in result["reminder"]
         assert "All items completed" in result["reminder"]
 
     def test_compute_reminder_comment_fence_with_branching_graph(self):
@@ -994,7 +994,7 @@ class TestTodoGraphManagerComputeReminder:
         result = mgr.update_by_index("inst-1", 0, "done")
 
         assert result["reminder"].startswith(
-            "User commented:\n---\nfirst done\n---\n"
+            "User added new high priority request:\n---\nfirst done\n---\n"
         )
         assert "⏭️ Next:" in result["reminder"]
 

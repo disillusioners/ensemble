@@ -412,7 +412,7 @@ class TestSpecialCharactersInComment:
         """User-supplied chars in a comment don't break the ``---`` fences.
 
         The reminder format wraps the comment in
-        ``User commented:\n---\n{comment}\n---\n{next}``. If the
+        ``User added new high priority request:\n---\n{comment}\n---\n{next}``. If the
         comment itself contains ``---``, the fence ordering still
         works (the *last* ``---`` separates the comment from the
         next-reminder). We verify the literal structure survives
@@ -427,7 +427,7 @@ class TestSpecialCharactersInComment:
         assert result is not None
         reminder = result["reminder"]
         # The user comment is intact between the fences.
-        assert "User commented:" in reminder
+        assert "User added new high priority request:" in reminder
         assert tricky_comment in reminder
         # The next-pending suffix still follows.
         assert "Next:" in reminder
@@ -749,7 +749,7 @@ class TestSubtaskEdgeCases:
         """After auto-completion, the reminder carries the parent's comment under fences.
 
         The reminder format from :meth:`_compute_reminder` is
-        ``User commented:\n---\n{comment}\n---\n{next-or-blocked}`` when
+        ``User added new high priority request:\n---\n{comment}\n---\n{next-or-blocked}`` when
         a parent transitions to ``"done"`` AND carries a non-empty
         comment. The sub-task auto-completion path must surface the
         same fence-protected reminder — sub-task updates don't get a
@@ -781,7 +781,7 @@ class TestSubtaskEdgeCases:
         assert result["auto_completed"] is True
         reminder = result["reminder"]
         # Comment is preserved verbatim between the fences.
-        assert "User commented:\n---\nReviewed — looks good\n---\n" in reminder
+        assert "User added new high priority request:\n---\nReviewed — looks good\n---\n" in reminder
         # And since the parent is now done, the graph has no pending
         # nodes — the base reminder is the "all completed" tail.
         assert "All items completed!" in reminder

@@ -440,7 +440,7 @@ Returns:
 
     * If ``status == "done"`` AND the completed node carries a non-empty
       ``comment``, the reminder is prefixed with
-      ``"User commented:\\n---\\n{comment}\\n---\\n"`` (the fences guard
+      ``"User added new high priority request:\\n---\\n{comment}\\n---\\n"`` (the fences guard
       against prompt injection).
     * Otherwise the reminder lists pending nodes whose predecessors are
       all done (``"\u23ed\ufe0f Next: A, B, ..."``), reports blocked
@@ -496,7 +496,7 @@ Returns:
 
     * If ``status == "done"`` AND the completed node carries a non-empty
       ``comment``, the reminder is prefixed with
-      ``"User commented:\\n---\\n{comment}\\n---\\n"`` (the fences guard
+      ``"User added new high priority request:\\n---\\n{comment}\\n---\\n"`` (the fences guard
       against prompt injection).
     * Otherwise the reminder lists pending nodes whose predecessors are
       all done (``"\u23ed\ufe0f Next: A, B, ..."``), reports blocked

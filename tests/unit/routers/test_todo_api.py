@@ -483,11 +483,11 @@ class TestSetTodoCommentIntegrationWithUpdate:
     """End-to-end: set a comment, then ``update`` the item to done.
 
     The comment set via the HTTP endpoint should be picked up by
-    ``update()`` and surface in the reminder as ``"User commented: ..."``.
+    ``update()`` and surface in the reminder as ``"User added new high priority request: ..."``.
     """
 
     def test_comment_set_via_api_surfaces_in_update_reminder(self, client_with_manager):
-        """Comment set via API → reminder includes ``"User commented: ..."``."""
+        """Comment set via API → reminder includes ``"User added new high priority request: ..."``."""
         client, state = client_with_manager
         mgr = _make_manager()
         mgr._todo_manager.create("inst-1", ["Task A", "Task B"])
@@ -505,7 +505,7 @@ class TestSetTodoCommentIntegrationWithUpdate:
         # is about API → manager → reminder plumbing).
         result = mgr._todo_manager.update_by_index("inst-1", 0, "done")
         assert result is not None
-        assert "User commented:\n---\nReviewed — looks good\n---\n" in result["reminder"]
+        assert "User added new high priority request:\n---\nReviewed — looks good\n---\n" in result["reminder"]
         # And the next-pending pointer still follows.
         assert "Next:" in result["reminder"]
         assert "Task B" in result["reminder"]
