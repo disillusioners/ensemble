@@ -9,5 +9,5 @@
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db"]
   },
-  "team_members": ["explorer"]
+  "team_members": ["explorer", "worker"]
 }
