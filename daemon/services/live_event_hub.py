@@ -420,7 +420,7 @@ class LiveEventHub:
         event: dict[str, Any] = {
             "instance_id": instance_id,
             "event_type": "question_pack",
-            "pack": pack,
+            "message": pack,
         }
         await self._stream_to_connections(instance_id, event)
 
