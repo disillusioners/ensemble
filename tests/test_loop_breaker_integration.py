@@ -272,6 +272,79 @@ class TestFullFlow:
         # The rest should be the original messages (we returned ctx.messages)
         assert len(sent) == 1 + len(messages)
 
+    @pytest.mark.asyncio
+    async def test_repaired_messages_actually_reach_llm(self):
+        """The LLM must receive the REPAIRED messages, not the original.
+
+        Closes the tautology gap in
+        ``test_detection_triggers_repair_and_llm_uses_repaired_messages``
+        above — that test returns ``ctx.messages`` from the fake repairer,
+        so it cannot distinguish between "LLM was called with the original
+        messages" and "LLM was called with the repaired messages". Here
+        the repairer returns a clearly-DISTINCT list (a single
+        ``HumanMessage`` with a sentinel ``id``) and we assert both that
+        the sentinel IS present and that the original loop messages are
+        NOT present.
+        """
+        from daemon.graph import LoopBreakerConfig
+
+        slot = _StubLoopBreakerSlot()
+        llm = _StubLLM(response=AIMessage(content="post-repair"))
+
+        # Sentinel list returned by the repairer — DISTINCT from the
+        # original loop messages (``id="pr-1"`` is the smoking gun).
+        repaired_tail = [HumanMessage(content="post-repair-fresh-context", id="pr-1")]
+
+        async def fake_repair(ctx):
+            return RepairResult(
+                success=True,
+                repaired_messages=repaired_tail,
+                summary="loop repaired",
+                repair_message_id="repair-test-123",
+            )
+        repairer = MagicMock()
+        repairer.repair = AsyncMock(side_effect=fake_repair)
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=slot,
+            loop_repairer=repairer,
+            loop_breaker_config=cfg,
+            graph_ref=[_StubGraph()],
+            llm=llm,
+        )
+
+        original_messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
+        await agent_node(
+            {"messages": original_messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Repair fired exactly once and was recorded.
+        repairer.repair.assert_awaited_once()
+        assert slot.record_calls == [("iid-1", "loop repaired")]
+        assert slot.get_repair_count("iid-1") == 1
+
+        # LLM was called once (post-repair path; no pre-repair LLM call).
+        assert len(llm.calls) == 1
+        sent = llm.calls[0]
+
+        # SystemMessage prepended by ``_maybe_repair_loop``'s rebuild.
+        assert isinstance(sent[0], SystemMessage)
+
+        # The repaired HumanMessage (sentinel id="pr-1") MUST be in what
+        # the LLM received — proves the post-repair rebuild took effect.
+        assert any(
+            getattr(m, 'id', None) == "pr-1" for m in sent
+        ), "LLM did not receive the repaired messages — full_messages was not rebuilt"
+
+        # None of the original loop messages (ids "ai-0", "ai-1", "ai-2",
+        # "tm-0", "tm-1", "tm-2") should appear — they were replaced.
+        for original_id in ("ai-0", "ai-1", "ai-2", "tm-0", "tm-1", "tm-2"):
+            assert not any(
+                getattr(m, 'id', None) == original_id for m in sent
+            ), f"Original loop message {original_id} leaked into the LLM context — repair was not used"
+
 
 # ---------------------------------------------------------------------------
 # 2. GII coexistence
@@ -374,6 +447,213 @@ class TestGIICoexistence:
         # Loop detector also saw the gii repetition and triggered repair.
         repairer.repair.assert_awaited_once()
         assert slot.record_calls == [("iid-1", "s")]
+
+    @pytest.mark.asyncio
+    async def test_gii_sleep_and_loop_repair_both_fire(self, monkeypatch):
+        """Pre-seeded GII count -> sleep AND loop repair fire in one call.
+
+        Extends ``test_gii_throttle_runs_before_loop_breaker`` above by
+        pre-seeding the throttle counter to 2 so the next bump lands at 3
+        (the ``GII_DELAY_MAP[3]=180`` threshold). The agent_node must
+        then execute BOTH:
+          * the throttle's ``asyncio.sleep(180)`` (proves the GII
+            throttling path took the sleep branch — not just the bump),
+          * the loop repairer's ``repair()`` (proves the loop breaker
+            path still fired AFTER the throttle, in the same invocation).
+
+        The order in ``agent_node`` is throttle -> repair -> LLM, so
+        both run sequentially within a single ``await agent_node(...)``.
+        """
+        from daemon.graph import GII_DELAY_MAP, GII_TOOL_NAME, LoopBreakerConfig
+
+        slot = _StubLoopBreakerSlot()
+        throttle = _StubToolThrottleSlot()
+        # Pre-seed: this bump lands at 3 -> sleep 180s per GII_DELAY_MAP.
+        throttle._counts["iid-1"] = 2
+
+        repairer = MagicMock()
+        repaired_tail = [HumanMessage(content="repaired", id="pr-1")]
+
+        async def fake_repair(ctx):
+            return RepairResult(
+                success=True,
+                repaired_messages=repaired_tail,
+                summary="fixed",
+                repair_message_id="r-1",
+            )
+        repairer.repair = AsyncMock(side_effect=fake_repair)
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        agent_node, llm = _make_agent(
+            loop_breaker_slot=slot,
+            loop_repairer=repairer,
+            loop_breaker_config=cfg,
+            throttle_slot=throttle,
+            graph_ref=[_StubGraph()],
+        )
+
+        # 3 identical ``get_instance_info`` calls: identical tool name +
+        # args so the loop detector groups them as a single repeating
+        # pattern at threshold=3.
+        gii_messages = _sequential_loop_messages(GII_TOOL_NAME, {"q": "1"}, count=3)
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("daemon.graph.asyncio.sleep", fake_sleep)
+
+        await agent_node(
+            {"messages": gii_messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # ── Throttle side ────────────────────────────────────────────────
+        # Bump was called once for the trailing gii ToolMessage; landed
+        # at count=3 -> the GII_DELAY_MAP[3] sleep branch fired.
+        assert throttle.bump_calls == ["iid-1"]
+        assert throttle._counts["iid-1"] == 3
+        assert sleeps == [GII_DELAY_MAP[3]]
+        assert sleeps == [180]
+        # No reset on a gii ToolMessage.
+        assert throttle.reset_calls == []
+
+        # ── Repair side ──────────────────────────────────────────────────
+        # The loop detector saw 3 identical gii calls and triggered
+        # repair AFTER the throttle sleep — both happened in one call.
+        repairer.repair.assert_awaited_once()
+        assert slot.record_calls == [("iid-1", "fixed")]
+        assert slot.get_repair_count("iid-1") == 1
+
+        # ── LLM side ─────────────────────────────────────────────────────
+        # LLM was invoked once with the repaired tail (the repaired
+        # message id="pr-1" must be present).
+        assert len(llm.calls) == 1
+        sent = llm.calls[0]
+        assert any(
+            getattr(m, 'id', None) == "pr-1" for m in sent
+        ), "Repaired messages did not reach LLM alongside the throttle sleep"
+
+
+# ---------------------------------------------------------------------------
+# 2b. Defensive branches (repair failure + None slot)
+# ---------------------------------------------------------------------------
+
+
+class TestRepairFailure:
+    """``RepairResult(success=False, ...)`` must degrade gracefully.
+
+    When the repairer raises or returns ``success=False``,
+    ``_maybe_repair_loop`` logs the error and returns the ORIGINAL
+    ``messages``/``full_messages`` pair so the agent continues with the
+    existing context. This guards against:
+      * repair_exception being swallowed without continuing (would freeze),
+      * ``slot.record_repair`` being called on failure (would corrupt the
+        repair cap counter for the next detection event),
+      * the LLM seeing a phantom repaired list (the ``repaired_messages``
+        field on a failed result must be IGNORED).
+    """
+
+    @pytest.mark.asyncio
+    async def test_repair_failure_continues_with_original_messages(self):
+        from daemon.graph import LoopBreakerConfig
+
+        slot = _StubLoopBreakerSlot()
+        llm = _StubLLM(response=AIMessage(content="continued-after-failure"))
+
+        async def failing_repair(ctx):
+            return RepairResult(
+                success=False,
+                repaired_messages=[],
+                summary="",
+                repair_message_id="",
+                error="LLM unavailable",
+            )
+        repairer = MagicMock()
+        repairer.repair = AsyncMock(side_effect=failing_repair)
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=slot,
+            loop_repairer=repairer,
+            loop_breaker_config=cfg,
+            graph_ref=[_StubGraph()],
+            llm=llm,
+        )
+
+        messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
+        await agent_node(
+            {"messages": messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # The repairer WAS invoked once (detection fired and routed to
+        # the repair path).
+        repairer.repair.assert_awaited_once()
+
+        # LLM was called once — with the ORIGINAL messages, since the
+        # repair failed and the no-repair path returned ``messages``
+        # unchanged. Original AI messages MUST be present; the (empty)
+        # ``repaired_messages`` MUST NOT.
+        assert len(llm.calls) == 1
+        sent = llm.calls[0]
+        assert isinstance(sent[0], SystemMessage)
+        original_ids = {"ai-0", "ai-1", "ai-2", "tm-0", "tm-1", "tm-2"}
+        observed_ids = {getattr(m, 'id', None) for m in sent}
+        assert original_ids.issubset(observed_ids), (
+            f"Original loop messages missing from LLM context on failure "
+            f"(observed: {sorted(i for i in observed_ids if i)})"
+        )
+        # No phantom repair message leaked.
+        assert slot.get_repair_count("iid-1") == 0
+        assert slot.record_calls == []
+
+
+class TestNoneLoopBreakerSlot:
+    """``loop_breaker_slot=None`` disables the loop-breaker block entirely.
+
+    The :func:`_maybe_repair_loop` guard at its very first line
+    (``loop_breaker_slot is not None and loop_repairer is not None and
+    loop_breaker_config.enabled``) short-circuits when the slot is
+    ``None`` and returns the original messages. The agent_node then
+    proceeds straight to the LLM call. This test pins that
+    backward-compatible no-op so a future refactor that drops the
+    guard fails loudly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_none_loop_breaker_slot_is_safe(self):
+        """``loop_breaker_slot=None`` must not raise; LLM still invoked."""
+        from daemon.graph import LoopBreakerConfig
+
+        llm = _StubLLM(response=AIMessage(content="ok"))
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=None,
+            loop_repairer=None,
+            loop_breaker_config=cfg,
+            llm=llm,
+        )
+
+        # Even with 5 identical bash calls (would otherwise trip the
+        # detector), ``loop_breaker_slot=None`` short-circuits the
+        # entire block — must not raise.
+        messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=5)
+        await agent_node(
+            {"messages": messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # LLM still invoked once with the original messages (SystemMessage
+        # prepended, then the 10-tool-call history). The whole point is
+        # that ``agent_node`` behaves exactly like the pre-loop-breaker
+        # version when the slot is ``None``.
+        assert len(llm.calls) == 1
+        sent = llm.calls[0]
+        assert isinstance(sent[0], SystemMessage)
+        assert len(sent) == 1 + len(messages)
 
 
 # ---------------------------------------------------------------------------
