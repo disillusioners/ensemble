@@ -398,6 +398,7 @@ def _make_manager_stub_with_question_state():
             self._graph_tasks: dict = {}
             self._pending_injections: dict = {}
             self._gii_throttle: dict = {}
+            self._deferred_question_pause: set[str] = set()
             self.release_context_usage_cache = MagicMock()
             # Bind the real helpers as instance methods.
             self.set_question_pause_requested = (
