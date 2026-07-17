@@ -111,6 +111,7 @@ from .knowledge_tools import create_knowledge_tools
 from .chart_tools import create_chart_tools
 from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
+from .question_tools import create_question_tools
 from .skill_tools import create_skill_tools
 from .skill_evolution_tools import create_skill_evolution_tools
 from .external_opencode import create_opencode_tools
@@ -1039,6 +1040,20 @@ Returns:
         getattr(manager, "_live_hub", None),
     )
     tools.extend(todo_tool_list)
+
+    # ── Question tools (per-instance user-pause-and-answer flow, always available) ──
+    # Mirrors the todo wiring above. The single ``question`` tool stores a
+    # QuestionPack, emits a ``question_pack`` SSE event, sets the pause flag,
+    # and the conditional post-tools edge in ``daemon.graph`` routes the
+    # graph to ``question_pause_node`` (which calls ``pause_instance_cascade``
+    # and clears the flag in ``finally``). The user answers via the Phase 2
+    # answer API (``POST /api/instances/{id}/answer``).
+    question_tool_list = create_question_tools(
+        manager,
+        current_instance_id,
+        getattr(manager, "_live_hub", None),
+    )
+    tools.extend(question_tool_list)
 
     # ── Dynamic Skill tools (per-instance dynamic-skill surface, always available) ──
     # Mirrors the todo/chart pattern above. These tools are auto-granted to

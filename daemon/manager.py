@@ -89,6 +89,7 @@ from .services.skill_seed_service import SkillSeedService
 from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
 from .services.todo_manager import TodoManager
+from .services.question_manager import QuestionManager
 from .cancellation import (
     CancellationToken,
     CancellationTokenSource,
@@ -765,6 +766,20 @@ class InstanceManager:
 
         # Per-instance in-memory todo state for the todo tool surface
         self._todo_manager = TodoManager()
+
+        # Per-instance in-memory question-pack state for the question tool
+        # surface. QuestionManager mirrors TodoManager's threading.Lock +
+        # dict-keyed-by-instance_id pattern. Question packs live for the
+        # lifetime of the daemon process — there is no DB persistence.
+        self._question_manager = QuestionManager()
+
+        # Per-instance "pause requested by the question tool" flag. The
+        # conditional post-tools edge in ``daemon.graph.build_instance_graph``
+        # reads this flag; when True, the graph routes to
+        # ``question_pause_node`` which calls ``pause_instance_cascade`` and
+        # clears the flag in its ``finally`` block. Cleared on terminate /
+        # release / hard-delete via ``_cleanup_instance_state``.
+        self._question_pause_requested: dict[str, bool] = {}
         
         self.source_dispatcher = ResponseDispatcher(
             registry=self.source_registry,
@@ -1887,6 +1902,59 @@ class InstanceManager:
         """
         return self._pending_injections.pop(instance_id, None)
 
+    # ------------------------------------------------------------------
+    # Question pause-requested flag (Phase 1 / question tool)
+    # ------------------------------------------------------------------
+    # The ``question`` tool sets this flag before returning. The
+    # conditional post-tools edge in ``daemon.graph.build_instance_graph``
+    # reads it on the way out of the tools node and routes to
+    # ``question_pause_node``, which calls ``pause_instance_cascade``
+    # and clears the flag in its ``finally`` block. The dict keyed by
+    # ``instance_id`` keeps each instance's flag isolated — there is no
+    # cross-instance coupling.
+
+    def set_question_pause_requested(self, instance_id: str) -> None:
+        """Mark that the ``question`` tool has requested a pause.
+
+        Called by the ``question`` tool immediately after storing the
+        pack and emitting the SSE event. Read by
+        :func:`daemon.graph.create_post_tools_router` on every post-tools
+        edge evaluation — the flag's value at the time of evaluation is
+        what determines routing, not when the flag was set.
+
+        Args:
+            instance_id: Owning instance identifier.
+        """
+        self._question_pause_requested[instance_id] = True
+
+    def is_question_pause_requested(self, instance_id: str) -> bool:
+        """Return True if a question-initiated pause is pending.
+
+        Returns ``False`` (not ``None``) for unknown instance_ids so the
+        caller can use the result as a boolean directly without a
+        ``None`` check.
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            ``True`` when the flag is set; ``False`` otherwise.
+        """
+        return self._question_pause_requested.get(instance_id, False)
+
+    def clear_question_pause_requested(self, instance_id: str) -> None:
+        """Drop the pause-requested flag for ``instance_id``.
+
+        Called from ``question_pause_node``'s ``finally`` block (every
+        execution path — success, CancelledError, or exception) and from
+        ``_cleanup_instance_state`` for terminate / release / hard-delete
+        paths. Safe to call when the flag is unset.
+
+        Args:
+            instance_id: Owning instance identifier.
+        """
+        self._question_pause_requested.pop(instance_id, None)
+
     def bump_gii_throttle(self, instance_id: str) -> int:
         """Increment the consecutive ``get_instance_info`` call counter.
 
@@ -1945,6 +2013,15 @@ class InstanceManager:
         # lived instances (each termination leaks one entry).
         self._gii_throttle.pop(instance_id, None)
         self.release_context_usage_cache(instance_id)
+        # Question-tool cleanup (F5): drop any pending QuestionPack and the
+        # pause-requested flag so the dicts cannot grow unbounded across many
+        # short-lived instances. The pause flag in particular must be
+        # cleared on terminate — otherwise a future instance that re-uses
+        # the same id (unlikely but possible across daemon restarts) would
+        # inherit a stuck "pause requested" state and immediately re-pause
+        # on the first tool call.
+        self._question_manager.clear_question_pack(instance_id)
+        self.clear_question_pause_requested(instance_id)
         # Note: request_registry.cancel_by_instance() is called separately
         # by the lifecycle callers because the cancellation reason differs
         # per call site (USER_STOPPED vs SESSION_TERMINATED). Centralizing

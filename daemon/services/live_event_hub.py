@@ -381,6 +381,49 @@ class LiveEventHub:
         }
         await self._stream_to_connections(instance_id, event)
 
+    async def stream_question_pack(
+        self,
+        instance_id: str,
+        pack: dict[str, Any],
+    ) -> None:
+        """Stream a question-pack event to all active connections.
+
+        Emitted twice in the question lifecycle:
+
+        1. From the ``question`` tool with ``status="pending"`` BEFORE
+           the pause cascade — this is the only reliable emission point
+           because the subsequent pause cascade cancels the graph task
+           mid-execution, skipping any post-commit SSE code (F3 /
+           SSE-timing note from phase1-plan).
+        2. From the Phase 2 answer API with ``status="answered"`` BEFORE
+           the resume cascade — same timing constraint for symmetry.
+
+        Best-effort: failures during broadcast are logged at WARNING by
+        :meth:`_stream_to_connections` (which silently drops events when
+        no clients are connected). Callers (the ``question`` tool and
+        the answer endpoint) wrap the await in their own try/except so
+        a transport hiccup never blocks the question/answer flow.
+
+        The payload follows the **frozen pack_to_dict schema** defined
+        by :func:`daemon.services.question_manager.pack_to_dict`. The
+        frontend consumes both pending and answered events with the
+        same parser, so the schema is a contract across Phase 1 + Phase 2.
+
+        Args:
+            instance_id: The instance this question pack belongs to.
+            pack: Question-pack dict (output of
+                :func:`daemon.services.question_manager.pack_to_dict`).
+                Carries ``instance_id``, ``status`` (``pending`` |
+                ``answered``), ``created_at``, ``questions`` (list of
+                per-question dicts), and ``answers``.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "question_pack",
+            "pack": pack,
+        }
+        await self._stream_to_connections(instance_id, event)
+
     # -------------------------------------------------------------------------
     # Cleanup
     # -------------------------------------------------------------------------

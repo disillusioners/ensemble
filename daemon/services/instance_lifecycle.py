@@ -1145,6 +1145,10 @@ class InstanceLifecycleService:
         # reference through the factory closure so the agent_node can
         # consume pending user messages and (Phase 2) emit SSE events
         # without coupling to module-level singletons.
+        # Phase 1 / question-tool: thread ``manager`` so the conditional
+        # post-tools edge (``create_post_tools_router``) can read the
+        # ``_question_pause_requested`` flag and the
+        # ``question_pause_node`` can call ``pause_instance_cascade``.
         from ..graph import InjectionSlot, ToolThrottleSlot
         graph = build_instance_graph(
             tools=tools,
@@ -1159,6 +1163,7 @@ class InstanceLifecycleService:
             injection_slot=InjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
+            manager=self._manager,
         )
 
         # Save metadata to DB using instance repository
@@ -2446,6 +2451,9 @@ class InstanceLifecycleService:
         from ..manager import build_instance_graph
         # Phase 1 / C1: thread injection_slot + live_hub via factory
         # closure (see _spawn_instance_internal for the same wiring).
+        # Phase 1 / question-tool: thread ``manager`` for the same
+        # reasons as the spawn path — conditional post-tools edge and
+        # ``question_pause_node`` both need the manager reference.
         from ..graph import InjectionSlot, ToolThrottleSlot
         graph = build_instance_graph(
             tools=tools,
@@ -2460,6 +2468,7 @@ class InstanceLifecycleService:
             injection_slot=InjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
+            manager=self._manager,
         )
 
         # Store in instances dict

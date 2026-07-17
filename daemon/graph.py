@@ -1084,6 +1084,192 @@ def build_instance_llms(
     return llm_with_tools, llm_standard
 
 
+# ============================================================================
+# Question tool: conditional post-tools edge + pause node (Phase 1)
+# ============================================================================
+# The ``question`` tool sets ``manager._question_pause_requested[instance_id]
+# = True`` before returning. The conditional post-tools edge
+# (``create_post_tools_router``) reads this flag on every post-tools
+# evaluation. When the flag is set, the graph routes to
+# ``question_pause_node`` instead of back to ``agent``. The pause node calls
+# ``manager.pause_instance_cascade`` which cancels the graph task mid-
+# execution (raising ``CancelledError`` at the next ``await``), then clears
+# the flag in its ``finally`` block so a future resume can't get stuck in a
+# pause loop.
+#
+# CRITICAL invariants (F2 + F4 from phase1-plan):
+#  * The flag MUST be cleared in ``finally`` — never after the await.
+#    ``pause_instance_cascade`` cancels the graph task; any code after the
+#    await is unreachable. Without ``finally``, the flag would stay set
+#    forever and the instance would re-pause on the first post-resume tool
+#    call, creating a stuck loop.
+#  * ``CancelledError`` is RE-RAISED, never swallowed. Swallowing it would
+#    break LangGraph's cancellation contract and leave the task in a
+#    running-but-actually-cancelled state.
+#  * Non-CancelledError exceptions are logged + the flag is cleared + the
+#    exception is re-raised — defense in depth so a transient cascade
+#    failure can't leave the flag set either.
+
+
+def create_post_tools_router(manager: Any):
+    """Build the conditional post-tools router that handles question pauses.
+
+    Returns a closure suitable for ``graph.add_conditional_edges``. On
+    every post-tools evaluation the closure reads
+    ``manager.is_question_pause_requested(instance_id)`` and routes to
+    ``"question_pause_node"`` when True, otherwise back to ``"agent"``.
+
+    The ``instance_id`` is taken from the LangGraph config's
+    ``configurable.thread_id`` (set when the graph is invoked with
+    ``{"configurable": {"thread_id": instance_id}}`` — the same pattern
+    used elsewhere in the codebase). Falling back to ``None`` when
+    config is missing is safe because ``is_question_pause_requested``
+    returns ``False`` for unknown ids.
+
+    Args:
+        manager: The ``InstanceManager`` reference threaded from
+            ``build_instance_graph``. Must expose
+            ``is_question_pause_requested(instance_id) -> bool``.
+
+    Returns:
+        A callable ``router(state, config) -> str`` returning the
+        next-node name (``"agent"`` or ``"question_pause_node"``).
+    """
+    def post_tools_router(state: Any, config: Any = None) -> str:
+        instance_id: str | None = None
+        try:
+            if config is not None:
+                configurable = (
+                    config.get("configurable")
+                    if isinstance(config, dict)
+                    else getattr(config, "configurable", None)
+                )
+                if isinstance(configurable, dict):
+                    instance_id = configurable.get("thread_id")
+        except Exception:
+            instance_id = None
+        if instance_id and manager.is_question_pause_requested(instance_id):
+            return "question_pause_node"
+        return "agent"
+
+    return post_tools_router
+
+
+def create_question_pause_node(manager: Any):
+    """Build the ``question_pause_node`` async function with ``manager`` captured.
+
+    This factory mirrors the pattern used by ``create_agent_node`` and
+    ``create_language_check_node`` — the closure captures ``manager``
+    so the returned coroutine function has the manager reference at
+    call time without depending on module-level singletons (which would
+    break tests and any multi-graph runtime).
+
+    The returned node pauses the instance after a question tool call:
+
+      1. Reads ``instance_id`` from ``config["configurable"]["thread_id"]``.
+      2. Calls ``manager.pause_instance_cascade(instance_id)`` which
+         transitions the instance + all children to ``PAUSED`` in the
+         DB and cancels the active ``graph_task`` via
+         ``graph_task.cancel()``.
+      3. The cascade's cancellation raises ``CancelledError`` at the
+         next ``await`` — re-raised so LangGraph's cancellation
+         contract is honored.
+      4. The ``finally`` block clears the pause-requested flag,
+         preventing stuck-pause loops on the next resume.
+
+    CRITICAL invariants (F2 + F4 from phase1-plan):
+      * Flag MUST be cleared in ``finally`` — code after the await is
+        unreachable on the CancelledError success path.
+      * ``CancelledError`` is RE-RAISED, never swallowed.
+      * Non-CancelledError exceptions are logged + the flag cleared +
+        re-raised (defense in depth).
+
+    Args:
+        manager: The ``InstanceManager`` reference threaded from
+            ``build_instance_graph``. Must expose
+            ``pause_instance_cascade(instance_id) -> Awaitable[dict]``
+            and
+            ``clear_question_pause_requested(instance_id) -> None``.
+
+    Returns:
+        An async callable suitable for ``graph.add_node("name", ...)``.
+    """
+    async def question_pause_node(state: Any, config: Any = None) -> dict:
+        instance_id: str | None = None
+        try:
+            if config is not None:
+                configurable = (
+                    config.get("configurable")
+                    if isinstance(config, dict)
+                    else getattr(config, "configurable", None)
+                )
+                if isinstance(configurable, dict):
+                    instance_id = configurable.get("thread_id")
+        except Exception:
+            instance_id = None
+
+        if instance_id is None:
+            # Should never happen in production (the router requires
+            # config to set the flag); log + bail so LangGraph sees a
+            # normal return and can route to END.
+            logger.warning(
+                "[question_pause_node] missing instance_id from config — "
+                "skipping pause cascade"
+            )
+            return {}
+
+        try:
+            await manager.pause_instance_cascade(instance_id)
+        except asyncio.CancelledError:
+            # SUCCESS PATH: ``pause_instance_cascade`` calls
+            # ``graph_task.cancel()`` which raises CancelledError at the
+            # next await — i.e. right here, on the way back from the
+            # cascade. Re-raise so LangGraph's cancellation contract is
+            # honored. The ``finally`` block below clears the flag
+            # BEFORE the CancelledError propagates further (Python
+            # guarantees ``finally`` runs during exception unwinding).
+            raise
+        except Exception as e:
+            # Defense-in-depth (F4): non-CancelledError failures — log
+            # + clear the flag + re-raise so the graph sees a real
+            # error rather than a silent stuck-pause loop. Re-raising
+            # also lets upstream observers record the failure.
+            logger.error(
+                f"[question_pause_node] pause cascade failed for "
+                f"{instance_id[:8]}...: {type(e).__name__}: {e}"
+            )
+            try:
+                manager.clear_question_pause_requested(instance_id)
+            except Exception as clear_err:
+                logger.warning(
+                    f"[question_pause_node] failed to clear pause flag "
+                    f"after cascade error for {instance_id[:8]}...: "
+                    f"{clear_err}"
+                )
+            raise
+        finally:
+            # ALWAYS clear the flag, even on CancelledError path (F2).
+            # The success path of ``pause_instance_cascade`` raises
+            # CancelledError at the next await, so code after the await
+            # is UNREACHABLE. The ``finally`` block is the ONLY
+            # reliable place to clear the flag — without it the
+            # instance would re-pause on the first post-resume tool call.
+            try:
+                manager.clear_question_pause_requested(instance_id)
+            except Exception as clear_err:
+                logger.warning(
+                    f"[question_pause_node] failed to clear pause flag "
+                    f"in finally for {instance_id[:8]}...: {clear_err}"
+                )
+
+        # Unreachable in practice — CancelledError from
+        # ``pause_instance_cascade`` always interrupts the await. Kept
+        # for type-checker / defensive clarity.
+        return {}
+
+    return question_pause_node
+
+
 def build_instance_graph(
     tools: list,
     checkpointer,
@@ -1097,6 +1283,7 @@ def build_instance_graph(
     injection_slot: InjectionSlot | None = None,
     live_hub: Any = None,
     throttle_slot: ToolThrottleSlot | None = None,
+    manager: Any = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -1134,6 +1321,13 @@ def build_instance_graph(
             injecting escalating ``asyncio.sleep`` delays before the
             LLM call. ``None`` disables throttling (backward-compatible
             default).
+        manager: Optional ``InstanceManager`` reference (Phase 1 /
+            question-tool) threaded so the conditional post-tools edge
+            (``create_post_tools_router``) can read the
+            ``_question_pause_requested`` flag and the
+            ``question_pause_node`` can call ``pause_instance_cascade``.
+            ``None`` is backward-compatible (no question-pause behavior;
+            the unconditional ``tools → agent`` edge is used instead).
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
@@ -1223,7 +1417,35 @@ def build_instance_graph(
             END: END,
         })
 
-    graph.add_edge("tools", "agent")
+    # Conditional post-tools edge: route to ``question_pause_node`` when
+    # the question tool has requested a pause (F1). The original
+    # unconditional ``tools → agent`` edge was the bug — it could not
+    # honor a pause request because every post-tools routing went back
+    # to the agent unconditionally. The conditional router reads
+    # ``manager._question_pause_requested`` (set by the ``question``
+    # tool, cleared by ``question_pause_node``'s ``finally`` block).
+    # Non-question tool calls still route to ``agent`` normally because
+    # the flag defaults to False for instances that haven't called the
+    # ``question`` tool.
+    if manager is None:
+        # Backward-compatible fallback: no manager reference means no
+        # question-pause behavior. Keep the original unconditional edge.
+        graph.add_edge("tools", "agent")
+    else:
+        question_pause_node = create_question_pause_node(manager)
+        graph.add_node("question_pause_node", question_pause_node)
+        graph.add_conditional_edges(
+            "tools",
+            create_post_tools_router(manager),
+            {
+                "agent": "agent",
+                "question_pause_node": "question_pause_node",
+            },
+        )
+        # ``question_pause_node`` routes to END — the cascade has
+        # cancelled the graph task, so resuming will start fresh from
+        # the checkpoint.
+        graph.add_edge("question_pause_node", END)
     graph.add_edge("nudge", "agent")
     
     compiled = graph.compile(checkpointer=checkpointer)

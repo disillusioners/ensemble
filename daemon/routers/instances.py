@@ -119,6 +119,30 @@ class TodoSubtaskUpdateRequest(BaseModel):
     )
 
 
+class AnswerRequest(BaseModel):
+    """Request body for ``POST /api/instances/{id}/answer``.
+
+    Carries the user's answers to a pending question pack. The shape
+    of ``answers`` is intentionally flexible — callers may key by
+    question id (preferred) or by question text (for ad-hoc clients
+    that didn't capture the auto-generated ids).
+
+    Attributes:
+        answers: User-supplied answer dict. Shape is unconstrained
+            (any JSON-serializable dict); the manager stores it
+            verbatim and the resume-message formatter iterates it.
+    """
+
+    answers: dict = Field(
+        default_factory=dict,
+        description=(
+            "User-supplied answers. Shape is flexible: prefer keying "
+            "by question id (the field returned in the pending SSE "
+            "event) — text-keyed fallbacks are also accepted."
+        ),
+    )
+
+
 # Create router with /instances prefix
 router = APIRouter(prefix="/instances", tags=["instances"])
 
@@ -467,6 +491,159 @@ async def resume_instance(
         "skipped_ids": result["skipped_ids"],
         "target_id": target_id,
         "resume_results": resume_results,
+    }
+
+
+# 6b. POST /instances/{instance_id}/answer - Submit answers to a pending question pack
+#
+# Phase 2 / question-tool. Mirrors the PAUSED-branch fan-out from
+# ``daemon/routers/messages.py:198-249`` (F10) because
+# ``pause_instance_cascade`` cascades to children — the answer endpoint
+# must mirror this fan-out. The target instance gets the formatted
+# Q↔A HumanMessage; children resume silently from checkpoint.
+@router.post("/{instance_id}/answer")
+async def answer_questions(
+    instance_id: str,
+    body: AnswerRequest,
+    request: Request,
+) -> dict:
+    """Submit answers to a pending question pack; resume the instance cascade.
+
+    The instance must have a pending question pack (set by the
+    ``question`` tool before the graph paused). Stores the answers,
+    emits a ``question_pack`` SSE event with ``status="answered"``, then
+    mirrors the PAUSED-branch resume fan-out: cascade-resumes target +
+    all paused children, and for each resumed instance calls
+    ``resume_processing_job`` — the target receives the formatted
+    Q↔A HumanMessage; children resume silently from their checkpoint.
+
+    The Q↔A HumanMessage intentionally echoes the question text (F7
+    compaction safety) so the agent can correlate Q↔A from this message
+    alone even after the original tool call result has been compacted.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``404`` if no pending (or answered — second answer is allowed)
+          question pack exists for the instance.
+        * ``503`` if the daemon is in write-paused mode (migration).
+    """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+    # 1. Validate instance exists — uniform 404 contract with every other
+    #    instance-scoped endpoint in this router.
+    await _check_instance_exists(manager, instance_id)
+
+    # 2. Store answers via QuestionManager. ``None`` means there is no
+    #    pack for this instance — surface as 404 so the frontend can
+    #    distinguish "answer without a question" from "answer stored".
+    #    We import here to avoid pulling the service into every
+    #    request that doesn't need it (lazy import).
+    from daemon.services.question_manager import pack_to_dict
+
+    pack = manager._question_manager.set_answers(instance_id, body.answers)
+    if pack is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=(
+                    f"No question pack for instance {instance_id!r}. "
+                    "The user can only answer a question that was "
+                    "actually asked."
+                ),
+            ).model_dump(),
+        )
+
+    # 3. Emit SSE: question_pack with status="answered". Best-effort —
+    #    the resume cascade must proceed even if SSE fails. Mirrors
+    #    Phase 1's pattern where the tool emits SSE synchronously
+    #    BEFORE setting the pause flag, for the same F3 timing reason.
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            await live_hub.stream_question_pack(instance_id, pack_to_dict(pack))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"question_pack SSE emission failed for answer on "
+                f"instance {instance_id}: {e}"
+            )
+
+    # 4. Format answers as a HumanMessage string. The echo of question
+    #    text is F7 — even if the tool result was compacted, the agent
+    #    can correlate Q↔A from this message alone.
+    answer_lines = ["Here are the user's answers to your questions:", ""]
+    for i, q in enumerate(pack.questions):
+        # Prefer keying by id (the canonical contract); fall back to
+        # text-keyed lookups for ad-hoc clients that didn't capture the
+        # auto-generated ids.
+        answer = (
+            pack.answers.get(q.id)
+            if q.id in pack.answers
+            else pack.answers.get(q.text, "(no answer)")
+        )
+        answer_lines.append(f"**Q{i + 1}:** {q.text}")
+        answer_lines.append(f"**A{i + 1}:** {answer}")
+        answer_lines.append("")
+    answer_msg = "\n".join(answer_lines)
+
+    # 5. Mirror the PAUSED-branch fan-out from messages.py:198-249 (F10).
+    #    ``pause_instance_cascade`` cascades to children, so the resume
+    #    must too. Target gets the answer HumanMessage; children resume
+    #    silently from their checkpoint — they were paused as a side
+    #    effect of the parent's question and don't need a new message.
+    try:
+        resume_result = await manager.resume_instance_cascade(instance_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to resume instance: {e}",
+            ).model_dump(),
+        )
+
+    target_id = resume_result.get("target_id", instance_id)
+
+    resume_results: dict = {}
+    for resumed_id in resume_result["resumed_ids"]:
+        is_target = resumed_id == target_id
+        try:
+            job_result = await manager.resume_processing_job(
+                resumed_id,
+                message=answer_msg if is_target else "resume",
+                silent=not is_target,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to resume processing for "
+                f"{resumed_id[:8]}...: {e}"
+            )
+            job_result = {"status": "error", "error": str(e)}
+        if job_result is None:
+            logger.debug(
+                f"No active PROCESSING job for instance "
+                f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
+            )
+        resume_results[resumed_id] = (
+            job_result if job_result is not None else {"status": "no_active_job"}
+        )
+
+    return {
+        "status": "answered",
+        "instance_id": instance_id,
+        "question_pack": pack_to_dict(pack),
+        "resume_info": {
+            "resumed": True,
+            "resumed_ids": resume_result["resumed_ids"],
+            "skipped_ids": resume_result["skipped_ids"],
+            "target_id": target_id,
+            "resume_results": resume_results,
+        },
     }
 
 

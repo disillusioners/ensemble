@@ -197,6 +197,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "chart": "daemon.tools.chart_tools",
     "image": "daemon.tools.image_tools",
     "todo": "daemon.tools.todo_tools",
+    "question": "daemon.tools.question_tools",
     "rag": "daemon.tools.rag_tools",
     "mcp": "daemon.tools.mcp_tools",
     "external_opencode": "daemon.tools.external_opencode",
