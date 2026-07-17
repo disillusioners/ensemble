@@ -343,3 +343,19 @@ Update after each test run:
 | frontend_skill_jest_test | frontend/ (npx jest with skill spec files) | Frontend skill component unit tests: skill-lineage-tree, skill-trigger-form, skill-trigger-list, skill-usage-table, ab-test-dashboard, mermaid-graph, skill.model (contract), skill.service, app.routes. 305 tests. | 3 min | 2026-07-16 | ✅ PASS (305/305 in 4.9s, 9 suites, feature/skill-evolution-ui, 0 failures) |
 | frontend_skill_tsc_test | frontend/ (npx tsc --noEmit) | Frontend TypeScript compilation check — 0 type errors. | 1 min | 2026-07-16 | ✅ PASS (0 errors in <1s, feature/skill-evolution-ui) |
 | frontend_build_test | frontend/ (npm run build) | Frontend production build — Angular ng build succeeds. Bundle budget warnings pre-existing. | 3 min | 2026-07-16 | ✅ PASS (exit 0 in 11.9s, feature/skill-evolution-ui) |
+
+---
+
+## C2 Deferred Pause Fix Verification Packs (2026-07-17)
+
+### C2 Test Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| c2_question_deferred_pause_unit_test | test/packs/c2_question_deferred_pause_unit_test.sh | C2 invariant + question tests: deferred_pause_callback (4 ordering/cascade/negative/failure), question_graph (node deferred marker, manager semantics, cleanup), question_manager, question_tools, question_untested_paths. **Quick fix cae11e6f**: _ManagerStub missing _deferred_question_pause | 2 min | 2026-07-17 | ✅ PASS (40/40 after quick fix, commit 557ec294, cae11e6f) |
+| c2_pause_cascade_graph_unit_test | test/packs/c2_pause_cascade_graph_unit_test.sh | C2 pause cascade + graph task: pause_instance_cascade (resume, idempotency, mixed states), pause_flow_redesign (atomic 3-table transition), graph_task_cancellation (_graph_tasks contract), tree_aware_pause_resume (cascade BFS) | 2 min | 2026-07-17 | ✅ PASS (commit 557ec294) |
+| c2_messaging_lifecycle_unit_test | test/packs/c2_messaging_lifecycle_unit_test.sh | C2 messaging + lifecycle: instance_lifecycle_h10_l14, instance_lifecycle_terminate, instance_messaging_compaction_guard, instance_messaging_shared_context_injection, instance_messaging_skill_injection, multi_reuse_lifecycle | 2 min | 2026-07-17 | ✅ PASS (69 passed, 14 skipped, commit 557ec294) |
+| c2_cleanup_resume_unit_test | test/packs/c2_cleanup_resume_unit_test.sh | C2 cleanup + resume: instance_hard_delete, hard_delete_mock_integration, resume_gate, resume_child_notification, resume_message_append, resume_waiting_children, child_resume | 2 min | 2026-07-17 | ✅ PASS (56/56, commit 557ec294) |
+| c2_core_regression_unit_test | test/packs/c2_core_regression_unit_test.sh | C2 core regression: manager (InstanceManager init, spawn, send, terminate, streaming), paused_instance_ttl, context_usage_emission, dispatcher_path_equivalence, phase4_manager_decomposition, title_generation_trigger | 2 min | 2026-07-17 | ⚠️ 165 passed, 38 pre-existing failures (SQLite migration bug 843e2c34, NOT C2-related) |
+| c2_question_deferred_pause_edge_cases | tests/unit/test_question_deferred_pause_edge_cases.py | C2 edge cases: second cycle marker re-set, non-question no-marker, marker idempotency pop-once, concurrent instance isolation, _process_message_with_tracking Path B | 2 min | 2026-07-17 | ✅ PASS (5/5, NEW tests, commit 4ad66982) |
+| c2_pg_manager_unit_test | test/packs/c2_pg_manager_unit_test.sh | C2 PostgreSQL verification: test_manager.py + C2 invariant tests against PostgreSQL (DATABASE_URL override). Confirms migration is valid PG, C2 tests pass on PG | 5 min | 2026-07-17 | ⚠️ C2 tests PASS on PG, test_manager.py still SQLite-locked by fixture |
