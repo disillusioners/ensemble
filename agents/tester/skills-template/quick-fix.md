@@ -145,7 +145,7 @@ After the session reports a quick fix, the tester writes a LESSONS entry:
 ## Verification
 - Re-run result: PASS
 - Commit: [hash]
-- Author: [opencode session ID]
+- Author: [executor session ID]
 
 ## Lessons
 [Anything to remember for future similar issues]

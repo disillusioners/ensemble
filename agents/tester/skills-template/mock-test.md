@@ -1,12 +1,12 @@
 ---
 version: 1.0.0
 category: execution
-auto_load: true
+auto_load: false
 ---
 
 # Mock Test
 
-Design mock tests for features that depend on external services. You design and document the spec; opencode implements and executes.
+You are the executor. You design, implement, and execute mock tests directly against external-service dependencies — no delegation to other agents.
 
 ## Port & Safety Rules
 
@@ -73,7 +73,7 @@ Document every mock test in `.agents/tester/MOCK_TESTS.md` using this template:
 
 ### Last Run
 - **Date**: [timestamp]
-- **Session**: [opencode session ID]
+- **Session**: [executor session ID]
 - **Result**: [PASS/FAIL]
 - **Quick Fixes**: [List any quick fixes applied]
 - **Report**: [link to RESULTS/ file]
@@ -92,15 +92,15 @@ Document every mock test in `.agents/tester/MOCK_TESTS.md` using this template:
 
 ### Phase 2: Create Mock Test Script
 
-Delegate to opencode with the spec from MOCK_TESTS.md: request a script (Python/Go/Bash) with explicit auto-kill timeout, pre-start port validation/cleanup, mock services on ports > 10000, the test scenarios, and exit-time cleanup of all processes.
+Write the test script directly (Python/Go/Bash) with explicit auto-kill timeout, pre-start port validation/cleanup, mock services on ports > 10000, the test scenarios, and exit-time cleanup of all processes.
 
 ### Phase 3: Execute Mock Test
 
-Delegate to opencode: run the script, capture all output, report PASS/FAIL with details (on FAIL include error messages and logs). Apply quick fixes (< 20 lines, no architecture change) and retry; always verify post-run cleanup (processes killed, ports freed).
+Run the script directly, capture all output, report PASS/FAIL with details (on FAIL include error messages and logs). Apply quick fixes (< 20 lines, no architecture change) and retry; always verify post-run cleanup (processes killed, ports freed).
 
 ### Phase 4: Report & Document
 
-1. Receive results from opencode session
+1. Capture execution results directly
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` Last Run section (status, date, result)
 4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., `mock-test-[name]-findings.md`)

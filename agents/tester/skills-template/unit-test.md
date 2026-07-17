@@ -1,98 +1,98 @@
 ---
 version: 1.0.0
 category: execution
-auto_load: true
+auto_load: false
 ---
 
 # Unit Test
 
-Coordinate unit test execution across packs. You plan and delegate; opencode runs. Scope to relevant packs per blast radius control (see `test-strategy` skill).
+Discover what unit tests exist in the codebase and analyze coverage gaps. You are the executor — read-only investigation only. You produce a report; you do not run tests, fix code, or coordinate sessions.
 
-## Step 1: Discover & Plan
+## Scope
 
-1. Read `.agents/tester/README.md` for project context
-2. Read `.agents/tester/rules/ensure.md` for quality requirements
-3. **Derive the change set** (blast radius) — scope to relevant unit test packs (see `test-strategy` skill)
-4. **List the unit test packs to run** (one per module/scope, named `<module>_unit_test`). Estimate each pack's runtime. **Split any pack > 2 min (unit hard limit) into smaller packs before launching.**
-5. **Plan sessions**: one opencode session per pack; independent packs in parallel. Materialize as a todo graph: `todo_graph_create(nodes=<packs>, edges=<dependencies>)`
-6. Prepare the strict message (Step 2) per pack — never a single "run unit tests" message
+This skill answers two questions:
 
-## Step 2: Delegate Execution (Per Pack)
+1. **What unit tests exist** — which test files cover which source modules.
+2. **Where are the coverage gaps** — which source files, functions, or branches lack unit tests, and what edge cases are missing.
 
-Use the **Run Single Test Pack** strict message template (see `test-pack-execution` skill). Send one message per pack, one session per pack. Never send a bare "run unit tests" / `go test ./...` / `pytest tests/` message.
+You do not orchestrate test execution, hand work off to other sessions, apply fixes, or re-validate after changes. Those concerns belong to `test-pack-execution` and `test-strategy`.
 
-Key fields to fill per pack:
+## Step 1: Discover Existing Unit Tests
 
-```
-Task: Run Single Test Pack
-Pack: [exact path/to/<module>_unit_test.sh]   # exactly ONE pack
-Estimated runtime: [X min, must be < 2 for unit]
-... (rest of the strict template — see test-pack-execution skill)
-```
+Map the test landscape before you judge coverage.
 
-- **Independent unit packs** → launch in parallel (one session each)
-- **Run the Pre-Send Self-Check** before each send (see `test-pack-execution` skill for checklist)
-- **Always grant Quick Fix Authorization** when criteria are met (< 20 lines, no architecture change, obvious root cause)
+1. **Locate test directories** — scan the repo for conventional locations: `tests/unit/`, `tests/`, `<module>/__tests__/`, `*_test.go`, `*_test.py`, `*.spec.ts`, etc. Note non-obvious locations discovered via grep (e.g., colocated `*.test.tsx`, `*_test.py` next to source).
+2. **Identify test files** — list every file whose name or path signals a test (filename matches, `test_` prefix, `Test` suffix, `describe(`/`it(` blocks, pytest decorators).
+3. **Map tests to source modules** — for each test file, record which module/function it covers. Group by feature area, not by directory, so the report reads as "what is tested" rather than "what folders exist."
+4. **Note test conventions** — record the framework (pytest, jest, vitest, go test, etc.), naming patterns, fixture style, and any shared setup. This is what later runs and fixes will depend on.
 
-## Step 3: Analyze & Document
+Output: a `Test Inventory` section in your report — file path → covered module(s) → framework.
 
-1. Receive results from all opencode sessions
-2. Aggregate per-pack PASS/FAIL/TIMEOUT; analyze failures and patterns
-3. Note which issues were quick-fixed by sessions (record commit hashes)
-4. Update `.agents/tester/COVERAGE.md` with findings:
-   - Modules exercised
-   - Gaps discovered (untested code paths, missing edge cases)
-   - New test files added
-5. Update `.agents/tester/LESSONS/` with issues found and fixes applied (e.g., `unit-test-fix-[issue].md`)
+## Step 2: Analyze Coverage Gaps
 
-## Step 4: Fix Failures (If Needed)
+Compare what exists against what should exist.
 
-**If unit tests are still broken after quick fixes:**
+1. **Identify untested source files** — for every module under the project's main source tree, check whether any test file references it (import, fixture, call). Flag files with zero coverage.
+2. **Identify under-tested modules** — modules with one or two tests covering the happy path only. These have the most hidden risk.
+3. **Spot missing edge cases** — look for the patterns that bite later:
+   - Empty inputs, nil/None, zero values
+   - Boundary values (off-by-one, max int, empty collections)
+   - Error paths and exception branches
+   - Validation rejection paths (invalid input, permission denied)
+   - Concurrency / re-entrancy cases if relevant to the module
+4. **Size the test packs** — apply the sizing heuristics below; flag any pack that already exceeds the unit-test runtime budget, since it will need splitting before execution.
 
-1. Assess remaining failures: are they quick-fixable?
-2. **If yes** → Reuse same opencode session, send follow-up task (still single-pack scoped). Quick fix criteria: < 20 lines, single file/module, no PRODUCTION architecture change, obvious root cause, instance has context
-3. **If no** → Spawn new opencode session for full fix workflow
-4. Monitor and verify fixes
-5. Document in `.agents/tester/LESSONS/` (e.g., `unit-test-failures-[date].md`)
+Output: a `Coverage Gaps` section listing each gap with file:line where possible and the scenario missing.
 
-**For test-code architecture issues** (bloated pack, slow setup, order-dependent tests) → use the Test Architecture Fix workflow from `test-pack-execution` skill. Test-code refactors are NOT blocked by the production "no architecture change" rule.
+## Step 3: Write the Report
 
-## Step 5: Validate ensure.md (After Unit Tests Pass)
+Produce a single structured report. Use the Coverage Documentation Pattern in this skill as the template for what the report should look like. Do not write to `.agents/tester/COVERAGE.md` yourself — that update happens after execution, not during discovery.
 
-1. If unit tests pass, proceed to ensure.md validation
-2. Follow the ensure-validation skill workflow
-3. Document results in `.agents/tester/RESULTS/[date]-ensure-validation.md`
+The report goes back to the requester with three sections:
+
+- **Test Inventory** — what exists, grouped by feature
+- **Coverage Gaps** — what's missing, prioritized (untested file > under-tested file > missing edge case)
+- **Pack Sizing Notes** — any existing pack > 2 min, suggestions for splitting
+
+Keep it focused and actionable. The requester decides what to run, fix, or follow up on.
 
 ## Unit Pack Sizing Heuristics
 
+Apply these when assessing test pack structure during discovery:
+
 | Pack characteristic | Action |
 |---|---|
-| Estimated runtime < 2 min | OK to launch as-is |
-| Estimated runtime ≥ 2 min | **Split before launch** — group by feature/module into smaller packs |
-| Tests hitting real DB/network | Mock the boundary or split into a separate integration-style pack |
-| Tests sharing heavy setup | Extract shared fixture; ensure cleanup runs (state leaks cause flakes) |
-| Tests with > 5s sleeps each | Override config/env to reduce waits; never raise the cap |
+| Estimated runtime < 2 min | OK as-is for unit-test scope |
+| Estimated runtime ≥ 2 min | Split before launch — group by feature/module |
+| Tests hitting real DB/network | Mock the boundary or split into integration pack |
+| Tests sharing heavy setup | Extract shared fixture; verify cleanup runs (state leaks cause flakes) |
+| Tests with > 5s sleeps each | Override config/env to reduce waits; do not raise the cap |
 | Tests with order dependencies | Isolate them; order-coupled tests create flakes |
+
+These are the same heuristics `test-pack-execution` uses at run time. Reporting a pack that violates them now saves a re-split later.
 
 ## Coverage Documentation Pattern
 
-When updating `.agents/tester/COVERAGE.md` after a unit test run, structure entries as:
+Structure the `Coverage Gaps` section of the report as:
 
 ```markdown
-## [Date] — [Change/Feature]
+## [Date] — Unit Test Discovery
 
-**Change set**: [files/modules touched]
-**Packs run**: [list]
-**Result**: [PASS/FAIL — counts]
+**Repository**: [repo / branch]
+**Framework(s)**: [pytest, jest, ...]
+**Test files found**: [count]
+**Modules covered**: [count of N]
 
-### Coverage added
-- [module/path]: [what scenarios now covered]
+### Test Inventory
+- [path/to/test_file]: covers [module/function], [scenario summary]
 
-### Gaps discovered
-- [module/path:line]: [missing edge case] — recommend adding test in [pack]
+### Coverage Gaps
+- [module/path] — entire file untested; recommend pack [pack_name]
+- [module/path:line] — [missing edge case] — add to [pack_name]
+- [module/path:line] — [error branch not exercised] — add to [pack_name]
 
-### Quick fixes applied
-- [commit-hash]: [fix description] in [file:line]
+### Pack Sizing Notes
+- [pack_name]: estimated [X min] — exceeds 2 min budget, split before run
 ```
 
-This format makes coverage trends visible across runs and surfaces gaps that need follow-up.
+This format gives the requester what they need to decide the next step without re-doing the discovery.
