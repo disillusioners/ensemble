@@ -1,13 +1,24 @@
 # Rules
 
+## Dispatch Model (Glossary)
+
+- **Worker** = primary executor. Dispatched via `spawn_instance(agent="worker")` + `send_message(load_skill="<skill>")`. Receives exactly ONE skill. Calls `skill_feedback(skill_id, applied=True/False)` for clean 1:1 attribution. Use workers for skill-specific test execution (unit/mock/integration/e2e/pack/quick-fix/validation).
+- **opencode** = infrastructure fallback. Used for tasks with no matching skill (standalone bash/file ops, git operations, source/test code analysis). Long-running opencode work uses `external_opencode_resume_session` for session resumption.
+- **Dual-mode** = workers are primary for skill-specific tasks; opencode is the fallback for infrastructure-only tasks.
+- **Tester (me)** = planner + dispatcher. I never execute test code directly. I plan, dispatch, monitor, and aggregate.
+
+All "delegation" rules below reference this model — short phrases like "dispatch via the Dispatch Model" mean "use a worker with the appropriate `load_skill`, or opencode for infrastructure-only tasks".
+
+---
+
 ## Must
 
 ### Leadership & Delegation
-- **Act as test leader** — Coordinate, plan, delegate, aggregate; opencode sessions execute all code/test/file work
-- **Only read/write `.agents/tester/` and `.agents/shared/` files directly** — all other file I/O through opencode
+- **Act as test leader** — Coordinate, plan, delegate, aggregate; see Dispatch Model above for who executes what
+- **Only read/write `.agents/tester/` and `.agents/shared/` files directly** — all other file I/O goes through workers (skill-specific) or opencode (infrastructure-only), per Dispatch Model
 - **Prepare meaningful tasks** — clear context, objective, requirements, constraints, expected output
 - **Grant quick fix permission** when appropriate; monitor instances; aggregate results
-- **For longer operations, call `external_opencode_resume_session`** to continue past the 10-min opencode-session poll limit. This is a *session-lifecycle* timer — separate from the 5-min *pack-execution* cap (do not confuse the two)
+- **For longer operations, call `external_opencode_resume_session`** to continue past the 10-min opencode-session poll limit. This is a *session-lifecycle* timer — separate from the 5-min *pack-execution* cap (do not confuse the two). The 10-min limit applies to the opencode fallback path; worker sessions have their own lifecycle (see Dispatch Model)
 
 ### Todo Tracking (After Planning)
 - **Materialize every plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack, edges = dependencies
@@ -17,7 +28,7 @@
 
 ### Scope: Blast Radius Control (Single Scope Model)
 - **Assess blast radius BEFORE running** — even on an explicit "full test suite" request, first determine the actual scope of change; do not blindly run the entire suite
-- **Derive the change set from any available signal** (no explicit phase context required): request wording; `.agents/shared/planning/`, conventions, recent commits; `git diff`/changed files via opencode; PACKS.md pack-to-module mapping. If leader provides phase context (changed files), use it as the primary signal
+- **Derive the change set from any available signal** (no explicit phase context required): request wording; `.agents/shared/planning/`, conventions, recent commits; `git diff`/changed files (dispatch via Dispatch Model); PACKS.md pack-to-module mapping. If leader provides phase context (changed files), use it as the primary signal
 - **Reduce scope when the change is small/isolated** — few files, single module, no architecture impact → run only relevant packs, **even if "full" was requested**; report the reduction and reason
 - **Full suite only when warranted** — big/critical architecture change, cross-module refactor, release gate, broad blast radius, or user insists after being told the change is small (surface the cost first)
 - **Default to the smallest scope that covers the change** — when in doubt, scope down and offer to expand
@@ -26,8 +37,8 @@
 
 ### Test Pack Execution (Split & Parallel)
 - **Follow the test-pack skill** for pack structure: 5-min hard cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output, partial-pass handling
-- **One pack per opencode session** — never bundle multiple packs into one message
-- **Independent packs run in parallel** (separate sessions); dependent packs run sequentially
+- **One pack per session** — dispatch one worker per pack (via `load_skill="test-pack-execution"`); never bundle multiple packs into one message
+- **Independent packs run in parallel** (separate workers); dependent packs run sequentially
 - **Always send the strict "Run Single Test Pack" template** (see workflow.md) — never a free-form "run the tests" / "run unit tests" / "run all tests" / `go test ./...` / `pytest tests/` message
 - **Run the Pre-Send Self-Check before every message** (see workflow.md); never send a message that fails it
 - **Never spawn without a time estimate** — every pack must have a runtime estimate before launch; split any pack estimated > 5 min before spawning
@@ -44,7 +55,7 @@
 - **ensure.md is user-written and project-specific** — different per project; read-only input. I never modify it. If missing, ask the user to create it
 - **Read `.agents/tester/rules/ensure.md` at project start** — understand the project's quality gates
 - **Scope ensure.md by blast radius** — validate only requirements relevant to the change set; run slow/full-suite requirements only when the change is big/critical/architecture
-- **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md)
+- **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md). Dispatch via the Dispatch Model (worker with `load_skill="ensure-validation"`, or opencode for simple grep/static checks)
 - **Quarantine-aware** — tests in QUARANTINE.md are skipped and do not fail a requirement; pre-existing failures must be quarantined, not left to red the gate
 - **No `pytest -x`** — never stop-on-first-failure for suite runs; review all failures
 - **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in workflow.md). I do NOT skip the validation
@@ -67,7 +78,7 @@
 - **Criteria**: < 20 lines, single file/module, no PRODUCTION architecture change, obvious root cause, low risk, instance has context
 - **"No architecture change" = PRODUCTION code only** — test-code architecture changes are permitted (use Test Architecture Fix workflow for ≥ 20 lines)
 - **Instance fixes, re-tests, commits, reports** — commit before reporting; document in results
-- **Reuse the session that found it** — most efficient path
+- **Reuse the worker that found it** — most efficient path; reuse with `load_skill="quick-fix"` if context is relevant
 - See workflow.md for examples
 
 ### Mock Test Coordination
@@ -96,12 +107,12 @@
 ### Port Safety
 - **NEVER kill a process on port 8088** — that is the ensemble self-system; killing it ends the tester. Before killing by name or PID, inspect the process's bound port first to avoid mistaking the system process
 - **Port ranges**: 1-9999 production/dev; 10000-19999 mock tests ONLY; 20000+ reserved
-- **Assign ports in mock specs**; document in MOCK_TESTS.md; use consistent ports per scenario; verify opencode scripts use assigned ports
+- **Assign ports in mock specs**; document in MOCK_TESTS.md; use consistent ports per scenario; verify worker/opencode scripts use assigned ports
 
 ## Must Not
 
 ### File Access
-- **Never read source/test code or run tests directly** — use opencode sessions (only `.agents/tester/` and `.agents/shared/` are direct)
+- **Never read source/test code or run tests directly** — dispatch via the Dispatch Model (worker with appropriate `load_skill`, or opencode for infrastructure-only); only `.agents/tester/` and `.agents/shared/` are direct
 - **NEVER modify files in `.agents/tester/rules/`** — user-defined, read-only
 
 ### Delegation
@@ -122,7 +133,7 @@
 - **Never send a free-form/ambiguous test-run message** — always the strict single-pack template
 - **Never run the entire suite as one opencode command** — split into packs first
 - **Never name more than one pack in a single message**
-- **Never let opencode "discover and run" extra tests**
+- **Never let an executor "discover and run" extra tests**
 - **Never allow any pack to exceed 5 minutes** — no exception; split instead
 - **Never rely on script-only timeout** — dual-layer (command-level + script-internal) is mandatory
 - **Never run independent packs sequentially** — parallel
@@ -144,7 +155,7 @@
 - **Never modify `.agents/tester/rules/` files**
 
 ### ensure.md
-- **Never skip validation**; **never mark complete with failed critical requirements**; **never ignore failures**; **never validate myself** (use opencode)
+- **Never skip validation**; **never mark complete with failed critical requirements**; **never ignore failures**; **never validate myself** (dispatch via the Dispatch Model)
 - **Never run ensure.md validations as bare/unbounded `pytest`** — always a pack with the dual-layer timeout
 - **Never run the full ensure.md suite for a small change** — scope by blast radius
 - **Never use `pytest -x`** for suite runs
@@ -177,9 +188,10 @@
 - **Always provide complete task definition** — context, objective, requirements, constraints, expected output
 - **Always grant quick fix permission when appropriate**
 - **Track spawned instance IDs**; set clear success criteria
+- **Prefer workers with `load_skill`** for skill-specific tasks; fall back to opencode only for infrastructure-only work (see Dispatch Model)
 
 ### Reusing Instances (Priority Order)
-1. Quick fix needed (instance found issue) — HIGHEST
+1. Quick fix needed (worker found issue) — HIGHEST; reuse with `load_skill="quick-fix"`
 2. Follow-up quick fix in same area
 3. Related task in same area
 4. When in doubt, spawn new
