@@ -776,10 +776,21 @@ class InstanceManager:
         # Per-instance "pause requested by the question tool" flag. The
         # conditional post-tools edge in ``daemon.graph.build_instance_graph``
         # reads this flag; when True, the graph routes to
-        # ``question_pause_node`` which calls ``pause_instance_cascade`` and
-        # clears the flag in its ``finally`` block. Cleared on terminate /
-        # release / hard-delete via ``_cleanup_instance_state``.
+        # ``question_pause_node`` which sets the deferred-pause marker (see
+        # below) and clears the flag in its ``finally`` block. Cleared on
+        # terminate / release / hard-delete via ``_cleanup_instance_state``.
         self._question_pause_requested: dict[str, bool] = {}
+
+        # C2 fix — per-instance "deferred question pause" marker.
+        # ``question_pause_node`` (which runs INSIDE the graph task) sets
+        # this marker; the actual ``pause_instance_cascade`` invocation
+        # runs from the post-graph completion path in
+        # ``daemon.services.instance_messaging`` AFTER ``_graph_tasks`` is
+        # popped, so there is no graph task to self-cancel. The
+        # conditional-edge flag above decides whether the graph routes to
+        # ``question_pause_node`` at all; this set carries the result
+        # forward to the post-graph code that performs the cascade.
+        self._deferred_question_pause: set[str] = set()
         
         self.source_dispatcher = ResponseDispatcher(
             registry=self.source_registry,
@@ -1908,10 +1919,13 @@ class InstanceManager:
     # The ``question`` tool sets this flag before returning. The
     # conditional post-tools edge in ``daemon.graph.build_instance_graph``
     # reads it on the way out of the tools node and routes to
-    # ``question_pause_node``, which calls ``pause_instance_cascade``
-    # and clears the flag in its ``finally`` block. The dict keyed by
-    # ``instance_id`` keeps each instance's flag isolated — there is no
-    # cross-instance coupling.
+    # ``question_pause_node``, which sets the deferred-pause marker (see
+    # :attr:`_deferred_question_pause` below) and clears the flag in its
+    # ``finally`` block. The actual ``pause_instance_cascade`` runs from
+    # the post-graph completion path in
+    # ``daemon.services.instance_messaging`` AFTER the graph task has been
+    # popped (C2 torn-state fix). The dict keyed by ``instance_id`` keeps
+    # each instance's flag isolated — there is no cross-instance coupling.
 
     def set_question_pause_requested(self, instance_id: str) -> None:
         """Mark that the ``question`` tool has requested a pause.
@@ -1954,6 +1968,62 @@ class InstanceManager:
             instance_id: Owning instance identifier.
         """
         self._question_pause_requested.pop(instance_id, None)
+
+    # ------------------------------------------------------------------
+    # C2 fix — Deferred question pause (Solution A)
+    # ------------------------------------------------------------------
+    # ``question_pause_node`` runs INSIDE the graph task stored at
+    # ``_graph_tasks[instance_id]``. It cannot call
+    # ``pause_instance_cascade`` directly because the cascade pops the
+    # task and calls ``task.cancel()`` on it — which raises
+    # ``CancelledError`` at the next ``await`` inside the cascade,
+    # interrupting its batched DB write (C2 torn-state bug).
+    #
+    # Instead, the node sets a deferred-pause marker on the manager;
+    # the actual cascade runs from the post-graph completion path in
+    # ``daemon.services.instance_messaging`` AFTER ``_graph_tasks`` is
+    # popped, so there is no graph task to self-cancel. The DB write
+    # then proceeds cleanly and the instance transitions to PAUSED.
+
+    def set_deferred_question_pause(self, instance_id: str) -> None:
+        """Mark that ``question_pause_node`` ran and a pause should be applied.
+
+        Called from inside the graph task. The actual
+        ``pause_instance_cascade`` invocation runs from the post-graph
+        completion path (see ``daemon.services.instance_messaging``) via
+        :meth:`pop_deferred_question_pause`. The in-graph task cannot
+        call the cascade directly because ``task.cancel()`` would
+        interrupt the cascade's DB transaction with ``CancelledError``
+        (C2 torn-state bug).
+
+        Args:
+            instance_id: Owning instance identifier.
+        """
+        self._deferred_question_pause.add(instance_id)
+
+    def pop_deferred_question_pause(self, instance_id: str) -> bool:
+        """Pop the deferred-pause marker for ``instance_id``.
+
+        Called from the post-graph completion path AFTER ``_graph_tasks``
+        has been popped for this instance. Returns ``True`` if a marker
+        was set and the caller should now invoke
+        ``pause_instance_cascade``; ``False`` otherwise. Atomic check-
+        and-remove so a concurrent resume / retry path observes a
+        consistent view (the marker is either present for the caller or
+        absent — never re-fired by a later code path that lost the
+        race).
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            ``True`` if a deferred pause was pending; ``False``
+            otherwise.
+        """
+        if instance_id not in self._deferred_question_pause:
+            return False
+        self._deferred_question_pause.discard(instance_id)
+        return True
 
     def bump_gii_throttle(self, instance_id: str) -> int:
         """Increment the consecutive ``get_instance_info`` call counter.
@@ -2022,6 +2092,12 @@ class InstanceManager:
         # on the first tool call.
         self._question_manager.clear_question_pack(instance_id)
         self.clear_question_pause_requested(instance_id)
+        # C2 fix — drop the deferred-pause marker so a fresh instance that
+        # reuses this id (e.g., after daemon restart, or a manual hard-
+        # delete + recreate) cannot inherit a stuck "pause pending" state
+        # that would silently trigger ``pause_instance_cascade`` on the
+        # next graph completion for the new instance.
+        self._deferred_question_pause.discard(instance_id)
         # Note: request_registry.cancel_by_instance() is called separately
         # by the lifecycle callers because the cancellation reason differs
         # per call site (USER_STOPPED vs SESSION_TERMINATED). Centralizing

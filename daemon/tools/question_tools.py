@@ -23,9 +23,11 @@ Lifecycle:
        issued the tool call may be lost; echoing Q text lets the LLM
        correlate Q↔A from later context alone).
     6. After the agent turn completes, the conditional post-tools edge
-       in ``daemon.graph.build_instance_graph`` routes to
-       ``question_pause_node`` which calls ``pause_instance_cascade``
-       and clears the flag in its ``finally`` block.
+        in ``daemon.graph.build_instance_graph`` routes to
+        ``question_pause_node`` which sets the deferred-pause marker
+        (C2 fix — the actual ``pause_instance_cascade`` runs from the
+        post-graph completion path, not from inside the graph task)
+        and clears the flag in its ``finally`` block.
 
 Answers flow back through the Phase 2 answer API
 (``POST /api/instances/{id}/answer``) — see ``daemon.routers.instances``.
@@ -53,8 +55,9 @@ pausing the instance until they answer.
 - question(questions): store a QuestionPack, emit ``question_pack`` SSE
   (status=pending), set the pause flag, and return a compaction-safe
   echo of the question text. The graph's conditional post-tools edge
-  routes to ``question_pause_node`` which calls
-  ``pause_instance_cascade`` and clears the flag in ``finally``.
+  routes to ``question_pause_node`` which sets the deferred-pause
+  marker (C2 fix — ``pause_instance_cascade`` runs from the post-graph
+  completion path) and clears the flag in ``finally``.
 
 The user submits answers through the Phase 2 answer API
 (``POST /api/instances/{id}/answer``), which resumes the instance and
@@ -167,10 +170,15 @@ def create_question_tools(
 
         # 3. Emit SSE best-effort BEFORE setting the pause flag. The
         #    conditional post-tools edge routes the graph to
-        #    ``question_pause_node``, which calls ``pause_instance_cascade``
-        #    that cancels the graph task — any post-commit SSE code
-        #    would be skipped, so this synchronous emit is the only
-        #    reliable opportunity (F3).
+        #    ``question_pause_node``, which sets the deferred-pause
+        #    marker; the actual ``pause_instance_cascade`` runs from the
+        #    post-graph completion path AFTER ``_graph_tasks`` is popped.
+        #    The graph task is no longer running the question tool by the
+        #    time the cascade fires, so any post-tool SSE code on the
+        #    tool-call side is moot — this synchronous emit is still the
+        #    most reliable place (F3) so the frontend sees the
+        #    ``question_pack`` event before the user's interaction
+        #    surface changes (status_change → PAUSED).
         await _emit_pending_pack(live_event_hub, current_instance_id, pack)
 
         # 4. Set pause flag — read by ``create_post_tools_router`` in
@@ -213,8 +221,9 @@ Lifecycle:
      ``status="pending"`` so the frontend renders the question UI.
   3. The tool sets the pause flag — the conditional post-tools edge in
      ``daemon.graph`` then routes the graph to
-     ``question_pause_node``, which calls ``pause_instance_cascade``
-     and clears the flag in its ``finally`` block.
+     ``question_pause_node``, which sets the deferred-pause marker
+     (C2 fix — ``pause_instance_cascade`` runs from the post-graph
+     completion path) and clears the flag in its ``finally`` block.
   4. The user submits answers via
      ``POST /api/instances/{id}/answer`` (the Phase 2 answer API). The
      endpoint stores the answers, emits a ``question_pack`` SSE event

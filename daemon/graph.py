@@ -1085,30 +1085,32 @@ def build_instance_llms(
 
 
 # ============================================================================
-# Question tool: conditional post-tools edge + pause node (Phase 1)
+# Question tool: conditional post-tools edge + pause node (Phase 1 + C2 fix)
 # ============================================================================
 # The ``question`` tool sets ``manager._question_pause_requested[instance_id]
 # = True`` before returning. The conditional post-tools edge
 # (``create_post_tools_router``) reads this flag on every post-tools
 # evaluation. When the flag is set, the graph routes to
-# ``question_pause_node`` instead of back to ``agent``. The pause node calls
-# ``manager.pause_instance_cascade`` which cancels the graph task mid-
-# execution (raising ``CancelledError`` at the next ``await``), then clears
-# the flag in its ``finally`` block so a future resume can't get stuck in a
-# pause loop.
+# ``question_pause_node`` instead of back to ``agent``.
 #
-# CRITICAL invariants (F2 + F4 from phase1-plan):
-#  * The flag MUST be cleared in ``finally`` — never after the await.
-#    ``pause_instance_cascade`` cancels the graph task; any code after the
-#    await is unreachable. Without ``finally``, the flag would stay set
-#    forever and the instance would re-pause on the first post-resume tool
-#    call, creating a stuck loop.
-#  * ``CancelledError`` is RE-RAISED, never swallowed. Swallowing it would
-#    break LangGraph's cancellation contract and leave the task in a
-#    running-but-actually-cancelled state.
-#  * Non-CancelledError exceptions are logged + the flag is cleared + the
-#    exception is re-raised — defense in depth so a transient cascade
-#    failure can't leave the flag set either.
+# The pause node does NOT call ``pause_instance_cascade`` directly. That
+# would self-cancel the currently-running graph task (via
+# ``task.cancel()``), which raises ``CancelledError`` at the next ``await``
+# inside the cascade — interrupting the cascade's batched DB write and
+# leaving the instance in PROCESSING in the DB while in-memory state says
+# PAUSED (C2 torn-state bug). Instead, the node sets a deferred-pause
+# marker on the manager; the actual cascade runs from the post-graph
+# completion path in ``daemon.services.instance_messaging`` AFTER
+# ``_graph_tasks`` has been popped, so there is no graph task left to
+# self-cancel. The DB transaction completes cleanly.
+#
+# CRITICAL invariants (F2 from phase1-plan, plus C2):
+#   * The conditional-edge flag MUST be cleared in ``finally`` — the post-
+#     tools router reads it on every evaluation. Without ``finally``
+#     cleanup the flag would stay set forever and the instance would
+#     re-pause on the first post-resume tool call, creating a stuck loop.
+#   * The node must NOT call ``pause_instance_cascade`` directly — that
+#     causes the C2 self-cancel / torn-state bug.
 
 
 def create_post_tools_router(manager: Any):
@@ -1164,31 +1166,34 @@ def create_question_pause_node(manager: Any):
     call time without depending on module-level singletons (which would
     break tests and any multi-graph runtime).
 
-    The returned node pauses the instance after a question tool call:
+    The returned node marks the instance as paused-after-question:
 
       1. Reads ``instance_id`` from ``config["configurable"]["thread_id"]``.
-      2. Calls ``manager.pause_instance_cascade(instance_id)`` which
-         transitions the instance + all children to ``PAUSED`` in the
-         DB and cancels the active ``graph_task`` via
-         ``graph_task.cancel()``.
-      3. The cascade's cancellation raises ``CancelledError`` at the
-         next ``await`` — re-raised so LangGraph's cancellation
-         contract is honored.
-      4. The ``finally`` block clears the pause-requested flag,
+      2. Sets a deferred-pause marker via
+         ``manager.set_deferred_question_pause(instance_id)`` — does NOT
+         call ``pause_instance_cascade`` directly (C2 torn-state fix).
+      3. The actual cascade runs from the post-graph completion path in
+         ``daemon.services.instance_messaging`` AFTER ``_graph_tasks`` is
+         popped, so there is no graph task left to self-cancel. The DB
+         write proceeds cleanly and the instance transitions to PAUSED.
+      4. The ``finally`` block clears the conditional-edge flag,
          preventing stuck-pause loops on the next resume.
 
-    CRITICAL invariants (F2 + F4 from phase1-plan):
-      * Flag MUST be cleared in ``finally`` — code after the await is
-        unreachable on the CancelledError success path.
-      * ``CancelledError`` is RE-RAISED, never swallowed.
-      * Non-CancelledError exceptions are logged + the flag cleared +
-        re-raised (defense in depth).
+    CRITICAL invariants (F2 from phase1-plan, plus C2):
+      * The conditional-edge flag MUST be cleared in ``finally`` — the
+        post-tools router reads it on every evaluation. Without ``finally``
+        cleanup the flag would stay set forever and the instance would
+        re-pause on the first post-resume tool call, creating a stuck
+        loop.
+      * The node must NOT call ``pause_instance_cascade`` directly.
+        Self-cancel would interrupt the cascade's DB write with
+        ``CancelledError`` (C2 torn-state bug) and leave the instance
+        stuck in PROCESSING while in-memory state says PAUSED.
 
     Args:
         manager: The ``InstanceManager`` reference threaded from
             ``build_instance_graph``. Must expose
-            ``pause_instance_cascade(instance_id) -> Awaitable[dict]``
-            and
+            ``set_deferred_question_pause(instance_id) -> None`` and
             ``clear_question_pause_requested(instance_id) -> None``.
 
     Returns:
@@ -1214,57 +1219,42 @@ def create_question_pause_node(manager: Any):
             # normal return and can route to END.
             logger.warning(
                 "[question_pause_node] missing instance_id from config — "
-                "skipping pause cascade"
+                "skipping deferred pause marker"
             )
             return {}
 
+        # C2 fix — Solution A (deferred pause).
+        #
+        # The node does NOT call ``pause_instance_cascade`` from within the
+        # graph task. The cascade pops ``_graph_tasks[instance_id]`` and
+        # calls ``task.cancel()`` on the current task, which raises
+        # ``CancelledError`` at the next ``await`` — including the DB write
+        # at the end of the cascade. The DB transaction never commits,
+        # leaving the instance in PROCESSING in the DB while in-memory
+        # state says PAUSED (torn state).
+        #
+        # Instead, we set a deferred-pause marker. The actual cascade runs
+        # from the post-graph completion path in
+        # ``daemon.services.instance_messaging`` AFTER the graph task has
+        # been popped from ``_graph_tasks``. At that point there is no
+        # graph task to self-cancel, so the DB write proceeds cleanly.
         try:
-            await manager.pause_instance_cascade(instance_id)
-        except asyncio.CancelledError:
-            # SUCCESS PATH: ``pause_instance_cascade`` calls
-            # ``graph_task.cancel()`` which raises CancelledError at the
-            # next await — i.e. right here, on the way back from the
-            # cascade. Re-raise so LangGraph's cancellation contract is
-            # honored. The ``finally`` block below clears the flag
-            # BEFORE the CancelledError propagates further (Python
-            # guarantees ``finally`` runs during exception unwinding).
-            raise
-        except Exception as e:
-            # Defense-in-depth (F4): non-CancelledError failures — log
-            # + clear the flag + re-raise so the graph sees a real
-            # error rather than a silent stuck-pause loop. Re-raising
-            # also lets upstream observers record the failure.
-            logger.error(
-                f"[question_pause_node] pause cascade failed for "
-                f"{instance_id[:8]}...: {type(e).__name__}: {e}"
-            )
-            try:
-                manager.clear_question_pause_requested(instance_id)
-            except Exception as clear_err:
-                logger.warning(
-                    f"[question_pause_node] failed to clear pause flag "
-                    f"after cascade error for {instance_id[:8]}...: "
-                    f"{clear_err}"
-                )
-            raise
+            manager.set_deferred_question_pause(instance_id)
         finally:
-            # ALWAYS clear the flag, even on CancelledError path (F2).
-            # The success path of ``pause_instance_cascade`` raises
-            # CancelledError at the next await, so code after the await
-            # is UNREACHABLE. The ``finally`` block is the ONLY
-            # reliable place to clear the flag — without it the
-            # instance would re-pause on the first post-resume tool call.
+            # ALWAYS clear the conditional-edge flag (F2). The graph
+            # routes to END after this node returns ``{}``, so the flag
+            # is only needed for the one post-tools edge evaluation that
+            # brought us here. Leaving it set would re-pause the instance
+            # on the first post-resume tool call.
             try:
                 manager.clear_question_pause_requested(instance_id)
             except Exception as clear_err:
                 logger.warning(
                     f"[question_pause_node] failed to clear pause flag "
-                    f"in finally for {instance_id[:8]}...: {clear_err}"
+                    f"in finally for {instance_id[:8]}...: "
+                    f"{type(clear_err).__name__}: {clear_err}"
                 )
 
-        # Unreachable in practice — CancelledError from
-        # ``pause_instance_cascade`` always interrupts the await. Kept
-        # for type-checker / defensive clarity.
         return {}
 
     return question_pause_node
@@ -1325,9 +1315,12 @@ def build_instance_graph(
             question-tool) threaded so the conditional post-tools edge
             (``create_post_tools_router``) can read the
             ``_question_pause_requested`` flag and the
-            ``question_pause_node`` can call ``pause_instance_cascade``.
-            ``None`` is backward-compatible (no question-pause behavior;
-            the unconditional ``tools → agent`` edge is used instead).
+            ``question_pause_node`` can set a deferred-pause marker
+            (C2 fix — the actual ``pause_instance_cascade`` runs from
+            the post-graph completion path, not from inside the graph
+            task). ``None`` is backward-compatible (no question-pause
+            behavior; the unconditional ``tools → agent`` edge is used
+            instead).
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {

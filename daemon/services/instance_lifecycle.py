@@ -1148,7 +1148,9 @@ class InstanceLifecycleService:
         # Phase 1 / question-tool: thread ``manager`` so the conditional
         # post-tools edge (``create_post_tools_router``) can read the
         # ``_question_pause_requested`` flag and the
-        # ``question_pause_node`` can call ``pause_instance_cascade``.
+        # ``question_pause_node`` can set the deferred-pause marker
+        # (C2 fix — ``pause_instance_cascade`` runs from the post-graph
+        # completion path, not from inside the graph task).
         from ..graph import InjectionSlot, ToolThrottleSlot
         graph = build_instance_graph(
             tools=tools,
