@@ -35,6 +35,7 @@ Mocking style mirrors ``tests/unit/test_compaction.py`` and
 from __future__ import annotations
 
 import asyncio
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -341,6 +342,8 @@ class TestRepairMessageFreshUUID:
         # uuid4() string form has dashes). Either is acceptable; we just
         # assert length is UUID-shaped.
         assert len(suffix) >= 32
+        # Tighten: the suffix must parse as a real UUID, not just be 32+ chars.
+        uuid.UUID(suffix)  # raises ValueError if not a valid UUID
 
     def test_id_is_unique_across_calls(self):
         """Each call must produce a DIFFERENT UUID (fresh = no replacement)."""
@@ -398,6 +401,8 @@ class TestRepairStateUpdate:
         )
         # as_node kwarg
         assert call.kwargs.get("as_node") == "agent"
+        # Lock down #6433 bug avoidance: astream(None) must NOT be called
+        graph.astream.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_aget_state_called_after_aupdate(self):
