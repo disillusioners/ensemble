@@ -11,7 +11,7 @@ and ``source_skill_bank_id`` set to the template's ID.
 The ``auto_load`` flag propagates from the bank template to the
 cloned skill — NOT hardcoded. This is the C2 fix called out in
 the Phase 4 plan: the source-of-truth is the template, which in
-turn was seeded from ``skill-set.md`` by the Phase 3 seeding
+turn was seeded from ``skill-set.yaml`` (legacy ``.md``) by the Phase 3 seeding
 pipeline.
 
 Embedding computation (W3) — design note
@@ -311,7 +311,7 @@ class SkillCloneService:
 
         ``auto_load`` is read from ``template.auto_load`` — NOT
         hardcoded (C2 fix; the source-of-truth is the bank
-        template, which was seeded from ``skill-set.md`` by the
+        template, which was seeded from ``skill-set.yaml`` (legacy ``.md``) by the
         Phase 3 pipeline).
 
         ``source_skill_bank_id`` is set to the template's ID
@@ -337,7 +337,7 @@ class SkillCloneService:
                 is_active=True,
                 # C2 fix: auto_load is propagated from the template,
                 # NOT hardcoded. Phase 3 seeded this from
-                # ``skill-set.md``'s ``auto_load:`` frontmatter.
+                # ``skill-set.yaml`` (legacy ``.md``) ``auto_load:`` field.
                 auto_load=template.auto_load,
                 source_skill_bank_id=template.id,
             )

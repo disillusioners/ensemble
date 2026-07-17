@@ -1,8 +1,12 @@
 """Startup seeding service for versioned skill templates.
 
-Scans agents/*/skill-set.md at ensemble startup and populates
+Scans agents/*/skill-set.{yaml,md} at ensemble startup and populates
 the skill_bank table from skills-template/ files. Idempotent:
 on re-run, detects version bumps and refreshes bank content.
+
+The primary manifest format is ``skill-set.yaml`` (pure YAML).
+Legacy ``skill-set.md`` files with YAML frontmatter are still parsed
+for backward compatibility with existing agents.
 
 NOT gated by config.skill_evolution — the Skill Bank is
 standalone infrastructure. Uses only SkillBankRepository.
@@ -24,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SkillSetEntry:
-    """Parsed skill definition from skill-set.md frontmatter.
+    """Parsed skill definition from skill-set.{yaml,md} manifest.
 
     Attributes:
         name: Skill name (matches skills-template/{name}.md filename).
@@ -44,9 +48,10 @@ class SkillSetEntry:
 
 
 # ── Frontmatter delimiter pattern ────────────────────────────────
-# YAML frontmatter is enclosed between two lines of exactly "---".
-# The regex captures the YAML block between the first and second
-# delimiter. It's non-greedy so it stops at the first closing "---".
+# Used only for legacy skill-set.md files. YAML frontmatter is
+# enclosed between two lines of exactly "---". The regex captures
+# the YAML block between the first and second delimiter. It's
+# non-greedy so it stops at the first closing "---".
 _FRONTMATTER_RE = re.compile(
     r"^---\s*\n(.*?)\n---\s*\n",
     re.DOTALL,
@@ -57,13 +62,16 @@ _REQUIRED_FIELDS = frozenset({"name", "version", "auto_load", "category", "descr
 
 
 def parse_skill_set_file(skill_set_path: Path) -> list[SkillSetEntry]:
-    """Parse a skill-set.md file into a list of SkillSetEntry objects.
+    """Parse a skill-set.{yaml,md} file into a list of SkillSetEntry objects.
 
-    Reads YAML frontmatter delimited by --- lines. Expects a
-    ``skills`` top-level key containing a list of skill definitions.
+    For ``.yaml`` files: parses the whole file as YAML.
+    For ``.md`` files (legacy): reads YAML frontmatter delimited by
+    ``---`` lines. Both formats expect a ``skills`` top-level key
+    containing a list of skill definitions.
 
     Args:
-        skill_set_path: Path to the skill-set.md file.
+        skill_set_path: Path to the skill-set file. Extension determines
+            parse mode (``.yaml`` → whole file; ``.md`` → frontmatter).
 
     Returns:
         List of SkillSetEntry objects. Empty list if the file has
@@ -74,33 +82,41 @@ def parse_skill_set_file(skill_set_path: Path) -> list[SkillSetEntry]:
         FileNotFoundError: If skill_set_path does not exist.
 
     Example:
-        >>> entries = parse_skill_set_file(Path("agents/tester/skill-set.md"))
+        >>> entries = parse_skill_set_file(Path("agents/tester/skill-set.yaml"))
         >>> entries[0].name
         'test-strategy'
         >>> entries[0].auto_load
         True
     """
-    content = skill_set_path.read_text(encoding="utf-8")
+    suffix = skill_set_path.suffix.lower()
 
-    # Extract YAML frontmatter
-    match = _FRONTMATTER_RE.match(content)
-    if match is None:
-        logger.warning(
-            f"No YAML frontmatter found in {skill_set_path}. "
-            f"Expected file to start with '---'. Skipping."
-        )
-        return []
+    if suffix == ".yaml":
+        try:
+            data = yaml.safe_load(skill_set_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            logger.warning(
+                f"Malformed YAML in {skill_set_path}: {e}. Skipping."
+            )
+            return []
+    else:
+        # Legacy .md: extract YAML frontmatter between --- delimiters.
+        content = skill_set_path.read_text(encoding="utf-8")
+        match = _FRONTMATTER_RE.match(content)
+        if match is None:
+            logger.warning(
+                f"No YAML frontmatter found in {skill_set_path}. "
+                f"Expected file to start with '---'. Skipping."
+            )
+            return []
 
-    yaml_text = match.group(1)
-
-    # Parse YAML
-    try:
-        data = yaml.safe_load(yaml_text)
-    except yaml.YAMLError as e:
-        logger.warning(
-            f"Malformed YAML in {skill_set_path}: {e}. Skipping."
-        )
-        return []
+        yaml_text = match.group(1)
+        try:
+            data = yaml.safe_load(yaml_text)
+        except yaml.YAMLError as e:
+            logger.warning(
+                f"Malformed YAML in {skill_set_path}: {e}. Skipping."
+            )
+            return []
 
     if not isinstance(data, dict):
         logger.warning(
@@ -190,7 +206,11 @@ def _version_lt(v1: str, v2: str) -> bool:
 
 
 class SkillSeedService:
-    """Seeds skill_bank from agents/*/skill-set.md + skills-template/.
+    """Seeds skill_bank from agents/*/skill-set.{yaml,md} + skills-template/.
+
+    Primary manifest format is ``skill-set.yaml`` (pure YAML). Legacy
+    ``skill-set.md`` files (with YAML frontmatter) are still supported
+    as a fallback for backward compatibility.
 
     All methods are synchronous; callers bridge to async via
     asyncio.to_thread.
@@ -199,6 +219,11 @@ class SkillSeedService:
     # Category convention (W2): seeded items use this suffix to
     # distinguish from user-created bank items.
     _CATEGORY_SUFFIX = "skill-set"
+
+    # Primary manifest filename (modern, pure YAML). Legacy .md is
+    # still supported as a fallback for backward compatibility.
+    _MANIFEST_FILENAME = "skill-set.yaml"
+    _LEGACY_MANIFEST_FILENAME = "skill-set.md"
 
     def __init__(
         self,
@@ -210,6 +235,9 @@ class SkillSeedService:
 
     def seed_all(self) -> dict[str, int]:
         """Scan all agent directories and seed their skill sets.
+
+        For each agent directory, prefers ``skill-set.yaml`` and falls
+        back to legacy ``skill-set.md`` (with YAML frontmatter).
 
         Returns:
             Summary: {"new": N, "updated": N, "unchanged": N, "errors": N}
@@ -223,8 +251,8 @@ class SkillSeedService:
             if agent_dir.name.startswith("_"):
                 continue
 
-            skill_set_path = agent_dir / "skill-set.md"
-            if not skill_set_path.exists():
+            skill_set_path = self._find_manifest(agent_dir)
+            if skill_set_path is None:
                 continue
 
             agent_id = agent_dir.name
@@ -245,6 +273,23 @@ class SkillSeedService:
         )
         return summary
 
+    @classmethod
+    def _find_manifest(cls, agent_dir: Path) -> Path | None:
+        """Locate the skill-set manifest for an agent directory.
+
+        Prefers the modern ``skill-set.yaml`` (pure YAML). Falls back
+        to the legacy ``skill-set.md`` (YAML frontmatter) when the
+        YAML version does not exist. Returns ``None`` if neither is
+        present.
+        """
+        yaml_path = agent_dir / cls._MANIFEST_FILENAME
+        if yaml_path.exists():
+            return yaml_path
+        legacy_path = agent_dir / cls._LEGACY_MANIFEST_FILENAME
+        if legacy_path.exists():
+            return legacy_path
+        return None
+
     def seed_agent(
         self,
         agent_id: str,
@@ -253,7 +298,7 @@ class SkillSeedService:
     ) -> dict[str, int]:
         """Seed one agent's skill set into skill_bank.
 
-        For each skill in skill-set.md:
+        For each skill in skill-set.{yaml,md}:
         - If not in bank → INSERT (create)
         - If in bank with lower version → UPDATE content + version
         - If in bank with same/higher version → SKIP (W4: version guard)
@@ -264,7 +309,7 @@ class SkillSeedService:
         if not entries:
             logger.info(
                 f"No skills to seed for agent '{agent_id}' "
-                f"(empty or unparseable skill-set.md)"
+                f"(empty or unparseable skill-set file: {skill_set_path.name})"
             )
             return summary
 

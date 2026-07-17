@@ -85,7 +85,7 @@ class SkillBankRepository:
                 ``'workflow'``).
             template_version: Semver version of this template
                 (default ``'1.0.0'``). Bumped by the seeding
-                pipeline when the source skill-set.md file
+                pipeline when the source skill-set.yaml (legacy .md) file
                 changes so stale bank copies can be refreshed.
             agent_id: Agent this template belongs to (e.g.
                 ``'tester'``). ``None`` means a generic/shared

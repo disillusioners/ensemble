@@ -97,7 +97,7 @@ def check_seeding(engine) -> bool:
 
     expected_new = summary["new"]
     if expected_new == 0:
-        print("WARN: 0 new templates seeded — tester/skill-set.md may be malformed.")
+        print("WARN: 0 new templates seeded — tester/skill-set.yaml may be malformed.")
         return False
 
     items = bank_repo.list_items(category="tester-skill-set")
@@ -201,7 +201,7 @@ def check_clone_on_miss(engine) -> bool:
         failures.append(f"status expected 'active', got {cloned.status!r}")
     if cloned.generation != 0:
         failures.append(f"generation expected 0, got {cloned.generation}")
-    # auto_load should come from template (test-strategy has auto_load=true in tester skill-set.md)
+    # auto_load should come from template (test-strategy has auto_load=true in tester skill-set.yaml)
     template = bank_repo.get_by_name_and_agent("test-strategy", TESTER_AGENT)
     if template and cloned.auto_load != template.auto_load:
         failures.append(
@@ -279,7 +279,7 @@ def check_on_demand_clone(engine) -> bool:
     )
     test_project_id = "pg-parity-test-project-ondemand"
 
-    # mock-test has auto_load=false in tester skill-set.md
+    # mock-test has auto_load=false in tester skill-set.yaml
     template = bank_repo.get_by_name_and_agent("mock-test", TESTER_AGENT)
     if template is None:
         print("SKIP: no mock-test template found")

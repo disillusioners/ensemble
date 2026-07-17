@@ -1752,11 +1752,11 @@ class InstanceManager:
         await self._maintenance_service.start()
 
         # ── Skill Bank seeding (Phase 3: versioned templates) ──────────
-        # Scans agents/*/skill-set.md + skills-template/ and populates
-        # skill_bank. Idempotent via version guard (W4). NOT gated by
-        # skill_evolution — the Skill Bank is standalone infrastructure.
-        # Soft-fail: any error is logged and swallowed so startup
-        # never crashes.
+        # Scans agents/*/skill-set.yaml (legacy .md fallback) +
+        # skills-template/ and populates skill_bank. Idempotent via
+        # version guard (W4). NOT gated by skill_evolution — the Skill
+        # Bank is standalone infrastructure. Soft-fail: any error is
+        # logged and swallowed so startup never crashes.
         try:
             agents_base = Path(__file__).parent.parent / "agents"
             seed_service = SkillSeedService(
@@ -3338,7 +3338,7 @@ class InstanceManager:
             # Phase 2 of tester-skill-evolution. The skill_bank table gains
             # three columns backing template versioning (for stale-bank refresh
             # detection), per-agent template scoping, and the auto_load flag
-            # that propagates from the skill-set.md source of truth into
+            # that propagates from the skill-set.yaml (legacy .md) source of truth into
             # cloned skills. SQLite counterpart lives in
             # ``daemon/migrations/versions/20260714_000003_skill_bank_new_columns.sql``;
             # the .sql runner is a NO-OP on PG (runner.py lines 446-448), so

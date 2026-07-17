@@ -702,7 +702,7 @@ class SkillBankItem(SQLModel, table=True):
     # changes so startup seeding can detect and refresh stale bank copies.
     # ``agent_id`` scopes the template to one agent (e.g. 'tester');
     # NULL means generic/shared. ``auto_load`` is the source-of-truth
-    # flag from the skill-set.md definition: when True, skills cloned
+    # flag from the skill-set.yaml (legacy .md) definition: when True, skills cloned
     # from this template inherit auto_load=True (loaded into the system
     # prompt before every task, not on demand).
     template_version: str = Field(
@@ -727,7 +727,7 @@ class SkillBankItem(SQLModel, table=True):
         description=(
             "Whether skills cloned from this template should have "
             "auto_load=true (loaded into system prompt before every "
-            "task). Source of truth from skill-set.md definition."
+            "task). Source of truth from skill-set.yaml (legacy .md) definition."
         ),
     )
     created_at: str = Field(default_factory=_now_iso)

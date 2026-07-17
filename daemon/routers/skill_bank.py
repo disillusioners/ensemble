@@ -32,7 +32,7 @@ class SkillBankItemCreate(BaseModel):
     # ``template_version`` defaults to ``'1.0.0'``; callers creating a
     # new revision should pass the bumped semver. ``agent_id`` scopes
     # the template to one agent (NULL = generic/shared). ``auto_load``
-    # is the source-of-truth flag from the skill-set.md definition.
+    # is the source-of-truth flag from the skill-set.yaml (legacy .md) definition.
     template_version: str = "1.0.0"
     agent_id: str | None = None
     auto_load: bool = False

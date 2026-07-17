@@ -32,7 +32,7 @@ export interface SkillBankItem {
   agent_id: string | null;
   /**
    * Whether skills cloned from this template should have
-   * ``auto_load=true`` — source of truth from skill-set.md.
+   * ``auto_load=true`` — source of truth from skill-set.yaml (legacy .md).
    */
   auto_load: boolean;
   created_at: string;
