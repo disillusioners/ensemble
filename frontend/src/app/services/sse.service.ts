@@ -1,5 +1,6 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
+import type { QuestionPack } from '../models/question.model';
 import { ApiService } from './api.service';
 
 export interface SubTask {
@@ -78,6 +79,18 @@ export class SseService {
   // chat component binds to this signal to surface the "queued" indicator
   // and pre-fill the composer for cancellation / edit.
   pendingInjection = signal<InjectionEvent | null>(null);
+
+  // Pending question pack for the connected instance (Phase 4 / Question
+  // Tool). Set by the ``question_pack`` SSE event whenever the agent emits
+  // a pending question; cleared to ``null`` on instance switch so a late
+  // event from a previous instance never re-opens the wizard.
+  //
+  // Visibility is driven ENTIRELY by this signal — NOT by ``status_change``
+  // (F3). The pause cascade cancels the graph task mid-execution, so the
+  // ``status_change`` → paused event may never fire. The
+  // ``question_pack`` event is emitted by the tool itself before the
+  // cascade and is the only reliable pause-UI signal for this state.
+  questionPack = signal<QuestionPack | null>(null);
 
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
@@ -369,6 +382,27 @@ export class SseService {
       });
     });
 
+    // Question pack event (Phase 4 / Question Tool). Carries the full
+    // QuestionPack inside ``data.message`` (status='pending' or
+    // 'answered'). Visibility is driven entirely by this signal — see the
+    // ``questionPack`` declaration for the F3 rationale (the pause cascade
+    // swallows the status_change→paused event, so the wizard cannot rely
+    // on it). On 'answered' the frontend wizard auto-hides via the
+    // ``status === 'pending'`` check; we still store the answered pack
+    // briefly so a re-render doesn't blank the answer list, then drop it
+    // on the next clearEvents() cycle.
+    eventSource.addEventListener('question_pack', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const pack = data.message as QuestionPack;
+          this.questionPack.set(pack);
+        } catch (err) {
+          console.error('[SSE] Failed to parse question_pack:', err);
+        }
+      });
+    });
+
     // Injection lifecycle events. ``injection_pending`` carries the full
     // content + timestamp inside the ``message`` field (the SSE envelope
     // wraps it). ``injection_consumed`` and ``injection_cleared`` clear the
@@ -518,6 +552,7 @@ export class SseService {
     this.instanceCreatedQueue.set([]);
     this.contextUsage.set(null);
     this.pendingInjection.set(null);
+    this.questionPack.set(null);
     this.pendingToolOutputs.clear();
   }
 }

@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import type { TodoItem, TodoNode, SubTask } from './sse.service';
+import type { QuestionPack } from '../models/question.model';
 import type {
   InstanceInfo,
   InstanceListResponse,
@@ -238,6 +239,19 @@ export class ApiService {
       content: string | null;
       timestamp: string | null;
     }>(`${this.API_BASE}/instances/${instanceId}/injection`);
+  }
+
+  /**
+   * Submit answers to a pending question pack. POST /api/instances/{id}/answer.
+   * The backend will resume the paused instance with the answers converted into
+   * a HumanMessage. The frontend relies on the `question_pack` SSE event with
+   * status='answered' to hide the wizard — not on the HTTP response.
+   */
+  answerQuestions(instanceId: string, answers: Record<string, string>): Observable<QuestionPack> {
+    return this.http.post<QuestionPack>(
+      `${this.API_BASE}/instances/${instanceId}/answer`,
+      { answers }
+    );
   }
 
 }

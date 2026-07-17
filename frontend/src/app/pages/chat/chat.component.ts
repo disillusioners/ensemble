@@ -16,6 +16,7 @@ import { ProjectTabBarComponent } from '../../components/project-tab-bar/project
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent, MessagePayload } from '../../components/message-input/message-input.component';
 import { TodoListComponent } from '../../components/todo-list/todo-list.component';
+import { QuestionWizardComponent } from '../../components/question-wizard/question-wizard.component';
 import type { Agent, InstanceInfo, Message } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
@@ -34,7 +35,8 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     ProjectTabBarComponent,
     ChatInterfaceComponent,
     MessageInputComponent,
-    TodoListComponent
+    TodoListComponent,
+    QuestionWizardComponent
   ],
   templateUrl: './chat.html',
   styleUrl: './chat.scss'

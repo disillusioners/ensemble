@@ -131,6 +131,10 @@
       }
 
       @if (currentInstance() && !instanceNotFound()) {
+        <app-question-wizard [instanceId]="currentInstance()?.instance_id ?? ''" />
+      }
+
+      @if (currentInstance() && !instanceNotFound()) {
         <app-message-input
           (sendMessage)="onSendMessage($event)"
           [disabled]="isSending()"

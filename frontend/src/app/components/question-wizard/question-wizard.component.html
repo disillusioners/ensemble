@@ -1,0 +1,105 @@
+<!--
+  Question Wizard template (Phase 4 / Question Tool).
+  All visibility comes from the component's `isVisible` computed signal
+  (driven by the `question_pack` SSE event with status='pending').
+  The parent chat.html wraps this component in @if (currentInstance() ...)
+  but the wizard itself is the pause-UI for the question state.
+-->
+@if (isVisible()) {
+  <div class="wizard-container">
+    <div class="wizard-header">
+      <span class="wizard-title">Questions from agent</span>
+      <span
+        class="progress-pill"
+        aria-label="Progress"
+        title="Question {{ currentIndex() + 1 }} of {{ questions().length }}"
+      >
+        {{ currentIndex() + 1 }} / {{ questions().length }}
+      </span>
+    </div>
+
+    @if (currentQuestion(); as q) {
+      <div class="question-page">
+        <p class="question-text">{{ q.text }}</p>
+
+        @if (q.options?.length) {
+          <div class="options">
+            @for (opt of q.options; track opt) {
+              <button
+                type="button"
+                class="option-chip"
+                [class.selected]="isSelected(q, opt)"
+                [disabled]="isSubmitting()"
+                (click)="selectOption(opt)"
+              >
+                {{ opt }}
+              </button>
+            }
+          </div>
+        }
+
+        @if (q.allow_custom) {
+          <input
+            type="text"
+            class="custom-input"
+            placeholder="Type your own answer..."
+            [value]="answers()[q.id] || ''"
+            [disabled]="isSubmitting()"
+            (input)="customInput($event, q)"
+          />
+        }
+
+        @if (q.required) {
+          <span class="required-hint">Required</span>
+        }
+      </div>
+    }
+
+    @if (submitError()) {
+      <div class="wizard-error">
+        <span>{{ submitError() }}</span>
+        <button
+          type="button"
+          class="wizard-error-close"
+          (click)="clearError()"
+          aria-label="Dismiss error"
+        >✕</button>
+      </div>
+    }
+
+    <div class="wizard-nav">
+      @if (currentIndex() > 0) {
+        <button
+          type="button"
+          class="editor-btn secondary"
+          (click)="prev()"
+          [disabled]="isSubmitting()"
+        >
+          Back
+        </button>
+      }
+
+      @if (!isLastQuestion()) {
+        <button
+          type="button"
+          class="editor-btn"
+          (click)="next()"
+          [disabled]="!canProceed() || isSubmitting()"
+        >
+          Next
+        </button>
+      }
+
+      @if (isLastQuestion()) {
+        <button
+          type="button"
+          class="editor-btn"
+          (click)="submit()"
+          [disabled]="!canSubmit() || isSubmitting()"
+        >
+          {{ isSubmitting() ? 'Submitting...' : 'Submit Answers' }}
+        </button>
+      }
+    </div>
+  </div>
+}
