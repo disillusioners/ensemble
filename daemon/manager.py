@@ -730,6 +730,14 @@ class InstanceManager:
         # Reset on any non-gii tool/message — see ``ToolThrottleSlot`` in graph.py.
         self._gii_throttle: dict[str, int] = {}
 
+        # Per-instance loop-breaker state for the general hallucination detector.
+        # Each entry: ``{"count": int, "last_summary": str, "last_repair_at": str}``.
+        # RAM-only (no DB persistence) — follows the ``_gii_throttle`` /
+        # ``_pending_injections`` pattern. A restarted session starts fresh.
+        # Cleanup follows the same 5-path pattern as ``_gii_throttle``; Phase 3
+        # wires those paths up.
+        self._loop_breaker_state: dict[str, dict] = {}
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -2044,6 +2052,50 @@ class InstanceManager:
         """Return the current consecutive-call count (0 if unset)."""
         return self._gii_throttle.get(instance_id, 0)
 
+    def get_loop_breaker_state(self, instance_id: str) -> dict:
+        """Return the loop-breaker state for ``instance_id`` (empty dict if unset).
+
+        Used by :class:`daemon.graph.LoopBreakerSlot` to peek at the current
+        repair count without mutating state. Reads from ``_loop_breaker_state``
+        which is RAM-only.
+        """
+        return self._loop_breaker_state.get(instance_id, {})
+
+    def record_loop_repair(self, instance_id: str, summary: str) -> int:
+        """Record a repair event for ``instance_id``.
+
+        Increments the per-instance repair counter, stores ``summary`` as the
+        last repair summary, and stamps ``last_repair_at`` with the current
+        UTC time. Returns the new repair count.
+
+        Args:
+            instance_id: Target instance.
+            summary: Short description of what was repaired (used by
+                ``LOOP_BREAKER_SUMMARY_PROMPT``-style summaries).
+
+        Returns:
+            The new repair count after incrementing.
+        """
+        state = self._loop_breaker_state.get(instance_id, {"count": 0})
+        state["count"] = state.get("count", 0) + 1
+        state["last_summary"] = summary
+        state["last_repair_at"] = datetime.now(timezone.utc).isoformat()
+        self._loop_breaker_state[instance_id] = state
+        return state["count"]
+
+    def reset_loop_breaker(self, instance_id: str) -> None:
+        """Clear loop-breaker state for ``instance_id`` (no-op when unset).
+
+        Called when no loop is currently detected — the agent made progress,
+        so we reset the per-instance counter so the next genuine loop starts
+        from ``count=1``.
+        """
+        self._loop_breaker_state.pop(instance_id, None)
+
+    def get_loop_repair_count(self, instance_id: str) -> int:
+        """Return the current repair count (0 if unset)."""
+        return self._loop_breaker_state.get(instance_id, {}).get("count", 0)
+
     def _cleanup_instance_state(self, instance_id: str) -> dict | None:
         """Centralized per-instance in-memory state cleanup (W1).
 
@@ -2082,6 +2134,11 @@ class InstanceManager:
         # grows unbounded for long-lived daemons that process many short-
         # lived instances (each termination leaks one entry).
         self._gii_throttle.pop(instance_id, None)
+        # Memory-leak fix: drop the per-instance loop-breaker state too.
+        # Follows the same 5-path cleanup pattern as ``_gii_throttle`` —
+        # centralizing in ``_cleanup_instance_state`` is the single source
+        # of truth for the 4 lifecycle callers that route through here.
+        self._loop_breaker_state.pop(instance_id, None)
         self.release_context_usage_cache(instance_id)
         # Question-tool cleanup (F5): drop any pending QuestionPack and the
         # pause-requested flag so the dicts cannot grow unbounded across many
@@ -4539,6 +4596,10 @@ class InstanceManager:
             # throttle counter alongside the dead-task cleanup. Without
             # this the dict leaks one entry per cancelled instance.
             self._gii_throttle.pop(instance_id, None)
+            # Memory-leak fix: drop the per-instance loop-breaker state
+            # alongside the dead-task cleanup. Same pattern as
+            # ``_gii_throttle`` above (cancel_graph_task done-branch).
+            self._loop_breaker_state.pop(instance_id, None)
             return gate_cancelled
 
         if task is not None:

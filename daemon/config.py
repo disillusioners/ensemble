@@ -521,6 +521,29 @@ class SkillEvolutionConfig(BaseSettings):
     capture_min_duration_seconds: int = Field(default=60)
 
 
+class LoopBreakerConfig(BaseSettings):
+    """Configuration for the general hallucination loop breaker.
+
+    The loop breaker detects consecutive identical tool-call patterns (any
+    tool, parallel-aware) and triggers a repair cycle that removes the
+    repetitive messages and re-injects a fresh summary. Detection runs in
+    ``agent_node`` before the LLM call; repair is wired in Phase 3.
+
+    State storage is RAM-only (``InstanceManager._loop_breaker_state``)
+    following the existing ``_gii_throttle`` pattern — see
+    ``.agents/shared/planning/general-hallucination-fix/decisions.md`` D4.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LOOP_BREAKER_")
+
+    enabled: bool = Field(default=True, description="Enable general hallucination loop breaker")
+    threshold: int = Field(default=3, description="Consecutive identical tool calls required to trigger detection")
+    max_repairs: int = Field(default=3, description="Maximum repair attempts per instance before giving up")
+    summarization_timeout_seconds: int = Field(default=30, description="Timeout for the repair LLM summarization call")
+    excluded_tools: list[str] = Field(default_factory=list, description="Tool names to skip during detection (e.g. legitimately polled resources)")
+    summarization_model: str | None = Field(default=None, description="Model override for repair summarization; None = use session model")
+
+
 class LanguageConfig(BaseSettings):
     """Language check configuration."""
 
@@ -548,6 +571,7 @@ class Config(BaseSettings):
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
+    loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
 
 

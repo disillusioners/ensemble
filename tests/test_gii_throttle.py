@@ -57,6 +57,7 @@ def _make_manager_with_throttle_dict():
 
         def __init__(self):
             self._gii_throttle: dict[str, int] = {}
+            self._loop_breaker_state: dict[str, dict] = {}
             self.bump_gii_throttle = manager_module.InstanceManager.bump_gii_throttle.__get__(self)
             self.reset_gii_throttle = manager_module.InstanceManager.reset_gii_throttle.__get__(self)
             self.get_gii_throttle_count = manager_module.InstanceManager.get_gii_throttle_count.__get__(self)
@@ -83,13 +84,36 @@ def _make_manager_with_cleanup_surface():
         bump_gii_throttle: Any
         reset_gii_throttle: Any
         get_gii_throttle_count: Any
+        clear_question_pause_requested: Any
         _cleanup_instance_state: Any
 
         def __init__(self):
             self._gii_throttle: dict[str, int] = {}
+            self._loop_breaker_state: dict[str, dict] = {}
             self._graph_tasks: dict[str, Any] = {}
             self._pending_injections: dict[str, Any] = {}
             self._context_usage_cleared: list[str] = []
+            # Mirror the surface ``_cleanup_instance_state`` touches today:
+            # * ``_question_manager.clear_question_pack`` (question cleanup)
+            # * ``clear_question_pause_requested`` which in turn mutates
+            #   ``self._question_pause_requested`` (so the stub needs that
+            #   dict too — otherwise the bound method raises ``AttributeError``
+            #   on every test that exercises the helper through the stub).
+            # ``_question_manager`` is a ``MagicMock`` because the helper
+            # only calls ``clear_question_pack`` on it; ``clear_question_pause_requested``
+            # is an unbound method on ``InstanceManager`` so we bind it via
+            # ``__get__`` — matching the pattern used for the throttle
+            # helpers just below.
+            from unittest.mock import MagicMock
+
+            self._question_manager = MagicMock()
+            self._question_pause_requested: dict[str, Any] = {}
+            # ``_deferred_question_pause`` is the set the cleanup helper
+            # drains via ``_deferred_question_pause.discard``. Without
+            # this stub attribute the helper raises ``AttributeError`` on
+            # every test that exercises it through the stub.
+            self._deferred_question_pause: set[str] = set()
+            self.clear_question_pause_requested = manager_module.InstanceManager.clear_question_pause_requested.__get__(self)
             self.bump_gii_throttle = manager_module.InstanceManager.bump_gii_throttle.__get__(self)
             self.reset_gii_throttle = manager_module.InstanceManager.reset_gii_throttle.__get__(self)
             self.get_gii_throttle_count = manager_module.InstanceManager.get_gii_throttle_count.__get__(self)
@@ -1054,6 +1078,7 @@ class TestLegacyCleanupPaths:
 
             def __init__(self):
                 self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
                 self._graph_tasks: dict[str, Any] = {}
                 self.instances: dict[str, Any] = {}
                 self._request_registry = MagicMock()
@@ -1150,6 +1175,7 @@ class TestLegacyCleanupPaths:
 
             def __init__(self):
                 self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
                 self._graph_tasks: dict[str, Any] = {}
                 self._instance_repository = MagicMock()
                 self._instance_repository.get_tree_ids = MagicMock(
@@ -1213,6 +1239,7 @@ class TestLegacyCleanupPaths:
 
             def __init__(self):
                 self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
                 self._graph_tasks: dict[str, Any] = {}
                 # Minimal gate stub — ``cancel_instance_execution`` is
                 # not defined, so the inner try/except (catches only
@@ -1279,6 +1306,7 @@ class TestLegacyCleanupPaths:
 
             def __init__(self):
                 self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
                 self._graph_tasks: dict[str, Any] = {}
                 self.bump_gii_throttle = (
                     manager_module.InstanceManager.bump_gii_throttle.__get__(self)

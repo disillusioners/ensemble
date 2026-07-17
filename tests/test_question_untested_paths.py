@@ -399,6 +399,11 @@ def _make_manager_stub_with_question_state():
             self._pending_injections: dict = {}
             self._gii_throttle: dict = {}
             self._deferred_question_pause: set[str] = set()
+            # Loop-breaker cleanup surface (added with the 5-path
+            # cleanup pattern — ``_cleanup_instance_state`` now also
+            # pops ``_loop_breaker_state``). Without this attribute the
+            # helper raises ``AttributeError`` on the first pop call.
+            self._loop_breaker_state: dict[str, dict] = {}
             self.release_context_usage_cache = MagicMock()
             # Bind the real helpers as instance methods.
             self.set_question_pause_requested = (

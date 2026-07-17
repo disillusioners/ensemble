@@ -8,14 +8,17 @@ from langchain_openai.chat_models.base import (
     _convert_delta_to_message_chunk as _base_convert_delta_to_message_chunk,
 )
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from typing import Any, ClassVar, Mapping, cast
+from dataclasses import dataclass, field
 import asyncio
+import json
 import logging
 import re
+import uuid
 import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
@@ -39,6 +42,50 @@ GII_DELAY_MAP: dict[int, int] = {
     5: 600,   # 5th: 10 min
 }
 GII_MAX_DELAY = 900  # 6+ consecutive: 15 min (cap)
+
+
+# ============================================================================
+# General Hallucination Loop Breaker (Phase 1 — detection only)
+# ============================================================================
+# Detects CONSECUTIVE identical tool-call patterns regardless of which tool.
+# Unlike the GII throttle (which is a counter that resets on any non-gii
+# message), the loop breaker scans the message tail and groups parallel tool
+# calls by canonical (name, args) signature. This catches parallel-call loops
+# that the GII counter misses and survives compaction/reactive re-reads.
+# State lives on InstanceManager._loop_breaker_state; access goes through
+# LoopBreakerSlot (duck-typed getattr delegation).
+LOOP_BREAKER_DEFAULT_THRESHOLD = 3
+LOOP_BREAKER_DEFAULT_MAX_REPAIRS = 3
+LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS = 30
+LOOP_BREAKER_REPAIR_PREFIX = "repair-"
+LOOP_BREAKER_SUMMARY_PROMPT = (
+    "A repetition loop was detected in your recent tool calls. "
+    "You called '{tool_name}' {count} times in a row with the same arguments. "
+    "Those repetitive messages have been removed to break the loop. "
+    "Review what you were trying to accomplish and continue with a different approach."
+)
+
+# Phase 2 / Repair engine prompt — sent to the LLM when summarizing a detected
+# loop. The repair flow calls ``LoopRepairer._summarize_loop`` which builds
+# the prompt via ``str.format`` and falls back to a static truncation summary
+# on timeout / error. Keep parameter names stable: ``tool_name``, ``tool_args``,
+# ``count``, ``conversation_excerpt``.
+REPAIR_SUMMARIZATION_PROMPT = """You are analyzing an AI agent's conversation history that has entered a repetitive loop.
+
+The agent repeatedly called the tool "{tool_name}" with these arguments:
+{tool_args}
+
+This happened {count} times consecutively without making progress.
+
+Recent conversation context:
+{conversation_excerpt}
+
+Please provide a concise summary (2-3 sentences) of:
+1. What the agent was trying to accomplish
+2. Why it appears to be stuck in a loop
+3. What alternative approach it should try
+
+Be specific and actionable."""
 
 from .llm_error_classifier import (
     classify_llm_errors,
@@ -144,6 +191,704 @@ class ToolThrottleSlot:
         if getter is None:
             return 0
         return getter(instance_id)
+
+
+class LoopBreakerSlot:
+    """Lightweight, mock-friendly handle around InstanceManager loop-breaker state.
+
+    Mirrors :class:`ToolThrottleSlot`'s duck-typed ``getattr`` pattern: only the
+    methods ``agent_node`` needs (Phase 3 wiring) are exposed, the manager
+    reference is duck-typed so tests can pass any object exposing the matching
+    surface without instantiating a real ``InstanceManager``.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object exposing
+            ``get_loop_breaker_state``, ``record_loop_repair``,
+            ``reset_loop_breaker``, and ``get_loop_repair_count`` methods).
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    def get_state(self, instance_id: str) -> dict:
+        """Return loop-breaker state for instance (empty dict if unset)."""
+        getter = getattr(self._manager, "get_loop_breaker_state", None)
+        if getter is None:
+            return {}
+        return getter(instance_id)
+
+    def record_repair(self, instance_id: str, summary: str) -> int:
+        """Record a repair event. Returns the new repair count for the instance.
+
+        Returns ``0`` when the manager does not expose ``record_loop_repair`` —
+        matches the no-op default of the ``ToolThrottleSlot.bump`` family so
+        tests can stub the manager without the loop-breaker surface.
+        """
+        recorder = getattr(self._manager, "record_loop_repair", None)
+        if recorder is None:
+            return 0
+        return recorder(instance_id, summary)
+
+    def clear(self, instance_id: str) -> None:
+        """Clear loop-breaker state for instance (no-op when unset)."""
+        clearer = getattr(self._manager, "reset_loop_breaker", None)
+        if clearer is not None:
+            clearer(instance_id)
+
+    def get_repair_count(self, instance_id: str) -> int:
+        """Return the current repair count (0 if unset)."""
+        getter = getattr(self._manager, "get_loop_repair_count", None)
+        if getter is None:
+            return 0
+        return getter(instance_id)
+
+
+@dataclass
+class LoopDetectionResult:
+    """Result of a :class:`LoopDetector` scan.
+
+    IMPORTANT: ``loop_messages`` excludes the evidence unit. The evidence unit
+    (oldest matching call+result pair) is preserved so the agent has context
+    about what it was doing before the loop. Only its IDs appear in
+    ``evidence_message_ids`` and those messages are excluded from removal.
+
+    Attributes:
+        tool_name: Primary tool in the detected loop (first call's name).
+        tool_args: Canonical args of the loop (first call's args).
+        repetition_count: Number of consecutive identical units detected.
+        loop_messages: Repetitive messages to REMOVE (excludes the evidence unit).
+        evidence_message_ids: IDs to KEEP — the 1 oldest call+result pair.
+    """
+
+    tool_name: str
+    tool_args: dict
+    repetition_count: int
+    loop_messages: list[BaseMessage] = field(default_factory=list)
+    evidence_message_ids: list[str] = field(default_factory=list)
+
+
+class LoopDetector:
+    """Static utility that scans a message tail for consecutive identical tool-call patterns.
+
+    The detector is intentionally stateless — it inspects the message list
+    directly (the source of truth) instead of a counter, so it survives
+    compaction, pause/resume, and crash recovery.
+
+    Detection rules:
+        * Walk backwards from ``messages[-1]``.
+        * A "unit" is one ``AIMessage`` with ``tool_calls`` plus its matching
+          ``ToolMessage`` results (matched via ``tool_call_id``).
+        * A unit's signature is the sorted set of ``(name, args)`` pairs with
+          args canonicalised via ``json.dumps(args, sort_keys=True, separators=(",",":"))``.
+        * Parallel tool calls (multiple ``tool_calls`` in one ``AIMessage``)
+          produce a single signature per unit.
+        * Count consecutive units with the same signature.
+        * If the count reaches ``threshold``, the oldest unit is kept as
+          evidence and all newer duplicate units are flagged for removal.
+        * Walking stops at any non-tool message (HumanMessage, plain AIMessage
+          without ``tool_calls``, plain SystemMessage, etc.).
+        * If every tool in a unit is in ``excluded_tools``, that unit breaks
+          the chain (we don't penalise legitimately polled resources).
+    """
+
+    @staticmethod
+    def _compute_tool_signature(ai_message: AIMessage) -> str:
+        """Compute a canonical signature for an ``AIMessage``'s tool calls.
+
+        Groups all ``tool_calls`` in the message into a sorted set of
+        ``(name, args)`` pairs. Handles parallel tool calls: multiple calls
+        in one ``AIMessage`` yield a single signature covering all of them.
+
+        Returns an empty string when the message has no tool calls (caller
+        should treat that as "not a tool unit").
+        """
+        tool_calls = getattr(ai_message, "tool_calls", None) or []
+        if not tool_calls:
+            return ""
+        pairs: list[str] = []
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args", {})
+            args_str = json.dumps(args, sort_keys=True, separators=(",", ":"))
+            pairs.append(f"{name}:{args_str}")
+        pairs.sort()
+        return "|".join(pairs)
+
+    @staticmethod
+    def scan(
+        messages: list[BaseMessage],
+        threshold: int = LOOP_BREAKER_DEFAULT_THRESHOLD,
+        excluded_tools: list[str] | None = None,
+    ) -> LoopDetectionResult | None:
+        """Scan message tail for consecutive identical tool-call patterns.
+
+        Args:
+            messages: The full conversation history (most recent message last).
+            threshold: Number of consecutive identical units required to
+                trigger detection. Defaults to :data:`LOOP_BREAKER_DEFAULT_THRESHOLD`.
+            excluded_tools: Tool names to skip — a unit whose tool_calls are
+                entirely excluded breaks the chain. ``None`` means no
+                exclusions.
+
+        Returns:
+            :class:`LoopDetectionResult` if a loop is detected, ``None``
+            otherwise. The returned ``loop_messages`` exclude the oldest
+            evidence unit so callers can build ``RemoveMessage`` sentinels
+            without losing context.
+        """
+        if not messages or threshold < 1:
+            return None
+        excluded = set(excluded_tools or [])
+
+        # Build unit records walking backwards. Each record captures the
+        # AIMessage index and its signature so we can later resolve the
+        # matching ToolMessages by tool_call_id.
+        units: list[tuple[str, int]] = []  # (signature, ai_message_index)
+        i = len(messages) - 1
+        while i >= 0:
+            msg = messages[i]
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                sig = LoopDetector._compute_tool_signature(msg)
+                if not sig:
+                    break
+                tool_names = {tc.get("name", "") for tc in (msg.tool_calls or [])}
+                if tool_names and tool_names.issubset(excluded):
+                    # Excluded tools break the chain — the agent is polling
+                    # something legitimately.
+                    break
+                units.append((sig, i))
+            elif isinstance(msg, ToolMessage):
+                # ToolMessages are folded into the unit when we walk back to
+                # their issuing AIMessage (matched via tool_call_id in the
+                # evidence/loop_message collection below). For counting
+                # purposes we ignore them and keep walking.
+                pass
+            else:
+                # HumanMessage, SystemMessage, plain AIMessage without
+                # tool_calls — non-tool message breaks the consecutive chain.
+                break
+            i -= 1
+
+        if not units:
+            return None
+
+        # Count consecutive identical signatures from the tail (most recent).
+        # ``units`` is newest-first because we walked backwards.
+        first_sig = units[0][0]
+        consecutive = 0
+        loop_indices: list[int] = []
+        for sig, idx in units:
+            if sig == first_sig:
+                consecutive += 1
+                loop_indices.append(idx)
+            else:
+                break
+
+        if consecutive < threshold:
+            return None
+
+        # ``loop_indices`` is newest-first; the LAST entry is the oldest
+        # matching AIMessage — that's the evidence unit we KEEP.
+        evidence_unit_idx = loop_indices[-1]
+        evidence_ai_msg = messages[evidence_unit_idx]
+
+        # Collect message IDs in the evidence unit (AIMessage + its ToolMessages).
+        evidence_message_ids: set[str] = set()
+        evidence_ai_id = getattr(evidence_ai_msg, "id", None)
+        if evidence_ai_id:
+            evidence_message_ids.add(evidence_ai_id)
+        evidence_tool_call_ids = {
+            tc.get("id", "")
+            for tc in (getattr(evidence_ai_msg, "tool_calls", None) or [])
+            if tc.get("id", "")
+        }
+        for msg in messages:
+            if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") in evidence_tool_call_ids:
+                tool_msg_id = getattr(msg, "id", None)
+                if tool_msg_id:
+                    evidence_message_ids.add(tool_msg_id)
+
+        # Collect loop_messages: every unit's AIMessage + matching ToolMessages,
+        # EXCEPT the evidence unit.
+        loop_messages: list[BaseMessage] = []
+        for idx in loop_indices[:-1]:  # skip evidence (last = oldest)
+            ai_msg = messages[idx]
+            loop_messages.append(ai_msg)
+            tool_call_ids = {
+                tc.get("id", "")
+                for tc in (getattr(ai_msg, "tool_calls", None) or [])
+                if tc.get("id", "")
+            }
+            for msg in messages:
+                if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") in tool_call_ids:
+                    loop_messages.append(msg)
+
+        # Primary tool/args for the summary come from the first (newest) unit.
+        first_ai_msg = messages[loop_indices[0]]
+        first_tc = (getattr(first_ai_msg, "tool_calls", None) or [{}])[0]
+
+        return LoopDetectionResult(
+            tool_name=first_tc.get("name", "unknown"),
+            tool_args=first_tc.get("args", {}),
+            repetition_count=consecutive,
+            loop_messages=loop_messages,
+            evidence_message_ids=list(evidence_message_ids),
+        )
+
+
+# ============================================================================
+# Phase 2 / Message Repair Engine
+# ============================================================================
+# When the :class:`LoopDetector` (Phase 1) flags a repetition, the
+# :class:`LoopRepairer` below performs the actual repair: build
+# ``RemoveMessage`` sentinels for the duplicate units, summarize the loop via
+# the LLM (with timeout fallback to a static summary), construct a repair
+# ``SystemMessage`` with a FRESH UUID, and apply the state update via
+# ``graph.aupdate_state``. The reactive compaction pattern at
+# ``daemon.graph.create_agent_node`` (the C3 fix at lines 1204-1217) is the
+# reference for the re-read + injected_msg re-append sequence — keeping the
+# two paths aligned means the same injection guarantee holds whether the
+# recovery is triggered by context overflow or by a hallucination loop.
+#
+# Design contract (matches ``phase2-plan.md`` + ``notes.md``):
+#   * RemoveMessage sentinels MUST come BEFORE the repair message in the
+#     replacement list (LangGraph ``add_messages`` reducer processes
+#     left-to-right).
+#   * Repair message ID MUST be a fresh UUID — reusing an ID replaces the
+#     existing message instead of appending (LangGraph ``add_messages``
+#     reducer behaviour).
+#   * ``clean_llm_config`` MUST run before constructing ``ThinkingChatOpenAI``
+#     so the ``model_vision`` key never leaks into the text summarization
+#     call (matches the 5+ existing call sites).
+#   * Summarization MUST be wrapped in ``asyncio.wait_for(timeout=...)`` —
+#     a hung LLM call would otherwise freeze ``agent_node`` indefinitely.
+#   * On any failure (timeout, exception, or state-update error), the repair
+#     returns the ORIGINAL message list so the graph can fall through to
+#     ``recursion_limit`` rather than wedging the agent.
+
+# ``_extract_text_from_content`` is imported lazily inside
+# ``LoopRepairer._build_excerpt`` to avoid a circular import: ``compaction.py``
+# already imports ``clean_llm_config`` from this module at module-load time,
+# so a top-level ``from .compaction import _extract_text_from_content`` here
+# would deadlock at import time. The lazy import mirrors the
+# ``from .compaction import CompactionContext`` pattern already used in
+# :func:`create_agent_node` for the same reason.
+
+
+@dataclass
+class RepairContext:
+    """Inputs for a single :class:`LoopRepairer` invocation.
+
+    Carries everything :meth:`LoopRepairer.repair` needs without holding a
+    reference to ``InstanceManager`` — the repairer is intentionally a
+    stateless helper so the agent-node closure can construct it lazily and
+    tests can pass arbitrary objects exposing the matching surface.
+
+    Attributes:
+        detection: Loop detection result from :class:`LoopDetector` (Phase 1).
+            ``loop_messages`` already excludes the evidence unit; the repairer
+            builds ``RemoveMessage`` sentinels only for these.
+        messages: Full conversation history at detection time (oldest-first).
+            Used for the LLM summarization excerpt — last N messages only.
+        thread_config: LangGraph thread config (``{"configurable": {"thread_id": ...}}``).
+            Passed to ``graph.aupdate_state`` and ``graph.aget_state``.
+        graph: Compiled LangGraph graph (or any object exposing
+            ``aupdate_state`` / ``aget_state``). Held by reference, not by
+            closure, so tests can substitute an ``AsyncMock``.
+        llm_config: Session LLM config used for the summarization call.
+            Passed through ``clean_llm_config`` to strip ``model_vision``
+            before constructing ``ThinkingChatOpenAI``.
+        system_prompt: System prompt for the agent session. Carried for
+            parity with reactive compaction; not consumed by the current
+            repair logic but kept so future call sites can match the same
+            shape as ``create_agent_node``.
+        injected_msg: Optional ``HumanMessage`` that was pending in the
+            injection slot when the loop was detected. Re-appended to
+            ``repaired_messages`` after the state re-read (C3 pattern, see
+            ``daemon.graph.create_agent_node`` lines 1204-1217) so the LLM
+            retry sees the user's injection exactly as the first attempt
+            did. ``None`` when no injection was consumed.
+        summarization_timeout_seconds: Override for the LLM summarization
+            ``asyncio.wait_for`` timeout. ``0`` / unset defers to the
+            repairer's own ``self._timeout_seconds`` and finally 30s.
+    """
+
+    detection: LoopDetectionResult
+    messages: list[BaseMessage]
+    thread_config: dict
+    graph: Any  # compiled LangGraph graph (or AsyncMock stand-in)
+    llm_config: dict
+    system_prompt: str
+    injected_msg: BaseMessage | None = None
+    summarization_timeout_seconds: int = 30
+
+
+@dataclass
+class RepairResult:
+    """Outcome of a :class:`LoopRepairer.repair` invocation.
+
+    The caller (Phase 3 ``agent_node`` wiring, not in this phase) reads
+    ``success`` to decide whether to re-invoke the LLM with
+    ``repaired_messages`` or fall back to the original message list. Even on
+    failure ``repaired_messages`` is populated with the ORIGINAL input — never
+    ``None`` — so the call site can substitute it directly into
+    ``agent_node``'s LLM call without further checks.
+    """
+
+    success: bool
+    repaired_messages: list[BaseMessage]
+    summary: str
+    repair_message_id: str
+    error: str | None = None
+
+
+class LoopRepairer:
+    """Repairs the message history when a hallucination loop is detected.
+
+    Mirrors the reactive compaction pattern at
+    :func:`daemon.graph.create_agent_node` (the C3 fix): remove the
+    repetitive messages via ``RemoveMessage`` sentinels, summarize what the
+    agent was doing, inject a fresh ``SystemMessage`` that nudges the LLM
+    toward a different approach, and apply the change via
+    ``graph.aupdate_state(as_node='agent')``. The injected user message (if
+    any) is re-appended after the state re-read so the LLM retry does not
+    silently lose it.
+
+    The repairer is intentionally simple: no I/O of its own (the LLM call is
+    synchronous via ``asyncio.to_thread``), no DB writes (the
+    ``graph.aupdate_state`` call handles persistence), no callback wiring.
+    Phase 3 will thread it into ``agent_node`` and ``LoopBreakerSlot`` will
+    record the repair via ``record_repair``.
+    """
+
+    def __init__(self, llm_config: dict | None = None, timeout_seconds: int = LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS):
+        # ``llm_config`` is kept on the instance for parity with other
+        # graph-level helpers, but the LLM config actually used at runtime
+        # comes from ``RepairContext.llm_config`` (per-call, matches how
+        # reactive compaction uses ``compactor.llm_config``). Storing it
+        # here lets callers override the default without threading
+        # ``llm_config`` through every ``RepairContext`` site.
+        self._llm_config = llm_config or {}
+        self._timeout_seconds = timeout_seconds or LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS
+
+    async def repair(self, context: RepairContext) -> RepairResult:
+        """Execute the full repair flow for a detected loop.
+
+        Steps (each wrapped in the outer ``try`` so any failure returns the
+        ORIGINAL ``context.messages`` and a populated ``error``):
+
+            1. Build ``RemoveMessage`` sentinels from ``detection.loop_messages``
+               (evidence IDs are excluded — see :meth:`_build_removal_list`).
+            2. Call LLM summarization with timeout fallback (see
+               :meth:`_summarize_loop`). A hung LLM call never freezes
+               ``agent_node`` because of the ``asyncio.wait_for`` guard.
+            3. Build the repair ``SystemMessage`` with a FRESH UUID
+               (``f"{LOOP_BREAKER_REPAIR_PREFIX}{uuid4()}"``) so the
+               ``add_messages`` reducer appends rather than replaces.
+            4. ``graph.aupdate_state(thread_config, {'messages': replacement},
+               as_node='agent')`` — sentinels first, repair message last.
+            5. Re-read state via ``graph.aget_state`` and extract the
+               updated ``messages`` list.
+            6. Re-append ``context.injected_msg`` if present (C3 pattern —
+               the injection lives only in the local closure until the LLM
+               call returns, so a checkpoint re-read would lose it).
+
+        Args:
+            context: Fully populated :class:`RepairContext`.
+
+        Returns:
+            :class:`RepairResult` with ``success=True`` and the post-repair
+            message list on success; ``success=False`` and the ORIGINAL
+            ``context.messages`` on any exception. ``error`` carries the
+            exception string when ``success`` is False.
+        """
+        try:
+            # Step 1: Build removal list.
+            removals = self._build_removal_list(context.detection)
+            logger.info(
+                f"[LoopRepairer] Removing {len(removals)} repetitive messages "
+                f"for tool '{context.detection.tool_name}' "
+                f"(repetition_count={context.detection.repetition_count})"
+            )
+
+            # Step 2: LLM summarization (timeout fallback to static summary).
+            # REVIEW FIX: prefer the per-context timeout (set by Phase 3
+            # from ``LoopBreakerConfig.summarization_timeout_seconds``)
+            # over the constructor default, so config flows through
+            # without requiring a fresh ``LoopRepairer`` per call.
+            timeout = (
+                context.summarization_timeout_seconds
+                or self._timeout_seconds
+                or LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS
+            )
+            summary = await self._summarize_loop(
+                context.detection,
+                context.messages,
+                context.llm_config,
+                timeout_seconds=timeout,
+            )
+
+            # Step 3: Build repair message with fresh UUID.
+            repair_msg = self._build_repair_message(context.detection, summary)
+
+            # Step 4: Apply state update. Order matters — RemoveMessage
+            # sentinels must come BEFORE the repair message so the
+            # ``add_messages`` reducer processes removals before appending
+            # the summary (LangGraph processes the list left-to-right).
+            replacement = list(removals) + [repair_msg]
+            await context.graph.aupdate_state(
+                context.thread_config,
+                {'messages': replacement},
+                as_node='agent',
+            )
+            logger.info(
+                f"[LoopRepairer] State updated, repair message "
+                f"{repair_msg.id[:16] if repair_msg.id else '<no-id>'}... injected"
+            )
+
+            # Step 5: Re-read state via the checkpoint (matches the
+            # reactive compaction pattern at lines 1201-1202).
+            updated_state = await context.graph.aget_state(context.thread_config)
+            repaired_messages = list(updated_state.values.get('messages', []))
+
+            # Step 6: C3 re-append — the injected user message lives only
+            # in the closure, NOT in the checkpoint, so the re-read above
+            # loses it. Re-append to ``repaired_messages`` so the LLM
+            # retry sees the user's intent.
+            if context.injected_msg is not None:
+                repaired_messages = list(repaired_messages) + [context.injected_msg]
+
+            return RepairResult(
+                success=True,
+                repaired_messages=repaired_messages,
+                summary=summary,
+                repair_message_id=repair_msg.id or "",
+            )
+
+        except Exception as e:
+            # Any failure (LLM, state update, re-read) — fall back to the
+            # ORIGINAL message list so the graph continues rather than
+            # wedging. ``recursion_limit`` still protects against runaway
+            # loops if the LLM keeps hallucinating after the failed repair.
+            logger.error(
+                f"[LoopRepairer] Repair failed: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            return RepairResult(
+                success=False,
+                repaired_messages=list(context.messages),
+                summary="",
+                repair_message_id="",
+                error=str(e),
+            )
+
+    @staticmethod
+    def _build_removal_list(detection: LoopDetectionResult) -> list[RemoveMessage]:
+        """Build ``RemoveMessage`` sentinels for the duplicate units.
+
+        The ``LoopDetector.scan`` algorithm already excluded the evidence
+        unit (oldest matching call+result pair) from ``loop_messages``, so
+        every message here is safe to remove. The ``evidence_message_ids``
+        check is defensive: if the detector ever returns a result that
+        includes an evidence ID in ``loop_messages``, we still preserve it
+        (the reducer would otherwise remove the only context the agent
+        has about what it was doing).
+
+        Args:
+            detection: Result from :class:`LoopDetector`.
+
+        Returns:
+            List of :class:`RemoveMessage` sentinels, one per removable
+            message. Empty when nothing qualifies (no IDs, all evidence).
+        """
+        evidence_ids = set(detection.evidence_message_ids or [])
+        removals: list[RemoveMessage] = []
+        for msg in detection.loop_messages:
+            msg_id = getattr(msg, "id", None)
+            if msg_id and msg_id not in evidence_ids:
+                removals.append(RemoveMessage(id=msg_id))
+        return removals
+
+    @staticmethod
+    async def _summarize_loop(
+        detection: LoopDetectionResult,
+        messages: list[BaseMessage],
+        llm_config: dict,
+        timeout_seconds: int = LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS,
+    ) -> str:
+        """Call LLM to summarize the loop, with strict timeout + fallback.
+
+        Builds a focused prompt from :data:`REPAIR_SUMMARIZATION_PROMPT`,
+        calls the session LLM (with ``clean_llm_config`` to strip
+        ``model_vision``) and returns the response text. The call is wrapped
+        in ``asyncio.wait_for(asyncio.to_thread(llm.invoke, [...]),
+        timeout=timeout_seconds)`` so a hung LLM provider can never freeze
+        ``agent_node``.
+
+        On ``asyncio.TimeoutError`` OR any other Exception: log a warning
+        and return the static fallback summary (``f"The agent called
+        {tool_name} {count} times with the same arguments without
+        progress."``). The fallback is sufficient to break the loop — it
+        just lacks the contextual nuance of an LLM-generated summary.
+
+        Args:
+            detection: Loop detection result — supplies ``tool_name``,
+                ``tool_args``, and ``repetition_count`` for the prompt.
+            messages: Full conversation history — last 10 messages are
+                included in the prompt as context.
+            llm_config: Session LLM config; cleaned before constructing
+                ``ThinkingChatOpenAI``.
+            timeout_seconds: Hard timeout for the summarization call.
+
+        Returns:
+            Either the LLM-generated summary string or the static fallback
+            on timeout / error. Never raises.
+        """
+        # Lazy import to avoid circular dependency with daemon.compaction
+        # (see module-level comment above the ``RepairContext`` dataclass).
+        from .compaction import _extract_text_from_content
+
+        excerpt = LoopRepairer._build_excerpt(messages, max_messages=10)
+        prompt = REPAIR_SUMMARIZATION_PROMPT.format(
+            tool_name=detection.tool_name,
+            tool_args=json.dumps(detection.tool_args, indent=2)[:500],
+            count=detection.repetition_count,
+            conversation_excerpt=excerpt,
+        )
+
+        fallback = (
+            f"The agent called {detection.tool_name} "
+            f"{detection.repetition_count} times with the same arguments "
+            f"without progress."
+        )
+
+        try:
+            # clean_llm_config strips model_vision — see note above
+            # about the 5+ existing call sites. Same module as
+            # ``_call_summarization_llm`` in ``daemon/compaction.py``.
+            config = clean_llm_config(llm_config)
+            llm = ThinkingChatOpenAI(**config)
+
+            # CRITICAL: asyncio.to_thread keeps the LLM call off the
+            # event loop (matches compaction.py:999) and asyncio.wait_for
+            # enforces the hard timeout. If either guard fails we fall
+            # back to the static summary rather than freezing the agent.
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm.invoke,
+                    [
+                        SystemMessage(
+                            content=(
+                                "You are a helpful assistant that analyzes "
+                                "conversation patterns."
+                            )
+                        ),
+                        HumanMessage(content=prompt),
+                    ],
+                ),
+                timeout=timeout_seconds,
+            )
+            return _extract_text_from_content(response.content)
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[LoopRepairer] Summarization timed out after {timeout_seconds}s, "
+                f"using truncation fallback for tool '{detection.tool_name}'"
+            )
+            return fallback
+        except Exception as e:
+            logger.warning(
+                f"[LoopRepairer] Summarization failed: {type(e).__name__}: {e}, "
+                f"using fallback for tool '{detection.tool_name}'"
+            )
+            return fallback
+
+    @staticmethod
+    def _build_excerpt(messages: list[BaseMessage], max_messages: int = 10) -> str:
+        """Build a text-only excerpt of the last ``max_messages`` entries.
+
+        Used as the ``conversation_excerpt`` field of the summarization
+        prompt. Multimodal content (list-of-dicts with image_url blocks) is
+        flattened to text via ``_extract_text_from_content`` so the LLM
+        only ever sees a plain string — never ``str(list_of_dicts)``
+        garbage (see compaction.py:706 fix in the experience notes).
+
+        Args:
+            messages: Full conversation history (oldest-first). Only the
+                last ``max_messages`` entries are included.
+            max_messages: Maximum number of recent messages to include.
+                Defaults to 10 — large enough for context, small enough to
+                keep the prompt bounded.
+
+        Returns:
+            Newline-joined text excerpt. Empty string when ``messages``
+            is empty.
+        """
+        # Lazy import to avoid circular dependency with daemon.compaction
+        # (see module-level comment above the ``RepairContext`` dataclass).
+        from .compaction import _extract_text_from_content
+
+        if not messages:
+            return ""
+        tail = messages[-max_messages:]
+        lines: list[str] = []
+        for msg in tail:
+            content = getattr(msg, "content", "") or ""
+            text = _extract_text_from_content(content)
+            msg_type = type(msg).__name__
+            if text:
+                lines.append(f"[{msg_type}] {text}")
+            else:
+                lines.append(f"[{msg_type}] <empty>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_repair_message(detection: LoopDetectionResult, summary: str) -> SystemMessage:
+        """Construct the repair ``SystemMessage`` with a fresh UUID.
+
+        The UUID is fresh on every call (``uuid.uuid4()``) so the
+        ``add_messages`` reducer appends the new message rather than
+        replacing an existing one with the same ID (LangGraph reducer
+        behaviour — see ``phase2-plan.md`` gotcha #1 and the resume
+        message replacement bug in the experience notes).
+
+        Args:
+            detection: Loop detection result — supplies ``tool_name`` and
+                ``repetition_count`` for the body text.
+            summary: Either the LLM-generated summary or the static
+                fallback (after a timeout / error).
+
+        Returns:
+            :class:`SystemMessage` with ID prefixed by
+            :data:`LOOP_BREAKER_REPAIR_PREFIX` and the formatted repair
+            content. The SystemMessage type matches the compaction summary
+            pattern (``compaction.py:962``) and ``decisions.md`` D9 — a
+            system-level directive, NOT a user message.
+        """
+        content = (
+            f"[LOOP BREAKER — Repetitive tool call detected]\n\n"
+            f"You have called the tool '{detection.tool_name}' "
+            f"{detection.repetition_count} times consecutively with the "
+            f"same arguments. This indicates you may be stuck in a loop.\n\n"
+            f"Summary of what happened:\n{summary}\n\n"
+            f"Please try a DIFFERENT approach. Consider:\n"
+            f"- Using a different tool\n"
+            f"- Changing the arguments\n"
+            f"- Reviewing the available information before acting\n"
+            f"- If the task is complete, provide your final response\n"
+        )
+        return SystemMessage(
+            content=content,
+            id=f"{LOOP_BREAKER_REPAIR_PREFIX}{uuid.uuid4()}",
+        )
+
+
+# ``RepairResult`` is defined at module scope (no nesting under
+# ``LoopRepairer``) so the type annotation on ``repair`` can stay a forward
+# reference and the dataclass stays importable in isolation. Alias it on
+# the class for callers — including the loop-breaker integration tests —
+# that prefer the ``LoopRepairer.RepairResult`` qualification.
+LoopRepairer.RepairResult = RepairResult
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -699,6 +1444,9 @@ def create_agent_node(
     injection_slot: InjectionSlot | None = None,
     live_hub: Any = None,
     throttle_slot: ToolThrottleSlot | None = None,
+    loop_breaker_slot: LoopBreakerSlot | None = None,
+    loop_repairer: LoopRepairer | None = None,
+    loop_breaker_config: "LoopBreakerConfig | None" = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -731,7 +1479,36 @@ def create_agent_node(
             invoked on the last message in the state — non-gii
             messages reset the consecutive-call counter. ``None``
             disables throttling (backward compatible).
+        loop_breaker_slot: Optional :class:`LoopBreakerSlot` handle that
+            exposes per-instance loop-breaker state. ``None`` disables
+            loop detection / repair (backward compatible). Phase 3
+            wiring — runs AFTER the GII throttle block and BEFORE the
+            LLM call. When detection finds a repeating tool pattern
+            AND repair_count < max_repairs, the repairer is invoked
+            and the LLM is re-invoked with the repaired messages.
+        loop_repairer: Optional :class:`LoopRepairer` (Phase 2) used
+            to summarize and rewrite messages when detection fires.
+            ``None`` disables the repair path even if a slot is
+            provided. Backward compatible.
+        loop_breaker_config: Optional :class:`LoopBreakerConfig` —
+            supplies ``enabled``, ``threshold``, ``max_repairs``,
+            ``excluded_tools``, ``summarization_timeout_seconds``.
+            ``None`` (or omitted) implies a default-enabled config
+            (``LoopBreakerConfig()``).
     """
+
+    # Resolve once at factory time so the closure does not rebuild a
+    # default config on every LLM call (and so tests can pass their
+    # own frozen config object). ``LoopBreakerConfig`` lives in
+    # ``daemon.config`` and is imported lazily to avoid the
+    # ``daemon.graph ↔ daemon.config ↔ daemon.manager`` import cycle
+    # that would otherwise force a hard-import of config at module
+    # load (graph is imported transitively by config).
+    if loop_breaker_config is None:
+        from .config import LoopBreakerConfig as _LBC
+        _lb_config = _LBC()
+    else:
+        _lb_config = loop_breaker_config
 
     async def agent_node(state, config=None):
         messages = state['messages']
@@ -887,6 +1664,123 @@ def create_agent_node(
                     await asyncio.sleep(delay)
             else:
                 throttle_slot.reset(instance_id)
+
+        # ── General hallucination loop detection + repair ───────────────
+        # Runs AFTER the GII throttle block and BEFORE the LLM call.
+        # The two mechanisms are complementary — GII gives the LLM provider
+        # a breather via ``asyncio.sleep``; the loop breaker removes the
+        # repetitive messages and re-injects a fresh summary so the LLM
+        # sees different context on the retry. Both are no-ops when their
+        # respective slots are ``None`` (backward-compatible default).
+        #
+        # ``_lb_config.enabled`` is the kill switch — a config with
+        # ``enabled=False`` disables detection+repair entirely without
+        # callers having to thread ``None`` slots.
+        if (
+            loop_breaker_slot is not None
+            and loop_repairer is not None
+            and _lb_config.enabled
+        ):
+            try:
+                detection = LoopDetector.scan(
+                    messages=messages,
+                    threshold=_lb_config.threshold,
+                    excluded_tools=_lb_config.excluded_tools,
+                )
+            except Exception as det_err:  # noqa: BLE001
+                # Defensive: a detector crash MUST NOT freeze the agent.
+                # Log and continue with the original messages.
+                logger.warning(
+                    f"[LOOP BREAKER] scan failed for {instance_short}: "
+                    f"{type(det_err).__name__}: {det_err}"
+                )
+                detection = None
+
+            if detection is not None:
+                repair_count = loop_breaker_slot.get_repair_count(instance_id)
+                if repair_count < _lb_config.max_repairs:
+                    logger.warning(
+                        f"[LOOP BREAKER] Instance {instance_short}: detected "
+                        f"{detection.repetition_count}x repeated "
+                        f"'{detection.tool_name}' calls. Triggering repair "
+                        f"(attempt {repair_count + 1}/{_lb_config.max_repairs})"
+                    )
+                    try:
+                        repair_context = RepairContext(
+                            detection=detection,
+                            messages=messages,
+                            thread_config=config or {},
+                            graph=graph_ref[0] if graph_ref else None,
+                            llm_config=llm_config or {},
+                            system_prompt=system_prompt,
+                            injected_msg=injected_msg,
+                            summarization_timeout_seconds=(
+                                _lb_config.summarization_timeout_seconds
+                            ),
+                        )
+                        result = await loop_repairer.repair(repair_context)
+                    except Exception as rep_err:  # noqa: BLE001
+                        # Repair's own ``repair`` is already wrapped in
+                        # try/except — a raise here means something
+                        # escaped that guard (e.g. graph_ref is a bad
+                        # type). Log + fall through to original messages.
+                        logger.error(
+                            f"[LOOP BREAKER] repair raised unexpectedly for "
+                            f"{instance_short}: {type(rep_err).__name__}: "
+                            f"{rep_err}"
+                        )
+                        result = RepairResult(
+                            success=False,
+                            repaired_messages=list(messages),
+                            summary="",
+                            repair_message_id="",
+                            error=str(rep_err),
+                        )
+
+                    if result.success:
+                        loop_breaker_slot.record_repair(
+                            instance_id, result.summary
+                        )
+                        messages = result.repaired_messages
+                        # C3 defensive re-append: the injection lives only
+                        # in the local closure (the real ``LoopRepairer``
+                        # already re-appends it on its own, but a mock
+                        # repairer — or a future repairer that forgets —
+                        # could drop it). If the repaired tail does NOT
+                        # end with the injected message, re-append it so
+                        # the LLM retry still receives the user's intent.
+                        # The id-match guard prevents double-appending when
+                        # a well-behaved repairer already preserved the
+                        # injection.
+                        if injected_msg is not None and (
+                            not messages or messages[-1].id != injected_msg.id
+                        ):
+                            messages = list(messages) + [injected_msg]
+                        full_messages = [SystemMessage(content=system_prompt)] + list(messages)
+                        logger.info(
+                            f"[LOOP BREAKER] Repair complete, re-invoking "
+                            f"LLM with {len(full_messages)} messages "
+                            f"(repair msg: "
+                            f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
+                        )
+                    else:
+                        logger.error(
+                            f"[LOOP BREAKER] Repair failed: {result.error}, "
+                            f"continuing with original messages"
+                        )
+                else:
+                    logger.warning(
+                        f"[LOOP BREAKER] Instance {instance_short}: max "
+                        f"repairs ({_lb_config.max_repairs}) reached, "
+                        f"forcing continuation with original messages"
+                    )
+            else:
+                # No loop detected on this turn — if a repair had been
+                # recorded previously, the agent has since made progress,
+                # so reset the counter so the next genuine loop starts
+                # from ``count=1`` instead of inheriting stale state.
+                if loop_breaker_slot.get_repair_count(instance_id) > 0:
+                    loop_breaker_slot.clear(instance_id)
 
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -1274,6 +2168,9 @@ def build_instance_graph(
     live_hub: Any = None,
     throttle_slot: ToolThrottleSlot | None = None,
     manager: Any = None,
+    loop_breaker_slot: LoopBreakerSlot | None = None,
+    loop_repairer: LoopRepairer | None = None,
+    loop_breaker_config: "LoopBreakerConfig | None" = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -1370,6 +2267,9 @@ def build_instance_graph(
         injection_slot=injection_slot,
         live_hub=live_hub,
         throttle_slot=throttle_slot,
+        loop_breaker_slot=loop_breaker_slot,
+        loop_repairer=loop_repairer,
+        loop_breaker_config=loop_breaker_config,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)
@@ -1454,3 +2354,34 @@ def build_instance_graph(
 
 # Backward compatibility alias
 build_session_graph = build_instance_graph
+
+
+def __getattr__(name: str):
+    """Lazy module-level attribute access.
+
+    Re-exports ``LoopBreakerConfig`` (defined in :mod:`daemon.config`) without
+    forcing an eager import at module load time. ``daemon.graph`` is imported
+    transitively by :mod:`daemon.config`, so a top-level
+    ``from .config import LoopBreakerConfig`` would create an import cycle.
+    Tests and downstream code can therefore write
+    ``from daemon.graph import LoopBreakerConfig`` and resolve it on first
+    attribute access instead.
+    """
+    if name == "LoopBreakerConfig":
+        from .config import LoopBreakerConfig
+
+        return LoopBreakerConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "LoopBreakerConfig",
+    "LoopRepairer",
+    "LoopBreakerSlot",
+    "ToolThrottleSlot",
+    "InjectionSlot",
+    "build_instance_graph",
+    "build_session_graph",
+    "create_agent_node",
+]
+

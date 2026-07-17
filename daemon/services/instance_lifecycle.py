@@ -1151,7 +1151,7 @@ class InstanceLifecycleService:
         # ``question_pause_node`` can set the deferred-pause marker
         # (C2 fix — ``pause_instance_cascade`` runs from the post-graph
         # completion path, not from inside the graph task).
-        from ..graph import InjectionSlot, ToolThrottleSlot
+        from ..graph import InjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -1161,10 +1161,13 @@ class InstanceLifecycleService:
             compactor=self._compactor,
             graph_config=config,
             user_language=user_language,
-            language_check_enabled=self._config.language.check_enabled,
+            language_check_enabled=self._config.language.check.enabled,
             injection_slot=InjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
+            loop_breaker_slot=LoopBreakerSlot(self._manager),
+            loop_repairer=LoopRepairer(llm_config),
+            loop_breaker_config=self._config.loop_breaker,
             manager=self._manager,
         )
 
@@ -1417,6 +1420,11 @@ class InstanceLifecycleService:
         # centralization) so the pop has to be inline here, otherwise the
         # ``_gii_throttle`` dict leaks one entry per terminated instance.
         self._manager._gii_throttle.pop(instance_id, None)
+        # Memory-leak fix: drop the per-instance loop-breaker state
+        # alongside the gii throttle. Same 5-path pattern — this
+        # terminate_instance site predates the centralization and needs
+        # the inline pop.
+        self._manager._loop_breaker_state.pop(instance_id, None)
         graph_unwind_ms = 0
         if graph_task and not graph_task.done():
             graph_task.cancel()
@@ -1841,6 +1849,10 @@ class InstanceLifecycleService:
             # throttle counter alongside the zombie-task sweep. The dict
             # would otherwise leak one entry per hard-deleted instance.
             self._manager._gii_throttle.pop(iid, None)
+            # Memory-leak fix: drop the per-instance loop-breaker state
+            # alongside the gii throttle. Same zombie-sweep loop, same
+            # cleanup contract.
+            self._manager._loop_breaker_state.pop(iid, None)
 
         # 3. Hard-delete DB records — FK-safe cascade across the 10
         # tables. Off-load to a thread so SQLite WAL write contention
@@ -1990,6 +2002,10 @@ class InstanceLifecycleService:
                 # bypasses ``_cleanup_instance_state`` (paused instances
                 # stay in memory for resume), so the pop has to be inline.
                 self._manager._gii_throttle.pop(node_id, None)
+                # Pause reset: drop the per-instance loop-breaker state
+                # alongside the gii throttle. Same rationale — a resumed
+                # instance should not inherit stale loop-repair counts.
+                self._manager._loop_breaker_state.pop(node_id, None)
                 if graph_task and not graph_task.done():
                     graph_task.cancel()
                     logger.info(f"Cancelled graph task for instance {node_id[:8]}...")
@@ -2456,7 +2472,7 @@ class InstanceLifecycleService:
         # Phase 1 / question-tool: thread ``manager`` for the same
         # reasons as the spawn path — conditional post-tools edge and
         # ``question_pause_node`` both need the manager reference.
-        from ..graph import InjectionSlot, ToolThrottleSlot
+        from ..graph import InjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -2466,10 +2482,13 @@ class InstanceLifecycleService:
             compactor=self._compactor,
             graph_config=config,
             user_language=user_language,
-            language_check_enabled=self._config.language.check_enabled,
+            language_check_enabled=self._config.language.check.enabled,
             injection_slot=InjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
+            loop_breaker_slot=LoopBreakerSlot(self._manager),
+            loop_repairer=LoopRepairer(llm_config),
+            loop_breaker_config=self._config.loop_breaker,
             manager=self._manager,
         )
 
