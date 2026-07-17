@@ -64,10 +64,10 @@ Apply these when assessing test pack structure during discovery:
 |---|---|
 | Estimated runtime < 2 min | OK as-is for unit-test scope |
 | Estimated runtime ≥ 2 min | Split before launch — group by feature/module |
-| Tests hitting real DB/network | Mock the boundary or split into integration pack |
-| Tests sharing heavy setup | Extract shared fixture; verify cleanup runs (state leaks cause flakes) |
-| Tests with > 5s sleeps each | Override config/env to reduce waits; do not raise the cap |
-| Tests with order dependencies | Isolate them; order-coupled tests create flakes |
+| Tests hitting real DB/network | Recommend mocking the boundary or splitting into integration pack |
+| Tests sharing heavy setup | Flag for fixture extraction; verify cleanup runs (state leaks cause flakes) |
+| Tests with > 5s sleeps each | Recommend overriding config/env to reduce waits; do not raise the cap |
+| Tests with order dependencies | Flag order-dependent tests for isolation; order-coupled tests create flakes |
 
 These are the same heuristics `test-pack-execution` uses at run time. Reporting a pack that violates them now saves a re-split later.
 
