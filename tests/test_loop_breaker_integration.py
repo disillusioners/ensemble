@@ -45,6 +45,7 @@ from daemon.graph import (
     LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS,
     LoopDetectionResult,
     LoopRepairer,
+    RepairResult,
 )
 
 
@@ -57,7 +58,6 @@ class _StubLoopBreakerSlot:
     """In-memory mock of ``LoopBreakerSlot``.
 
     Mirrors the real handle's contract:
-        get_state(iid)        -> dict
         record_repair(iid, s) -> int
         clear(iid)            -> None
         get_repair_count(iid) -> int
@@ -65,14 +65,9 @@ class _StubLoopBreakerSlot:
 
     def __init__(self, initial: dict[str, dict] | None = None):
         self._state: dict[str, dict] = dict(initial or {})
-        self.get_state_calls: list[str] = []
         self.record_calls: list[tuple[str, str]] = []
         self.clear_calls: list[str] = []
         self.get_repair_count_calls: list[str] = []
-
-    def get_state(self, instance_id: str) -> dict:
-        self.get_state_calls.append(instance_id)
-        return self._state.get(instance_id, {})
 
     def record_repair(self, instance_id: str, summary: str) -> int:
         self.record_calls.append((instance_id, summary))
@@ -134,6 +129,7 @@ def _make_agent(
     throttle_slot: Any | None = None,
     injection_slot: Any | None = None,
     llm: Any | None = None,
+    # graph_ref=[None] disables repair path; pass graph_ref=[_StubGraph()] to test repair
     graph_ref: Any | None = None,
 ):
     """Build a fresh agent_node for a test, bypassing ``build_instance_graph``."""
@@ -231,7 +227,7 @@ class TestFullFlow:
         # repairer.repair is a coroutine — patch its internal LLM call so
         # no real network is needed, then return a successful RepairResult.
         async def fake_repair(ctx):
-            return LoopRepairer.RepairResult(
+            return RepairResult(
                 success=True,
                 repaired_messages=ctx.messages,  # type: ignore[attr-defined]
                 summary="summary",
@@ -315,7 +311,7 @@ class TestGIICoexistence:
 
         slot = _StubLoopBreakerSlot()
         repairer = MagicMock()
-        repairer.repair = AsyncMock(return_value=LoopRepairer.RepairResult(
+        repairer.repair = AsyncMock(return_value=RepairResult(
             success=True,
             repaired_messages=[],
             summary="s",
@@ -329,6 +325,12 @@ class TestGIICoexistence:
             loop_repairer=repairer,
             loop_breaker_config=cfg,
             throttle_slot=throttle,
+            # ``graph_ref`` must point at a real-ish object because
+            # ``LoopRepairer.repair`` calls ``context.graph.aupdate_state``
+            # / ``aget_state`` after the summarization step. Without a
+            # stub graph the new graph_ref-empty guard in ``agent_node``
+            # (Fix 2) skips the repair at WARNING, masking the coexistence
+            # behavior this test is meant to exercise.
             graph_ref=[_StubGraph()],
         )
 
@@ -435,6 +437,13 @@ class TestMaxRepairs:
             loop_breaker_slot=slot,
             loop_repairer=repairer,
             loop_breaker_config=cfg,
+            # ``graph_ref`` must point at a real-ish object because
+            # ``LoopRepairer.repair`` calls ``context.graph.aupdate_state``
+            # / ``aget_state`` after the summarization step. Without a
+            # stub graph the new graph_ref-empty guard in ``agent_node``
+            # (Fix 2) skips the repair at WARNING, masking the single-repair
+            # behavior this test is meant to exercise.
+            graph_ref=[_StubGraph()],
         )
 
         messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
@@ -459,15 +468,14 @@ class TestMaxRepairs:
 def _make_manager_with_loop_breaker_surface():
     """Stand-in exposing the loop-breaker surface + cleanup helper.
 
-    Binds real ``InstanceManager.get_loop_breaker_state``,
-    ``record_loop_repair``, ``reset_loop_breaker``,
-    ``get_loop_repair_count``, AND ``_cleanup_instance_state`` onto
-    the stub. Mirrors ``_make_manager_with_cleanup_surface`` in
-    ``tests/test_gii_throttle.py`` for the loop-breaker parallel.
+    Binds real ``InstanceManager.record_loop_repair``,
+    ``reset_loop_breaker``, ``get_loop_repair_count``, AND
+    ``_cleanup_instance_state`` onto the stub. Mirrors
+    ``_make_manager_with_cleanup_surface`` in ``tests/test_gii_throttle.py``
+    for the loop-breaker parallel.
     """
     class _LoopCleanupStub:
         # Loop-breaker surface
-        get_loop_breaker_state: Any
         record_loop_repair: Any
         reset_loop_breaker: Any
         get_loop_repair_count: Any
@@ -480,9 +488,6 @@ def _make_manager_with_loop_breaker_surface():
             self._graph_tasks: dict = {}
             self._pending_injections: dict = {}
             self._context_usage_cleared: list[str] = []
-            self.get_loop_breaker_state = (
-                manager_module.InstanceManager.get_loop_breaker_state.__get__(self)
-            )
             self.record_loop_repair = (
                 manager_module.InstanceManager.record_loop_repair.__get__(self)
             )
@@ -555,7 +560,7 @@ class TestParallelToolCalls:
         repairer = MagicMock()
 
         async def fake_repair(ctx):
-            return LoopRepairer.RepairResult(
+            return RepairResult(
                 success=True,
                 repaired_messages=ctx.messages,
                 summary="summary",
@@ -674,7 +679,7 @@ class TestFallbackOnLLMError:
             graph_ref = [_StubGraph()]
             agent_node, llm = _make_agent(
                 loop_breaker_slot=slot,
-                loop_repairer=LoopRepairer(llm_config={"model": "test"}),
+                loop_repairer=LoopRepairer(),
                 loop_breaker_config=cfg,
                 graph_ref=graph_ref,
             )
@@ -737,7 +742,7 @@ class TestInjectedMessageReAppend:
             # that lost the in-memory message). Then return messages
             # WITHOUT the injection — the agent_node must re-append it
             # to ``messages``/``full_messages`` after the repair.
-            return LoopRepairer.RepairResult(
+            return RepairResult(
                 success=True,
                 repaired_messages=[HumanMessage(content="post-repair", id="pr-1")],
                 summary="s",
@@ -832,7 +837,7 @@ class TestSummarizationTimeout:
             graph_ref = [_StubGraph()]
             agent_node, llm = _make_agent(
                 loop_breaker_slot=slot,
-                loop_repairer=LoopRepairer(llm_config={"model": "test"}),
+                loop_repairer=LoopRepairer(),
                 loop_breaker_config=cfg,
                 graph_ref=graph_ref,
             )

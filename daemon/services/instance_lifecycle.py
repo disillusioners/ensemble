@@ -1166,7 +1166,7 @@ class InstanceLifecycleService:
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
             loop_breaker_slot=LoopBreakerSlot(self._manager),
-            loop_repairer=LoopRepairer(llm_config),
+            loop_repairer=LoopRepairer(),
             loop_breaker_config=self._config.loop_breaker,
             manager=self._manager,
         )
@@ -2487,7 +2487,7 @@ class InstanceLifecycleService:
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
             loop_breaker_slot=LoopBreakerSlot(self._manager),
-            loop_repairer=LoopRepairer(llm_config),
+            loop_repairer=LoopRepairer(),
             loop_breaker_config=self._config.loop_breaker,
             manager=self._manager,
         )

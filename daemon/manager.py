@@ -2052,15 +2052,6 @@ class InstanceManager:
         """Return the current consecutive-call count (0 if unset)."""
         return self._gii_throttle.get(instance_id, 0)
 
-    def get_loop_breaker_state(self, instance_id: str) -> dict:
-        """Return the loop-breaker state for ``instance_id`` (empty dict if unset).
-
-        Used by :class:`daemon.graph.LoopBreakerSlot` to peek at the current
-        repair count without mutating state. Reads from ``_loop_breaker_state``
-        which is RAM-only.
-        """
-        return self._loop_breaker_state.get(instance_id, {})
-
     def record_loop_repair(self, instance_id: str, summary: str) -> int:
         """Record a repair event for ``instance_id``.
 
@@ -2071,7 +2062,7 @@ class InstanceManager:
         Args:
             instance_id: Target instance.
             summary: Short description of what was repaired (used by
-                ``LOOP_BREAKER_SUMMARY_PROMPT``-style summaries).
+                ``REPAIR_SUMMARIZATION_PROMPT``-style summaries).
 
         Returns:
             The new repair count after incrementing.

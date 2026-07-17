@@ -55,15 +55,8 @@ GII_MAX_DELAY = 900  # 6+ consecutive: 15 min (cap)
 # State lives on InstanceManager._loop_breaker_state; access goes through
 # LoopBreakerSlot (duck-typed getattr delegation).
 LOOP_BREAKER_DEFAULT_THRESHOLD = 3
-LOOP_BREAKER_DEFAULT_MAX_REPAIRS = 3
 LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS = 30
 LOOP_BREAKER_REPAIR_PREFIX = "repair-"
-LOOP_BREAKER_SUMMARY_PROMPT = (
-    "A repetition loop was detected in your recent tool calls. "
-    "You called '{tool_name}' {count} times in a row with the same arguments. "
-    "Those repetitive messages have been removed to break the loop. "
-    "Review what you were trying to accomplish and continue with a different approach."
-)
 
 # Phase 2 / Repair engine prompt — sent to the LLM when summarizing a detected
 # loop. The repair flow calls ``LoopRepairer._summarize_loop`` which builds
@@ -98,6 +91,7 @@ from .llm_error_classifier import (
 from .response_validation import LLMResponseValidationError
 from .language_detection import detect_wrong_language
 from .utils import serialize_message
+from .config import LoopBreakerConfig
 # Lazy import below — module-level ``from .services.language_utils`` would
 # trigger daemon.services.__init__ → instance_lifecycle → compaction →
 # graph (cycle) before this module finishes loading.
@@ -203,19 +197,12 @@ class LoopBreakerSlot:
 
     Args:
         manager: The owning :class:`InstanceManager` (or any object exposing
-            ``get_loop_breaker_state``, ``record_loop_repair``,
-            ``reset_loop_breaker``, and ``get_loop_repair_count`` methods).
+            ``record_loop_repair``, ``reset_loop_breaker``, and
+            ``get_loop_repair_count`` methods).
     """
 
     def __init__(self, manager: Any) -> None:
         self._manager = manager
-
-    def get_state(self, instance_id: str) -> dict:
-        """Return loop-breaker state for instance (empty dict if unset)."""
-        getter = getattr(self._manager, "get_loop_breaker_state", None)
-        if getter is None:
-            return {}
-        return getter(instance_id)
 
     def record_repair(self, instance_id: str, summary: str) -> int:
         """Record a repair event. Returns the new repair count for the instance.
@@ -561,14 +548,11 @@ class LoopRepairer:
     record the repair via ``record_repair``.
     """
 
-    def __init__(self, llm_config: dict | None = None, timeout_seconds: int = LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS):
-        # ``llm_config`` is kept on the instance for parity with other
-        # graph-level helpers, but the LLM config actually used at runtime
-        # comes from ``RepairContext.llm_config`` (per-call, matches how
-        # reactive compaction uses ``compactor.llm_config``). Storing it
-        # here lets callers override the default without threading
-        # ``llm_config`` through every ``RepairContext`` site.
-        self._llm_config = llm_config or {}
+    def __init__(self, timeout_seconds: int = LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS):
+        # The LLM config is supplied per-call via ``RepairContext.llm_config``
+        # (mirrors how ``ContextCompactor`` works). Keeping the config out of
+        # the constructor avoids threading it through every ``LoopRepairer``
+        # instantiation site while matching the reactive-compaction shape.
         self._timeout_seconds = timeout_seconds or LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS
 
     async def repair(self, context: RepairContext) -> RepairResult:
@@ -883,12 +867,193 @@ class LoopRepairer:
         )
 
 
-# ``RepairResult`` is defined at module scope (no nesting under
-# ``LoopRepairer``) so the type annotation on ``repair`` can stay a forward
-# reference and the dataclass stays importable in isolation. Alias it on
-# the class for callers — including the loop-breaker integration tests —
-# that prefer the ``LoopRepairer.RepairResult`` qualification.
-LoopRepairer.RepairResult = RepairResult
+async def _maybe_repair_loop(
+    messages: list[BaseMessage],
+    full_messages: list[BaseMessage],
+    instance_id: str,
+    instance_short: str,
+    config: dict | None,
+    graph_ref: list | None,
+    injected_msg: BaseMessage | None,
+    system_prompt: str,
+    llm_config: dict | None,
+    loop_breaker_slot: LoopBreakerSlot | None,
+    loop_repairer: LoopRepairer | None,
+    loop_breaker_config: LoopBreakerConfig,
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    """Run the general hallucination loop detection+repair block.
+
+    Extracted from :func:`create_agent_node` to keep the LLM-call site readable.
+    The helper owns the entire ``loop_breaker_slot`` / ``loop_repairer``
+    pipeline: scan -> repair-cap check -> graph_ref guard -> repair call ->
+    C3 re-append. The agent node consumes only the returned
+    ``(messages, full_messages)`` pair.
+
+    The function is intentionally pure-except-for-side-effects: it returns the
+    ORIGINAL ``messages`` / ``full_messages`` pair whenever the loop breaker
+    is disabled, no loop is detected, the repair is skipped (max repairs or
+    missing ``graph_ref``), or the repair itself fails. ``full_messages`` is
+    ONLY rebuilt when a repair succeeds — mirroring the original inline
+    behavior. ``graph_ref=None`` disables the repair path (Fix 2).
+
+    ``full_messages`` MUST be the same list the caller intends to send to
+    the LLM at the call site — typically already including
+    ``injected_msg`` (C2) — so that the no-repair paths preserve it
+    unchanged. The helper only knows how to rebuild ``full_messages`` from
+    a clean ``[SystemMessage(system_prompt), *messages]`` skeleton; it does
+    NOT know whether the caller appended extra items, so the caller must
+    pass the post-append list and trust that the helper returns it
+    verbatim on the no-repair paths.
+
+    Args:
+        messages: Current conversation messages (oldest-first).
+        full_messages: The ``messages`` list the caller intends to feed to
+            the LLM (already includes ``injected_msg`` if any). Returned
+            unchanged on no-repair paths; rebuilt on success.
+        instance_id: Graph thread id — used for slot lookups.
+        instance_short: Short id for log readability.
+        config: LangGraph thread config (used to build ``RepairContext``).
+        graph_ref: Late-bound list ``[compiled_graph_or_None]``. ``None`` or
+            ``[None]`` disables the repair path.
+        injected_msg: Optional ``HumanMessage`` that was consumed from the
+            injection slot this turn; re-appended after a successful repair
+            (C3) when the repairer forgot it.
+        system_prompt: Session system prompt — prepended to ``full_messages``.
+        llm_config: Session LLM config — passed to ``RepairContext``.
+        loop_breaker_slot: Slot handle; ``None`` disables the block.
+        loop_repairer: Repair helper; ``None`` disables the block.
+        loop_breaker_config: ``LoopBreakerConfig`` — supplies ``enabled``,
+            ``threshold``, ``max_repairs``, ``excluded_tools``, and
+            ``summarization_timeout_seconds``.
+
+    Returns:
+        Tuple of ``(messages, full_messages)``. When the loop breaker is
+        no-op or the repair fails, the ORIGINAL pair is returned unchanged.
+        When the repair succeeds, ``messages`` is the post-repair list
+        (with ``injected_msg`` re-appended when missing) and ``full_messages``
+        is the freshly-rebuilt ``[SystemMessage(system_prompt), *messages]``.
+    """
+    if not (
+        loop_breaker_slot is not None
+        and loop_repairer is not None
+        and loop_breaker_config.enabled
+    ):
+        return messages, full_messages
+
+    try:
+        detection = LoopDetector.scan(
+            messages=messages,
+            threshold=loop_breaker_config.threshold,
+            excluded_tools=loop_breaker_config.excluded_tools,
+        )
+    except Exception as det_err:  # noqa: BLE001
+        # Defensive: a detector crash MUST NOT freeze the agent.
+        # Log and continue with the original messages.
+        logger.warning(
+            f"[LOOP BREAKER] scan failed for {instance_short}: "
+            f"{type(det_err).__name__}: {det_err}"
+        )
+        detection = None
+
+    if detection is None:
+        # No loop detected this turn. If a prior repair had been recorded,
+        # the agent has made progress since, so reset the counter so the
+        # next genuine loop starts from ``count=1`` instead of inheriting
+        # stale state.
+        if loop_breaker_slot.get_repair_count(instance_id) > 0:
+            loop_breaker_slot.clear(instance_id)
+        return messages, full_messages
+
+    repair_count = loop_breaker_slot.get_repair_count(instance_id)
+    if repair_count >= loop_breaker_config.max_repairs:
+        logger.warning(
+            f"[LOOP BREAKER] Instance {instance_short}: max "
+            f"repairs ({loop_breaker_config.max_repairs}) reached, "
+            f"forcing continuation with original messages"
+        )
+        return messages, full_messages
+
+    logger.warning(
+        f"[LOOP BREAKER] Instance {instance_short}: detected "
+        f"{detection.repetition_count}x repeated "
+        f"'{detection.tool_name}' calls. Triggering repair "
+        f"(attempt {repair_count + 1}/{loop_breaker_config.max_repairs})"
+    )
+
+    # Recoverable guard (Fix 2): if the graph reference has not been bound
+    # yet (e.g. early-turn graph compilation is still pending, or the agent
+    # is running outside ``build_instance_graph``), ``repair()`` cannot
+    # run and would land in the ``success=False`` ERROR path below. That
+    # outcome is recoverable — the agent continues with the original
+    # messages either way and the next turn will retry — so skip the
+    # repair call at WARNING and let the agent proceed unblocked.
+    if graph_ref is None or graph_ref[0] is None:
+        logger.warning(
+            f"[LOOP BREAKER] Skipping repair for "
+            f"{instance_short}: graph_ref is empty, "
+            f"continuing with original messages"
+        )
+        return messages, full_messages
+
+    try:
+        repair_context = RepairContext(
+            detection=detection,
+            messages=messages,
+            thread_config=config or {},
+            graph=graph_ref[0],
+            llm_config=llm_config or {},
+            system_prompt=system_prompt,
+            injected_msg=injected_msg,
+            summarization_timeout_seconds=(
+                loop_breaker_config.summarization_timeout_seconds
+            ),
+        )
+        result = await loop_repairer.repair(repair_context)
+    except Exception as rep_err:  # noqa: BLE001
+        # Repair's own ``repair`` is already wrapped in try/except — a
+        # raise here means something escaped that guard (e.g. graph_ref
+        # is a bad type). Log + fall through to original messages.
+        logger.error(
+            f"[LOOP BREAKER] repair raised unexpectedly for "
+            f"{instance_short}: {type(rep_err).__name__}: "
+            f"{rep_err}"
+        )
+        result = RepairResult(
+            success=False,
+            repaired_messages=list(messages),
+            summary="",
+            repair_message_id="",
+            error=str(rep_err),
+        )
+
+    if not result.success:
+        logger.error(
+            f"[LOOP BREAKER] Repair failed: {result.error}, "
+            f"continuing with original messages"
+        )
+        return messages, full_messages
+
+    loop_breaker_slot.record_repair(instance_id, result.summary)
+    messages = result.repaired_messages
+    # C3 defensive re-append: the injection lives only in the local
+    # closure (the real ``LoopRepairer`` already re-appends it on its own,
+    # but a mock repairer — or a future repairer that forgets — could
+    # drop it). If the repaired tail does NOT end with the injected
+    # message, re-append it so the LLM retry still receives the user's
+    # intent. The id-match guard prevents double-appending when a
+    # well-behaved repairer already preserved the injection.
+    if injected_msg is not None and (
+        not messages or messages[-1].id != injected_msg.id
+    ):
+        messages = list(messages) + [injected_msg]
+    full_messages = [SystemMessage(content=system_prompt)] + list(messages)
+    logger.info(
+        f"[LOOP BREAKER] Repair complete, re-invoking "
+        f"LLM with {len(full_messages)} messages "
+        f"(repair msg: "
+        f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
+    )
+    return messages, full_messages
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -1499,14 +1664,11 @@ def create_agent_node(
 
     # Resolve once at factory time so the closure does not rebuild a
     # default config on every LLM call (and so tests can pass their
-    # own frozen config object). ``LoopBreakerConfig`` lives in
-    # ``daemon.config`` and is imported lazily to avoid the
-    # ``daemon.graph ↔ daemon.config ↔ daemon.manager`` import cycle
-    # that would otherwise force a hard-import of config at module
-    # load (graph is imported transitively by config).
+    # own frozen config object). ``LoopBreakerConfig`` is imported at
+    # module top-level (no cycle — ``daemon.config`` does not import
+    # ``daemon.graph``).
     if loop_breaker_config is None:
-        from .config import LoopBreakerConfig as _LBC
-        _lb_config = _LBC()
+        _lb_config = LoopBreakerConfig()
     else:
         _lb_config = loop_breaker_config
 
@@ -1673,130 +1835,25 @@ def create_agent_node(
         # sees different context on the retry. Both are no-ops when their
         # respective slots are ``None`` (backward-compatible default).
         #
-        # ``_lb_config.enabled`` is the kill switch — a config with
-        # ``enabled=False`` disables detection+repair entirely without
-        # callers having to thread ``None`` slots.
-        if (
-            loop_breaker_slot is not None
-            and loop_repairer is not None
-            and _lb_config.enabled
-        ):
-            try:
-                detection = LoopDetector.scan(
-                    messages=messages,
-                    threshold=_lb_config.threshold,
-                    excluded_tools=_lb_config.excluded_tools,
-                )
-            except Exception as det_err:  # noqa: BLE001
-                # Defensive: a detector crash MUST NOT freeze the agent.
-                # Log and continue with the original messages.
-                logger.warning(
-                    f"[LOOP BREAKER] scan failed for {instance_short}: "
-                    f"{type(det_err).__name__}: {det_err}"
-                )
-                detection = None
-
-            if detection is not None:
-                repair_count = loop_breaker_slot.get_repair_count(instance_id)
-                if repair_count < _lb_config.max_repairs:
-                    logger.warning(
-                        f"[LOOP BREAKER] Instance {instance_short}: detected "
-                        f"{detection.repetition_count}x repeated "
-                        f"'{detection.tool_name}' calls. Triggering repair "
-                        f"(attempt {repair_count + 1}/{_lb_config.max_repairs})"
-                    )
-                    # Recoverable guard: if the graph reference has not
-                    # been bound yet (e.g. early-turn graph compilation
-                    # is still pending, or the agent is running outside
-                    # ``build_instance_graph``), ``repair()`` cannot run
-                    # and would land in the ``success=False`` ERROR path
-                    # below. That outcome is recoverable — the agent
-                    # continues with the original messages either way and
-                    # the next turn will retry — so skip the repair call
-                    # at WARNING and let the agent proceed unblocked.
-                    if graph_ref is None or graph_ref[0] is None:
-                        logger.warning(
-                            f"[LOOP BREAKER] Skipping repair for "
-                            f"{instance_short}: graph_ref is empty, "
-                            f"continuing with original messages"
-                        )
-                    else:
-                        try:
-                            repair_context = RepairContext(
-                                detection=detection,
-                                messages=messages,
-                                thread_config=config or {},
-                                graph=graph_ref[0],
-                                llm_config=llm_config or {},
-                                system_prompt=system_prompt,
-                                injected_msg=injected_msg,
-                                summarization_timeout_seconds=(
-                                    _lb_config.summarization_timeout_seconds
-                                ),
-                            )
-                            result = await loop_repairer.repair(repair_context)
-                        except Exception as rep_err:  # noqa: BLE001
-                            # Repair's own ``repair`` is already wrapped in
-                            # try/except — a raise here means something
-                            # escaped that guard (e.g. graph_ref is a bad
-                            # type). Log + fall through to original messages.
-                            logger.error(
-                                f"[LOOP BREAKER] repair raised unexpectedly for "
-                                f"{instance_short}: {type(rep_err).__name__}: "
-                                f"{rep_err}"
-                            )
-                            result = RepairResult(
-                                success=False,
-                                repaired_messages=list(messages),
-                                summary="",
-                                repair_message_id="",
-                                error=str(rep_err),
-                            )
-
-                        if result.success:
-                            loop_breaker_slot.record_repair(
-                                instance_id, result.summary
-                            )
-                            messages = result.repaired_messages
-                            # C3 defensive re-append: the injection lives only
-                            # in the local closure (the real ``LoopRepairer``
-                            # already re-appends it on its own, but a mock
-                            # repairer — or a future repairer that forgets —
-                            # could drop it). If the repaired tail does NOT
-                            # end with the injected message, re-append it so
-                            # the LLM retry still receives the user's intent.
-                            # The id-match guard prevents double-appending when
-                            # a well-behaved repairer already preserved the
-                            # injection.
-                            if injected_msg is not None and (
-                                not messages or messages[-1].id != injected_msg.id
-                            ):
-                                messages = list(messages) + [injected_msg]
-                            full_messages = [SystemMessage(content=system_prompt)] + list(messages)
-                            logger.info(
-                                f"[LOOP BREAKER] Repair complete, re-invoking "
-                                f"LLM with {len(full_messages)} messages "
-                                f"(repair msg: "
-                                f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
-                            )
-                        else:
-                            logger.error(
-                                f"[LOOP BREAKER] Repair failed: {result.error}, "
-                                f"continuing with original messages"
-                            )
-                else:
-                    logger.warning(
-                        f"[LOOP BREAKER] Instance {instance_short}: max "
-                        f"repairs ({_lb_config.max_repairs}) reached, "
-                        f"forcing continuation with original messages"
-                    )
-            else:
-                # No loop detected on this turn — if a repair had been
-                # recorded previously, the agent has since made progress,
-                # so reset the counter so the next genuine loop starts
-                # from ``count=1`` instead of inheriting stale state.
-                if loop_breaker_slot.get_repair_count(instance_id) > 0:
-                    loop_breaker_slot.clear(instance_id)
+        # The full detection+repair pipeline lives in ``_maybe_repair_loop``
+        # so the LLM-call site here stays readable. ``_lb_config.enabled`` is
+        # the kill switch — a config with ``enabled=False`` disables
+        # detection+repair entirely without callers having to thread
+        # ``None`` slots.
+        messages, full_messages = await _maybe_repair_loop(
+            messages,
+            full_messages,
+            instance_id,
+            instance_short,
+            config,
+            graph_ref,
+            injected_msg,
+            system_prompt,
+            llm_config,
+            loop_breaker_slot,
+            loop_repairer,
+            _lb_config,
+        )
 
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -2370,24 +2427,6 @@ def build_instance_graph(
 
 # Backward compatibility alias
 build_session_graph = build_instance_graph
-
-
-def __getattr__(name: str):
-    """Lazy module-level attribute access.
-
-    Re-exports ``LoopBreakerConfig`` (defined in :mod:`daemon.config`) without
-    forcing an eager import at module load time. ``daemon.graph`` is imported
-    transitively by :mod:`daemon.config`, so a top-level
-    ``from .config import LoopBreakerConfig`` would create an import cycle.
-    Tests and downstream code can therefore write
-    ``from daemon.graph import LoopBreakerConfig`` and resolve it on first
-    attribute access instead.
-    """
-    if name == "LoopBreakerConfig":
-        from .config import LoopBreakerConfig
-
-        return LoopBreakerConfig
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
