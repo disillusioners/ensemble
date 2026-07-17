@@ -329,6 +329,7 @@ class TestGIICoexistence:
             loop_repairer=repairer,
             loop_breaker_config=cfg,
             throttle_slot=throttle,
+            graph_ref=[_StubGraph()],
         )
 
         # Build 3 messages, each being a ``get_instance_info`` ToolMessage
@@ -567,6 +568,7 @@ class TestParallelToolCalls:
             loop_breaker_slot=slot,
             loop_repairer=repairer,
             loop_breaker_config=cfg,
+            graph_ref=[_StubGraph()],
         )
 
         # Build 3 AIMessages, each with TWO identical tool_calls in

@@ -1705,69 +1705,85 @@ def create_agent_node(
                         f"'{detection.tool_name}' calls. Triggering repair "
                         f"(attempt {repair_count + 1}/{_lb_config.max_repairs})"
                     )
-                    try:
-                        repair_context = RepairContext(
-                            detection=detection,
-                            messages=messages,
-                            thread_config=config or {},
-                            graph=graph_ref[0] if graph_ref else None,
-                            llm_config=llm_config or {},
-                            system_prompt=system_prompt,
-                            injected_msg=injected_msg,
-                            summarization_timeout_seconds=(
-                                _lb_config.summarization_timeout_seconds
-                            ),
-                        )
-                        result = await loop_repairer.repair(repair_context)
-                    except Exception as rep_err:  # noqa: BLE001
-                        # Repair's own ``repair`` is already wrapped in
-                        # try/except — a raise here means something
-                        # escaped that guard (e.g. graph_ref is a bad
-                        # type). Log + fall through to original messages.
-                        logger.error(
-                            f"[LOOP BREAKER] repair raised unexpectedly for "
-                            f"{instance_short}: {type(rep_err).__name__}: "
-                            f"{rep_err}"
-                        )
-                        result = RepairResult(
-                            success=False,
-                            repaired_messages=list(messages),
-                            summary="",
-                            repair_message_id="",
-                            error=str(rep_err),
-                        )
-
-                    if result.success:
-                        loop_breaker_slot.record_repair(
-                            instance_id, result.summary
-                        )
-                        messages = result.repaired_messages
-                        # C3 defensive re-append: the injection lives only
-                        # in the local closure (the real ``LoopRepairer``
-                        # already re-appends it on its own, but a mock
-                        # repairer — or a future repairer that forgets —
-                        # could drop it). If the repaired tail does NOT
-                        # end with the injected message, re-append it so
-                        # the LLM retry still receives the user's intent.
-                        # The id-match guard prevents double-appending when
-                        # a well-behaved repairer already preserved the
-                        # injection.
-                        if injected_msg is not None and (
-                            not messages or messages[-1].id != injected_msg.id
-                        ):
-                            messages = list(messages) + [injected_msg]
-                        full_messages = [SystemMessage(content=system_prompt)] + list(messages)
-                        logger.info(
-                            f"[LOOP BREAKER] Repair complete, re-invoking "
-                            f"LLM with {len(full_messages)} messages "
-                            f"(repair msg: "
-                            f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
-                        )
-                    else:
-                        logger.error(
-                            f"[LOOP BREAKER] Repair failed: {result.error}, "
+                    # Recoverable guard: if the graph reference has not
+                    # been bound yet (e.g. early-turn graph compilation
+                    # is still pending, or the agent is running outside
+                    # ``build_instance_graph``), ``repair()`` cannot run
+                    # and would land in the ``success=False`` ERROR path
+                    # below. That outcome is recoverable — the agent
+                    # continues with the original messages either way and
+                    # the next turn will retry — so skip the repair call
+                    # at WARNING and let the agent proceed unblocked.
+                    if graph_ref is None or graph_ref[0] is None:
+                        logger.warning(
+                            f"[LOOP BREAKER] Skipping repair for "
+                            f"{instance_short}: graph_ref is empty, "
                             f"continuing with original messages"
                         )
+                    else:
+                        try:
+                            repair_context = RepairContext(
+                                detection=detection,
+                                messages=messages,
+                                thread_config=config or {},
+                                graph=graph_ref[0],
+                                llm_config=llm_config or {},
+                                system_prompt=system_prompt,
+                                injected_msg=injected_msg,
+                                summarization_timeout_seconds=(
+                                    _lb_config.summarization_timeout_seconds
+                                ),
+                            )
+                            result = await loop_repairer.repair(repair_context)
+                        except Exception as rep_err:  # noqa: BLE001
+                            # Repair's own ``repair`` is already wrapped in
+                            # try/except — a raise here means something
+                            # escaped that guard (e.g. graph_ref is a bad
+                            # type). Log + fall through to original messages.
+                            logger.error(
+                                f"[LOOP BREAKER] repair raised unexpectedly for "
+                                f"{instance_short}: {type(rep_err).__name__}: "
+                                f"{rep_err}"
+                            )
+                            result = RepairResult(
+                                success=False,
+                                repaired_messages=list(messages),
+                                summary="",
+                                repair_message_id="",
+                                error=str(rep_err),
+                            )
+
+                        if result.success:
+                            loop_breaker_slot.record_repair(
+                                instance_id, result.summary
+                            )
+                            messages = result.repaired_messages
+                            # C3 defensive re-append: the injection lives only
+                            # in the local closure (the real ``LoopRepairer``
+                            # already re-appends it on its own, but a mock
+                            # repairer — or a future repairer that forgets —
+                            # could drop it). If the repaired tail does NOT
+                            # end with the injected message, re-append it so
+                            # the LLM retry still receives the user's intent.
+                            # The id-match guard prevents double-appending when
+                            # a well-behaved repairer already preserved the
+                            # injection.
+                            if injected_msg is not None and (
+                                not messages or messages[-1].id != injected_msg.id
+                            ):
+                                messages = list(messages) + [injected_msg]
+                            full_messages = [SystemMessage(content=system_prompt)] + list(messages)
+                            logger.info(
+                                f"[LOOP BREAKER] Repair complete, re-invoking "
+                                f"LLM with {len(full_messages)} messages "
+                                f"(repair msg: "
+                                f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
+                            )
+                        else:
+                            logger.error(
+                                f"[LOOP BREAKER] Repair failed: {result.error}, "
+                                f"continuing with original messages"
+                            )
                 else:
                     logger.warning(
                         f"[LOOP BREAKER] Instance {instance_short}: max "

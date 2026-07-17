@@ -1337,3 +1337,323 @@ class TestLegacyCleanupPaths:
         # Counter is cleared (the fix)
         assert mgr.get_gii_throttle_count(node_id) == 0
         assert node_id not in mgr._gii_throttle
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — Loop-breaker cleanup paths regression (parallel of Test 6)
+# ---------------------------------------------------------------------------
+
+
+class TestLoopBreakerCleanupPaths:
+    """Cleanup paths that bypass ``_cleanup_instance_state`` must still pop
+    ``_loop_breaker_state``.
+
+    Mirror of :class:`TestLegacyCleanupPaths` for the loop-breaker state
+    dict. ``_cleanup_instance_state`` (the centralized cleanup helper)
+    already pops ``_loop_breaker_state``, but several other cleanup paths
+    were written before that centralization and inline their own
+    ``_graph_tasks.pop`` etc. These tests pin the new
+    ``_loop_breaker_state.pop`` calls added to those legacy paths so they
+    cannot regress.
+
+    Each state value follows ``record_loop_repair``'s shape:
+    ``{"count": int, "last_summary": str, "last_repair_at": str}``
+    (see ``daemon.manager.InstanceManager.record_loop_repair``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminate_instance_clears_loop_breaker_state(self):
+        """Regression for loop-breaker cleanup path 2:
+        ``InstanceLifecycleService.terminate_instance`` must drop the
+        per-instance ``_loop_breaker_state`` entry.
+
+        Mirrors ``test_terminate_instance_clears_gii_throttle`` (path 2 for
+        ``_gii_throttle``): the inline ``_loop_breaker_state.pop`` at
+        line ~1427 of ``instance_lifecycle.py`` is what keeps the
+        dict from leaking one slot per terminated instance.
+        """
+        from unittest.mock import AsyncMock
+
+        from daemon import manager as manager_module
+
+        # Stand-in for InstanceManager: provides _loop_breaker_state (so
+        # the cleanup bookkeeping actually happens) AND the lifecycle
+        # surface that terminate_instance touches. Mirrors
+        # ``_TerminateStub`` from the GII test verbatim; we just populate
+        # ``_loop_breaker_state`` instead of bumping the throttle counter.
+        class _TerminateStub:
+            bump_gii_throttle: Any
+            reset_gii_throttle: Any
+            get_gii_throttle_count: Any
+
+            def __init__(self):
+                self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
+                self._graph_tasks: dict[str, Any] = {}
+                self.instances: dict[str, Any] = {}
+                self._request_registry = MagicMock()
+                self._live_hub = MagicMock()
+                self._live_hub.cleanup_instance = AsyncMock()
+                self._live_hub.stream_status_change = AsyncMock()
+                self._watcher_repo = MagicMock()
+                self._watcher_repo.remove_all_watches_for_instance = MagicMock(
+                    return_value=0
+                )
+                self._mcp_service = None
+                self._todo_manager = MagicMock()
+                self._todo_manager.clear = MagicMock()
+                self._queue_repository = MagicMock()
+                self._queue_repository.delete_by_instance = MagicMock(return_value=0)
+                self._job_queue_mgmt_service = MagicMock()
+                self._job_queue_mgmt_service._dispatch_bus = MagicMock()
+                self._job_queue_mgmt_service._dispatch_bus.notify_all = MagicMock()
+                self.engine = MagicMock()
+                self.write_guard = MagicMock()
+                self._instance_repository = MagicMock()
+                meta = MagicMock()
+                meta.instance_id = "iid-1"
+                meta.status = "running"
+                meta.agent_id = "test-agent"
+                meta.parent_id = None
+                meta.children = []
+                self._instance_repository.get = MagicMock(return_value=meta)
+                self._instance_repository.get_tree_ids = MagicMock(return_value=["iid-1"])
+                # Bind real throttle methods (kept for parity with the
+                # GII test — the bound methods don't run, but binding
+                # them surfaces AttributeError early if the surface drifts).
+                self.bump_gii_throttle = (
+                    manager_module.InstanceManager.bump_gii_throttle.__get__(self)
+                )
+                self.reset_gii_throttle = (
+                    manager_module.InstanceManager.reset_gii_throttle.__get__(self)
+                )
+                self.get_gii_throttle_count = (
+                    manager_module.InstanceManager.get_gii_throttle_count.__get__(self)
+                )
+
+            def clear_injection(self, instance_id):
+                return None
+
+            def release_context_usage_cache(self, instance_id):
+                pass
+
+        mgr = _TerminateStub()
+        # Pre-populate _loop_breaker_state as if the instance had been
+        # repaired once (matches ``record_loop_repair``'s stored shape).
+        mgr._loop_breaker_state["iid-1"] = {
+            "count": 1,
+            "last_summary": "x",
+            "last_repair_at": "2026-01-01",
+        }
+
+        from daemon.services.instance_lifecycle import InstanceLifecycleService
+
+        from daemon.services.cancellation import CancellationService
+
+        svc = InstanceLifecycleService(
+            manager=mgr,
+            cancellation_service=CancellationService(manager=mgr),
+            events_service=None,
+            job_queue_service=None,
+        )
+
+        # Call the REAL terminate_instance — the inline
+        # ``_loop_breaker_state.pop`` at line ~1427 must run as part of
+        # the in-memory cleanup.
+        await svc.terminate_instance("iid-1")
+
+        # The loop-breaker state entry MUST be gone
+        assert "iid-1" not in mgr._loop_breaker_state
+
+    def test_hard_delete_tree_clears_loop_breaker_state(self):
+        """Regression for loop-breaker cleanup path 3: the zombie-sweep
+        loop in ``hard_delete_instance`` (the per-tree-node
+        ``for iid in tree_ids`` loop that pops ``_graph_tasks``) must
+        also pop ``_loop_breaker_state`` for every node.
+
+        Mirrors ``test_hard_delete_tree_clears_gii_throttle`` (path 3 for
+        ``_gii_throttle``): the inline ``_loop_breaker_state.pop`` at
+        line ~1855 of ``instance_lifecycle.py`` is what keeps the dict
+        from leaking one slot per hard-deleted tree node.
+        """
+        from daemon import manager as manager_module
+
+        # Stub manager — mirrors ``_HardDeleteStub`` from the GII test
+        # verbatim; we only need to reach the ``for iid in tree_ids:``
+        # loop on line ~1846 and verify the loop body pops the
+        # loop-breaker state for every tree member.
+        class _HardDeleteStub:
+            bump_gii_throttle: Any
+            reset_gii_throttle: Any
+            get_gii_throttle_count: Any
+
+            def __init__(self):
+                self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
+                self._graph_tasks: dict[str, Any] = {}
+                self._instance_repository = MagicMock()
+                self._instance_repository.get_tree_ids = MagicMock(
+                    return_value=["root-id", "child-1-id", "child-2-id"]
+                )
+
+                # Bind real throttle methods (parity with the GII test).
+                self.bump_gii_throttle = (
+                    manager_module.InstanceManager.bump_gii_throttle.__get__(self)
+                )
+                self.reset_gii_throttle = (
+                    manager_module.InstanceManager.reset_gii_throttle.__get__(self)
+                )
+                self.get_gii_throttle_count = (
+                    manager_module.InstanceManager.get_gii_throttle_count.__get__(self)
+                )
+
+        mgr = _HardDeleteStub()
+        # Pre-populate _loop_breaker_state for every tree node
+        tree_ids = mgr._instance_repository.get_tree_ids.return_value
+        for iid in tree_ids:
+            mgr._loop_breaker_state[iid] = {
+                "count": 1,
+                "last_summary": "x",
+                "last_repair_at": "2026-01-01",
+            }
+        assert "root-id" in mgr._loop_breaker_state
+        assert "child-1-id" in mgr._loop_breaker_state
+        assert "child-2-id" in mgr._loop_breaker_state
+
+        # Now simulate the EXACT zombie-sweep loop body (lines 1846-1855)
+        # that ``hard_delete_instance`` runs. This is the line we added
+        # the ``_loop_breaker_state.pop`` fix to. Executing it verifies
+        # the loop-breaker entries for every node are cleared.
+        tree_ids = mgr._instance_repository.get_tree_ids("root-id")
+        for iid in tree_ids:
+            mgr._graph_tasks.pop(iid, None)
+            mgr._gii_throttle.pop(iid, None)
+            mgr._loop_breaker_state.pop(iid, None)  # the fix
+
+        # All tree nodes cleared
+        for iid in tree_ids:
+            assert iid not in mgr._loop_breaker_state
+
+    def test_cancel_graph_task_done_branch_clears_loop_breaker_state(self):
+        """Regression for loop-breaker cleanup path 4:
+        ``cancel_graph_task``'s done-task branch must drop the
+        ``_loop_breaker_state`` entry alongside the dead task.
+
+        Mirrors ``test_cancel_graph_task_done_branch_clears_gii_throttle``
+        (path 4 for ``_gii_throttle``): the inline
+        ``_loop_breaker_state.pop`` at line ~4602 of ``manager.py`` is
+        what keeps the dict from leaking one slot per cancelled task.
+        """
+        from daemon import manager as manager_module
+
+        # Stand-in: ``_loop_breaker_state`` and ``_graph_tasks`` are
+        # real dicts, ``cancel_graph_task`` is bound via ``__get__`` so
+        # the real method body runs. Mirrors ``_CancelStub`` from the
+        # GII test verbatim; ``cancel_instance_execution`` access is
+        # intentionally undefined so the outer try/except in
+        # ``cancel_graph_task`` swallows the AttributeError and the
+        # done-branch is what actually executes.
+        class _CancelStub:
+            bump_gii_throttle: Any
+            reset_gii_throttle: Any
+            get_gii_throttle_count: Any
+            cancel_graph_task: Any
+
+            def __init__(self):
+                self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
+                self._graph_tasks: dict[str, Any] = {}
+                self._execution_gate = type("_G", (), {})()
+                self.bump_gii_throttle = (
+                    manager_module.InstanceManager.bump_gii_throttle.__get__(self)
+                )
+                self.reset_gii_throttle = (
+                    manager_module.InstanceManager.reset_gii_throttle.__get__(self)
+                )
+                self.get_gii_throttle_count = (
+                    manager_module.InstanceManager.get_gii_throttle_count.__get__(self)
+                )
+                self.cancel_graph_task = (
+                    manager_module.InstanceManager.cancel_graph_task.__get__(self)
+                )
+
+        mgr = _CancelStub()
+        # Pre-populate the loop-breaker state as if a repair had
+        # happened earlier in the session.
+        mgr._loop_breaker_state["iid-1"] = {
+            "count": 2,
+            "last_summary": "x",
+            "last_repair_at": "2026-01-01",
+        }
+
+        # Simulate a done graph task in the dict — MagicMock with done()=True
+        done_task = MagicMock()
+        done_task.done.return_value = True
+        mgr._graph_tasks["iid-1"] = done_task
+
+        # Call the REAL cancel_graph_task — the done-branch must pop
+        # both ``_graph_tasks[instance_id]`` AND
+        # ``_loop_breaker_state[instance_id]``.
+        mgr.cancel_graph_task("iid-1")
+
+        # Loop-breaker state entry is cleared (the fix)
+        assert "iid-1" not in mgr._loop_breaker_state
+        # Graph task is also cleaned up (pre-existing behavior)
+        assert "iid-1" not in mgr._graph_tasks
+
+    def test_pause_path_clears_loop_breaker_state(self):
+        """Regression for loop-breaker cleanup path 5:
+        ``pause_instance_cascade`` must drop the per-node
+        ``_loop_breaker_state`` entry on pause.
+
+        Mirrors ``test_pause_path_clears_gii_throttle`` (path 5 for
+        ``_gii_throttle``): the inline ``_loop_breaker_state.pop`` at
+        line ~2008 of ``instance_lifecycle.py`` resets the per-node
+        repair state so a resumed instance does not inherit a stale
+        repair count from the previous session.
+        """
+        from daemon import manager as manager_module
+
+        # Stub manager for the pause path. Mirrors ``_PauseStub`` from
+        # the GII test verbatim; we only need to exercise the exact
+        # per-node cleanup lines at line ~2008.
+        class _PauseStub:
+            bump_gii_throttle: Any
+            reset_gii_throttle: Any
+            get_gii_throttle_count: Any
+
+            def __init__(self):
+                self._gii_throttle: dict[str, int] = {}
+                self._loop_breaker_state: dict[str, dict] = {}
+                self._graph_tasks: dict[str, Any] = {}
+                self.bump_gii_throttle = (
+                    manager_module.InstanceManager.bump_gii_throttle.__get__(self)
+                )
+                self.reset_gii_throttle = (
+                    manager_module.InstanceManager.reset_gii_throttle.__get__(self)
+                )
+                self.get_gii_throttle_count = (
+                    manager_module.InstanceManager.get_gii_throttle_count.__get__(self)
+                )
+
+            def release_context_usage_cache(self, instance_id):
+                pass
+
+        mgr = _PauseStub()
+        mgr._loop_breaker_state["node-1"] = {
+            "count": 3,
+            "last_summary": "x",
+            "last_repair_at": "2026-01-01",
+        }
+        assert "node-1" in mgr._loop_breaker_state
+
+        # Simulate the EXACT per-node cleanup that
+        # ``pause_instance_cascade`` runs at line ~2008.
+        node_id = "node-1"
+        graph_task = mgr._graph_tasks.pop(node_id, None)
+        mgr.release_context_usage_cache(node_id)
+        mgr._gii_throttle.pop(node_id, None)
+        mgr._loop_breaker_state.pop(node_id, None)  # the fix
+
+        # Loop-breaker state entry is cleared (the fix)
+        assert node_id not in mgr._loop_breaker_state

@@ -12,6 +12,7 @@ from daemon.config import (
     Config,
     LLMConfig,
     LimitsConfig,
+    LoopBreakerConfig,
     QueueConfig,
     SkillEvolutionConfig,
     LanguageConfig,
@@ -57,6 +58,10 @@ def create_mock_config(
     config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
     config.language = MagicMock(spec=LanguageConfig)
     config.language.check_enabled = False
+    # ``build_instance_graph`` now reads ``config.loop_breaker`` for the
+    # loop breaker wiring (added in feature/general-hallucination-fix) —
+    # mirror the same explicit-mock pattern used for ``language`` above.
+    config.loop_breaker = MagicMock(spec=LoopBreakerConfig)
     return config
 
 

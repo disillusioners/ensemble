@@ -541,7 +541,6 @@ class LoopBreakerConfig(BaseSettings):
     max_repairs: int = Field(default=3, description="Maximum repair attempts per instance before giving up")
     summarization_timeout_seconds: int = Field(default=30, description="Timeout for the repair LLM summarization call")
     excluded_tools: list[str] = Field(default_factory=list, description="Tool names to skip during detection (e.g. legitimately polled resources)")
-    summarization_model: str | None = Field(default=None, description="Model override for repair summarization; None = use session model")
 
 
 class LanguageConfig(BaseSettings):
