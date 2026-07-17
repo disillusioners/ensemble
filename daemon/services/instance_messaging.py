@@ -731,7 +731,50 @@ class InstanceMessagingService:
         finally:
             # Trigger title generation even on cancellation (fire-and-forget)
             self._maybe_trigger_title_generation(instance_id, message, is_first_message)
-            
+
+            # C2 fix — deferred question pause (Solution A), second pass.
+            #
+            # ``question_pause_node`` ran inside this graph task and set a
+            # marker rather than calling ``pause_instance_cascade`` directly
+            # (to avoid self-cancel of this very task). The graph task is now
+            # popped from ``_graph_tasks`` so we are safely OUTSIDE the
+            # graph-task context — calling the cascade here will not
+            # self-cancel; the DB transaction completes normally.
+            #
+            # HOISTED out of the ``if existing is current_task`` guard below:
+            # if an external ``pause_instance_cascade`` already pre-popped
+            # ``_graph_tasks[instance_id]`` (e.g. user-click-stop racing the
+            # graph completion), the identity check fails and the marker
+            # would otherwise leak — causing a spurious pause on the next
+            # message. ``pop_deferred_question_pause`` is idempotent
+            # (``set.discard``), so it's safe to call unconditionally.
+            #
+            # SHIELDED against double-cancel: a second ``task.cancel()``
+            # arriving during the ``await`` would raise ``CancelledError``
+            # (a ``BaseException`` in 3.8+, NOT caught by ``except Exception``).
+            # ``asyncio.shield`` protects the DB write so a transient cancel
+            # during the pause cascade does not corrupt instance state.
+            #
+            # Wrapped in try/except so a transient cascade failure does not
+            # crash the message-processing call. The question pack SSE has
+            # already fired from the tool, so the user can still answer; the
+            # instance will just remain in whatever status the graph
+            # completed in. Re-pausing an already-PAUSED instance is a
+            # no-op (``pause_instance_cascade`` filters out PAUSED nodes
+            # at line 1966), so a residual marker on top of an external
+            # pause is harmless.
+            if self._manager.pop_deferred_question_pause(instance_id):
+                try:
+                    await asyncio.shield(
+                        self._manager.pause_instance_cascade(instance_id)
+                    )
+                except Exception as pause_err:
+                    logger.warning(
+                        f"[send_message] deferred question pause "
+                        f"failed for {instance_id[:8]}...: "
+                        f"{type(pause_err).__name__}: {pause_err}"
+                    )
+
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
             if task_registered and current_task:
@@ -740,31 +783,6 @@ class InstanceMessagingService:
                     self._manager._graph_tasks.pop(instance_id, None)
                     self._manager.release_context_usage_cache(instance_id)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
-
-                    # C2 fix — deferred question pause (Solution A).
-                    #
-                    # ``question_pause_node`` ran inside this graph task and
-                    # set a marker rather than calling
-                    # ``pause_instance_cascade`` directly (to avoid
-                    # self-cancel of this very task). The graph task is now
-                    # popped from ``_graph_tasks`` so we are safely OUTSIDE
-                    # the graph-task context — calling the cascade here will
-                    # not self-cancel; the DB transaction completes normally.
-                    #
-                    # Wrapped in try/except so a transient cascade failure
-                    # does not crash the message-processing call. The
-                    # question pack SSE has already fired from the tool,
-                    # so the user can still answer; the instance will just
-                    # remain in whatever status the graph completed in.
-                    if self._manager.pop_deferred_question_pause(instance_id):
-                        try:
-                            await self._manager.pause_instance_cascade(instance_id)
-                        except Exception as pause_err:
-                            logger.warning(
-                                f"[send_message] deferred question pause "
-                                f"failed for {instance_id[:8]}...: "
-                                f"{type(pause_err).__name__}: {pause_err}"
-                            )
 
         # Extract message data from the current turn
         messages = result.get("messages", [])
@@ -2565,6 +2583,53 @@ class InstanceMessagingService:
             raise
 
         finally:
+            # C2 fix — deferred question pause (Solution A), second pass.
+            #
+            # ``question_pause_node`` ran inside this graph task and set a
+            # marker rather than calling ``pause_instance_cascade`` directly
+            # (to avoid self-cancel of this very task). The graph task is now
+            # popped from ``_graph_tasks`` so we are safely OUTSIDE the
+            # graph-task context — calling the cascade here will not
+            # self-cancel; the DB transaction completes normally.
+            #
+            # HOISTED out of the ``if existing is current_task`` guard below:
+            # if an external ``pause_instance_cascade`` already pre-popped
+            # ``_graph_tasks[instance_id]`` (e.g. user-click-stop racing the
+            # graph completion), the identity check fails and the marker
+            # would otherwise leak — causing a spurious pause on the next
+            # message. ``pop_deferred_question_pause`` is idempotent
+            # (``set.discard``), so it's safe to call unconditionally.
+            #
+            # SHIELDED against double-cancel: a second ``task.cancel()``
+            # arriving during the ``await`` would raise ``CancelledError``
+            # (a ``BaseException`` in 3.8+, NOT caught by ``except Exception``).
+            # ``asyncio.shield`` protects the DB write so a transient cancel
+            # during the pause cascade does not corrupt instance state.
+            #
+            # This runs on every exit path (normal completion,
+            # CancelledError, exception) because the cascade pop is
+            # unconditional — a no-op when no marker was set.
+            #
+            # Wrapped in try/except so a transient cascade failure does not
+            # crash the message-processing call. The question pack SSE has
+            # already fired from the tool, so the user can still answer; the
+            # instance will just remain in whatever status the graph
+            # completed in. Re-pausing an already-PAUSED instance is a
+            # no-op (``pause_instance_cascade`` filters out PAUSED nodes
+            # at line 1966), so a residual marker on top of an external
+            # pause is harmless.
+            if self._manager.pop_deferred_question_pause(instance_id):
+                try:
+                    await asyncio.shield(
+                        self._manager.pause_instance_cascade(instance_id)
+                    )
+                except Exception as pause_err:
+                    logger.warning(
+                        f"[process_message] deferred question pause "
+                        f"failed for {instance_id[:8]}...: "
+                        f"{type(pause_err).__name__}: {pause_err}"
+                    )
+
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
             if task_registered and current_task:
@@ -2573,38 +2638,6 @@ class InstanceMessagingService:
                     self._manager._graph_tasks.pop(instance_id, None)
                     self._manager.release_context_usage_cache(instance_id)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
-
-                    # C2 fix — deferred question pause (Solution A).
-                    #
-                    # ``question_pause_node`` ran inside this graph task and
-                    # set a marker rather than calling
-                    # ``pause_instance_cascade`` directly (to avoid
-                    # self-cancel of this very task). The graph task is now
-                    # popped from ``_graph_tasks`` so we are safely OUTSIDE
-                    # the graph-task context — calling the cascade here will
-                    # not self-cancel; the DB transaction completes normally.
-                    #
-                    # This runs on every exit path (normal completion,
-                    # CancelledError, exception) because the graph task is
-                    # always popped above. A non-question-pause CancelledError
-                    # (e.g. user-stop) will find no marker set, so the check
-                    # is a no-op for that case.
-                    #
-                    # Wrapped in try/except so a transient cascade failure
-                    # does not crash the message-processing call. The
-                    # question pack SSE has already fired from the tool,
-                    # so the user can still answer; the instance will just
-                    # remain in whatever status the graph completed in.
-                    if self._manager.pop_deferred_question_pause(instance_id):
-                        try:
-                            await self._manager.pause_instance_cascade(instance_id)
-                        except Exception as pause_err:
-                            logger.warning(
-                                f"[process_message] deferred question "
-                                f"pause failed for "
-                                f"{instance_id[:8]}...: "
-                                f"{type(pause_err).__name__}: {pause_err}"
-                            )
 
         # C1 FIX (Phase 2): Dispatch the deferred final message AFTER the astream
         # loop completes normally. This code only runs on successful completion —
