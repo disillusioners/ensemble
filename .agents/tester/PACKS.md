@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 164 packs
-- Unit: 138 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
+- Total: 167 packs
+- Unit: 141 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
 
 ## Unit Test Packs
 
@@ -323,6 +323,9 @@ Update after each test run:
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | image_tools_unit_test | test/packs/image_tools_unit_test.sh | Image tools: tool import & registration (CATEGORY_MODULES "image"), create_image_tools factory, explain_image tool; image-reader agent meta.json validation (id, llm_model, tools.allow excludes bash/filesystem, team_members empty, soul/rule/workflow no curl/mktemp/rm); 11-agent meta.json updates (image in tools.allow for ari/worker/leader/planner/developer/reviewer/tidier/approver/tester/giter/devops); security: SSRF guard (_ensure_public_url rejects private/loopback/link-local/metadata IPs, non-http schemes), path traversal (outside workdir, symlinks), memory cap (10MB), magic byte validation (non-image .png, format mismatch .png+JPEG); invoke_agent_and_wait backward compat (images=None default); explain_image delegation | 2 min | 2026-07-14 | ✅ PASS (101/101 in ~1s, feature/image-reader-agent, 0 failures) |
+| proc_unit_test | tests/tools/test_proc_tools.py | Background Process Tools (proc_run/proc_logs/proc_status/proc_stop/proc_list): lifecycle (start/status/logs/stop/list), process cap (10 limit), log spillover (4MB memory→file), split-line stitching at spill boundary (C1 fix), spawn-window race cleanup-during-start (C2 fix), timeout auto-kill, multi-chunk spillover (>8MB), instance cleanup, cross-instance isolation, _read_file_tail unit tests | 2 min | 2026-07-18 | ✅ PASS (21/21 in 7.24s, feature/background-proc-tools, commit 160701ed, 0 failures) |
+| proc_integration_smoke_test | /tmp/proc_integration_smoke.py (throwaway) | End-to-end integration against REAL BackgroundProcessManager singleton (no mocking): start background process, status mid-run, logs mid-run (10 lines), wait + read all logs (50 lines), proc_stop long-running, proc_list | 2 min | 2026-07-18 | ✅ PASS (6/6 steps in ~12s, feature/background-proc-tools, commit 160701ed, 0 failures) |
+| proc_edge_cases_test | /tmp/proc_edge_cases.py (throwaway) | Edge cases: 11th process rejected (cap=10 Error:), immediate-exit→exited code 0, error process→exited code 2, logs-before-output clean empty, 1s timeout auto-kill→killed exit_code=-9 timed_out=true | 2 min | 2026-07-18 | ✅ PASS (5/5 cases in ~8s, feature/background-proc-tools, commit 160701ed, 0 failures) |
 | image_regression_test | test/packs/image_regression_test.sh | Regression: chart_tools (delegation pattern analog), invoke_agent_and_wait (signature changed: images param added), skill_phase2_integration (CATEGORY_MODULES wiring pattern), tool_filter (tools.allow filtering — 11 agents updated), help_tool (_tool_registry mechanics) | 2 min | 2026-07-14 | ✅ PASS (115/115 in 2.02s, feature/image-reader-agent, 0 failures) |
 
 ## Skill-Worker Milestone Test Packs
