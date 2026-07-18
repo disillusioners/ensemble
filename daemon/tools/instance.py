@@ -452,6 +452,7 @@ def _make_workdir_aware(
                 func=wrapped_func,
                 name=tool.name,
                 description=tool.description,
+                args_schema=tool.args_schema,
                 coroutine=wrapped_func,
             )
         else:
@@ -459,6 +460,7 @@ def _make_workdir_aware(
                 func=wrapped_func,
                 name=tool.name,
                 description=tool.description,
+                args_schema=tool.args_schema,
             )
     else:
         # It's a plain function - wrap it directly
@@ -478,6 +480,89 @@ def _make_workdir_aware(
             def wrapped_func(*args, **kwargs):
                 if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
+                return func(*args, **kwargs)
+
+        return wrapped_func
+
+
+def _make_instance_id_aware(
+    tool,  # Can be a function or StructuredTool
+    get_default_instance_id: Callable[[], str | None]
+):
+    """Wrap a tool to auto-inject instance_id from a closure.
+
+    Mirrors ``_make_workdir_aware`` but keeps instance ownership out of
+    LLM-controlled arguments.
+
+    Args:
+        tool: The tool to wrap (function or StructuredTool)
+        get_default_instance_id: Callable that returns the default instance ID
+
+    Returns:
+        Wrapped tool with auto instance-id support
+    """
+    from functools import wraps
+    from langchain_core.tools import StructuredTool
+
+    # Check if it's a StructuredTool
+    if isinstance(tool, StructuredTool):
+        # Get the underlying function - @tool uses 'coroutine', from_function uses 'func'
+        original_func = getattr(tool, 'coroutine', None) or getattr(tool, 'func', None)
+        if original_func is None:
+            # Fallback - tool doesn't have a callable func, return as-is
+            return tool
+
+        # Check if async
+        is_async = asyncio.iscoroutinefunction(original_func)
+
+        if is_async:
+            @wraps(original_func)
+            async def wrapped_func(*args, **kwargs):
+                if kwargs.get('instance_id') is None:
+                    kwargs['instance_id'] = get_default_instance_id()
+                return await original_func(*args, **kwargs)
+        else:
+            @wraps(original_func)
+            def wrapped_func(*args, **kwargs):
+                if kwargs.get('instance_id') is None:
+                    kwargs['instance_id'] = get_default_instance_id()
+                return original_func(*args, **kwargs)
+
+        # Create a new StructuredTool with the wrapped function
+        # Use coroutine for async tools, func for sync
+        if asyncio.iscoroutinefunction(wrapped_func):
+            return tool.__class__.from_function(
+                func=wrapped_func,
+                name=tool.name,
+                description=tool.description,
+                args_schema=tool.args_schema,
+                coroutine=wrapped_func,
+            )
+        else:
+            return tool.__class__.from_function(
+                func=wrapped_func,
+                name=tool.name,
+                description=tool.description,
+                args_schema=tool.args_schema,
+            )
+    else:
+        # It's a plain function - wrap it directly
+        func = tool
+
+        # Check if async
+        is_async = asyncio.iscoroutinefunction(func)
+
+        if is_async:
+            @wraps(func)
+            async def wrapped_func(*args, **kwargs):
+                if kwargs.get('instance_id') is None:
+                    kwargs['instance_id'] = get_default_instance_id()
+                return await func(*args, **kwargs)
+        else:
+            @wraps(func)
+            def wrapped_func(*args, **kwargs):
+                if kwargs.get('instance_id') is None:
+                    kwargs['instance_id'] = get_default_instance_id()
                 return func(*args, **kwargs)
 
         return wrapped_func
@@ -561,6 +646,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     # Create a closure to get the current instance's project workdir
     def get_current_workdir() -> str | None:
         return _get_project_workdir(manager, current_instance_id)
+
+    def get_current_instance_id() -> str | None:
+        return current_instance_id
 
     # Capture the caller's agent_id from the outer ``create_instance_tools``
     # scope. The ``spawn_instance`` tool's parameter is named ``agent_id``
@@ -950,7 +1038,10 @@ Returns:
     
     # Create workdir-aware wrappers for filesystem tools
     # These auto-populate workdir from project's main_directory when not provided
-    bash_aware = _make_workdir_aware(bash, get_current_workdir)
+    bash_aware = _make_instance_id_aware(
+        _make_workdir_aware(bash, get_current_workdir),
+        get_current_instance_id,
+    )
     list_directory_aware = _make_workdir_aware(list_directory, get_current_workdir)
     read_file_aware = _make_workdir_aware(read_file, get_current_workdir)
     write_file_aware = _make_workdir_aware(write_file, get_current_workdir)

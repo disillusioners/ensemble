@@ -280,3 +280,87 @@ class TestManagerShutdownProcCleanup:
             f"Expected an INFO line reporting 5 instances cleaned; "
             f"got: {info_texts}"
         )
+
+
+class TestManagerShutdownBashCleanup:
+    """``shutdown()`` must sweep all tracked bash process groups."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_invokes_bash_cleanup_all(
+        self, mock_config, monkeypatch
+    ):
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=3)
+        monkeypatch.setattr(
+            bash_module,
+            "get_bash_process_registry",
+            lambda: bash_reg,
+        )
+        manager = _build_minimal_manager(mock_config)
+
+        await manager.shutdown(grace_period=0.01)
+
+        bash_reg.cleanup_all.assert_awaited_once()
+        manager.stop_sources.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_bash_cleanup_all_exception_does_not_propagate(
+        self, mock_config, monkeypatch, caplog
+    ):
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(
+            side_effect=RuntimeError("synthetic bash sweep failure")
+        )
+        monkeypatch.setattr(
+            bash_module,
+            "get_bash_process_registry",
+            lambda: bash_reg,
+        )
+        manager = _build_minimal_manager(mock_config)
+
+        with caplog.at_level("WARNING"):
+            await manager.shutdown(grace_period=0.01)
+
+        bash_reg.cleanup_all.assert_awaited_once()
+        manager.stop_sources.assert_awaited_once()
+        warning_texts = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ]
+        assert any(
+            "bash cleanup_all failed" in msg for msg in warning_texts
+        )
+
+    @pytest.mark.asyncio
+    async def test_shutdown_bash_cleanup_all_zero_count_logs_no_info(
+        self, mock_config, monkeypatch, caplog
+    ):
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            bash_module,
+            "get_bash_process_registry",
+            lambda: bash_reg,
+        )
+        manager = _build_minimal_manager(mock_config)
+
+        with caplog.at_level("INFO"):
+            await manager.shutdown(grace_period=0.01)
+
+        bash_reg.cleanup_all.assert_awaited_once()
+        info_texts = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "INFO"
+        ]
+        assert not any("killed bash processes" in msg for msg in info_texts)

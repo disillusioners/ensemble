@@ -5597,6 +5597,23 @@ class InstanceManager:
                 f"{type(e).__name__}: {e}"
             )
 
+        # Phase 2 (2026-07-19): bash cleanup_all alongside proc cleanup_all.
+        # Best-effort. See BashProcessRegistry docstring for known
+        # limitations (``setsid`` orphans, crash-recovery leak).
+        try:
+            from daemon.tools.bash import get_bash_process_registry
+
+            bash_killed = await get_bash_process_registry().cleanup_all()
+            if bash_killed:
+                logger.info(
+                    f"shutdown: killed bash processes: {bash_killed}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"shutdown: bash cleanup_all failed: "
+                f"{type(e).__name__}: {e}"
+            )
+
         steps = [
             ("stop_sources", self.stop_sources(timeout=grace_period)),
             ("cancel_active_requests", self._cancel_all_active_requests()),

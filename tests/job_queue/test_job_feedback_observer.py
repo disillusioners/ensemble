@@ -2029,3 +2029,199 @@ class TestDispatchTwoTierProcCleanup:
         assert any(
             "no _instance_repository" in msg for msg in warning_texts
         ), f"Expected missing-repo WARNING, got: {warning_texts}"
+
+
+# =============================================================================
+# Phase 2: Two-tier bash cleanup in the shared dispatcher (2026-07-19).
+# =============================================================================
+
+
+class TestDispatchTwoTierBashCleanup:
+    """Mirror the proc tier tests for ``BashProcessRegistry``."""
+
+    @staticmethod
+    def _wire_observer_with_bash_manager(bash_mgr_mock, monkeypatch):
+        """Build an observer and patch the bash registry singleton accessor."""
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        monkeypatch.setattr(
+            bash_module,
+            "get_bash_process_registry",
+            lambda: bash_mgr_mock,
+        )
+
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._live_hub = MagicMock()
+        mock_instance_manager._live_hub.stream_status_change = AsyncMock()
+        mock_instance_manager._events_service = MagicMock()
+        mock_instance_manager._events_service._publish_instance_lifecycle_event = (
+            AsyncMock()
+        )
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="mock-content"
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=MagicMock(),
+            job_repo=MagicMock(),
+            lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+            config=None,
+        )
+        return observer, mock_instance_manager
+
+    @pytest.mark.asyncio
+    async def test_tier1_fires_for_child_and_tier2_is_skipped(self, monkeypatch):
+        from daemon.tools import proc_tools
+
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_instance = AsyncMock()
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+        monkeypatch.setattr(
+            proc_tools, "get_background_process_manager", lambda: proc_mgr
+        )
+        observer, manager = self._wire_observer_with_bash_manager(
+            bash_reg, monkeypatch
+        )
+        manager._instance_repository.get_tree_ids = MagicMock(
+            side_effect=AssertionError("Tier 2 must not run for a child")
+        )
+        child_id = "child-bash-12345678"
+
+        await observer._dispatch_instance_post_commit_side_effects(
+            instance_id=child_id,
+            terminal_status="completed",
+            error=None,
+            parent_id="parent-bash-87654321",
+            agent_id="developer",
+            last_content="hello",
+        )
+
+        bash_reg.cleanup_instance.assert_awaited_once_with(child_id)
+        manager._instance_repository.get_tree_ids.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tier1_and_tier2_fire_for_root_and_tier2_skips_root(
+        self, monkeypatch
+    ):
+        from daemon.tools import proc_tools
+
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_instance = AsyncMock()
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+        monkeypatch.setattr(
+            proc_tools, "get_background_process_manager", lambda: proc_mgr
+        )
+        observer, manager = self._wire_observer_with_bash_manager(
+            bash_reg, monkeypatch
+        )
+        root_id = "root-bash-aaaaaaaa"
+        descendant_a = "bash-child-bbbbbbbb"
+        descendant_b = "bash-child-cccccccc"
+        manager._instance_repository.get_tree_ids = MagicMock(
+            return_value=[root_id, descendant_a, descendant_b]
+        )
+
+        await observer._dispatch_instance_post_commit_side_effects(
+            instance_id=root_id,
+            terminal_status="completed",
+            error=None,
+            parent_id=None,
+            agent_id="developer",
+            last_content="hello",
+        )
+
+        calls = [
+            call.args[0]
+            for call in bash_reg.cleanup_instance.await_args_list
+        ]
+        assert calls.count(root_id) == 1
+        assert descendant_a in calls
+        assert descendant_b in calls
+        manager._instance_repository.get_tree_ids.assert_called_once_with(root_id)
+
+    @pytest.mark.asyncio
+    async def test_tier1_fires_and_tier2_is_noop_when_tree_lookup_raises(
+        self, monkeypatch
+    ):
+        from daemon.tools import proc_tools
+
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_instance = AsyncMock()
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+        monkeypatch.setattr(
+            proc_tools, "get_background_process_manager", lambda: proc_mgr
+        )
+        observer, manager = self._wire_observer_with_bash_manager(
+            bash_reg, monkeypatch
+        )
+        root_id = "root-bash-failure"
+        manager._instance_repository.get_tree_ids = MagicMock(
+            side_effect=RuntimeError("synthetic tree failure")
+        )
+
+        await observer._dispatch_instance_post_commit_side_effects(
+            instance_id=root_id,
+            terminal_status="completed",
+            error=None,
+            parent_id=None,
+            agent_id="developer",
+            last_content="hello",
+        )
+
+        bash_reg.cleanup_instance.assert_awaited_once_with(root_id)
+        manager._instance_repository.get_tree_ids.assert_called_once_with(root_id)
+
+    @pytest.mark.asyncio
+    async def test_bash_failures_do_not_break_proc_or_other_side_effects(
+        self, monkeypatch, caplog
+    ):
+        from daemon.tools import proc_tools
+
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_instance = AsyncMock(
+            side_effect=RuntimeError("synthetic bash cleanup failure")
+        )
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+        monkeypatch.setattr(
+            proc_tools, "get_background_process_manager", lambda: proc_mgr
+        )
+        observer, manager = self._wire_observer_with_bash_manager(
+            bash_reg, monkeypatch
+        )
+        root_id = "root-bash-isolated"
+        child_id = "child-bash-isolated"
+        manager._instance_repository.get_tree_ids = MagicMock(
+            return_value=[root_id, child_id]
+        )
+
+        with caplog.at_level("WARNING"):
+            await observer._dispatch_instance_post_commit_side_effects(
+                instance_id=root_id,
+                terminal_status="completed",
+                error=None,
+                parent_id=None,
+                agent_id="developer",
+                last_content="hello",
+            )
+
+        proc_calls = [
+            call.args[0]
+            for call in proc_mgr.cleanup_instance.await_args_list
+        ]
+        assert proc_calls == [root_id, child_id]
+        manager._live_hub.stream_status_change.assert_awaited_once()
+        manager._events_service._publish_instance_lifecycle_event.assert_awaited_once()
+        warning_texts = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ]
+        assert any("Tier-1 bash cleanup failed" in msg for msg in warning_texts)
+        assert any("Tier-2 bash cleanup failed" in msg for msg in warning_texts)

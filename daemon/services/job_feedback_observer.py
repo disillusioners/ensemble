@@ -2473,6 +2473,27 @@ class JobFeedbackObserver:
                     f"{instance_id[:8]}: {type(e).__name__}: {e}"
                 )
 
+        # ── TIER 1: bash cleanup (Phase 2) ─────────────────────────────
+        try:
+            from daemon.tools.bash import get_bash_process_registry
+
+            bash_reg = get_bash_process_registry()
+        except Exception as e:
+            logger.warning(
+                f"Observer: could not load BashProcessRegistry for "
+                f"{instance_id[:8]}: {type(e).__name__}: {e}"
+            )
+            bash_reg = None
+
+        if bash_reg is not None:
+            try:
+                await bash_reg.cleanup_instance(instance_id)
+            except Exception as e:
+                logger.warning(
+                    f"Observer: Tier-1 bash cleanup failed for "
+                    f"{instance_id[:8]}: {type(e).__name__}: {e}"
+                )
+
         # ── TIER 2 (root-gated) ────────────────────────────────────────
         # Initialize ``tree_ids`` OUTSIDE the try block so a failure
         # inside the try does not leave it undefined (Phase 1 C4 fix).
@@ -2489,6 +2510,15 @@ class JobFeedbackObserver:
                 except Exception as e:
                     logger.warning(
                         f"Observer: Tier-2 proc cleanup failed for "
+                        f"{iid[:8]}: {type(e).__name__}: {e}"
+                    )
+
+                # NEW (Phase 2): bash Tier 2
+                try:
+                    await bash_reg.cleanup_instance(iid)
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: Tier-2 bash cleanup failed for "
                         f"{iid[:8]}: {type(e).__name__}: {e}"
                     )
 
