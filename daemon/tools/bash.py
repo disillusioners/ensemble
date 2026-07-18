@@ -135,18 +135,37 @@ Execute shell commands.
 """
 
 
-async def _kill_process(proc: asyncio.subprocess.Process) -> None:
+async def _kill_process(
+    proc: asyncio.subprocess.Process, pgid: int | None = None
+) -> None:
     """Gracefully kill a process: SIGTERM, wait 5s, then SIGKILL.
 
     On Unix, kills the entire process group so backgrounded children
     (e.g., `nohup ... &`) are terminated too. On Windows, falls back
     to killing the immediate process.
+
+    ``pgid`` is an optional override: callers that have already captured
+    the process group ID at spawn time SHOULD pass it to avoid a TOCTOU
+    race against PID recycling (the in-scope ``os.getpgid(proc.pid)`` could
+    race with the OS reusing a dead PID and return the wrong PGID). When
+    ``pgid`` is None we fall back to ``os.getpgid(proc.pid)`` for backward
+    compatibility with any callers that do not capture it.
     """
     is_unix = sys.platform != "win32"
+    # Resolve target PGID once at the top — never re-derive inside the
+    # SIGTERM/SIGKILL branches so we cannot accidentally kill a
+    # PID-recycled group if the process exited between calls.
+    target_pgid: int | None = None
+    if is_unix:
+        target_pgid = pgid if pgid is not None else os.getpgid(proc.pid)
     try:
         if is_unix:
+            # ``target_pgid`` is int on Unix (set above); the None-branch
+            # cannot be reached here, but the type checker wants a
+            # narrowing for the ``killpg`` signature.
+            assert target_pgid is not None
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                os.killpg(target_pgid, signal.SIGTERM)
             except OSError:
                 pass
         else:
@@ -155,8 +174,9 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             if is_unix:
+                assert target_pgid is not None
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    os.killpg(target_pgid, signal.SIGKILL)
                 except OSError:
                     pass
             else:
@@ -214,6 +234,11 @@ async def bash(
     stderr_file = None
     stdin_file = None
     proc: asyncio.subprocess.Process | None = None
+    # Captured PGID (D4: eager capture at spawn, BEFORE any await that could
+    # be cancelled). Used by both the timeout-cleanup path and the
+    # CancelledError handler to avoid re-deriving via ``os.getpgid(proc.pid)``
+    # which can race against PID recycling if the process exited.
+    pgid: int | None = None
     try:
         # start_new_session=True (Unix) creates a new process group so that
         # backgrounded children (e.g., `nohup ... &`) can be killed together
@@ -296,14 +321,16 @@ async def bash(
             await get_bash_process_registry().register(instance_id, proc.pid, pgid)
         elif instance_id is None:
             logger.warning("bash: instance_id is None; skipping process registration")
-
         # timeout=0 means "no timeout" — pass None to wait_for
         actual_timeout = None if timeout == 0 else timeout
         try:
             await asyncio.wait_for(proc.wait(), timeout=actual_timeout)
             timed_out = False
         except asyncio.TimeoutError:
-            await _kill_process(proc)
+            # M3: pass captured pgid to avoid a second ``os.getpgid(proc.pid)``
+            # call that could race against PID recycling if the process just
+            # exited between the SIGTERM and the SIGKILL window.
+            await _kill_process(proc, pgid=pgid)
             if instance_id is not None:
                 await get_bash_process_registry().unregister(instance_id, proc.pid)
             timed_out = True
@@ -347,15 +374,24 @@ For full output, redirect to file:
             task = asyncio.current_task()
             if task is not None and hasattr(task, "uncancel"):
                 task.uncancel()
+            # M2: split kill + unregister into INDEPENDENT guarded blocks so
+            # a second cancellation arriving mid-kill cannot skip the
+            # ``unregister`` call and leave a stale registry entry behind.
+            # ``_kill_process`` failure must not block the registry cleanup.
             try:
-                # shield protects against concurrent second cancel
-                await asyncio.shield(_kill_process(proc))
-                if instance_id is not None:
+                # shield protects against concurrent second cancel; M3
+                # passes the eager-captured pgid to avoid the
+                # ``os.getpgid(proc.pid)`` TOCTOU race.
+                await asyncio.shield(_kill_process(proc, pgid=pgid))
+            except BaseException:
+                pass  # best-effort during cancellation
+            if instance_id is not None:
+                try:
                     await asyncio.shield(
                         get_bash_process_registry().unregister(instance_id, proc.pid)
                     )
-            except BaseException:
-                pass  # best-effort during cancellation
+                except BaseException:
+                    pass  # best-effort during cancellation
         raise  # ALWAYS re-propagate the cancellation
     except Exception as e:
         return f"ERROR: {str(e)}"

@@ -81,6 +81,7 @@ import importlib
 import os
 import signal
 import sys
+import tempfile
 import textwrap
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -1475,3 +1476,339 @@ class TestParallelCallIdempotency:
         finally:
             if not bash_task.done():
                 bash_task.cancel()
+
+
+# =============================================================================
+# M1 regression — terminate_instance must drain the bash registry
+# =============================================================================
+#
+# Mirror of the proc-cleanup block in instance_lifecycle.py. We assert that
+# after M1, ``InstanceLifecycleService.terminate_instance`` calls
+# ``BashProcessRegistry.cleanup_instance(instance_id)`` directly (not only
+# via ``manager.shutdown()`` or the post-commit dispatcher). Without this, a
+# TERMINATED instance would leak its bash-spawned process groups until root
+# finalization or daemon shutdown.
+#
+# Implementation strategy:
+#   1. Real in-memory SQLite engine (same shape as test_instance_hard_delete).
+#   2. Seed one Instance row so ``_instance_repository.get`` returns it.
+#   3. Mock every manager-level side-effect so the function exits cleanly.
+#   4. Patch the two singleton accessors with AsyncMocks, observe calls.
+
+
+@pytest.fixture
+def _m1_engine():
+    """Self-contained SQLite engine for the M1 regression test.
+
+    Mirrors ``tests/test_instance_hard_delete.engine``. ``StaticPool`` so the
+    engine survives across the ``asyncio.to_thread`` worker that
+    ``_terminate_instance_db_sync`` may use.
+    """
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel
+
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(eng, "connect")
+    def _enable_fk(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_terminate_instance_cleans_bash_registry(
+    monkeypatch, _m1_engine
+):
+    """M1: ``InstanceLifecycleService.terminate_instance`` cleans both registries.
+
+    Verifies the new ``bash cleanup_instance`` block introduced at
+    ``daemon/services/instance_lifecycle.py:1469`` runs in the same
+    function that cleans up the proc registry. Asserts:
+
+    * ``proc cleanup_instance(instance_id)`` was awaited (preexisting).
+    * ``bash cleanup_instance(instance_id)`` was awaited (M1).
+    """
+    instance_id = "m1-terminate-cleans-bash"
+
+    # 1. Patch the two registry accessors with AsyncMocks so we can
+    # observe the call without spawning anything.
+    proc_mgr = AsyncMock(name="BackgroundProcessManager")
+    bash_reg = AsyncMock(name="BashProcessRegistry")
+    proc_mgr.cleanup_instance.return_value = 0
+    bash_reg.cleanup_instance.return_value = 0
+    _patch_registries(monkeypatch, proc_mgr=proc_mgr, bash_reg=bash_reg)
+
+    # 2. Seed one Instance row with status != TERMINATED so the
+    # ``_instance_repository.get`` early-return at line 1342 is not
+    # taken.
+    from datetime import datetime, timezone
+
+    from daemon.repositories.instance.models import Instance
+    from sqlmodel import Session
+
+    now = datetime.now(timezone.utc).isoformat()
+    with Session(_m1_engine) as s:
+        s.add(
+            Instance(
+                instance_id=instance_id,
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
+                agent_name="developer",
+                parent_id=None,
+                status="running",
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        s.commit()
+
+    # 3. Build a mock manager with every attribute ``terminate_instance``
+    # touches during the pre-DB cleanup section. Heavy mocking by design
+    # — we are not exercising the DB cascade, only the in-memory cleanup.
+    from daemon.services.instance_lifecycle import InstanceLifecycleService
+
+    fake_meta = MagicMock()
+    fake_meta.status = "running"
+    fake_meta.parent_id = None
+    fake_meta.agent_id = "developer"
+
+    manager = MagicMock()
+    manager.engine = _m1_engine
+    manager.write_guard = MagicMock()
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get = MagicMock(return_value=fake_meta)
+    manager._request_registry.cancel_by_instance = MagicMock()
+    manager.clear_injection = MagicMock(return_value=None)
+    manager._live_hub = MagicMock()
+    manager._live_hub.cleanup_instance = AsyncMock()
+    manager._live_hub.stream_status_change = AsyncMock()
+    manager._mcp_service = None
+    manager.instances = {instance_id: object()}
+    manager._todo_manager = None
+    manager._watcher_repo = MagicMock()
+    manager._watcher_repo.remove_all_watches_for_instance = MagicMock(
+        return_value=0,
+    )
+    manager._queue_repository = MagicMock()
+    manager._queue_repository.delete_by_instance = MagicMock(return_value=0)
+    manager._job_queue_mgmt_service = MagicMock()
+    manager.events_service = MagicMock()
+
+    svc = InstanceLifecycleService(
+        manager=manager,
+        cancellation_service=MagicMock(),
+        job_queue_service=MagicMock(
+            _repository=MagicMock(
+                find_jobs_by_instance=MagicMock(return_value=[])
+            ),
+            cancel_job=AsyncMock(return_value=True),
+            complete_job=AsyncMock(return_value=None),
+            release_lock_by_instance=AsyncMock(return_value=[]),
+            trigger_next_job_sync=MagicMock(),
+            get_job_by_instance_sync=MagicMock(return_value=None),
+        ),
+    )
+
+    # 4. Stub the DB cascade so we don't have to seed watcher/event/queue
+    # rows. The post-commit side effects are not in scope here.
+    from collections import namedtuple
+
+    _TerminateResult = namedtuple(
+        "_TerminateResult",
+        [
+            "skip",
+            "parent_id",
+            "agent_id",
+            "message_jobs_cancelled",
+            "all_jobs_cancelled",
+            "message_queue_removed",
+            "tasks_removed",
+        ],
+    )
+    svc._terminate_instance_db_sync = MagicMock(  # type: ignore[method-assign]
+        return_value=_TerminateResult(
+            skip=False,
+            parent_id=None,
+            agent_id="developer",
+            message_jobs_cancelled=0,
+            all_jobs_cancelled=0,
+            message_queue_removed=0,
+            tasks_removed=0,
+        ),
+    )
+
+    # 5. Run it.
+    result = await svc.terminate_instance(instance_id)
+    assert result is True
+
+    # 6. Assert both registries were called with the right instance_id.
+    proc_calls = [
+        call.args[0]
+        for call in proc_mgr.cleanup_instance.await_args_list
+    ]
+    bash_calls = [
+        call.args[0]
+        for call in bash_reg.cleanup_instance.await_args_list
+    ]
+    assert instance_id in proc_calls, (
+        f"proc cleanup_instance({instance_id!r}) not awaited. "
+        f"Calls observed: {proc_calls}"
+    )
+    assert instance_id in bash_calls, (
+        f"M1 regression: bash cleanup_instance({instance_id!r}) not "
+        f"awaited during terminate_instance. Calls observed: {bash_calls}."
+    )
+
+
+# =============================================================================
+# m8 characterization — setsid grandchild survives killpg (known limitation)
+# =============================================================================
+#
+# D4 / approver note documents that ``killpg`` cannot reach a grandchild
+# which detached itself by calling ``setsid()`` — it sits in its own process
+# group as a new session leader. This test pins that boundary so a future
+# claim of "we fixed this" fails here and forces a re-evaluation.
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="setsid is Unix-only")
+class TestSetsidOrphanSurvivesCleanup:
+    """A grandchild that calls ``setsid()`` detaches into its own process
+    group — ``killpg`` on the bash tool's PGID cannot reach it.
+
+    Characterization test: if a future PR claims to fix this, this test
+    will fail and force a re-evaluation of the bash kill model.
+    """
+
+    @pytest.mark.asyncio
+    async def test_setsid_orphan_survives_killpg(self, monkeypatch):
+        """Spawn a setsid grandchild, run cleanup, assert it survived.
+
+        The grandchild ``setsid bash -c 'echo $BASHPID > gc.pid; sleep 5'``
+        becomes a new session leader in its own process group. The bash
+        tool (running start_new_session=True) sits in a different PGID.
+        ``BashProcessRegistry.cleanup_instance`` calls
+        ``os.killpg(bash_shell_pgid, SIGKILL)`` which DOES NOT reach the
+        grandchild.
+
+        Critical: the grandchild MUST be SIGKILLed in teardown regardless
+        of which assertion path the test takes.
+        """
+        bash_mod = importlib.import_module("daemon.tools.bash")
+        bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
+        bash_reg = bash_mod.get_bash_process_registry()
+
+        instance_id = f"m8-setsid-{os.urandom(4).hex()}"
+
+        gc_pid_fd, gc_pid_path = tempfile.mkstemp(
+            prefix="m8-setsid-gc-", suffix=".pid"
+        )
+        os.close(gc_pid_fd)
+
+        orphan_pid: int | None = None
+        bash_task: asyncio.Task | None = None
+
+        try:
+            bash_task = asyncio.create_task(
+                bash(
+                    # Use a Python fork+os.setsid() to detach into a NEW
+                    # session/process group, then exec sleep. ``setsid``
+                    # from coreutils is not guaranteed on every Unix
+                    # (macOS lacks it without brew), but Python's
+                    # ``os.setsid`` is POSIX-standard and works
+                    # everywhere.
+                    command=textwrap.dedent(
+                        f"""\
+                        python3 -c '
+                        import os
+                        pid = os.fork()
+                        if pid == 0:
+                            os.setsid()
+                            with open("{gc_pid_path}", "w") as f:
+                                f.write(str(os.getpid()))
+                            os.execlp("sleep", "sleep", "5")
+                        else:
+                            os.waitpid(pid, 0)
+                        '
+                        """
+                    ),
+                    instance_id=instance_id,
+                    timeout=30,
+                )
+            )
+
+            gc_alive = False
+            for _ in range(80):  # 80 * 50ms = 4s
+                if os.path.exists(gc_pid_path):
+                    try:
+                        with open(gc_pid_path, "r") as f:
+                            orphan_pid = int(f.read().strip())
+                            if orphan_pid > 0:
+                                gc_alive = True
+                                break
+                    except (OSError, ValueError):
+                        pass
+                await asyncio.sleep(0.05)
+
+            assert gc_alive and orphan_pid is not None, (
+                "Test setup failure: setsid grandchild pid not captured "
+                "in time."
+            )
+            assert _pid_alive(orphan_pid), (
+                "Test setup failure: setsid grandchild died before "
+                "cleanup could be tested."
+            )
+            _register_pid(orphan_pid, "m8-setsid-grandchild", instance_id)
+
+            assert instance_id in bash_reg._entries, (
+                "Test setup failure: bash registry has no entry for "
+                "instance_id."
+            )
+
+            killed = await bash_reg.cleanup_instance(instance_id)
+            assert killed >= 1, (
+                "Bash cleanup should have killed at least the bash "
+                "shell's process group."
+            )
+
+            await asyncio.sleep(0.5)
+            assert _pid_alive(orphan_pid), (
+                "Characterization FAIL: setsid grandchild was killed by "
+                "``os.killpg`` on the bash tool's PGID. This contradicts "
+                "the documented D4 limitation."
+            )
+
+            try:
+                await asyncio.wait_for(bash_task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                if not bash_task.done():
+                    bash_task.cancel()
+        finally:
+            if orphan_pid is not None and _pid_alive(orphan_pid):
+                try:
+                    os.kill(orphan_pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+            if bash_task is not None and not bash_task.done():
+                bash_task.cancel()
+                try:
+                    await asyncio.wait_for(bash_task, timeout=2)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            if os.path.exists(gc_pid_path):
+                try:
+                    os.unlink(gc_pid_path)
+                except OSError:
+                    pass

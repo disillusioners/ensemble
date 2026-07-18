@@ -1466,6 +1466,20 @@ class InstanceLifecycleService:
                 f"{type(e).__name__}: {e}"
             )
 
+        # 2.56. Clean up bash subprocess groups for this instance (async,
+        # no DB write). Best-effort — terminates the bash registry's tracked
+        # PIDs/PGIDs that the proc manager does not see. Without this,
+        # TERMINATED instances leak bash-spawned process groups until root
+        # finalizes or daemon shutdown.
+        try:
+            from daemon.tools.bash import get_bash_process_registry
+            await get_bash_process_registry().cleanup_instance(instance_id)
+        except Exception as e:
+            logger.warning(
+                f"bash cleanup failed for {instance_id[:8]}: "
+                f"{type(e).__name__}: {e}"
+            )
+
         # 2.6. Clear per-instance todo state (best-effort, idempotent).
         # Pause intentionally retains todos for resume; terminate discards them.
         if hasattr(self._manager, '_todo_manager') and self._manager._todo_manager:

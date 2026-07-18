@@ -50,7 +50,7 @@ class TestCancelledErrorLeakFix:
                 command="echo hi", instance_id="test-inst"
             )
 
-        kill_process.assert_awaited_once_with(proc)
+        kill_process.assert_awaited_once_with(proc, pgid=proc.pid)
         registry.unregister.assert_awaited_once_with("test-inst", proc.pid)
 
     async def test_cancelled_error_at_spawn_kills_process_if_proc_assigned(
@@ -84,7 +84,7 @@ class TestCancelledErrorLeakFix:
                 command="echo hi", instance_id="test-inst"
             )
 
-        kill_process.assert_awaited_once_with(proc)
+        kill_process.assert_awaited_once_with(proc, pgid=proc.pid)
         registry.unregister.assert_awaited_once_with("test-inst", proc.pid)
 
     async def test_cancelled_error_at_spawn_skips_kill_if_proc_none(
