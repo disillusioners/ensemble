@@ -6,7 +6,7 @@ auto_load: false
 
 # ensure.md Validation
 
-You are the executor for this validation workflow. Project-specific quality gates live in `.agents/tester/rules/ensure.md`. Every requirement in that file must be validated before testing is complete. You run validation checks directly: parse the requirements, map them to test packs, execute the packs yourself, detect contradictions, and report.
+Project-specific quality gates live in `.agents/tester/rules/ensure.md`. Every requirement in that file must be validated before testing is complete. This skill describes the validation workflow: parse the requirements, map them to test packs, run them through opencode, detect contradictions, and report.
 
 The ensure.md file is **user-owned and read-only** — never modify it. Surface issues to the user; let them edit.
 
@@ -15,7 +15,7 @@ The ensure.md file is **user-owned and read-only** — never modify it. Surface 
 ### Phase 1: Review, Scope & Detect Contradictions
 
 1. Read `.agents/tester/rules/ensure.md` (read-only; direct read is allowed)
-2. Derive the change set from blast-radius signals (request wording, shared context, `git diff` you run yourself, PACKS.md mapping)
+2. Derive the change set from blast-radius signals (request wording, shared context, `git diff` via opencode, PACKS.md mapping)
 3. Determine which requirements are in-scope:
    - **Core** requirements: always relevant; scope by blast radius (only requirements touching changed code)
    - **Release Gate** requirements: only run when change is big/critical/architecture
@@ -25,9 +25,9 @@ The ensure.md file is **user-owned and read-only** — never modify it. Surface 
 7. For contradicting requirements, validate the tester's way (scoped pack + dual-layer timeout) instead of the literal method
 8. Prioritize: Critical → Important → Nice-to-have
 
-### Phase 2: Prepare Direct Validation Tasks (Pack-Mapped)
+### Phase 2: Create Validation Tasks (Pack-Mapped)
 
-For each in-scope requirement, prepare a direct validation task using this template:
+For each in-scope requirement, prepare an opencode task using this template:
 
 ```
 Task: Validate ensure.md Requirement (pack-mapped)
@@ -52,13 +52,13 @@ Expected Output:
 - Status (PASS/FAIL) + evidence + quick fixes applied (if any)
 ```
 
-Independent requirements → run their packs in parallel (one pack run per requirement).
+Independent requirements → parallel opencode sessions (one per pack).
 Dependent requirements → sequential, with edge in the todo graph.
 
-### Phase 3: Execute Validation Directly
+### Phase 3: Execute Validation
 
 1. `todo_graph_create` with one node per requirement (or per validation pack)
-2. Execute the validation yourself — run independent packs in parallel when supported; dependent checks run sequentially with edges in the todo graph
+2. Spawn opencode session(s) per requirement — independent in parallel
 3. Monitor execution; aggregate results
 4. For each result: capture PASS/FAIL with evidence
 
@@ -91,7 +91,7 @@ Each requirement references a pack from PACKS.md. The mapping discipline:
 2. Identify what it claims to verify (regression, contract, behavior, presence)
 3. Look up the corresponding pack name in PACKS.md
 4. If no pack exists for an ad-hoc requirement, create one (use the test-pack-execution skill) before validation
-5. Use the pack path verbatim when invoking the pack
+5. Use the pack path verbatim in the opencode message
 
 ## Contradiction Handling
 
@@ -131,7 +131,7 @@ This contradicts the rules because:
 Validation approach: honor the intent (verify no regressions in the change set), but run the scoped packs from PACKS.md that map to the changed files, each wrapped in `timeout 300`.
 
 Suggested rewrite for the user:
-> "Run scoped regression packs `[<module>_unit_test, <module>_integration_test]` for the change set, each ≤ 5 min, run in parallel."
+> "Run scoped regression packs `[<module>_unit_test, <module>_integration_test]` for the change set, each ≤ 5 min, parallel via opencode."
 
 ## Priority Levels
 
@@ -198,8 +198,8 @@ ensure.md validation must be **quarantine-aware**: tests listed in `.agents/test
 
 Quick fixes (see quick-fix skill) apply to ensure.md validation too:
 
-- You find a quick-fixable issue while validating a requirement
-- You apply the fix, re-validate the requirement, and report both the fix and the new result
+- Session finds a quick-fixable issue while validating a requirement
+- Session applies the fix, re-validates the requirement, reports both fix and new result
 - Commit hash must accompany the fix
 - Document in `LESSONS/` and reference in the requirement's validation report
 

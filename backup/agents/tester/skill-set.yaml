@@ -19,7 +19,7 @@ skills:
     version: "1.0.0"
     auto_load: false
     category: execution
-    description: "Unit test discovery, coverage-gap analysis, and coverage documentation (read-only investigation)"
+    description: "Unit test discovery, delegation, analysis, coverage documentation"
   - name: integration-test
     version: "1.0.0"
     auto_load: false

@@ -75,7 +75,7 @@ When the seam is an HTTP/gRPC/REST API:
 
 ### Task Message for API Boundary Pack
 
-For an API boundary pack, use the strict single-pack template (see test-pack-execution skill):
+When delegating to opencode, use the strict single-pack template (see test-pack-execution skill):
 
 ```
 Pack: [path/to/<module>_integration_test.sh]

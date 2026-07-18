@@ -37,28 +37,28 @@ This is the **second major milestone** of the skill evolution system after the T
 | Agent | Role | Skills | Auto_Load |
 |-------|------|--------|-----------|
 | **Tester** | Planner + dispatcher | `test-strategy` only | ✅ Yes (1 skill for blast radius + planning) |
-| **Worker** | Skill executor | None by default — receives via `send_message(skill=...)` | ❌ No auto_load |
+| **Worker** | Skill executor | None by default — receives via `send_message(load_skill=...)` | ❌ No auto_load |
 
 ### 3.2 Skill Distribution
 
 | Skill | Lives On | How Loaded |
 |-------|----------|------------|
 | test-strategy | Tester (auto_load) | Always in tester's prompt for planning |
-| unit-test | Worker (dynamic) | `send_message("task...", skill="unit-test")` |
-| mock-test | Worker (dynamic) | `send_message("task...", skill="mock-test")` |
-| test-pack-execution | Worker (dynamic) | `send_message("task...", skill="test-pack-execution")` |
-| integration-test | Worker (dynamic) | `send_message("task...", skill="integration-test")` |
-| e2e-test | Worker (dynamic) | `send_message("task...", skill="e2e-test")` |
-| ensure-validation | Worker (dynamic) | `send_message("task...", skill="ensure-validation")` |
-| flaky-test-management | Worker (dynamic) | `send_message("task...", skill="flaky-test-management")` |
-| quick-fix | Worker (dynamic) | `send_message("task...", skill="quick-fix")` |
+| unit-test | Worker (dynamic) | `send_message("task...", load_skill="unit-test")` |
+| mock-test | Worker (dynamic) | `send_message("task...", load_skill="mock-test")` |
+| test-pack-execution | Worker (dynamic) | `send_message("task...", load_skill="test-pack-execution")` |
+| integration-test | Worker (dynamic) | `send_message("task...", load_skill="integration-test")` |
+| e2e-test | Worker (dynamic) | `send_message("task...", load_skill="e2e-test")` |
+| ensure-validation | Worker (dynamic) | `send_message("task...", load_skill="ensure-validation")` |
+| flaky-test-management | Worker (dynamic) | `send_message("task...", load_skill="flaky-test-management")` |
+| quick-fix | Worker (dynamic) | `send_message("task...", load_skill="quick-fix")` |
 
 ### 3.3 Data Flow
 
 ```
 1. User sends testing task to Tester
 2. Tester loads test-strategy (auto_load) → plans blast radius, decides what to test
-3. Tester spawns Worker with send_message(skill="unit-test", message="run unit tests on auth module")
+3. Tester spawns Worker with send_message(load_skill="unit-test", message="run unit tests on auth module")
 4. Worker receives skill → skill system loads "unit-test" skill from project (clone-on-miss if needed)
 5. ← METRICS SCOPE START: last_injected_skill_ids = ["unit-test"]
 6. Worker executes task using the skill
@@ -73,7 +73,7 @@ This is the **second major milestone** of the skill evolution system after the T
 Tester                          Worker                    Metrics System
   │                               │                           │
   │── send_message(               │                           │
-  │    skill="unit-test",         │                           │
+  │    load_skill="unit-test",         │                           │
   │    "run unit tests on auth"   │                           │
   │  ) ──────────────────────────>│                           │
   │                               │                           │
@@ -199,7 +199,7 @@ No meta.json change — worker already has:
 send_message(
     instance_id="worker-xxx",
     message="run unit tests on auth module",
-    skill="unit-test"  # NEW: optional skill name
+    load_skill="unit-test"  # NEW: optional skill name
 )
 ```
 
@@ -214,7 +214,7 @@ When `skill` is NOT provided:
 ### 5.4 Clone-on-Miss (No Change)
 
 Existing mechanism works as-is:
-- Worker receives `skill="unit-test"` → system checks project skills
+- Worker receives `load_skill="unit-test"` → system checks project skills
 - If not found → clones from skill bank (existing mechanism)
 - Worker gets cloned project skill
 
@@ -270,7 +270,7 @@ These become meaningful only AFTER skill-per-worker is implemented, since they r
 
 After implementation:
 
-1. ✅ `send_message(skill="X")` reliably delivers skill X to worker
+1. ✅ `send_message(load_skill="X")` reliably delivers skill X to worker
 2. ✅ Worker's `last_injected_skill_ids` contains exactly 1 skill ID after send_message
 3. ✅ Worker calls `skill_feedback` after task completion (reinforced in prompt)
 4. ✅ `skill_usage_records` table shows 1 row per worker task with clean skill attribution

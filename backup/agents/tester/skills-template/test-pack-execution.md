@@ -1,34 +1,34 @@
 ---
 version: 1.0.0
 category: execution
-auto_load: false
+auto_load: true
 ---
 
 # Test Pack Execution
 
-You are the executor. You run test packs directly — you do not hand work off to another agent or spawn another session. The innate `test-pack` skill defines the INVARIANT rules (5-min cap, dual-layer timeout, naming convention, output format). This skill builds on those invariants and contains the EVOLVABLE procedures: how to launch, monitor, fix, and report your pack.
+Run packs, fix timeouts, optimize TTQA. The innate `test-pack` skill defines the INVARIANT rules (5-min cap, dual-layer timeout, naming convention, output format). This skill builds on those invariants and contains the EVOLVABLE procedures: how to actually launch, monitor, fix, and report.
 
 ## Pack Existence Gate
 
 1. **Check if test packs exist for this project** (look for `test/packs/` or similar; PACKS.md documents them)
 2. **YES** → Proceed to Run Single Test Pack
-3. **NO** → Organize tests into packs directly before proceeding (group by `<scope>_<type>_test`, follow the innate test-pack skill). This is a preparation step you own — do not defer it to another agent.
+3. **NO** → Spawn opencode to organize tests into packs first (group by `<scope>_<type>_test`, follow innate test-pack skill)
 
-## Pre-Execution Self-Check (Run Before EVERY Pack)
+## Pre-Send Self-Check (Run Before EVERY opencode Message)
 
-Before executing any test pack, verify ALL of the following. If any check fails, fix the execution plan before starting.
+Before sending any test-execution message, verify ALL of the following. If any check fails, fix the message before sending.
 
-- [ ] **Single pack** — You are targeting exactly ONE pack path (no "run all tests", no bare `go test ./...` / `pytest tests/`)
-- [ ] **Scope locked** — You will run ONLY that pack; you will NOT execute any other pack or test
-- [ ] **Command-level timeout** — Your run is wrapped with the 5-min cap (`timeout 300 ...` or `subprocess.run(..., timeout=300)`)
+- [ ] **Single pack** — Message names exactly ONE pack path (no "run all tests", no bare `go test ./...` / `pytest tests/`)
+- [ ] **Scope locked** — Message explicitly forbids running any other pack/test
+- [ ] **Command-level timeout** — Message includes the 5-min wrapper (`timeout 300 ...` or `subprocess.run(..., timeout=300)`)
 - [ ] **Script-internal timeout** — Pack script self-timeouts at ≤ 5 min (dual-layer confirmed)
-- [ ] **Time estimate** — Pack estimated < 5 min (if not, split before starting)
+- [ ] **Time estimate** — Pack estimated < 5 min (if not, split before sending)
 - [ ] **PACKS.md valid** — Pack path exists and is registered in PACKS.md
 - [ ] **Override documented** — If long-timeout case, overridden config/env is intentional and documented
 
-## Run Single Test Pack — Execution Contract (MANDATORY)
+## Run Single Test Pack — Strict Message Template (MANDATORY)
 
-**This is the ONLY acceptable execution shape for running a test pack.** Never free-form "run the tests" — that causes the whole suite to run at once and blow past the timeout.
+**This is the ONLY acceptable message format for running a test pack.** Never send a free-form "run the tests" message — that causes opencode to run the full suite at once.
 
 ```
 Task: Run Single Test Pack
@@ -59,7 +59,7 @@ Return:
 - Actual runtime: [X min]
 ```
 
-**Long-timeout case variant:** If the pack contains tests that inherently need long waits (retries/sleeps/polls), add an `ENV OVERRIDES` block to the same execution shape so the pack still finishes < 5 min:
+**Long-timeout case variant:** If the pack contains tests that inherently need long waits (retries/sleeps/polls), add an `ENV OVERRIDES` block to the same template so the pack still finishes < 5 min:
 
 ```
 ENV OVERRIDES (intentional, documented in MOCK_TESTS.md):
@@ -77,15 +77,15 @@ Do **not** raise the 5-min cap to fit a slow test. Override the config/env inste
 1. **List every pack** from PACKS.md and estimate each pack's runtime
 2. **Split any pack estimated > 5 min** into smaller packs until every pack is < 5 min (unit packs must also be < 2 min)
 3. **Group by independence:**
-   - Independent packs → execute in **parallel** within your execution context (one execution slot per pack, one execution contract per pack)
+   - Independent packs → launch in **parallel** (one opencode session + one strict message per pack)
    - Dependent packs → run sequentially in the required order
-4. **Execute each pack** using the Run Single Test Pack contract, after passing the Pre-Execution Self-Check
-5. **Aggregate** PASS/FAIL/TIMEOUT from every pack into one report. One pack's TIMEOUT does not block the others
+4. **Send each message** using the Run Single Test Pack template, after passing the Pre-Send Self-Check
+5. **Aggregate** PASS/FAIL/TIMEOUT from every session into one report. One pack's TIMEOUT does not block the others
 6. **For any TIMEOUT** → run the TTQA Loop on that single pack (do not re-run the whole project)
 
 ```
 Example: 6 packs, all independent, ~3 min each
-Plan: 6 parallel executions, each gets one "Run Single Test Pack" contract
+Plan: 6 parallel sessions, each gets one strict "Run Single Test Pack" message
 Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque timeout (all-at-once)
 ```
 
@@ -103,7 +103,7 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 
 ## Test Architecture Fix Workflow
 
-**When:** pack can't fit timeout, or quality issues found. Test-code architecture changes are your job; TTQA patches this run, this workflow is the permanent fix.
+**When:** pack can't fit timeout, or quality issues found. Test-code architecture changes are the tester's job; TTQA patches this run, this workflow is the permanent fix.
 
 **Diagnose:** identify slow pack/test + root cause; estimate before/after with target limit (≤ 5 min; unit ≤ 2 min). Small fix (< 20 lines, test code) → quick-fix path. Larger refactor (≥ 20 lines, test code only) → use the task template below — still immediate.
 
@@ -130,7 +130,7 @@ Return: what changed (before/after runtime); new PACKS.md entries if split; re-r
 
 ## Escalation
 
-**Only after a Test Architecture Fix has been attempted and verified insufficient**, report back to your dispatcher:
+**Only after a Test Architecture Fix has been attempted and verified insufficient**, report:
 
 ```
 TESTER_CANT_OPTIMIZE_TEST_PACK: Test pack [pack_name] exceeded timeout limit of 5 minutes.
@@ -143,4 +143,4 @@ Root cause that resists fixing: [reason]
 Test pack cannot meet timeout requirement. Manual intervention required.
 ```
 
-You stop here. Your dispatcher decides whether to escalate to the user, to spawn a follow-up task with relaxed constraints, or to apply other recovery actions. Do not continue iterating on your own once you have reported TESTER_CANT_OPTIMIZE_TEST_PACK.
+Leader response: TrueAuto → leader crafts quick fix plan, re-delegates; fails → leader reports to user and stops. Non-TrueAuto → report directly to user.
