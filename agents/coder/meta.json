@@ -7,6 +7,6 @@
   "version": "0.1.0",
   "innate_skills": ["todo", "chart"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "context", "shared_context"]
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "knowledge", "context", "shared_context"]
   }
 }

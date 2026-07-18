@@ -124,6 +124,7 @@ from .db_tools import create_db_tools
 from .infra import create_infra_tools
 from .system import create_system_tools
 from .language_tools import create_language_tools
+from .proc_tools import create_proc_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
@@ -981,6 +982,15 @@ Returns:
     
     # Add project management tools (available in all instances)
     tools.extend(project_tools)
+
+    # ── Background process tools (proc_*, always available — same base
+    # layer as bash). Created without workdir auto-injection because
+    # proc_run accepts an explicit ``workdir`` arg; relying on the
+    # caller (or proc_run internals) keeps the tool surface uniform
+    # with bash for cases where the agent intentionally overrides
+    # the project directory.
+    proc_tool_list = create_proc_tools(current_instance_id)
+    tools.extend(proc_tool_list)
 
     # Critical notes tools (project-scoped notes management)
     cn_tools = create_critical_notes_tools(

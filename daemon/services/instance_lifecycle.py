@@ -1454,6 +1454,18 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"MCP cleanup failed for {instance_id[:8]}: {e}")
 
+        # 2.55. Clean up background processes for this instance (async,
+        # no DB write). Best-effort — orphaned background processes
+        # would survive instance termination otherwise.
+        try:
+            from daemon.tools.proc_tools import get_background_process_manager
+            await get_background_process_manager().cleanup_instance(instance_id)
+        except Exception as e:
+            logger.warning(
+                f"proc cleanup failed for {instance_id[:8]}: "
+                f"{type(e).__name__}: {e}"
+            )
+
         # 2.6. Clear per-instance todo state (best-effort, idempotent).
         # Pause intentionally retains todos for resume; terminate discards them.
         if hasattr(self._manager, '_todo_manager') and self._manager._todo_manager:

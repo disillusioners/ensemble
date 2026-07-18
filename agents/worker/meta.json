@@ -11,6 +11,7 @@
   "tools": {
     "allow": [
       "bash",
+      "proc",
       "filesystem",
       "time",
       "self",

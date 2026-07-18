@@ -6,7 +6,7 @@
   "color": "accent-purple",
   "innate_skills": ["opencode", "chart", "todo"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
   },
   "team_members": ["explorer"]
 }

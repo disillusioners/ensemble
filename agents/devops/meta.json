@@ -9,7 +9,7 @@
   "skill_injection": true,
   "capabilities": ["docker", "kubernetes", "terraform", "ci-cd", "shell-ops"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db", "infra", "project", "dynamic-skill"]
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db", "infra", "project", "dynamic-skill"]
   },
   "team_members": ["explorer"]
 }

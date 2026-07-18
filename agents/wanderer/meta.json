@@ -8,6 +8,6 @@
   "innate_skills": ["todo", "chart"],
   "team_members": ["coder"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance"]
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance"]
   }
 }
