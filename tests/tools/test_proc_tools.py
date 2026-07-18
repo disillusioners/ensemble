@@ -24,6 +24,19 @@ Test scenarios
    verify ``proc_list`` returns a table with all of them.
 6. **Cross-instance isolation** (``TestCrossInstanceIsolation``) —
    processes started under instance A are invisible to instance B.
+7. **Split-line stitching** (``TestSplitLineStitching``) — when the
+   memory/file boundary lands mid-line, ``_get_recent_lines`` stitches
+   the partial line (C1 fix regression).
+8. **File-tail reader** (``TestReadFileTailSync``) — unit tests for
+   the backward chunked reader used by ``_read_file_tail_sync``.
+9. **Spawn-window race** (``TestSpawnWindowRace``) — when
+   ``cleanup_instance`` runs during subprocess creation, the C2 fix
+   detects and kills the orphan.
+10. **Timeout-killer** (``TestTimeoutKiller``) — ``timeout=...`` auto-kills
+    the process and surfaces ``timed_out: true`` + ``status: killed``.
+11. **Multi-chunk spillover** (``TestMultiChunkSpillover``) — emitting
+    >8 MB triggers multiple spills; memory stays capped and the spill
+    file grows proportionally.
 
 Conventions
 -----------
@@ -583,3 +596,520 @@ class TestCrossInstanceIsolation:
             # Teardown both instances.
             await manager.cleanup_instance(instance_a)
             await manager.cleanup_instance(instance_b)
+
+
+# =============================================================================
+# Group 8: Split-line stitching at the memory/file boundary (C1 regression)
+# =============================================================================
+
+
+class TestSplitLineStitching:
+    """C1 fix regression: ``_get_recent_lines`` must stitch the partial
+    line that straddles the memory/spill-file boundary.
+
+    When a spill splits the buffer mid-line, the last ``\n`` lives in
+    the spill file and the head of the next line lives in memory (or
+    vice versa, depending on the split direction). Without stitching,
+    the reader returns two halves of the same logical line as separate
+    garbled entries.
+
+    The C1 fix tracks ``info._file_ends_with_newline``: when False,
+    ``_get_recent_lines`` concatenates ``older[-1]`` with
+    ``memory_lines[0]`` to recover the full line.
+    """
+
+    def _make_spill_file(self, content: bytes) -> str:
+        """Write ``content`` to a temp spill file and return its path."""
+        handle = tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=".log",
+            delete=False,
+        )
+        try:
+            handle.write(content)
+        finally:
+            handle.close()
+        return handle.name
+
+    async def test_split_line_is_stitched_when_file_does_not_end_with_newline(
+        self,
+    ):
+        """When the spill file does not end with ``\\n``, the last
+        line in the file and the first line in memory are stitched
+        into a single logical line.
+        """
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        spill_path = self._make_spill_file(b"head of line ")  # NO trailing \n
+
+        try:
+            info = ProcessInfo(
+                process_id="proc-test0001",
+                instance_id="stitch-test",
+                command="test",
+            )
+            info.file_path = spill_path
+            info.memory_buffer.extend(b"tail of line\nnext line\n")
+            # C1 fix flag: spill did NOT end on a newline boundary.
+            info._file_ends_with_newline = False
+
+            result = await manager._get_recent_lines(info, 50)
+
+            # Stitched line must appear as a single contiguous string.
+            assert "head of line tail of line" in result, (
+                f"Stitched line missing from result: {result!r}"
+            )
+            # Garbled split (non-stitched) form must NOT appear.
+            assert "head of line \ntail of line" not in result, (
+                f"Result contains split-line artifact: {result!r}"
+            )
+            # The result must have exactly 2 lines (stitched + next).
+            lines = result.splitlines()
+            assert len(lines) == 2, (
+                f"Expected 2 stitched lines, got {len(lines)}: {lines!r}"
+            )
+            assert lines[0] == "head of line tail of line"
+            assert lines[1] == "next line"
+        finally:
+            try:
+                os.unlink(spill_path)
+            except OSError:
+                pass
+
+    async def test_no_stitching_when_file_ends_with_newline(self):
+        """Control case: when the spill file ends with ``\\n``, the
+        memory/file boundary is on a line boundary and no stitching
+        should happen. The head stays in the file, the tail in memory.
+        """
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        # Same content as the stitched case, but the file DOES end
+        # with a newline — no mid-line split to stitch.
+        spill_path = self._make_spill_file(b"head of line\n")
+
+        try:
+            info = ProcessInfo(
+                process_id="proc-test0002",
+                instance_id="stitch-control",
+                command="test",
+            )
+            info.file_path = spill_path
+            info.memory_buffer.extend(b"tail of line\nnext line\n")
+            info._file_ends_with_newline = True
+
+            result = await manager._get_recent_lines(info, 50)
+
+            # Stitched form must NOT appear — the file already ended
+            # the line, so "head" and "tail" stay separate.
+            assert "head of line tail of line" not in result, (
+                f"Unexpected stitch on clean boundary: {result!r}"
+            )
+            # Both halves appear as independent lines.
+            assert "head of line" in result
+            assert "tail of line" in result
+            # 3 separate lines (head, tail, next) — no stitching.
+            lines = result.splitlines()
+            assert len(lines) == 3, (
+                f"Expected 3 unstitched lines, got {len(lines)}: {lines!r}"
+            )
+        finally:
+            try:
+                os.unlink(spill_path)
+            except OSError:
+                pass
+
+
+# =============================================================================
+# Group 9: _read_file_tail_sync unit tests
+# =============================================================================
+
+
+class TestReadFileTailSync:
+    """Unit tests for the backward chunked reader used by
+    :meth:`BackgroundProcessManager._read_file_tail_sync`.
+
+    The reader walks the file in 64 KB chunks from EOF toward the start
+    until it has enough newlines, then stitches and returns the last N
+    lines (oldest → newest). These tests pin down corner cases that
+    would break the chunk-boundary math: tiny files, multi-chunk files
+    whose line length does not evenly divide 64 KB, files without
+    trailing newlines, and empty files.
+    """
+
+    def _make_spill_file(self, content: bytes) -> str:
+        """Write ``content`` to a temp spill file and return its path."""
+        handle = tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=".log",
+            delete=False,
+        )
+        try:
+            handle.write(content)
+        finally:
+            handle.close()
+        return handle.name
+
+    def _make_info(self, file_path: str):
+        from daemon.tools.proc_tools import ProcessInfo
+
+        return ProcessInfo(
+            process_id="proc-tailtest",
+            instance_id="tail-test",
+            command="test",
+            file_path=file_path,
+        )
+
+    def test_small_file_returns_last_n_lines(self):
+        """200 lines (under 64 KB) — request 10 → last 10 in order."""
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        content = "".join(f"line{i:04d}\n" for i in range(200)).encode()
+        assert len(content) < 64 * 1024, "test pre-condition: fits in 1 chunk"
+
+        path = self._make_spill_file(content)
+        try:
+            info = self._make_info(path)
+            lines = BackgroundProcessManager._read_file_tail_sync(info, 10)
+            assert lines == [f"line{i:04d}" for i in range(190, 200)], (
+                f"Unexpected lines: {lines}"
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_multichunk_file_under_64kb_boundary(self):
+        """>64 KB file with 7-byte lines (15000 × 7 = 105 KB) — request
+        30 → exactly the last 30 lines, no partials, no duplicates.
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        content = "".join(f"L{i:05d}\n" for i in range(15000)).encode()
+        assert len(content) > 64 * 1024, "test pre-condition: spans chunks"
+        # 15000 lines × 7 bytes = 105000 bytes
+        assert len(content) == 105000
+
+        path = self._make_spill_file(content)
+        try:
+            info = self._make_info(path)
+            lines = BackgroundProcessManager._read_file_tail_sync(info, 30)
+            assert len(lines) == 30, f"Expected 30 lines, got {len(lines)}"
+            expected = [f"L{i:05d}" for i in range(14970, 15000)]
+            assert lines == expected, (
+                f"Last 30 lines mismatch.\nGot: {lines[:5]}...{lines[-5:]}\n"
+                f"Expected: {expected[:5]}...{expected[-5:]}"
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_file_without_trailing_newline(self):
+        """File with 100 lines, no trailing newline — request 5 →
+        ``splitlines`` correctly returns the last 5 (the final
+        line-without-newline is preserved).
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        # 99 lines with \n + 1 final line WITHOUT \n. Encode to bytes
+        # because ``_make_spill_file`` writes binary content.
+        content = (
+            "".join(f"L{i:05d}\n" for i in range(99)) + "L00099"
+        ).encode()
+        assert not content.endswith(b"\n"), (
+            "test pre-condition: file must not end with a newline"
+        )
+
+        path = self._make_spill_file(content)
+        try:
+            info = self._make_info(path)
+            lines = BackgroundProcessManager._read_file_tail_sync(info, 5)
+            assert lines == [f"L{i:05d}" for i in range(95, 100)], (
+                f"Unexpected lines: {lines}"
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_empty_file_returns_empty_list(self):
+        """Empty file → ``[]`` (defensive: avoids crashing on spill
+        files that were created but never written to)."""
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        path = self._make_spill_file(b"")
+        try:
+            info = self._make_info(path)
+            lines = BackgroundProcessManager._read_file_tail_sync(info, 10)
+            assert lines == [], f"Expected empty list, got {lines!r}"
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+# =============================================================================
+# Group 10: Spawn-window race (C2 regression)
+# =============================================================================
+
+
+class TestSpawnWindowRace:
+    """C2 fix regression: if ``cleanup_instance`` runs while
+    :meth:`start_process` is awaiting subprocess creation (i.e. between
+    the lock-release that registers the stub and the post-spawn
+    re-check), the manager must detect the cleanup and kill the
+    orphaned subprocess + cancel its tasks.
+
+    Without this guard, the spawned subprocess would leak: the bucket
+    no longer tracks it, but the OS process is still alive with reader
+    + drain tasks pointing at it.
+    """
+
+    async def test_cleanup_during_spawn_kills_orphan(
+        self, unique_instance_id
+    ):
+        """Race ``cleanup_instance`` into the spawn window via a mocked
+        ``asyncio.create_subprocess_shell`` that sleeps first. Assert
+        that ``start_process`` returns the C2 error AND the orphan
+        subprocess's ``kill()`` was called.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import get_background_process_manager
+
+        manager = get_background_process_manager()
+
+        # Track every call to the mock proc's kill() — the C2 fix
+        # must invoke it after detecting the cleanup.
+        killed_pids: list[int] = []
+
+        async def slow_spawn(command, **kwargs):
+            """Simulate the spawn window: sleep, then trigger cleanup
+            during the window, then return a mock proc.
+            """
+            # Sleep gives the test loop time to interleave tasks.
+            await asyncio.sleep(0.1)
+            # Pop the stub from the bucket while start_process is
+            # awaiting this coroutine.
+            await manager.cleanup_instance(unique_instance_id)
+            # Return a mock proc whose kill() we can detect.
+            mock_proc = MagicMock()
+            mock_proc.pid = 99999  # non-existent pid
+            mock_proc.returncode = None
+            mock_proc.stdout = None  # reader exits immediately
+            mock_proc.kill = MagicMock(
+                side_effect=lambda: killed_pids.append(mock_proc.pid)
+            )
+            mock_proc.wait = AsyncMock(return_value=-9)
+            return mock_proc
+
+        with patch(
+            "daemon.tools.proc_tools.asyncio.create_subprocess_shell",
+            new=slow_spawn,
+        ):
+            process_id, err = await manager.start_process(
+                instance_id=unique_instance_id,
+                command="sleep 100",
+                workdir=None,
+                timeout_seconds=0,
+            )
+
+        # C2 fix: must return the "cleaned up during start" error
+        # AND a None process_id (caller cannot use the id).
+        assert err is not None, (
+            "start_process returned no error after cleanup-during-spawn"
+        )
+        assert "cleaned up during start" in err, (
+            f"Unexpected error from start_process: {err!r}"
+        )
+        assert process_id is None, (
+            f"Expected None process_id, got: {process_id!r}"
+        )
+
+        # The orphan subprocess must have been killed — otherwise the
+        # whole point of the C2 fix is moot.
+        assert killed_pids, (
+            "Orphan proc.kill() was not called by the C2 fix"
+        )
+        assert killed_pids[0] == 99999, (
+            f"kill() called on unexpected pid: {killed_pids}"
+        )
+
+        # Bucket must be empty after the test (C2 doesn't re-add the
+        # process; cleanup_instance popped it).
+        assert unique_instance_id not in manager._processes, (
+            f"Bucket for {unique_instance_id} should be empty after C2"
+        )
+
+
+# =============================================================================
+# Group 11: Timeout-killer auto-kill path
+# =============================================================================
+
+
+class TestTimeoutKiller:
+    """Verify that ``timeout=`` schedules an auto-kill task that sets
+    ``info.timed_out = True`` before killing the process — so
+    :func:`_drain_exit_code` reports ``"killed"`` rather than
+    ``"exited"`` and ``proc_status`` surfaces ``timed_out: true``.
+    """
+
+    async def test_timeout_kills_process_and_marks_timed_out(
+        self, proc_tools
+    ):
+        """timeout=1 on a 10s sleep → after ~2s, status=killed and
+        timed_out=true.
+        """
+        tools, _ = proc_tools
+        proc_run = tools["proc_run"]
+        proc_status = tools["proc_status"]
+
+        result = await proc_run.ainvoke({
+            "command": (
+                f"{sys.executable} -u -c "
+                "\"import time; print('start', flush=True); "
+                "time.sleep(10)\""
+            ),
+            "timeout": 1,
+        })
+        assert "Error:" not in result, f"proc_run failed: {result}"
+        match = re.search(r"(proc-[0-9a-f]+)", result)
+        assert match, f"Could not find process_id: {result}"
+        process_id = match.group(1)
+
+        # Timeout fires at t=1s; drain task settles ~immediately after
+        # the OS kills the proc. Wait 2.5s for headroom.
+        await asyncio.sleep(2.5)
+
+        status = await proc_status.ainvoke({"process_id": process_id})
+        assert "status: killed" in status, (
+            f"Expected 'status: killed', got:\n{status}"
+        )
+        assert "timed_out: true" in status, (
+            f"Expected 'timed_out: true' in status, got:\n{status}"
+        )
+
+
+# =============================================================================
+# Group 12: Multi-chunk spillover (>8 MB output)
+# =============================================================================
+
+
+class TestMultiChunkSpillover:
+    """Verify that emitting >>4 MB triggers multiple spills while
+    keeping memory bounded and the spill file proportionally large.
+
+    At >2× the memory cap the buffer is forced to spill multiple times;
+    we assert that the spill file grows past the cap (proving that the
+    oldest data was actually persisted to disk) and that ``proc_logs``
+    still returns valid content from the merged view.
+    """
+
+    async def test_emitting_9mb_caps_memory_and_grows_spill_file(
+        self, proc_tools, unique_instance_id
+    ):
+        """90 × 100 KB ≈ 9 MB → memory ≤ 4 MB, spill > 4 MB,
+        proc_logs returns valid merged content.
+        """
+        from daemon.tools.proc_tools import (
+            _MEMORY_BUFFER_LIMIT_BYTES,
+            get_background_process_manager,
+        )
+
+        tools, inst_id = proc_tools
+        proc_run = tools["proc_run"]
+        proc_status = tools["proc_status"]
+        proc_logs = tools["proc_logs"]
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".py",
+            delete=False,
+        ) as script:
+            script.write(
+                "import sys\n"
+                "chunk = b'x' * 100000 + b'\\n'  # 100 KB per line\n"
+                "for _ in range(90):  # 90 * 100 KB = 9 MB\n"
+                "    sys.stdout.buffer.write(chunk)\n"
+                "sys.stdout.buffer.flush()\n"
+            )
+            script_path = script.name
+
+        try:
+            result = await proc_run.ainvoke(
+                {"command": f"{sys.executable} -u {script_path}"}
+            )
+            assert "Error:" not in result, f"proc_run failed: {result}"
+            match = re.search(r"(proc-[0-9a-f]+)", result)
+            assert match, f"Could not find process_id: {result}"
+            process_id = match.group(1)
+
+            # Wait for the subprocess to exit (it writes 9 MB and
+            # returns). Poll up to ~20s — larger than the 5 MB test's
+            # 10s budget because we're moving 9 MB through a pipe.
+            deadline = asyncio.get_event_loop().time() + 20.0
+            while asyncio.get_event_loop().time() < deadline:
+                status = await proc_status.ainvoke(
+                    {"process_id": process_id}
+                )
+                if "status: exited" in status or "status: killed" in status:
+                    break
+                await asyncio.sleep(0.2)
+
+            # Let the reader + drain tasks settle.
+            await asyncio.sleep(0.5)
+
+            manager = get_background_process_manager()
+            bucket = manager._processes.get(inst_id, {})
+            info = bucket.get(process_id)
+            assert info is not None, (
+                f"Process {process_id} not found in manager"
+            )
+
+            # Memory buffer must be capped.
+            assert len(info.memory_buffer) <= _MEMORY_BUFFER_LIMIT_BYTES, (
+                f"Memory buffer ({len(info.memory_buffer)} bytes) exceeds "
+                f"cap ({_MEMORY_BUFFER_LIMIT_BYTES})"
+            )
+
+            # Spill file must exist and grow past the cap.
+            assert info.file_path is not None, (
+                "Spill file path is None — spillover did not occur"
+            )
+            assert os.path.exists(info.file_path), (
+                f"Spill file does not exist: {info.file_path}"
+            )
+            file_size = os.path.getsize(info.file_path)
+            assert file_size > _MEMORY_BUFFER_LIMIT_BYTES, (
+                f"Spill file ({file_size} bytes) should exceed memory "
+                f"cap ({_MEMORY_BUFFER_LIMIT_BYTES}) for 9 MB output"
+            )
+
+            # proc_logs must return merged content from file + memory.
+            logs_result = await proc_logs.ainvoke(
+                {"process_id": process_id, "lines": 100}
+            )
+            assert "Error:" not in logs_result, (
+                f"proc_logs failed: {logs_result}"
+            )
+            assert "x" in logs_result, (
+                f"Expected 'x' in merged logs, got: {logs_result[:200]}"
+            )
+            assert "status=" in logs_result
+        finally:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass

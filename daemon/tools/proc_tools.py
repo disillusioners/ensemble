@@ -43,11 +43,14 @@ meta.json filter via the ``proc`` category key registered by
 from __future__ import annotations
 
 import asyncio
+import errno
+import glob
 import logging
 import os
 import signal
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from secrets import token_hex
@@ -171,6 +174,12 @@ class ProcessInfo:
     timed_out: bool = False
     user_stopped: bool = False
     last_error: Optional[str] = None
+    # C1 fix: tracks whether the spill file's last byte is ``\n``.
+    # Used by ``_get_recent_lines`` to detect the split-line at the
+    # memory/file boundary and stitch the partial line correctly.
+    # Defaults True so existing tests that never spill pass without
+    # any extra branching.
+    _file_ends_with_newline: bool = True
 
 
 def _new_process_id() -> str:
@@ -195,6 +204,60 @@ class BackgroundProcessManager:
     def __init__(self) -> None:
         self._processes: dict[str, dict[str, ProcessInfo]] = {}
         self._lock = asyncio.Lock()
+        # M1 fix: sweep stale spill files left behind by a crashed
+        # daemon. Best-effort — never raises. Concurrent daemon
+        # instances may also try to sweep so each unlink is guarded
+        # by try/except OSError.
+        self._sweep_stale_files()
+
+    def _sweep_stale_files(self, max_age_seconds: int = 3600) -> None:
+        """Unlink stale ``proc-*.log`` spill files from the system temp dir.
+
+        If the daemon crashed, spill files (whose ``delete=False``
+        we own) leak in ``tempfile.gettempdir()`` forever. On
+        startup, sweep any that are older than ``max_age_seconds``
+        (default 1 hour) so they don't accumulate.
+
+        Safe to call concurrently from multiple daemon instances —
+        every unlink is wrapped in ``try/except OSError``. Defensive
+        against:
+          * File already unlinked by another instance.
+          * File in active use by a live process (Windows).
+          * Filesystem errors (``EACCES``, etc.).
+
+        Never raises — log warnings on unexpected errors only.
+        """
+        try:
+            tmp_dir = tempfile.gettempdir()
+            pattern = os.path.join(tmp_dir, "proc-*.log")
+            now = time.time()
+            for path in glob.glob(pattern):
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    # File disappeared between glob and stat — fine.
+                    continue
+                if now - mtime <= max_age_seconds:
+                    continue
+                try:
+                    os.unlink(path)
+                except OSError as exc:
+                    # Concurrent unlink or file in use — fine. Don't
+                    # warn for ``ENOENT`` (race) but DO log others so
+                    # we can see permission issues.
+                    if exc.errno != errno.ENOENT:
+                        logger.warning(
+                            "M1 sweep: failed to unlink stale spill "
+                            "file %s: %s",
+                            path,
+                            exc,
+                        )
+        except Exception as exc:  # pragma: no cover — defensive
+            # Never let sweep errors break daemon startup.
+            logger.warning(
+                "M1 sweep: unexpected error during stale-file sweep: %s",
+                exc,
+            )
 
     # -- helpers ------------------------------------------------------------
 
@@ -248,6 +311,26 @@ class BackgroundProcessManager:
         info.file_handle = handle
         info.file_path = handle.name
         return handle
+
+    async def _close_file_handle(self, info: ProcessInfo) -> None:
+        """Atomically close ``info.file_handle`` and null it under ``self._lock``.
+
+        Idempotent — if the handle is already None, returns immediately.
+        Sets ``_file_ends_with_newline = True`` as a defensive default (no
+        more bytes will land in the spill file once the handle is closed).
+        Both ``_drain_exit_code`` and ``cleanup_instance`` route their file
+        close through this helper to avoid double-close races.
+        """
+        async with self._lock:
+            fh = info.file_handle
+            if fh is None:
+                return
+            try:
+                fh.close()
+            except OSError:
+                pass
+            info.file_handle = None
+            info._file_ends_with_newline = True
 
     # -- output capture (asyncio coroutine running as a background task) -----
 
@@ -311,6 +394,13 @@ class BackgroundProcessManager:
                                 fh.write(spilled)
                                 # No explicit flush — ``buffering=0``
                                 # writes through to the OS.
+                                # C1 fix: remember whether the LAST byte
+                                # of what we just wrote is ``\n`` so the
+                                # reader can stitch a partial line that
+                                # straddled the memory/file boundary.
+                                info._file_ends_with_newline = (
+                                    spilled.endswith(b"\n")
+                                )
                 else:
                     # Still inside the cap. No spill needed.
                     pass
@@ -392,13 +482,10 @@ class BackgroundProcessManager:
         # open FDs to one per process per ``proc_status``/``proc_logs``
         # call instead of one per process for the lifetime of the
         # instance.
-        fh = info.file_handle
-        if fh is not None:
-            try:
-                fh.close()
-            except OSError:
-                pass
-            info.file_handle = None
+        # M2 fix: use the centralized helper so close + null is
+        # atomic under the lock (prevents double-close on
+        # concurrent natural-exit + cleanup).
+        await self._close_file_handle(info)
 
         # ``timed_out`` and ``user_stopped`` are both authoritative —
         # they represent an intentional kill from the runtime
@@ -603,6 +690,52 @@ class BackgroundProcessManager:
                 name=f"proc-timeout-{process_id}",
             )
 
+        # C2 fix: re-check that we're still tracked. ``cleanup_instance``
+        # could have popped the stub from ``bucket`` during the spawn
+        # window (between the first lock release above and now). If so,
+        # the just-spawned subprocess + the three tasks we just
+        # scheduled are all orphaned — kill the process and cancel the
+        # tasks before returning success. The caller sees ``process_id``
+        # ``None`` and surfaces an error (the existing ``proc_run``
+        # error path already handles this).
+        async with self._lock:
+            bucket_after = self._processes.get(instance_id, {})
+            if process_id not in bucket_after:
+                # We were cleaned up during spawn. Kill the orphan.
+                try:
+                    if sys.platform != "win32":
+                        try:
+                            os.killpg(
+                                os.getpgid(proc.pid), signal.SIGKILL
+                            )
+                        except OSError:
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                    else:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.warning(
+                        "C2 cleanup: kill failed for orphan %s: %s",
+                        process_id,
+                        exc,
+                    )
+                for task in (
+                    info.reader_task,
+                    info.exit_task,
+                    info.timeout_task,
+                ):
+                    if task is not None and not task.done():
+                        task.cancel()
+                return None, (
+                    f"Error: process {process_id} was cleaned up "
+                    f"during start"
+                )
+
         return process_id, None
 
     async def stop_process(
@@ -774,7 +907,7 @@ class BackgroundProcessManager:
         # output so the agent can confirm what the process printed
         # before it exited. Falls back gracefully if the file is
         # missing or unreadable.
-        tail = self._get_recent_lines(info, _STOP_TAIL_LINES)
+        tail = await self._get_recent_lines(info, _STOP_TAIL_LINES)
         header = (
             f"Process {process_id} stopped "
             f"(force={force}, status={info.status}, "
@@ -879,6 +1012,40 @@ class BackgroundProcessManager:
             for task in (info.reader_task, info.exit_task, info.timeout_task):  # type: ignore[attr-defined]
                 if task is not None and not task.done():
                     task.cancel()
+            # M4 fix: await task cancellation with a short timeout
+            # BEFORE unlinking the spill file. On Windows, unlinking
+            # an open file fails. On Unix, racing the reader's
+            # final write can lose data. A bounded await gives the
+            # tasks a chance to flush + close their end of the pipe
+            # before we tear down the file.
+            tasks_to_await = [
+                t
+                for t in (
+                    info.reader_task,
+                    info.exit_task,
+                    info.timeout_task,
+                )
+                if t is not None and not t.done()
+            ]
+            if tasks_to_await:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(
+                            *tasks_to_await, return_exceptions=True
+                        ),
+                        timeout=2.0,
+                    )
+                except asyncio.TimeoutError:
+                    # Tasks didn't settle in time. Proceed with
+                    # unlink anyway — worst case is a lost final
+                    # write or a Windows unlink failure (which we
+                    # already guard with try/except OSError).
+                    logger.warning(
+                        "cleanup: tasks for %s did not settle within "
+                        "2s, proceeding with unlink anyway",
+                        pid,
+                    )
+
             # Force-kill the process. If it already exited, this is a
             # no-op.
             proc = info.proc
@@ -907,12 +1074,10 @@ class BackgroundProcessManager:
                     )
             # Close + unlink the spill file. We created it with
             # ``delete=False`` so this is our responsibility.
-            fh = info.file_handle
-            if fh is not None:
-                try:
-                    fh.close()
-                except OSError:
-                    pass
+            # M2 fix: use the centralized helper so close + null is
+            # atomic under the lock (prevents double-close on
+            # concurrent natural-exit + cleanup).
+            await self._close_file_handle(info)
             if info.file_path:
                 try:
                     os.unlink(info.file_path)
@@ -921,7 +1086,7 @@ class BackgroundProcessManager:
 
     # -- log reading --------------------------------------------------------
 
-    def _get_recent_lines(self, info: ProcessInfo, lines: int) -> str:
+    async def _get_recent_lines(self, info: ProcessInfo, lines: int) -> str:
         """Return the last ``lines`` of captured output as text.
 
         Fast path: read the entire memory buffer and split. If memory
@@ -934,11 +1099,19 @@ class BackgroundProcessManager:
         prompt budget. The slow path additionally tails the spill file
         but only when the request really needs history memory can't
         satisfy.
+
+        C1 fix: when the last spill left a partial line in memory
+        (i.e. the spill file does not end with ``\n``), the last line
+        from the spill file's tail and the first line in the memory
+        buffer are two halves of the SAME line. Stitch them before
+        merging.
         """
         lines = max(1, min(int(lines), _MAX_LOG_LINES))
 
         memory_text = info.memory_buffer.decode(errors="replace")
-        memory_lines = memory_text.splitlines()
+        # ``list(...)`` to copy — we may mutate index 0 below when
+        # stitching the split line (C1 fix).
+        memory_lines = list(memory_text.splitlines())
 
         if len(memory_lines) >= lines:
             # Fast path: memory alone has enough lines.
@@ -947,15 +1120,41 @@ class BackgroundProcessManager:
         # Slow path: drain historical lines from the spill file and
         # merge with memory. The agent requested more lines than
         # memory holds, so they probably want older context.
-        older = self._read_file_tail(info, lines - len(memory_lines))
+        older = await self._read_file_tail(info, lines - len(memory_lines))
         if not older:
             return "\n".join(memory_lines)
+
+        # C1 fix: stitch the split line at the memory/file boundary.
+        # If the spill file does NOT end with a newline (last spill
+        # was mid-line), then ``older[-1]`` is the partial tail of a
+        # line whose head lives in ``memory_lines[0]``. Concatenate
+        # them and drop the now-stale older tail.
+        if not info._file_ends_with_newline and older and memory_lines:
+            memory_lines[0] = older.pop() + memory_lines[0]
 
         combined = older + memory_lines
         return "\n".join(combined[-lines:])
 
-    def _read_file_tail(
+    async def _read_file_tail(
         self, info: ProcessInfo, want_lines: int
+    ) -> list[str]:
+        """Async wrapper around :meth:`_read_file_tail_sync`.
+
+        Spill files can grow large; tailing them with ``open()`` +
+        ``seek()`` + ``read()`` is synchronous I/O that would block
+        the event loop. Offload to a worker thread via
+        :func:`asyncio.to_thread`.
+
+        Returns the same ``list[str]`` (oldest→newest) as the sync
+        helper — see that method for the stitching algorithm.
+        """
+        return await asyncio.to_thread(
+            self._read_file_tail_sync, info, want_lines
+        )
+
+    @staticmethod
+    def _read_file_tail_sync(
+        info: ProcessInfo, want_lines: int
     ) -> list[str]:
         """Return the most recent ``want_lines`` lines from the spill file.
 
@@ -1245,7 +1444,7 @@ Returns:
     # -----------------------------------------------------------------
     @register_tool_category("proc")
     @tool
-    def proc_logs(process_id: str, lines: int = 50) -> str:
+    async def proc_logs(process_id: str, lines: int = 50) -> str:
         """Read the last N lines of captured output. Use tool_help('proc_logs') for details.
 
         Args:
@@ -1279,7 +1478,10 @@ Returns:
                 f"(no output captured yet; status={status_hint})"
             )
 
-        body = manager._get_recent_lines(info, n)
+        # M3 fix: ``_get_recent_lines`` is now async because it may
+        # tail a large spill file via ``asyncio.to_thread`` — large
+        # spill files would otherwise stall the event loop.
+        body = await manager._get_recent_lines(info, n)
         if not body:
             return (
                 f"(no output captured yet; status={info.status})"
