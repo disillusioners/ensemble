@@ -1084,6 +1084,56 @@ class BackgroundProcessManager:
                 except OSError:
                     pass
 
+    async def cleanup_all(self) -> int:
+        """Kill ALL background processes across ALL instances.
+
+        Daemon-shutdown sweep. Idempotent: each ``cleanup_instance`` pops
+        its bucket atomically under the per-manager lock, so concurrent
+        or repeated calls are safe (the second pop returns an empty
+        bucket and short-circuits).
+
+        Known limitations (documented per Phase 1 approver note 4):
+
+        * **Truly-detached orphans.** A child process that called
+          ``setsid`` (or otherwise left its original process group)
+          sits outside the group that ``cleanup_instance`` kills via
+          ``os.killpg``. Such a process will not be reaped by this
+          sweep — that is a process-isolation issue, not a manager bug.
+        * **Crash-recovery leak.** The in-memory ``self._processes``
+          registry is not persisted to disk. If the daemon crashes
+          before this sweep runs (no graceful shutdown), the OS
+          processes themselves survive but the Python-side bookkeeping
+          is gone — a hard daemon restart cannot enumerate them here.
+          The OS reaps the subprocesses when the parent Python process
+          dies (unless they were ``setsid``-detached, see above).
+
+        Why we snapshot the keys under the lock and release before
+        iterating: ``cleanup_instance`` itself acquires ``self._lock``.
+        ``asyncio.Lock`` is non-reentrant, so holding it across the
+        loop would deadlock. Snapshot → release → iterate is safe
+        because ``cleanup_instance`` pops each bucket atomically.
+
+        Returns:
+            Number of instance buckets that were cleaned (0 if none).
+        """
+        # Snapshot instance ids under lock; release before iterating so
+        # ``cleanup_instance`` can re-acquire the lock per call.
+        async with self._lock:
+            instance_ids = list(self._processes.keys())
+        cleaned = 0
+        for iid in instance_ids:
+            try:
+                await self.cleanup_instance(iid)
+                cleaned += 1
+            except Exception as e:
+                logger.warning(
+                    f"cleanup_all: cleanup_instance failed for {iid[:8]}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        if cleaned:
+            logger.info(f"cleanup_all: cleaned {cleaned} instance bucket(s)")
+        return cleaned
+
     # -- log reading --------------------------------------------------------
 
     async def _get_recent_lines(self, info: ProcessInfo, lines: int) -> str:

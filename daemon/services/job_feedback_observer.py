@@ -2422,6 +2422,76 @@ class JobFeedbackObserver:
                 dispatcher fetches it on-demand via
                 ``_get_last_assistant_message_raw``.
         """
+        # Step 1: TWO-TIER proc cleanup. Added in Phase 1 of the
+        # "auto-kill background processes on root instance completion"
+        # plan (2026-07-18). Closes the per-child leak window: every
+        # terminal instance now has its own background processes
+        # cleaned up here, regardless of parent_id.
+        #
+        # Tier 1 — ALWAYS clean THIS instance's own processes. Runs
+        # for ANY terminal instance (root OR child). Without this, a
+        # child that COMPLETED would leak its background processes
+        # until the root finalized.
+        #
+        # Tier 2 — Root-gated tree sweep for DESCENDANTS. Only when
+        # this is a ROOT instance (parent_id is None). Tier 1 already
+        # cleaned the root's own processes; Tier 2 sweeps descendants.
+        #
+        # Known limitations (mirrors ``BackgroundProcessManager.cleanup_all``):
+        #   * Truly-detached orphans (child called ``setsid``) sit
+        #     outside the process group that ``cleanup_instance``
+        #     reaps via ``os.killpg`` — they will not be killed here.
+        #   * Crash-recovery leak: the in-memory ``_processes``
+        #     registry does not survive a daemon crash. The OS
+        #     subprocesses themselves survive; the manager's
+        #     bookkeeping is gone on next start. This sweep cannot
+        #     reach them after a hard restart.
+        #
+        # Best-effort throughout: every cleanup call is wrapped in its
+        # own try/except so a failure in one tier does not block the
+        # other or the downstream side-effects below.
+        try:
+            from daemon.tools.proc_tools import get_background_process_manager
+
+            proc_mgr = get_background_process_manager()
+        except Exception as e:
+            # Failed to even import / look up the manager — log and
+            # fall through (Tier 1 + Tier 2 become no-ops).
+            logger.warning(
+                f"Observer: could not load BackgroundProcessManager for "
+                f"{instance_id[:8]}: {type(e).__name__}: {e}"
+            )
+            proc_mgr = None
+
+        # ── TIER 1 ─────────────────────────────────────────────────────
+        if proc_mgr is not None:
+            try:
+                await proc_mgr.cleanup_instance(instance_id)
+            except Exception as e:
+                logger.warning(
+                    f"Observer: Tier-1 proc cleanup failed for "
+                    f"{instance_id[:8]}: {type(e).__name__}: {e}"
+                )
+
+        # ── TIER 2 (root-gated) ────────────────────────────────────────
+        # Initialize ``tree_ids`` OUTSIDE the try block so a failure
+        # inside the try does not leave it undefined (Phase 1 C4 fix).
+        tree_ids: list[str] = []
+        if parent_id is None and proc_mgr is not None:
+            tree_ids = await self._cleanup_descendants_of(instance_id)
+
+            # Iterate tree, skipping the root (Tier 1 already cleaned it).
+            for iid in tree_ids:
+                if iid == instance_id:
+                    continue
+                try:
+                    await proc_mgr.cleanup_instance(iid)
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: Tier-2 proc cleanup failed for "
+                        f"{iid[:8]}: {type(e).__name__}: {e}"
+                    )
+
         # Step 2: SSE status_change — fire AFTER commit so subscribers see
         # a state consistent with the DB. Best-effort.
         live_hub = getattr(self._instance_manager, "_live_hub", None)
@@ -2486,6 +2556,56 @@ class JobFeedbackObserver:
                     f"Observer: failed to publish lifecycle event for "
                     f"{instance_id[:8]}...: {e}"
                 )
+
+    async def _cleanup_descendants_of(self, root_id: str) -> list[str]:
+        """Return the descendant ``instance_id`` list for ``root_id``.
+
+        Extracted from ``_dispatch_instance_post_commit_side_effects`` so
+        it can be unit-tested directly and so Phase 2's adjacent bash
+        sweep can re-use the same tree-id resolution without a diff
+        touching the dispatcher's body.
+
+        Resolves ``root_id``'s full subtree via
+        ``instance_repository.get_tree_ids``. That call is SYNC (it
+        reads from SQLite), so we run it via ``asyncio.to_thread`` to
+        avoid blocking the event loop.
+
+        Failure modes — all return ``[]`` so the caller's Tier 2 loop
+        becomes a safe no-op:
+
+          * ``_instance_repository`` missing on the manager
+            (race during early shutdown) — WARNING logged.
+          * ``get_tree_ids`` raises (DB locked, table missing, etc.)
+            — WARNING logged.
+
+        Args:
+            root_id: Root instance ID whose descendants to enumerate.
+
+        Returns:
+            List of ``instance_id`` strings including ``root_id`` itself
+            (the caller is expected to filter it out, since Tier 1
+            already cleaned it). Returns ``[]`` on any failure.
+        """
+        instance_repository = getattr(
+            self._instance_manager, "_instance_repository", None
+        )
+        if instance_repository is None:
+            logger.warning(
+                f"Observer: no _instance_repository on manager; "
+                f"skipping descendant cleanup for root {root_id[:8]}"
+            )
+            return []
+
+        try:
+            return await asyncio.to_thread(
+                instance_repository.get_tree_ids, root_id
+            )
+        except Exception as e:
+            logger.warning(
+                f"Observer: get_tree_ids failed for root {root_id[:8]}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return []
 
     def _finalize_instance_db_sync(
         self,

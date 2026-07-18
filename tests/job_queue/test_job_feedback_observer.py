@@ -1766,3 +1766,266 @@ class TestRepositoryFiltersMessageTypeAtPendingQueries:
             "Fix 1 has regressed; stale MESSAGE JobItems will now be "
             "double-dispatched via _trigger_next_job"
         )
+
+
+# =============================================================================
+# Phase 1: Two-tier proc cleanup in
+# ``_dispatch_instance_post_commit_side_effects`` (2026-07-18).
+# =============================================================================
+
+
+class TestDispatchTwoTierProcCleanup:
+    """Tier 1 + Tier 2 proc cleanup in ``_dispatch_instance_post_commit_side_effects``.
+
+    Phase 1 of the "auto-kill background processes on root instance
+    completion" plan. Tier 1 always cleans the terminating instance's
+    own processes (root OR child); Tier 2 is root-gated and sweeps
+    the descendant subtree via ``_instance_repository.get_tree_ids``.
+
+    All tests below patch ``daemon.tools.proc_tools.get_background_process_manager``
+    so the real BackgroundProcessManager singleton is not touched — we
+    only care about call shape (which ids are passed to
+    ``cleanup_instance`` and whether ``get_tree_ids`` fires).
+
+    The dispatcher's other side-effects (SSE, CompletionRegistry,
+    lifecycle event) are stubbed via mock instance_manager so the
+    test focuses on proc cleanup only.
+    """
+
+    @staticmethod
+    def _wire_observer_with_proc_manager(proc_mgr_mock):
+        """Build an observer whose ``BackgroundProcessManager`` is replaced.
+
+        Returns ``(observer, instance_manager_mock)``.
+        """
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._live_hub = MagicMock()
+        mock_instance_manager._live_hub.stream_status_change = AsyncMock()
+        mock_instance_manager._events_service = MagicMock()
+        mock_instance_manager._events_service._publish_instance_lifecycle_event = (
+            AsyncMock()
+        )
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="mock-content"
+        )
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=MagicMock(),
+            job_repo=MagicMock(),
+            lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+            config=None,
+        )
+        return observer, mock_instance_manager
+
+    @pytest.mark.asyncio
+    async def test_tier1_always_fires_for_child_instance(self, monkeypatch):
+        """Tier 1 fires for any terminal instance (parent_id != None).
+
+        Tier 2 must NOT fire when the terminating instance is a child —
+        only Tier 1 runs (cleanup_instance on the child itself).
+        ``get_tree_ids`` must NOT be called.
+        """
+        from daemon.tools import proc_tools
+
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+
+        monkeypatch.setattr(
+            proc_tools,
+            "get_background_process_manager",
+            lambda: proc_mgr,
+        )
+
+        observer, _im = self._wire_observer_with_proc_manager(proc_mgr)
+
+        child_id = "child-instance-12345678"
+        parent_id = "parent-instance-87654321"
+
+        # Make sure get_tree_ids would fail loudly if accidentally called.
+        _im._instance_repository.get_tree_ids = MagicMock(
+            side_effect=AssertionError(
+                "get_tree_ids must NOT be called for non-root"
+            )
+        )
+
+        await observer._dispatch_instance_post_commit_side_effects(
+            instance_id=child_id,
+            terminal_status="completed",
+            error=None,
+            parent_id=parent_id,
+            agent_id="developer",
+            last_content="hello",
+        )
+
+        # Tier 1 fired.
+        proc_mgr.cleanup_instance.assert_awaited_once_with(child_id)
+        # Tier 2 was skipped — get_tree_ids must not be touched.
+        assert not _im._instance_repository.get_tree_ids.called, (
+            "Tier 2 must be skipped for child instances"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tier2_fires_only_for_root_and_skips_root(self, monkeypatch):
+        """Tier 1 + Tier 2 both fire when parent_id is None.
+
+        Tier 1 cleans the root; Tier 2 walks ``get_tree_ids`` and
+        cleans descendants, skipping the root (Tier 1 already handled
+        it).
+        """
+        from daemon.tools import proc_tools
+
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+
+        monkeypatch.setattr(
+            proc_tools,
+            "get_background_process_manager",
+            lambda: proc_mgr,
+        )
+
+        observer, im = self._wire_observer_with_proc_manager(proc_mgr)
+
+        root_id = "root-instance-aaaaaaaa"
+        descendant_a = "descendant-a-bbbbbbbb"
+        descendant_b = "descendant-b-cccccccc"
+
+        # get_tree_ids returns [root, descendant_a, descendant_b] (BFS).
+        im._instance_repository.get_tree_ids = MagicMock(
+            return_value=[root_id, descendant_a, descendant_b]
+        )
+
+        await observer._dispatch_instance_post_commit_side_effects(
+            instance_id=root_id,
+            terminal_status="completed",
+            error=None,
+            parent_id=None,
+            agent_id="developer",
+            last_content="hello",
+        )
+
+        im._instance_repository.get_tree_ids.assert_called_once_with(root_id)
+
+        # Tier 1: root cleaned exactly once.
+        # Tier 2: descendant_a and descendant_b cleaned; root NOT cleaned
+        # a second time.
+        calls = [c.args[0] for c in proc_mgr.cleanup_instance.await_args_list]
+        assert calls.count(root_id) == 1, (
+            f"Root should be cleaned exactly once (Tier 1); "
+            f"calls were: {calls}"
+        )
+        assert descendant_a in calls, (
+            f"Tier 2 must clean descendant_a; calls were: {calls}"
+        )
+        assert descendant_b in calls, (
+            f"Tier 2 must clean descendant_b; calls were: {calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_tree_ids_failure_is_isolated(self, monkeypatch, caplog):
+        """If ``get_tree_ids`` raises, Tier 2 is a no-op; Tier 1 + other side-effects still fire."""
+        from daemon.tools import proc_tools
+
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        proc_mgr.cleanup_instance = AsyncMock()
+
+        monkeypatch.setattr(
+            proc_tools,
+            "get_background_process_manager",
+            lambda: proc_mgr,
+        )
+
+        observer, im = self._wire_observer_with_proc_manager(proc_mgr)
+
+        root_id = "root-instance-failroot"
+
+        # Make get_tree_ids raise (e.g., DB locked).
+        im._instance_repository.get_tree_ids = MagicMock(
+            side_effect=RuntimeError("DB locked (synthetic)")
+        )
+
+        with caplog.at_level("WARNING"):
+            await observer._dispatch_instance_post_commit_side_effects(
+                instance_id=root_id,
+                terminal_status="completed",
+                error=None,
+                parent_id=None,
+                agent_id="developer",
+                last_content="hello",
+            )
+
+        # Tier 1 still ran (root cleaned).
+        proc_mgr.cleanup_instance.assert_awaited_once_with(root_id)
+
+        # Tier 2: get_tree_ids was called (the helper invokes it), but
+        # the helper swallowed the error so no descendant was passed
+        # to cleanup_instance.
+        im._instance_repository.get_tree_ids.assert_called_once_with(root_id)
+        assert proc_mgr.cleanup_instance.await_count == 1, (
+            "Tier 2 must not invoke cleanup_instance when get_tree_ids "
+            "fails — only Tier 1 should have run"
+        )
+
+        # WARNING was logged for the get_tree_ids failure.
+        warning_texts = [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert any(
+            "get_tree_ids failed" in msg for msg in warning_texts
+        ), f"Expected a get_tree_ids WARNING, got: {warning_texts}"
+
+        # Other side-effects (SSE, CompletionRegistry, lifecycle event)
+        # still fired — Tier 2 failure is isolated.
+        im._live_hub.stream_status_change.assert_awaited_once()
+        im._events_service._publish_instance_lifecycle_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_descendants_of_helper_returns_tree(self, monkeypatch):
+        """``_cleanup_descendants_of`` wraps ``get_tree_ids`` and returns the result list."""
+        from daemon.tools import proc_tools
+
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        monkeypatch.setattr(
+            proc_tools,
+            "get_background_process_manager",
+            lambda: proc_mgr,
+        )
+
+        observer, im = self._wire_observer_with_proc_manager(proc_mgr)
+        im._instance_repository.get_tree_ids = MagicMock(
+            return_value=["root", "kid"]
+        )
+
+        result = await observer._cleanup_descendants_of("root")
+        assert result == ["root", "kid"]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_descendants_of_missing_repo_returns_empty(
+        self, monkeypatch, caplog
+    ):
+        """If ``_instance_repository`` is missing, helper returns ``[]`` and logs WARNING."""
+        from daemon.tools import proc_tools
+
+        proc_mgr = AsyncMock(name="BackgroundProcessManager")
+        monkeypatch.setattr(
+            proc_tools,
+            "get_background_process_manager",
+            lambda: proc_mgr,
+        )
+
+        observer, im = self._wire_observer_with_proc_manager(proc_mgr)
+        # Make _instance_repository explicitly missing.
+        im._instance_repository = None
+
+        with caplog.at_level("WARNING"):
+            result = await observer._cleanup_descendants_of("root")
+
+        assert result == []
+        warning_texts = [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert any(
+            "no _instance_repository" in msg for msg in warning_texts
+        ), f"Expected missing-repo WARNING, got: {warning_texts}"

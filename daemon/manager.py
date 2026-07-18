@@ -5575,6 +5575,28 @@ class InstanceManager:
                 task.cancel()
         self._background_tasks.clear()
         
+        # Phase 1 (2026-07-19): kill all background processes BEFORE
+        # tearing down workers / sources. Best-effort — failures must
+        # never block the rest of shutdown. ``cleanup_all`` snapshots
+        # per-instance buckets and calls ``cleanup_instance`` on each,
+        # which is idempotent (atomic bucket pop). See
+        # ``daemon/tools/proc_tools.py`` for the limitations
+        # (``setsid`` orphans, crash-recovery leak).
+        try:
+            from daemon.tools.proc_tools import get_background_process_manager
+
+            cleaned = await get_background_process_manager().cleanup_all()
+            if cleaned:
+                logger.info(
+                    f"shutdown: killed background processes in "
+                    f"{cleaned} instance(s)"
+                )
+        except Exception as e:
+            logger.warning(
+                f"shutdown: proc cleanup_all failed: "
+                f"{type(e).__name__}: {e}"
+            )
+
         steps = [
             ("stop_sources", self.stop_sources(timeout=grace_period)),
             ("cancel_active_requests", self._cancel_all_active_requests()),

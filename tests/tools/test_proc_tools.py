@@ -82,6 +82,30 @@ PROC_TOOL_NAMES: frozenset[str] = frozenset({
 MAX_PROCESSES = 10
 
 
+def _make_fake_info(pid: str):
+    """Build a ``ProcessInfo``-like stub for ``cleanup_all`` unit tests.
+
+    ``cleanup_instance`` only does duck-typed attribute access on
+    ``info`` — the fields it actually touches are: ``reader_task``,
+    ``exit_task``, ``timeout_task``, ``proc``, ``file_path``,
+    ``file_handle``. All can be ``None`` (early-returned in the kill
+    loop). We use ``SimpleNamespace`` rather than a dataclass because
+    dataclass forbids mutable defaults like ``bytearray()``, and
+    ``ProcessInfo`` requires constructor args we don't want to fake.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        process_id=pid,
+        reader_task=None,
+        exit_task=None,
+        timeout_task=None,
+        proc=None,
+        file_path=None,
+        file_handle=None,
+    )
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -464,6 +488,147 @@ class TestInstanceCleanup:
         assert "No background processes" in listing_after, (
             f"Expected empty list after cleanup, got: {listing_after}"
         )
+
+
+class TestCleanupAll:
+    """Verify ``BackgroundProcessManager.cleanup_all`` (Phase 1 of the
+    auto-kill background processes on root instance completion plan).
+
+    ``cleanup_all`` is the daemon-shutdown sweep: it iterates every
+    instance bucket and calls ``cleanup_instance`` per bucket, returning
+    a count. It is idempotent and best-effort (per-iid try/except).
+
+    The tests below directly poke ``manager._processes`` (the in-memory
+    registry) rather than spawning real OS subprocesses. The manager's
+    ``cleanup_instance`` itself is exercised end-to-end in
+    ``TestInstanceCleanup``; here we only care that ``cleanup_all``
+    walks every key and pops every bucket — and that failures are
+    isolated.
+    """
+
+    async def test_cleanup_all_empties_all_buckets_across_instances(self):
+        """Spawn procs across multiple instances, then ``cleanup_all`` empties every bucket."""
+        from daemon.tools.proc_tools import (
+            get_background_process_manager,
+        )
+
+        manager = get_background_process_manager()
+        # Use unique ids so we don't collide with other tests.
+        ids = [
+            f"test-cleanup-all-a-{os.urandom(4).hex()}",
+            f"test-cleanup-all-b-{os.urandom(4).hex()}",
+            f"test-cleanup-all-c-{os.urandom(4).hex()}",
+        ]
+        # Inject fake buckets (skip subprocess spawn — we only exercise
+        # the snapshot-and-pop logic, not the OS kill).
+
+        try:
+            for iid in ids:
+                manager._processes[iid] = {  # type: ignore[assignment]
+                    "proc-fake-1": _make_fake_info("proc-fake-1"),
+                    "proc-fake-2": _make_fake_info("proc-fake-2"),
+                }
+
+            # Sanity: all buckets present before cleanup.
+            for iid in ids:
+                assert iid in manager._processes
+                assert len(manager._processes[iid]) == 2
+
+            cleaned = await manager.cleanup_all()
+
+            assert cleaned == 3, f"Expected 3 cleaned buckets, got {cleaned}"
+            assert manager._processes == {}, (
+                f"Expected empty _processes dict, got: "
+                f"{list(manager._processes.keys())}"
+            )
+        finally:
+            # Belt-and-suspenders: ensure no leak if a sub-assert failed.
+            for iid in ids:
+                manager._processes.pop(iid, None)
+
+    async def test_cleanup_all_is_idempotent(self):
+        """Calling ``cleanup_all`` twice on the same manager is a no-op the second time."""
+        from daemon.tools.proc_tools import (
+            get_background_process_manager,
+        )
+
+        manager = get_background_process_manager()
+        iid = f"test-cleanup-all-idem-{os.urandom(4).hex()}"
+
+        # Empty state: cleanup_all is a no-op, returns 0.
+        first = await manager.cleanup_all()
+        assert first == 0, f"Empty state should yield 0, got {first}"
+
+        try:
+            manager._processes[iid] = {"proc-x": _make_fake_info("proc-x")}  # type: ignore[assignment]
+            first_with_bucket = await manager.cleanup_all()
+            assert first_with_bucket == 1, (
+                f"Expected 1 cleaned bucket, got {first_with_bucket}"
+            )
+            second = await manager.cleanup_all()
+            assert second == 0, (
+                f"Second cleanup_all on empty registry should be 0, "
+                f"got {second}"
+            )
+        finally:
+            manager._processes.pop(iid, None)
+
+    async def test_cleanup_all_isolates_per_instance_failures(self):
+        """If ``cleanup_instance`` raises for one iid, others still get cleaned."""
+        from daemon.tools.proc_tools import (
+            get_background_process_manager,
+        )
+
+        manager = get_background_process_manager()
+        iid_a = f"test-cleanup-all-fail-a-{os.urandom(4).hex()}"
+        iid_b = f"test-cleanup-all-fail-b-{os.urandom(4).hex()}"
+
+        # Stub ``cleanup_instance`` so it raises for iid_a only.
+        original_cleanup = manager.cleanup_instance
+        raised_for: list[str] = []
+
+        async def stub_cleanup(iid: str) -> None:
+            if iid == iid_a:
+                raised_for.append(iid)
+                # Mimic the real ``cleanup_instance``'s atomic pop BEFORE
+                # raising so the bucket is gone from the registry — this
+                # matches the production behavior (the pop happens before
+                # the OS kill attempt, so even a kill failure leaves the
+                # bucket empty). Otherwise we'd be testing an artifact
+                # of the test stub, not the production code path.
+                async with manager._lock:
+                    manager._processes.pop(iid, {})
+                raise RuntimeError("synthetic cleanup_instance failure")
+            # Otherwise fall back to the real method (idempotent pop).
+            await original_cleanup(iid)
+
+        try:
+            manager._processes[iid_a] = {"proc-y": _make_fake_info("proc-y")}  # type: ignore[assignment]
+            manager._processes[iid_b] = {"proc-y": _make_fake_info("proc-y")}  # type: ignore[assignment]
+
+            manager.cleanup_instance = stub_cleanup  # type: ignore[assignment]
+
+            cleaned = await manager.cleanup_all()
+
+            # iid_a failed (WARNING logged but counter not incremented);
+            # iid_b succeeded.
+            assert cleaned == 1, f"Expected 1 cleaned (iid_b), got {cleaned}"
+            assert iid_a in raised_for, (
+                "cleanup_instance should have been called for iid_a"
+            )
+            assert iid_a not in manager._processes, (
+                f"iid_a bucket should still be popped (real pop happens "
+                f"before the stub raises), got: "
+                f"{list(manager._processes.keys())}"
+            )
+            assert iid_b not in manager._processes, (
+                f"iid_b bucket should be cleaned, got: "
+                f"{list(manager._processes.keys())}"
+            )
+        finally:
+            manager.cleanup_instance = original_cleanup  # type: ignore[assignment]
+            manager._processes.pop(iid_a, None)
+            manager._processes.pop(iid_b, None)
 
 
 # =============================================================================
