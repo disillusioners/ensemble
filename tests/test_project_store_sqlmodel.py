@@ -660,10 +660,19 @@ class TestProjectEnums:
         assert ProjectType.is_valid("research") is True
         assert ProjectType.is_valid("task") is True
         assert ProjectType.is_valid("general") is True
+        # Test newly added enum values
+        assert ProjectType.is_valid("infrastructure") is True
+        assert ProjectType.is_valid("gitops") is True
+        assert ProjectType.is_valid("devops") is True
+        assert ProjectType.is_valid("library") is True
+        assert ProjectType.is_valid("data") is True
+        assert ProjectType.is_valid("mobile") is True
         # Test invalid values
         assert ProjectType.is_valid("") is False
         assert ProjectType.is_valid("   ") is False
         assert ProjectType.is_valid("invalid") is False
+        assert ProjectType.is_valid("infra") is False
+        assert ProjectType.is_valid("GitOps") is False  # case sensitive
 
 
 class TestGetByShortname:

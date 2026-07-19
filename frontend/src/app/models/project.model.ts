@@ -2,7 +2,7 @@
 export type ProjectStatus = 'active' | 'paused' | 'completed' | 'archived';
 
 // Project type
-export type ProjectType = 'software' | 'documentation' | 'research' | 'task' | 'general' | string;
+export type ProjectType = 'software' | 'documentation' | 'research' | 'task' | 'general' | 'infrastructure' | 'gitops' | 'devops' | 'library' | 'data' | 'mobile' | string;
 
 // Main Project interface matching backend
 export interface Project {

@@ -90,7 +90,13 @@ class ProjectType(str, enum.Enum):
     RESEARCH = "research"
     TASK = "task"
     GENERAL = "general"
-    
+    INFRASTRUCTURE = "infrastructure"  # Infrastructure-as-Code (Terraform, Ansible, Pulumi)
+    GITOPS = "gitops"  # GitOps pipelines (ArgoCD, Flux, Git-based deployment)
+    DEVOPS = "devops"  # CI/CD, deployment automation, pipeline tooling
+    LIBRARY = "library"  # Reusable libraries/packages/SDKs
+    DATA = "data"  # Data engineering, pipelines, analytics, ML
+    MOBILE = "mobile"  # Mobile applications (iOS/Android)
+
     @classmethod
     def is_valid(cls, project_type: str) -> bool:
         return project_type in cls._value2member_map_

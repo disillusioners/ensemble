@@ -575,6 +575,38 @@ Projects are organizational units that group related work, agents, and context.
 }
 ```
 
+**Example with a different project type:**
+
+```json
+{
+  "name": "GitOps Deploy Pipelines",
+  "project_type": "devops",
+  "main_directory": "/path/to/gitops-repo",
+  "description": "ArgoCD + GitHub Actions deployment pipelines",
+  "tags": ["argocd", "ci-cd", "k8s"]
+}
+```
+
+Other types like `infrastructure`, `gitops`, `library`, `data`, and `mobile` are also supported — see [Allowed Project Types](#allowed-project-types) below.
+
+### Allowed Project Types
+
+The `project_type` field accepts the following 11 values:
+
+- `software` — Application code (web, API, services)
+- `documentation` — Docs sites, guides, written material
+- `research` — Research projects, experiments, papers
+- `task` — One-off tasks, scripts, ad-hoc work
+- `general` — Catch-all for projects that don't fit other categories
+- `infrastructure` — Infrastructure-as-Code (Terraform, Ansible, Pulumi)
+- `gitops` — GitOps pipelines (ArgoCD, Flux, Git-based deployment)
+- `devops` — CI/CD, deployment automation, pipeline tooling
+- `library` — Reusable libraries, packages, SDKs
+- `data` — Data engineering, pipelines, analytics, ML
+- `mobile` — Mobile applications (iOS/Android)
+
+Values are validated against the `ProjectType` enum in `daemon/repositories/project/models.py`. Unknown values are rejected with a validation error.
+
 ### List Projects
 
 **GET `/api/projects`**

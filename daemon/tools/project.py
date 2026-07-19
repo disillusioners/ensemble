@@ -30,7 +30,7 @@ CATEGORY_DOC = """\
 Create, update, search, and manage projects.
 
 **Status values:** `active`, `paused`, `completed`, `archived`
-**Project types:** `software`, `documentation`, `research`, `task`, `general`, or custom
+**Project types:** `software`, `documentation`, `research`, `task`, `general`, `infrastructure`, `gitops`, `devops`, `library`, `data`, `mobile`, or custom
 """
 
 
@@ -72,8 +72,10 @@ work that benefits from tracking directories, status, and metadata.
 
 Args:
     name: Project name (required, must be unique).
-    project_type: Type of project - "software", "documentation", "research", 
-                  "task", "general", or any custom type. Default: "general".
+    project_type: Type of project - "software", "documentation", "research",
+                  "task", "general", "infrastructure", "gitops", "devops",
+                  "library", "data", "mobile", or any custom type.
+                  Default: "general".
     main_directory: Primary directory where project files are located.
     related_directories: Additional directories related to this project.
     description: Brief description of the project's purpose.
@@ -154,7 +156,9 @@ Returns:
 Args:
     project_id: The project ID to update.
     name: New project name (must be unique).
-    project_type: New project type.
+    project_type: New project type - "software", "documentation", "research",
+                  "task", "general", "infrastructure", "gitops", "devops",
+                  "library", "data", "mobile", or any custom type.
     description: New description.
     main_directory: New main directory path.
     related_directories: Replace all related directories.
