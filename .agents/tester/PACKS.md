@@ -316,7 +316,7 @@ Update after each test run:
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | 4 E2E workflow tests from ensure.md Release Gate: parent-child happy path, pause/resume, terminate/revive, wave spawn + defer queue. Requires live daemon at localhost:8079 (./dev.sh). Real LLM calls. NOTE: All 4 tests together exceed 5-min cap (~450s). Must run individually via -k filter. | 5 min per test (run individually) | 2026-07-14 | ⚠️ PARTIAL (3/4 PASS, test 4 FAIL — deferred job stuck pending) |
+| e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | 4 E2E workflow tests from ensure.md Release Gate: parent-child happy path, pause/resume, terminate/revive, wave spawn + defer queue. Requires live daemon at localhost:8079 (./dev.sh). Real LLM calls. NOTE: All 4 tests together exceed 5-min cap (~450s). Must run individually via -k filter. | 5 min per test (run individually) | 2026-07-18 | ✅ PASS (4/4, ~226s total, all Release Gate E2E green) |
 
 ## Image-Reader Agent Test Packs
 
