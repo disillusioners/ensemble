@@ -20,6 +20,7 @@ from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
+from .job_queue_service import TERMINAL_STATUSES
 from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
@@ -60,6 +61,10 @@ class _ChildCompletionDbResult(NamedTuple):
             ``completed`` + CompletionRegistry + lifecycle event + title
             gen + child_completed lifecycle broadcast + (optional) parent
             completion event when all children resolved.
+        ``"child_still_running_defer"`` — non-root instance has
+            non-terminal children (active in ``instances.parent_id``
+            working set), defer; no commit, no report, no event. Mirrors
+            ``deferred_waiting_children`` for the non-root parent case.
     """
 
     outcome: str
@@ -1118,9 +1123,41 @@ Provide a concise summary:"""
                     agent_id=None,
                     parent_id=None,
                 )
-            
+
             logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, status={instance.status}")
-            
+
+            # ─── Fix 2 idempotency short-circuit ─────────────────────────
+            # If the instance is already in a terminal state (COMPLETED
+            # or ERROR), short-circuit immediately. Re-running this
+            # function on a terminal instance would otherwise re-write
+            # status, re-emit a completion_report, re-emit an
+            # INSTANCE_COMPLETED event, and re-trigger the bus terminal
+            # hook — duplicating every observable side effect on each
+            # re-entry (the Wanderer per-graph-turn pattern).
+            #
+            # This is a status-level idempotency guard: the existing
+            # in-branch idempotency check (existing_report query)
+            # catches the duplicate-message case via the report message
+            # source, but it does NOT catch re-entries with a different
+            # ``completed_message_id`` (or with None) where the row has
+            # already been finalized. The status check is the
+            # coarser-grained safety net that supersedes both.
+            if instance.status in (
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.ERROR.value,
+            ):
+                logger.info(
+                    f"Instance {instance_id[:8]}... already in terminal "
+                    f"state ({instance.status}), skipping "
+                    f"_process_child_completion_db_sync (idempotency)"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
             # Not a child? Instance completed (no parent to send report to)
             # Check if we have active children - if so, wait for them before completing.
             #
@@ -1486,6 +1523,80 @@ Provide a concise summary:"""
                     parent_id=parent_id,
                 )
 
+            # ─── Wanderer active-children guard ────────────────────────────
+            # Symmetric to the root-instance ``deferred_waiting_children``
+            # branch above (lines ~1146-1163): if this non-root instance
+            # still has children with non-terminal status, defer the
+            # completion_report emission. Without this guard, a non-root
+            # parent like Wanderer emits a completion_report to its
+            # parent (leader) on every graph turn while its own spawned
+            # children are still running — corrupting the leader's
+            # understanding of child completion and risking premature
+            # finalization.
+            #
+            # Source of truth: ``instances.parent_id`` (the permanent
+            # record), NOT the bus ``DependencyWatcher`` counter. The bus
+            # under-counts because ``spawn_instance`` does not register
+            # bus watchers for every spawn — using it here would let
+            # the defer gate leak. ``instances.parent_id`` is the
+            # source-of-truth working set the cascade code already
+            # maintains (insert on spawn, status transitions on
+            # completion/error).
+            #
+            # The guard checks whether the just-completed instance
+            # ITSELF has non-terminal children (rows whose
+            # ``parent_id == instance_id``). When Wanderer emits its own
+            # completion_report to leader, Wanderer's spawned coders
+            # are rows with ``parent_id == wanderer_id``. Without this
+            # check, Wanderer would emit a completion_report on every
+            # graph turn even while its coders are still running.
+            #
+            # Status filter: ``status NOT IN (COMPLETED, ERROR,
+            # TERMINATED, FAILED)`` — the canonical terminal set
+            # (``daemon.services.job_queue_service.TERMINAL_STATUSES``).
+            # Without TERMINATED / FAILED here, a single TERMINATED or
+            # FAILED sibling would be counted as active and permanently
+            # wedge the parent (it would never emit a completion_report).
+            # These states are terminal — the child will not resume
+            # normal work, so the parent must not wait for it. Mirrors
+            # the cascade completion check (Fix 1).
+            #
+            # Note: this is the ONLY Fix-1 site we expand. Fix 2's
+            # idempotency set (``child_reports.py:1144-1147``) and the
+            # parent-cascade check (``child_reports.py:1682-1684``) have
+            # the same COMPLETED/ERROR-only omission but that is
+            # PRE-EXISTING and out of scope for this PR — leaving them
+            # untouched keeps the diff focused.
+            active_children = session.exec(
+                select(func.count())
+                .select_from(Instance)
+                .where(Instance.parent_id == instance_id)
+                .where(Instance.instance_id != instance_id)
+                .where(
+                    Instance.status.not_in(TERMINAL_STATUSES)
+                )
+            ).scalar_one()
+            if active_children > 0:
+                # The just-completed instance (e.g., Wanderer) still has
+                # non-terminal children of its own. Mirror the root
+                # branch's defer outcome — no status transition, no
+                # report, no events. The child's status stays in its
+                # pre-call value (typically RUNNING) until the parent
+                # actually finalizes the subtree.
+                logger.info(
+                    f"Non-root instance {instance_id[:8]}... has "
+                    f"{active_children} active children, deferring "
+                    f"completion_report to parent "
+                    f"(parent={instance.parent_id[:8]}..., "
+                    f"active-children guard)"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="child_still_running_defer",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
             # ATOMIC: Instance completed — create completion report for parent
             logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
             
@@ -1636,7 +1747,29 @@ Provide a concise summary:"""
             # Source of ``pending_for_parent``: DependencyBus (SOLE completion
             # authority). When bus is None the error-reporting path raises
             # A9 hard error above, so we only ever reach here with a bus.
-            pending_for_parent = max(0, int(bus.count_pending_for_target_sync(instance.parent_id) or 0))
+            #
+            # Fix 3 (off-by-1 correction): the snapshot below is taken
+            # INSIDE the WriteGuardSession transaction, BEFORE the
+            # post-commit bus terminal hook fires (called from
+            # ``_dispatch_post_commit_side_effects`` for the
+            # ``regular_child_completed`` outcome — see ~lines 1880-1900).
+            # That hook atomically transitions the just-completed child's
+            # PENDING watcher to FIRED, decrementing the parent's
+            # pending count by exactly 1. The CHILD_COMPLETED event
+            # emitted here is intended for the parent's UI / observers —
+            # it should reflect the parent's pending-children count
+            # AFTER the watcher fires (the post-commit reality), not
+            # the pre-commit snapshot.
+            #
+            # The minimal, least-invasive fix: subtract 1 with a
+            # ``max(0, ...)`` clamp. We know exactly one watcher was
+            # just fired (the current child's task), so the corrected
+            # post-fire count is ``current_count - 1``. ``max(0, ...)``
+            # is defensive — should never underflow, but a transient
+            # race that drops the count below 0 must not produce a
+            # negative value in the event payload.
+            _raw_pending = bus.count_pending_for_target_sync(instance.parent_id)
+            pending_for_parent = max(0, int(_raw_pending or 0) - 1)
             completion_event = Event(
                 instance_id=instance_id,
                 kind=EventKind.INSTANCE_COMPLETED.value,
@@ -1742,6 +1875,25 @@ Provide a concise summary:"""
                 except Exception as e:
                     logger.warning(
                         f"Failed to emit status_change for waiting_children: {e}"
+                    )
+            return
+
+        # Child still running defer (Fix 1, Wanderer active-children guard):
+        # non-root instance has non-terminal children → no commit, no
+        # report, no events fired. Same dispatch shape as
+        # ``deferred_waiting_children`` (SSE only) so the UI can reflect
+        # the wait state without emitting a duplicate
+        # ``child_completed`` lifecycle event to the parent.
+        if outcome == "child_still_running_defer":
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "waiting_children", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for "
+                        f"child_still_running_defer: {e}"
                     )
             return
 
