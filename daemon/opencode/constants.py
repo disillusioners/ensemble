@@ -71,7 +71,7 @@ START_WORK_AGENT: str = "atlas"
 
 # ── Agent override on resume / continue / retry ────────────────────────────────
 RESUME_AGENT: str = DEFAULT_AGENT
-RESUME_TEXT: str = "resume"
+RESUME_TEXT: str = "continue"
 """Hardcoded resume prompt body — agent=orchestrator, model=litellm/coding,
 text="resume". See ``manager.go`` lines 465-470."""
 
