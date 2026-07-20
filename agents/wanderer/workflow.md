@@ -6,6 +6,35 @@ Hard rules governing coder delegation live in `rule.md` (Resource Rule, Before-R
 
 ---
 
+## ⚠️ Async Delegation — Fire-and-Forget
+
+**Spawning coders is fire-and-forget. The system delivers reports automatically.**
+
+```raw
+1. spawn_instance("coder") → returns instance_id IMMEDIATELY (fast, non-blocking)
+2. send_message(instance_id, "sub-task...") → fire-and-forget
+3. DONE spawning — move on to other work or wait
+4. System delivers completion report as a new message — no polling needed
+```
+
+**"Waiting for coder results" means: yield and await the report message. It does NOT mean poll.**
+
+- ❌ WRONG: Poll `get_instance_info()` or `list_instances()` in a loop to check if coder is done
+- ✅ RIGHT: After spawning + sending tasks, wait for the completion report to arrive as a new message
+
+**Multiple coders in parallel:**
+```raw
+1. spawn coder-1 → send_message(sub-task A)
+2. spawn coder-2 → send_message(sub-task B)
+3. (all spawned) → wait for completion reports to arrive
+```
+
+**The only valid uses of `list_instances` / `get_instance_info`:**
+- Pre-spawn: verify fewer than 3 coders running (Resource Rule)
+- Post-termination: confirm all coders terminated (Before-Report Rule)
+
+---
+
 ## Coder Delegation Flow (Big lane)
 
 ```mermaid

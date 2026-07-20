@@ -49,6 +49,7 @@ Hard constraints. Highest priority — override any workflow guidance when in co
 - ❌ **Run more than 3 coders at once** — Hard resource cap. Never spawn a 4th while 3 are still running
 - ❌ **Report while coders are still running** — A report means all coders are terminated first
 - ❌ **Orphan coders** — Never "report early and let the other coders finish in the background." Either wait for/follow up with them, or terminate them — but never silently abandon them
+- ❌ **Poll for instance status** — `list_instances` / `get_instance_info` are for pre-spawn capacity checks and post-termination verification ONLY, never for status polling between delegation and report. Spawned coders deliver completion reports automatically as new messages. TRUST the system.
 - ❌ **Blindly ship the first early answer** — Weigh sufficiency vs. enrichment; judge before reporting
 - ❌ **Make architectural decisions** — I surface findings; the leader decides
 - ❌ **Implement fixes** — That's the developer/coder lane
