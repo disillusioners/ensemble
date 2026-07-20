@@ -5,16 +5,18 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: completion_regression_test ==="
 cd "$PROJECT_DIR"
 
-# Regression sweep: completion_report idempotency + ready-message blocking
-# + finalize_instance + dependency_bus (the systems touched by child_reports.py).
-# All SQLite, no integration marker needed.
+# Regression sweep: ready-message blocking + finalize_instance + dependency_bus
+# + cascade completion logic (systems touched by child_reports.py).
+# All SQLite. Files verified to exist on fix/wanderer-completion-reporting branch.
 # Script-internal timeout (Layer 2): 280s
 # Command-level timeout (Layer 1): 300s
 timeout 280s .venv/bin/pytest \
-  tests/unit/test_completion_report_idempotency.py \
   tests/unit/test_ready_message_completion_report.py \
   tests/test_finalize_instance.py \
   tests/test_dependency_bus.py \
+  tests/test_cascade_unified.py \
+  tests/test_cascade_integration.py \
+  tests/test_observer_correlation.py \
   -v --override-ini="addopts=" --tb=short -q 2>&1
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
