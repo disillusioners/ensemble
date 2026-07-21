@@ -64,7 +64,7 @@ Skill needed: unit-test
 1. `spawn_instance(agent="worker")` to create the worker
 2. Compose the message with the task body, then pass `load_skill="<skill_name>"` as a separate argument on the `send_message(...)` call
 3. The worker loads the named skill automatically and executes with full skill guidance
-4. Collect the worker's report back into your aggregation
+4. **After `send_message`, END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a new message. Holding your turn open blocks report delivery and deadlocks the run. Collect each worker's report as it arrives and aggregate once all expected reports are in.
 
 ### Skill Selection Guide
 

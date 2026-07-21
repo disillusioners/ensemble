@@ -17,6 +17,7 @@ from .message_processing_pipeline import (
 )
 from daemon.cancellation import CancellationToken, OperationCancelledError
 from daemon.repositories.message_queue.models import MessageStatus
+from daemon.repositories.task.models import TaskType
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
@@ -194,6 +195,62 @@ class ProcessMessageProcessor(BaseProcessor):
                 f"Message {task.message_id} not found in message_queue "
                 f"for task {task.id}"
             )
+
+        # ---- Report-injection dedup (process_report only) ----
+        # The DB-backed report-injection queue delivers child reports to
+        # a parent's LIVE graph turn ASAP (drain → ``INJECTED``). This
+        # ``process_report`` task is the FALLBACK delivery path for when
+        # no parent turn is live (and the crash-recovery path). To keep
+        # delivery exactly-once across the two paths, claim the
+        # companion ``report_injections`` row here: if the claim
+        # succeeds (``PENDING → TASK_DELIVERED``), this task OWNS
+        # delivery and proceeds normally. If it returns ``None``, the
+        # live turn already drained the report (``INJECTED``) — skip
+        # the graph turn entirely (mark the task completed, no-op).
+        #
+        # The per-instance serialization guard (one RUNNING task per
+        # instance) guarantees this task and the parent's live
+        # agent-node never run concurrently, so the atomic claim is
+        # defense-in-depth for the restart / cross-instance window.
+        if task.task_type == TaskType.PROCESS_REPORT.value:
+            repo = getattr(self._manager, "_report_injection_repo", None)
+            if repo is not None:
+                claimed = await asyncio.to_thread(
+                    repo.claim_for_task_delivery, task.message_id
+                )
+                if claimed is None:
+                    logger.info(
+                        f"Task {task.id}: report {task.message_id[:8]}... "
+                        f"already delivered via report-injection "
+                        f"(INJECTED) — skipping PROCESS_REPORT graph turn"
+                    )
+                    completed_task = await asyncio.to_thread(
+                        self._task_repo.complete_task,
+                        task.id,
+                        {
+                            "success": True,
+                            "message_id": task.message_id,
+                            "skipped": True,
+                        },
+                    )
+                    if (
+                        completed_task is not None
+                        and self._work_resolver is not None
+                        and self._watcher_repo is not None
+                    ):
+                        await notify_work_watchers(
+                            work_id=completed_task.work_id,
+                            status="completed",
+                            instance_manager=self._manager,
+                            work_resolver=self._work_resolver,
+                            watcher_repo=self._watcher_repo,
+                        )
+                    return {
+                        "success": True,
+                        "content": None,
+                        "message_id": task.message_id,
+                        "skipped": True,
+                    }
 
         # ---- Idempotency guard: skip already-completed messages ----
         # On resume of a paused root instance, two graph-driving paths

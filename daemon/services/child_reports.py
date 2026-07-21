@@ -18,6 +18,7 @@ from ..repositories.job_queue.models import JobItem
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
+from ..repositories.report_injection.models import ReportInjection
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
 from .job_queue_service import TERMINAL_STATUSES
@@ -1722,6 +1723,40 @@ Provide a concise summary:"""
                 created_at=datetime.now(timezone.utc),
             )
             session.add(report_task)
+
+            # ─── Report-injection queue (deadlock fix) ───────────────────
+            # Enqueue a row in ``report_injections`` in the SAME
+            # transaction as the completion_report message + the
+            # PROCESS_REPORT task, so the three are crash-consistent.
+            # The parent's LIVE agent-node drains PENDING rows from
+            # this queue (via the ``ReportInjectionSlot`` factory
+            # closure) right before each LLM call and injects them as
+            # ``HumanMessage``\s — delivering the report ASAP, WITHOUT
+            # waiting for the parent's turn to end.
+            #
+            # This fixes the deadlock where a parent that held its
+            # graph turn open (polling / sleeping for child reports)
+            # blocked the PROCESS_REPORT task via the per-instance
+            # serialization guard (one RUNNING task per instance) —
+            # the report sat in ``pending`` forever. With this queue,
+            # the live turn pulls the report on its next LLM call;
+            # the PROCESS_REPORT task remains as the fallback for when
+            # no turn is live (and as the crash-recovery path).
+            #
+            # Exactly-once between the two paths is enforced by the
+            # atomic ``state = PENDING → terminal`` claim in
+            # ``ReportInjectionRepository`` (drain marks ``INJECTED``;
+            # the fallback task claims ``TASK_DELIVERED``; the loser
+            # sees no PENDING row and skips). See the package docstring
+            # in ``daemon/repositories/report_injection/``.
+            report_injection_row = ReportInjection(
+                parent_instance_id=instance.parent_id,
+                child_instance_id=instance.instance_id,
+                child_message_id=completed_message_id,
+                report_message_id=report_message_id,
+                content=last_content,
+            )
+            session.add(report_injection_row)
             
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.

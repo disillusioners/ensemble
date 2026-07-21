@@ -71,6 +71,16 @@ from .skill.models import (
 from .dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from .dependency_bus.repository import DependencyWatcherRepository
 
+# Report Injection queue.
+# Imported here so ``SQLModel.metadata.create_all()`` registers the
+# ``report_injections`` table. This is a brand-new table (not an
+# additive column), so ``create_all`` handles it on every backend
+# (fresh + existing) and no ``_ensure_postgres_columns`` entry is
+# needed. See ``daemon/repositories/report_injection/`` package
+# docstring for the deadlock-fix context.
+from .report_injection.models import ReportInjection, ReportInjectionState
+from .report_injection.repository import ReportInjectionRepository
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -166,6 +176,10 @@ __all__ = [
     "DependencyWatcher",
     "DependencyWatcherState",
     "DependencyWatcherRepository",
+    # Report Injection queue
+    "ReportInjection",
+    "ReportInjectionState",
+    "ReportInjectionRepository",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",

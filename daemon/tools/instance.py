@@ -24,18 +24,18 @@ _FIRE_AND_FORGET_NOTE = """\
 
 `get_instance_info` returns instance METADATA (status, config, project) — it does NOT return the instance's report/result. The system will deliver the instance's final report to you automatically when it finishes. Instances never get stuck silently: you are guaranteed to receive the result.
 
-DO NOT poll `get_instance_info` or `list_instances` to wait for a delegated task. That wastes resources and tokens.
+DO NOT poll `get_instance_info` or `list_instances` to wait for a delegated task, and DO NOT hold your turn open with `sleep`/`bash` waiting. Both waste resources and tokens, and holding your turn open does NOT speed up delivery.
 
 Correct workflow:
 ```mermaid
 flowchart LR
-    A[Delegate task via send_message] --> B[STOP polling]
-    B --> C{Receive system<br/>report automatically}
+    A[Delegate task via send_message] --> B[END YOUR TURN — stop calling tools]
+    B --> C{System resumes your turn<br/>with the report automatically}
     C -->|Report arrives| D[Continue work]
     C -->|Need to cancel| E[terminate_instance]
 ```
 
-After delegating, just wait. The system will report back.
+After delegating, END YOUR TURN (produce your final response / stop calling tools). The system will resume your turn automatically the moment the report arrives.
 """
 
 
@@ -988,7 +988,15 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                                 f"correlation (dependency_bus): {hook_err}"
                             )
 
-        return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
+        return (
+            f"Message queued and sent to {instance_id}. Do NOT poll or "
+            f"sleep waiting for the result — END YOUR TURN now (stop "
+            f"calling tools, produce your final response). The system "
+            f"will deliver the completion report to you automatically "
+            f"the moment the child finishes, as a new message that "
+            f"resumes your turn. Polling or holding your turn open will "
+            f"NOT make the report arrive faster."
+        )
     
     send_message._full_doc_ = """Send a message to another instance's input queue.
 

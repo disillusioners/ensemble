@@ -1151,7 +1151,7 @@ class InstanceLifecycleService:
         # ``question_pause_node`` can set the deferred-pause marker
         # (C2 fix — ``pause_instance_cascade`` runs from the post-graph
         # completion path, not from inside the graph task).
-        from ..graph import InjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
+        from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -1163,6 +1163,7 @@ class InstanceLifecycleService:
             user_language=user_language,
             language_check_enabled=self._config.language.check_enabled,
             injection_slot=InjectionSlot(self._manager),
+            report_injection_slot=ReportInjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
             loop_breaker_slot=LoopBreakerSlot(self._manager),
@@ -2498,7 +2499,7 @@ class InstanceLifecycleService:
         # Phase 1 / question-tool: thread ``manager`` for the same
         # reasons as the spawn path — conditional post-tools edge and
         # ``question_pause_node`` both need the manager reference.
-        from ..graph import InjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
+        from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -2510,6 +2511,7 @@ class InstanceLifecycleService:
             user_language=user_language,
             language_check_enabled=self._config.language.check_enabled,
             injection_slot=InjectionSlot(self._manager),
+            report_injection_slot=ReportInjectionSlot(self._manager),
             live_hub=self._manager._live_hub,
             throttle_slot=ToolThrottleSlot(self._manager),
             loop_breaker_slot=LoopBreakerSlot(self._manager),

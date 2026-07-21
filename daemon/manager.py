@@ -45,6 +45,7 @@ from .repositories import (
     create_skill_trigger_repository,
     create_skill_ab_test_repository,
     create_skill_bank_repository,
+    ReportInjectionRepository,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -687,6 +688,15 @@ class InstanceManager:
 
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
+
+        # Report-injection queue repository. Backs the DB-backed, queued,
+        # persistent report-delivery path (the deadlock fix for
+        # parent-waits-for-child when the parent holds its graph turn
+        # open). Shares the engine with the other repos. The
+        # ``report_injections`` table is created by
+        # ``SQLModel.metadata.create_all()`` (model registered via
+        # ``daemon/repositories/__init__.py``).
+        self._report_injection_repo = ReportInjectionRepository(engine=self._engine)
         
         # discard_on_startup: safe "backlog clear". Clears only unstarted
         # / terminal work (PENDING tasks + their messages); RUNNING and

@@ -151,6 +151,67 @@ class InjectionSlot:
         return clearer(instance_id)
 
 
+class ReportInjectionSlot:
+    """Duck-typed handle around the DB-backed report-injection queue.
+
+    SEPARATE from :class:`InjectionSlot` (which wraps the RAM-only
+    single-slot user-message store and is intentionally untouched).
+    This handle wraps the manager's
+    :class:`~daemon.repositories.report_injection.ReportInjectionRepository`
+    and exposes the single operation the agent-node needs:
+    :meth:`drain`, which atomically claims ALL pending reports for the
+    instance and returns their contents for mid-turn injection.
+
+    Threaded into :func:`build_instance_graph` /
+    :func:`create_agent_node` via the same factory-closure pattern as
+    ``injection_slot`` / ``compactor``. Duck-typed via ``getattr`` so
+    the agent-node can be unit-tested without a real manager: any
+    object exposing ``drain(instance_id) -> list[dict]`` works.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or test double)
+            exposing a ``_report_injection_repo`` attribute whose
+            ``claim_for_injection`` method does the atomic drain.
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    def drain(self, instance_id: str) -> list[dict]:
+        """Atomically claim all pending reports for ``instance_id``.
+
+        Delegates to
+        :meth:`ReportInjectionRepository.claim_for_injection`, which
+        transitions every PENDING report for the parent to ``INJECTED``
+        and marks the companion ``message_queue`` rows ``COMPLETED``
+        in a single transaction. Returns the drained contents in
+        insertion order (oldest report first).
+
+        Returns:
+            List of ``{"content": str, "report_message_id": str}``
+            dicts. Empty list when no pending reports exist or the
+            manager has no repo wired (tests).
+        """
+        repo = getattr(self._manager, "_report_injection_repo", None)
+        if repo is None:
+            return []
+        try:
+            return repo.claim_for_injection(instance_id)
+        except Exception as e:  # pragma: no cover - defensive
+            # A DB failure here MUST NOT block the LLM call — log and
+            # treat as "no reports to inject". The fallback
+            # PROCESS_REPORT task will still deliver the report when
+            # the parent's turn is not live, so a transient drain
+            # failure degrades to the pre-fix latency, not data loss.
+            logger.warning(
+                f"[ReportInjection] drain failed for instance "
+                f"{instance_id[:8] if instance_id else '?'}...: "
+                f"{type(e).__name__}: {e} — falling back to "
+                f"PROCESS_REPORT task delivery"
+            )
+            return []
+
+
 class ToolThrottleSlot:
     """Lightweight, mock-friendly handle around InstanceManager tool-throttle counters.
 
@@ -1608,6 +1669,7 @@ def create_agent_node(
     retry_config=None,
     llm_standard=None,
     injection_slot: InjectionSlot | None = None,
+    report_injection_slot: ReportInjectionSlot | None = None,
     live_hub: Any = None,
     throttle_slot: ToolThrottleSlot | None = None,
     loop_breaker_slot: LoopBreakerSlot | None = None,
@@ -1631,8 +1693,20 @@ def create_agent_node(
             ``clear(instance_id) → dict|None``. When supplied, the agent
             node peeks + clears a pending user message on every LLM
             invocation and threads the resulting ``HumanMessage`` into
-            the conversation. ``None`` disables injection entirely
+            the conversation.             ``None`` disables injection entirely
             (backward compatible).
+        report_injection_slot: Optional :class:`ReportInjectionSlot`
+            handle that exposes ``drain(instance_id) -> list[dict]``
+            for the DB-backed child-report queue. When supplied, the
+            agent node drains ALL pending child completion reports for
+            the instance right before the LLM call (after the
+            user-message injection pull) and threads each as a
+            ``HumanMessage``. This is the deadlock fix: a parent that
+            holds its graph turn open receives child reports ASAP
+            instead of waiting for a ``PROCESS_REPORT`` task that the
+            per-instance serialization guard blocks. ``None`` disables
+            the report-injection path (backward compatible; the
+            fallback ``PROCESS_REPORT`` task still delivers reports).
         live_hub: Optional ``LiveEventHub`` reference threaded for the
             Phase 2 SSE emission path (``stream_message(... event_type=
             "injection_consumed" ...)``). In Phase 1 the handle is wired
@@ -1784,6 +1858,51 @@ def create_agent_node(
                             f"{type(e).__name__}: {e}"
                         )
 
+        # ── Report-injection drain (deadlock fix) ──────────────────────
+        # Drain ALL pending child completion reports for this instance
+        # from the DB-backed ``report_injections`` queue and inject
+        # each as a ``HumanMessage`` BEFORE the LLM call. This delivers
+        # child reports to a LIVE parent turn ASAP — without waiting
+        # for the parent's turn to end (which is the bug: a parent
+        # holding its turn open blocked the ``PROCESS_REPORT`` fallback
+        # task via the per-instance serialization guard).
+        #
+        # Distinct from the RAM user-message ``injection_slot`` above:
+        # the report queue is DB-backed, queued (multiple workers can
+        # complete near-simultaneously), and persisted (survives
+        # crashes). Exactly-once vs the fallback task is enforced by
+        # the atomic PENDING→INJECTED claim in
+        # :meth:`ReportInjectionRepository.claim_for_injection`; the
+        # fallback ``PROCESS_REPORT`` task claims PENDING→TASK_DELIVERED
+        # and skips when this drain already won.
+        #
+        # Each drained report becomes its own ``HumanMessage`` (NOT
+        # concatenated) so the LLM sees each child's report as a
+        # discrete user turn — matching how the fallback task would
+        # deliver them as separate graph turns. The
+        # ``additional_kwargs={"injected_message": True}`` flag mirrors
+        # the user-injection path so compaction preserves them (C3).
+        injected_report_msgs: list[HumanMessage] = []
+        if report_injection_slot is not None:
+            drained = await asyncio.to_thread(
+                report_injection_slot.drain, instance_id
+            )
+            for report in drained:
+                report_content = report.get("content", "") if isinstance(report, dict) else ""
+                if not report_content:
+                    continue
+                report_msg = HumanMessage(
+                    content=report_content,
+                    additional_kwargs={"injected_message": True},
+                )
+                full_messages.append(report_msg)
+                injected_report_msgs.append(report_msg)
+            if injected_report_msgs:
+                logger.info(
+                    f"[ReportInjection] Injected {len(injected_report_msgs)} "
+                    f"report(s) into live turn for {instance_short}"
+                )
+
         # Check if vision model is being used (images present in user message)
         model_vision = llm_config.get("model_vision") if llm_config else None
         has_images = False
@@ -1856,6 +1975,21 @@ def create_agent_node(
             _lb_config,
         )
 
+        # C3-style re-append for report-injection messages: a successful
+        # loop-breaker repair rebuilds ``full_messages`` from
+        # ``[SystemMessage(system_prompt), *messages]`` and would drop the
+        # report messages this turn appended (they live only in the local
+        # closure — not yet checkpointed). Re-append any that are missing
+        # (id-based guard prevents double-append on the no-repair path,
+        # which returns ``full_messages`` unchanged with reports intact).
+        if injected_report_msgs:
+            existing_ids = {
+                getattr(m, "id", None) for m in full_messages
+            }
+            for rmsg in injected_report_msgs:
+                if getattr(rmsg, "id", None) not in existing_ids:
+                    full_messages.append(rmsg)
+
         try:
             # Use run_in_executor to avoid blocking the event loop.
             # This allows SSE streaming to continue while LLM processes.
@@ -1916,6 +2050,13 @@ def create_agent_node(
                     f'message for {instance_short} '
                     f'(len={len(injected_msg.content or "")})'
                 )
+            # C3 for report-injection messages: same reason as the
+            # user-injection re-append above — they live only in the
+            # local closure and ``graph.aget_state`` reads from
+            # checkpoint, so without this re-append the retry would
+            # lose the just-drained child reports.
+            for rmsg in injected_report_msgs:
+                compact_messages.append(rmsg)
 
             # Use run_in_executor to avoid blocking the event loop after compaction
             # Continue with the same LLM that was being used (may be vision or standard)
@@ -1952,8 +2093,18 @@ def create_agent_node(
         # together. When no injection was consumed, fall back to the
         # existing single-message return so the surface is identical to
         # the pre-Phase-1 behavior.
-        if injected_msg is not None:
-            return {'messages': [injected_msg, response]}
+        #
+        # Report-injection messages are persisted here too (after the
+        # user-injection, before the response) so child reports drained
+        # into a live parent turn survive crash recovery and show up in
+        # GET /messages history — same C2 rationale as the user-injection.
+        if injected_msg is not None or injected_report_msgs:
+            persisted: list[BaseMessage] = []
+            if injected_msg is not None:
+                persisted.append(injected_msg)
+            persisted.extend(injected_report_msgs)
+            persisted.append(response)
+            return {'messages': persisted}
         return {'messages': [response]}
 
     return agent_node
@@ -2239,6 +2390,7 @@ def build_instance_graph(
     user_language: str = "Auto",
     language_check_enabled: bool = True,
     injection_slot: InjectionSlot | None = None,
+    report_injection_slot: ReportInjectionSlot | None = None,
     live_hub: Any = None,
     throttle_slot: ToolThrottleSlot | None = None,
     manager: Any = None,
@@ -2274,6 +2426,13 @@ def build_instance_graph(
             / C1) that lets the agent_node pull a pending user message
             into the conversation before each LLM call. ``None``
             disables injection (backward-compatible default).
+        report_injection_slot: Optional :class:`ReportInjectionSlot`
+            handle that lets the agent_node drain pending child
+            completion reports from the DB-backed queue and inject
+            them before each LLM call (the parent-waits-for-child
+            deadlock fix). ``None`` disables the report-injection
+            path (backward-compatible default; the fallback
+            ``PROCESS_REPORT`` task still delivers reports).
         live_hub: Optional ``LiveEventHub`` reference (Phase 1 / C1)
             threaded for Phase 2 SSE emission (placeholder only in
             Phase 1).
@@ -2339,6 +2498,7 @@ def build_instance_graph(
         retry_config=retry_config,
         llm_standard=llm_standard,
         injection_slot=injection_slot,
+        report_injection_slot=report_injection_slot,
         live_hub=live_hub,
         throttle_slot=throttle_slot,
         loop_breaker_slot=loop_breaker_slot,
