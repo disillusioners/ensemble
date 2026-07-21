@@ -89,9 +89,23 @@ def _resolve_target_path(
     try:
         base = Path(workdir).expanduser().resolve()
         target = (base / path).expanduser().resolve()
-        return target, base, None
     except (OSError, RuntimeError) as e:
         return None, None, f"ERROR: Invalid path: {e}"
+
+    # Verify the resolved workdir actually exists on disk. When the caller
+    # passes a typo'd / hallucinated workdir (e.g. `ngienminhkha` instead of
+    # `nguyenminhkha`), `base` resolves successfully but is not a real
+    # directory. Without this check, every downstream tool would report a
+    # misleading "File does not exist" against the (valid) target path while
+    # the real cause is the missing workdir. Surface the original workdir
+    # string the caller passed in, so the agent can spot its own typo.
+    if not base.exists():
+        return None, None, (
+            f"ERROR: Working directory does not exist: {workdir} "
+            "— check the workdir path. Was it typed correctly?"
+        )
+
+    return target, base, None
 
 
 def _resolve_within_workdir(

@@ -108,6 +108,40 @@ class TestResolveTargetPath:
         assert base == tmp_path.resolve()
         assert target == (sub / "file.txt").resolve()
 
+    def test_relative_path_with_nonexistent_workdir_errors(self):
+        """A typo'd / hallucinated workdir surfaces a workdir-specific error.
+
+        Regression: previously this returned a misleading "File does not
+        exist" downstream. Now the resolver itself reports that the workdir
+        itself is missing, using the *original* workdir string the caller
+        passed in (so the agent can spot its own typo).
+        """
+        typo_workdir = "/Users/ngienminhkha/projects/agents-ensemble"  # missing 'u'
+        target, base, err = _resolve_target_path("foo.txt", workdir=typo_workdir)
+
+        assert err is not None
+        assert target is None
+        assert base is None
+        assert "Working directory does not exist" in err
+        assert "check the workdir path" in err
+        # Original workdir echoed verbatim, so the agent sees its own typo.
+        assert typo_workdir in err
+
+    def test_relative_path_nonexistent_workdir_does_not_fall_through_to_file_error(self, tmp_path):
+        """When the workdir is missing, the resolver must NOT return a valid target.
+
+        Otherwise downstream tools would see a 'valid' target path and report
+        a misleading "File does not exist" instead of the real workdir issue.
+        """
+        # Use a path under tmp_path that definitely does not exist.
+        ghost = tmp_path / "nope" / "not_here"
+        target, base, err = _resolve_target_path("file.txt", workdir=str(ghost))
+
+        assert err is not None
+        assert target is None
+        assert base is None
+        assert "Working directory does not exist" in err
+
 
 class TestResolveWithinWorkdir:
     def test_absolute_path_works_no_boundary_check(self, tmp_path):
@@ -122,6 +156,23 @@ class TestResolveWithinWorkdir:
         target, err = _resolve_within_workdir("file.txt", workdir=str(sub))
         assert err is None
         assert target == (sub / "file.txt").resolve()
+
+    def test_relative_path_with_nonexistent_workdir_errors(self, tmp_path):
+        """_resolve_within_workdir surfaces the workdir-does-not-exist error.
+
+        Bug class: caller passes a typo'd workdir, the wrapper used to return
+        a resolved target inside a non-existent directory. Downstream tools
+        then reported "File does not exist" against a path the agent never
+        intended. Now the error fires at the resolver.
+        """
+        ghost = tmp_path / "definitely_not_here"
+        target, err = _resolve_within_workdir("file.txt", workdir=str(ghost))
+
+        assert err is not None
+        assert target is None
+        assert "Working directory does not exist" in err
+        # Original (unresolved) workdir string preserved in the message.
+        assert str(ghost) in err
 
 
 # ---------------------------------------------------------------------------

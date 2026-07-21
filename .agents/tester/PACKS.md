@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 171 packs
-- Unit: 145 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
+- Total: 173 packs
+- Unit: 147 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
 
 ## Unit Test Packs
 
@@ -24,6 +24,8 @@
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-05 | ✅ PASS (209 passed, 8 skipped, fix/windows-encoding-paths, 0 regressions) |
 | todo_unit_test | tests/test_todo_manager.py + tests/test_todo_tools.py + tests/test_todo_sse.py + tests/unit/routers/test_todo_api.py + tests/test_todo_comment_edge_cases.py + tests/test_subtask_param_fix.py | TodoManager CRUD, set_comment, update() reminder, todo tools (create/update/list/clear), status aliases, indicators, SSE stream_todo_update, API GET/POST, concurrent access, special chars (unicode/emoji/XSS), API error paths (400/404), subtask CRUD + auto_complete + 7-key SSE + backward compat + subtask param rename (list/text alias, JSON auto-parse, schema verification) | 2 min | 2026-07-11 | ✅ PASS (228/228, feature/subtask-param-fix, commit 6144d70c, 0 failures) |
 | todo_graph_integration_test | tests/test_todo_manager.py + tests/test_todo_tools.py + tests/test_todo_sse.py + tests/test_todo_comment_edge_cases.py + tests/unit/routers/test_todo_api.py | Todo graph DAG transformation: TodoGraphManager, 6 tools (add_edge/remove_edge), cycle detection (Kahn's algo), backward compat (flat→linear chain), node_id+index update paths, graph API endpoints, 6-key SSE schema, 8 integration scenarios | 2 min | 2026-07-10 | ✅ PASS (168/168 specific + 174/174 regression sweep, 0 failures, frontend ng build PASS, feature/todo-graph) |
+| filesystem_resolver_unit_test | test/packs/filesystem_resolver_unit_test.sh | _resolve_target_path resolver-level unit tests: workdir-existence check, new workdir-not-found error ("Working directory does not exist: {workdir} — check the workdir path"), workdir-required for relative paths (None/empty/whitespace), absolute path handling, path-escape guard, file-not-found vs workdir-error distinction | 2 min | 2026-07-21 | PASS (31/31, feature/file-read-workdir-error, commit 19b8fd40, 0 failures) |
+| filesystem_tools_unit_test | test/packs/filesystem_tools_unit_test.sh | End-to-end filesystem tool tests across all 6 tools (list_directory, read_file, write_file, edit_file, glob_files, grep_files): new workdir-not-found error for non-existent workdir + relative path, file-not-found for valid workdir + missing file, absolute path ignores workdir, hallucinated/typo username workdir handling, parameter validation | 2 min | 2026-07-21 | PASS (38/38, feature/file-read-workdir-error, commit 19b8fd40, 0 failures) |
 | shared_context_unit_test | test/packs/shared_context_unit_test.sh | Shared Context Metadata KV — runs the 46 existing unit tests (repo CRUD + bounds + atomic + fences + 32k cap + tool calls). Covers scenarios 1, 3, 5, partial 8. | 2 min | 2026-07-12 | ✅ PASS (46/46 in 1.36s, feature/shared-context-metadata, commit d38aab92) |
 | shared_context_full_unit_test | test/packs/shared_context_full_unit_test.sh | Shared Context Metadata KV — 46 baseline + 3 concurrent race-free + 3 prompt-injection fence-defense tests. Covers scenarios 1, 3, 4, 5, 8. | 3 min | 2026-07-12 | ✅ PASS (52/52 — prior bugs fixed in commit 17828cba, now in latest/base; verified via shared_context_all_unit_test pack) |
 | shared_context_tool_filter_check | test/packs/shared_context_tool_filter_check.sh | Static check — verifies `shared_context` is in `tools.allow` for all 22 agent meta.json files (20 active + _baby_template + _mother). Bash + python json parser. | 30s | 2026-07-12 | ✅ PASS (22/22, feature/shared-context-metadata) |
