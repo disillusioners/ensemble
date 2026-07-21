@@ -1,7 +1,8 @@
 ---
-version: 1.0.0
+version: 1.0.1
 category: execution
 auto_load: false
+include: [test-pack]
 ---
 
 # Mock Test

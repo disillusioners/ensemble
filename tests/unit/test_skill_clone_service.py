@@ -558,3 +558,228 @@ class TestAsyncCloneOnMiss:
         assert first.id == second.id
         assert first.lineage_origin == "bank_clone"
         assert first.auto_load is True
+
+
+# ============================================================================
+# Bank → project skill refresh (propagation of include / version bumps)
+# ============================================================================
+
+
+class TestRefreshFromBank:
+    """Already-cloned project skills refresh from the bank on lookup.
+
+    Covers the propagation path for the seed-time include feature:
+    when ``skill-set.yaml`` is re-seeded with new ``include:``
+    directives (or any other bank-side edit), the bank's
+    ``content`` is re-rendered. This refresh carries the new
+    content into every project that already cloned the skill —
+    without requiring a daemon restart + fresh instance spawn.
+    """
+
+    def test_existing_skill_refreshed_when_bank_content_changes(
+        self,
+        clone_service: SkillCloneService,
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """Lookup after a bank content update returns the NEW content.
+
+        Reproduces the prod scenario: a worker instance cloned
+        ``unit-test`` into project scope (old body), then the
+        daemon re-seeded the bank with ``include: [test-pack]``
+        resolved. The next clone-on-miss lookup for the same
+        (project, name) MUST return the refreshed body, not the
+        stale snapshot.
+        """
+        template = _seed_template(
+            skill_bank_repo,
+            name="refreshable",
+            content="# v1\n\nOld body.\n",
+        )
+
+        # First call → clones.
+        cloned = clone_service.clone_on_miss_sync(
+            name="refreshable",
+            agent_id="tester",
+            project_id="proj-refresh",
+        )
+        assert cloned is not None
+        assert cloned.content == "# v1\n\nOld body.\n"
+
+        # Simulate a bank-side update (re-seed with include).
+        skill_bank_repo.update(
+            template.id,
+            content="# v2\n\nNew body with includes.\n",
+        )
+
+        # Second call → refreshes from bank, returns new content.
+        refreshed = clone_service.clone_on_miss_sync(
+            name="refreshable",
+            agent_id="tester",
+            project_id="proj-refresh",
+        )
+        assert refreshed is not None
+        assert refreshed.id == cloned.id  # same row, not a duplicate.
+        assert refreshed.content == "# v2\n\nNew body with includes.\n"
+
+        # Bank still has one row (no duplicate); project scope has
+        # one row (no duplicate).
+        assert skill_repo.get_by_name(
+            project_id="proj-refresh", name="refreshable", generation=0
+        ).content == "# v2\n\nNew body with includes.\n"
+
+    def test_no_refresh_when_content_unchanged(
+        self,
+        clone_service: SkillCloneService,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """Common case: content already in sync → no DB write.
+
+        The refresh path runs on every clone-on-miss lookup. The
+        short-circuit compares content + description + category +
+        auto_load; if they all match, the update is skipped so
+        the per-lookup cost stays at one DB read (the bank fetch).
+        """
+        _seed_template(
+            skill_bank_repo,
+            name="stable",
+            content="# Stable\n\nUnchanged.\n",
+            description="Stable skill",
+        )
+
+        first = clone_service.clone_on_miss_sync(
+            name="stable",
+            agent_id="tester",
+            project_id="proj-stable",
+        )
+        second = clone_service.clone_on_miss_sync(
+            name="stable",
+            agent_id="tester",
+            project_id="proj-stable",
+        )
+
+        assert first is not None
+        assert second is not None
+        assert first.id == second.id
+        # No content change — second call returns the same row.
+        assert second.content == first.content
+
+    def test_evolved_skill_not_refreshed(
+        self,
+        clone_service: SkillCloneService,
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """Lineage guard: evolved skills keep their own content.
+
+        The skill-keeper agent may produce an evolved variant
+        (``lineage_origin='evolved'``) of a bank-cloned skill.
+        Refreshing it from the bank would silently destroy that
+        evolution work. Only ``bank_clone`` lineage is refreshable.
+        """
+        template = _seed_template(
+            skill_bank_repo,
+            name="evolved-base",
+            content="# Bank v1\n",
+        )
+        # First call → clones with bank_clone lineage.
+        cloned = clone_service.clone_on_miss_sync(
+            name="evolved-base",
+            agent_id="tester",
+            project_id="proj-evolved",
+        )
+        assert cloned is not None
+        assert cloned.lineage_origin == "bank_clone"
+
+        # Mutate the project skill to simulate an evolved fork:
+        # change lineage + content.
+        skill_repo.update(
+            cloned.id,
+            lineage_origin="evolved",
+            content="# Evolved\n\nHand-crafted by skill-keeper.\n",
+        )
+
+        # Bank gets updated (new version).
+        skill_bank_repo.update(template.id, content="# Bank v2\n")
+
+        # Re-lookup — the evolved project skill MUST NOT be
+        # overwritten by the bank refresh.
+        result = clone_service.clone_on_miss_sync(
+            name="evolved-base",
+            agent_id="tester",
+            project_id="proj-evolved",
+        )
+        assert result is not None
+        assert result.content == "# Evolved\n\nHand-crafted by skill-keeper.\n"
+        assert result.lineage_origin == "evolved"
+
+    def test_refresh_propagates_description_and_category(
+        self,
+        clone_service: SkillCloneService,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """Refresh carries description + category too, not just content."""
+        template = _seed_template(
+            skill_bank_repo,
+            name="meta-skill",
+            content="body",
+            description="Old desc",
+        )
+
+        clone_service.clone_on_miss_sync(
+            name="meta-skill",
+            agent_id="tester",
+            project_id="proj-meta",
+        )
+
+        skill_bank_repo.update(
+            template.id,
+            content="body-v2",
+            description="New desc",
+        )
+
+        refreshed = clone_service.clone_on_miss_sync(
+            name="meta-skill",
+            agent_id="tester",
+            project_id="proj-meta",
+        )
+        assert refreshed is not None
+        assert refreshed.content == "body-v2"
+        assert refreshed.description == "New desc"
+
+    def test_ensure_all_skills_also_refreshes(
+        self,
+        clone_service: SkillCloneService,
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """``ensure_all_skills_sync`` refreshes existing rows too.
+
+        The batch path (used by the injection pipeline before BM25
+        search) hits the same refresh logic per-template, so a
+        bank-side update propagates through it as well.
+        """
+        template = _seed_template(
+            skill_bank_repo,
+            name="batch-refresh",
+            content="# v1\n",
+        )
+
+        # First call → clones.
+        clone_service.ensure_all_skills_sync(
+            agent_id="tester", project_id="proj-batch"
+        )
+
+        # Bank updated.
+        skill_bank_repo.update(template.id, content="# v2\n")
+
+        # Second call → refreshes.
+        clone_service.ensure_all_skills_sync(
+            agent_id="tester", project_id="proj-batch"
+        )
+
+        skill = skill_repo.get_by_name(
+            project_id="proj-batch", name="batch-refresh", generation=0
+        )
+        assert skill is not None
+        assert skill.content == "# v2\n"

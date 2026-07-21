@@ -6,27 +6,27 @@ skills:
     category: testing-strategy
     description: "Blast radius analysis, change-set derivation, test pack planning"
   - name: test-pack-execution
-    version: "1.0.0"
+    version: "1.0.1"
     auto_load: false
     category: execution
     description: "Pack lifecycle, TTQA optimization, splitting heuristics, output format"
   - name: mock-test
-    version: "1.0.0"
+    version: "1.0.1"
     auto_load: false
     category: execution
     description: "Mock test design: spec template, port allocation, what-to-mock, 5-phase workflow"
   - name: unit-test
-    version: "1.0.0"
+    version: "1.0.1"
     auto_load: false
     category: execution
     description: "Unit test discovery, coverage-gap analysis, and coverage documentation (read-only investigation)"
   - name: integration-test
-    version: "1.0.0"
+    version: "1.0.1"
     auto_load: false
     category: execution
     description: "Cross-component testing, API boundaries, DB integration"
   - name: e2e-test
-    version: "1.0.0"
+    version: "1.0.1"
     auto_load: false
     category: execution
     description: "Full-flow validation, browser automation, scenario coverage"

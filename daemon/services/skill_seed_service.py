@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from ..repositories.skill.skill_bank_repository import SkillBankRepository
+from .skill_include_resolver import resolve_includes
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,22 @@ class SkillSeedService:
                 continue
 
             template_content = template_path.read_text(encoding="utf-8")
+
+            # Resolve ``include:`` directives from the template's
+            # YAML frontmatter. The directive lets a skill inline
+            # shared bodies (typically innate-skill invariants like
+            # ``test-pack``'s 5-min cap / dual-layer timeout) so the
+            # rendered ``skill_bank.content`` is self-contained under
+            # the "one skill per send_message" design contract.
+            # See :mod:`daemon.services.skill_include_resolver` for
+            # the full resolution semantics (innate-skills first,
+            # skill_bank fallback, cycle + depth guards).
+            template_content = resolve_includes(
+                template_content,
+                agent_id=agent_id,
+                agents_dir=self._agents_dir,
+                bank_repo=self._bank_repo,
+            )
 
             # Check if bank already has this template
             existing = self._bank_repo.get_by_name_and_agent(

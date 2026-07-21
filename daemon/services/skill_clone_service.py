@@ -146,15 +146,20 @@ class SkillCloneService:
         agent_id: str,
         project_id: str,
     ) -> Optional[Skill]:
-        """Sync clone-on-miss: existing → return; miss → clone.
+        """Sync clone-on-miss: existing → refresh+return; miss → clone.
 
         Lookup order:
 
         1. ``skills`` table at ``(project_id, name, generation=0)``
-           — if present, return that row, do NOT re-clone
-           (idempotent contract).
-        2. ``skill_bank`` table at ``(name, agent_id)`` — if
-           present, clone into the project scope.
+           — if present, refresh its content from the bank template
+           (when one exists and content differs) and return it.
+           The refresh propagates include-merged bank updates,
+           template-version bumps, and any other bank-side edits
+           into already-cloned project skills without requiring a
+           daemon restart + new instance spawn cycle.
+        2. ``skill_bank`` table at ``(name, agent_id)`` (with
+           cross-agent fallback) — if present, clone into the
+           project scope.
         3. Otherwise return ``None`` — the template isn't in the
            bank either, so the caller (prompt loader / search)
            simply has nothing to inject for this name.
@@ -168,8 +173,8 @@ class SkillCloneService:
                 Must be a non-None, non-empty string.
 
         Returns:
-            The existing or newly-cloned :class:`Skill` row, or
-            ``None`` when no template exists in the bank.
+            The existing (refreshed) or newly-cloned :class:`Skill`
+            row, or ``None`` when no template exists in the bank.
         """
         # Step 1: check if skill already exists in project scope.
         existing = self._skill_repo.get_by_name(
@@ -177,8 +182,6 @@ class SkillCloneService:
             name=name,
             generation=0,
         )
-        if existing is not None:
-            return existing
 
         # Step 2: find template in skill_bank. First an exact
         # ``(name, agent_id)`` lookup — the agent_id is the OWNING
@@ -194,6 +197,20 @@ class SkillCloneService:
         )
         if template is None:
             template = self._skill_bank_repo.get_by_name_any_agent(name)
+
+        if existing is not None:
+            # Refresh path — propagate bank updates (include
+            # resolution, version bumps, manual edits) into the
+            # already-cloned project skill. No-op when content is
+            # already in sync (the common case). Skipped for
+            # non-bank-clone lineages (evolved / imported skills
+            # have their own content lifecycle).
+            if template is not None:
+                existing = self._refresh_from_template_sync(
+                    existing, template
+                )
+            return existing
+
         if template is None:
             logger.debug(
                 f"No skill template for clone: name={name}, "
@@ -276,12 +293,18 @@ class SkillCloneService:
         templates: list[SkillBankItem],
         project_id: str,
     ) -> list[Skill]:
-        """Clone templates that don't yet exist as project skills.
+        """Clone or refresh templates into project-scoped skills.
 
-        For each template, return the existing project-scoped row
-        if present (idempotent contract) or clone it via
-        :meth:`_clone_template_sync`. Order of the returned list
-        matches the input template order.
+        For each template:
+
+        * Existing project skill → :meth:`_refresh_from_template_sync`
+          propagates bank-side updates (include resolution, version
+          bumps) into the already-cloned row. No-op when content
+          already matches.
+        * Missing project skill → clone via
+          :meth:`_clone_template_sync`.
+
+        Order of the returned list matches the input template order.
 
         Args:
             templates: Bank templates to materialize into project
@@ -291,19 +314,26 @@ class SkillCloneService:
 
         Returns:
             List of :class:`Skill` instances — either existing
-            or freshly-cloned.
+            (possibly refreshed) or freshly-cloned.
         """
         results: list[Skill] = []
 
         for template in templates:
-            # Idempotency — short-circuit on existing.
+            # Look up existing first.
             existing = self._skill_repo.get_by_name(
                 project_id=project_id,
                 name=template.name,
                 generation=0,
             )
             if existing is not None:
-                results.append(existing)
+                # Refresh path — propagate bank updates into the
+                # already-cloned project skill. Returns the
+                # (possibly updated) row; no-op when content is
+                # already in sync.
+                refreshed = self._refresh_from_template_sync(
+                    existing, template
+                )
+                results.append(refreshed)
                 continue
 
             cloned = self._clone_template_sync(template, project_id)
@@ -311,6 +341,89 @@ class SkillCloneService:
                 results.append(cloned)
 
         return results
+
+    def _refresh_from_template_sync(
+        self,
+        skill: Skill,
+        template: SkillBankItem,
+    ) -> Skill:
+        """Refresh a project skill's content from its bank template.
+
+        Propagates bank-side updates (include resolution, version
+        bumps, manual edits) into already-cloned project skills.
+        This is the propagation path for the seed-time include
+        feature: when ``skill-set.yaml`` is re-seeded with new
+        ``include:`` directives, the bank's ``content`` is
+        re-rendered, and this method carries the new content into
+        every project that already cloned the skill — without
+        requiring a daemon restart + fresh instance spawn.
+
+        Refresh scope: only template-derived fields are touched
+        (``content``, ``description``, ``category``, ``auto_load``).
+        Metrics counters (``total_selections``, ``total_applied``,
+        ``total_completions``, ``total_fallbacks``,
+        ``consecutive_failures``), status, lineage, generation,
+        and A/B test group are preserved — they belong to the
+        project-scoped skill's own lifecycle, not the template.
+
+        Lineage guard: only ``bank_clone`` skills are refreshable.
+        ``evolved`` and ``imported`` lineages have their own content
+        lifecycle (the skill-keeper agent may have evolved them, or
+        a user may have imported a custom body) — overwriting them
+        would silently destroy that work.
+
+        The refresh is a no-op when content + description + category
+        + auto_load all already match the template (the common case
+        on every lookup after the first refresh). This keeps the
+        per-lookup cost at one DB read (the bank fetch the caller
+        already did) plus one DB write only when content actually
+        changed.
+
+        Args:
+            skill: The existing project-scoped skill row.
+            template: The bank template to refresh from.
+
+        Returns:
+            The refreshed :class:`Skill` (re-fetched from the DB
+            after the update so the caller sees the new state).
+            When the lineage guard rejects the refresh, the
+            original ``skill`` is returned unchanged.
+        """
+        # Lineage guard — only bank-cloned skills are refreshable.
+        # Evolved/imported skills have their own content lifecycle.
+        if getattr(skill, "lineage_origin", "") != _LINEAGE_ORIGIN_BANK_CLONE:
+            return skill
+
+        # Common-case short-circuit — skip the write when nothing
+        # changed. ``content`` is the dominant signal; the others
+        # are cheap to also check inline.
+        if (
+            getattr(skill, "content", None) == template.content
+            and getattr(skill, "description", None) == template.description
+            and getattr(skill, "category", None) == template.category
+            and bool(getattr(skill, "auto_load", False))
+            == bool(template.auto_load)
+        ):
+            return skill
+
+        logger.info(
+            f"Refreshing project skill from bank: "
+            f"name={template.name}, "
+            f"project={skill.project_id[:8] if skill.project_id else '?'}, "
+            f"reason=content_changed"
+        )
+        updated = self._skill_repo.update(
+            skill.id,
+            content=template.content,
+            description=template.description,
+            category=template.category,
+            auto_load=bool(template.auto_load),
+        )
+        # Fall back to the in-memory ``skill`` if the update lost
+        # the row race (extremely rare — concurrent delete between
+        # our get_by_name and update). The caller still gets a
+        # usable object even if it's the pre-refresh state.
+        return updated if updated is not None else skill
 
     def _clone_template_sync(
         self,

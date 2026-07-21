@@ -797,3 +797,152 @@ skills:
         assert alpha.description == "Modern alpha"
         beta = repository.get_by_name_and_agent("beta-skill", "dual-agent")
         assert beta is not None
+
+
+# ============================================================================
+# Integration: seed_agent resolves ``include:`` directives
+# ============================================================================
+
+
+class TestSeedAgentResolvesIncludes:
+    """End-to-end: ``seed_agent`` calls the include resolver before
+    writing the rendered body to ``skill_bank.content``.
+
+    Covers the integration seam — the resolver itself has its own
+    unit-test pack (``tests/unit/test_skill_include_resolver.py``),
+    these tests verify the seeder wires it in correctly.
+    """
+
+    def test_included_innate_body_lands_in_bank_content(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """Template with ``include: [test-pack]`` → bank row holds the
+        merged body (includer + innate test-pack), not the raw template."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+        # Innate skill the template will include.
+        innate_dir = (
+            agents_root / "_prompt_system" / "innate-skills" / "test-pack"
+        )
+        innate_dir.mkdir(parents=True)
+        (innate_dir / "skill.md").write_text(
+            "# Test Pack\n\n5-min cap. Dual-layer timeout.\n",
+            encoding="utf-8",
+        )
+
+        tester_dir = agents_root / "tester"
+        _write_skill_set_yaml(tester_dir, _VALID_FM_ONE)
+        # Template with the include directive.
+        _write_template(
+            tester_dir,
+            "alpha-skill",
+            "---\nversion: 1.0.0\ninclude: [test-pack]\n---\n"
+            "# Alpha\n\nMain body.\n",
+        )
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        service.seed_agent(
+            agent_id="tester",
+            agent_dir=tester_dir,
+            skill_set_path=tester_dir / "skill-set.yaml",
+        )
+
+        alpha = repository.get_by_name_and_agent("alpha-skill", "tester")
+        assert alpha is not None
+        # Merged body has both the includer body and the innate body.
+        assert "Main body." in alpha.content
+        assert "## Included: test-pack" in alpha.content
+        assert "5-min cap. Dual-layer timeout." in alpha.content
+        # Frontmatter stripped from the rendered body (the
+        # directive has no runtime value).
+        assert "include:" not in alpha.content
+
+    def test_template_without_include_passes_through(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """Template without ``include:`` → bank row holds the raw body
+        (backwards compatibility — no resolver-induced change)."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+        tester_dir = agents_root / "tester"
+        _write_skill_set_yaml(tester_dir, _VALID_FM_ONE)
+        raw_body = "# Alpha\n\nPlain body, no includes.\n"
+        _write_template(tester_dir, "alpha-skill", raw_body)
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        service.seed_agent(
+            agent_id="tester",
+            agent_dir=tester_dir,
+            skill_set_path=tester_dir / "skill-set.yaml",
+        )
+
+        alpha = repository.get_by_name_and_agent("alpha-skill", "tester")
+        assert alpha is not None
+        # Raw body stored verbatim — no ``## Included:`` block.
+        assert alpha.content == raw_body
+
+    def test_version_bump_rerenders_includes(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """When ``skill-set.yaml`` version bumps, the seeder refreshes
+        the bank row AND re-resolves includes — so an innate-skill
+        content change picked up by the includer's version bump
+        propagates into the stored body."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+        innate_dir = (
+            agents_root / "_prompt_system" / "innate-skills" / "test-pack"
+        )
+        innate_dir.mkdir(parents=True)
+        innate_md = innate_dir / "skill.md"
+        innate_md.write_text("# Test Pack v1\n\nOld invariant.\n")
+
+        tester_dir = agents_root / "tester"
+        _write_skill_set_yaml(tester_dir, _VALID_FM_ONE)
+        _write_template(
+            tester_dir,
+            "alpha-skill",
+            "---\nversion: 1.0.0\ninclude: [test-pack]\n---\n"
+            "# Alpha\n",
+        )
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        service.seed_agent(
+            agent_id="tester",
+            agent_dir=tester_dir,
+            skill_set_path=tester_dir / "skill-set.yaml",
+        )
+
+        alpha_v1 = repository.get_by_name_and_agent("alpha-skill", "tester")
+        assert alpha_v1 is not None
+        assert "Old invariant." in alpha_v1.content
+
+        # Bump version + change innate content.
+        innate_md.write_text("# Test Pack v2\n\nNew invariant.\n")
+        bumped_fm = """\
+skills:
+  - name: alpha-skill
+    version: "1.0.1"
+    auto_load: true
+    category: planning
+    description: "Alpha planner"
+"""
+        _write_skill_set_yaml(tester_dir, bumped_fm)
+        service.seed_agent(
+            agent_id="tester",
+            agent_dir=tester_dir,
+            skill_set_path=tester_dir / "skill-set.yaml",
+        )
+
+        alpha_v2 = repository.get_by_name_and_agent("alpha-skill", "tester")
+        assert alpha_v2 is not None
+        assert alpha_v2.template_version == "1.0.1"
+        # New innate body picked up via re-resolve.
+        assert "New invariant." in alpha_v2.content
+        assert "Old invariant." not in alpha_v2.content
