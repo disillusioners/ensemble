@@ -449,6 +449,151 @@ class TestRecordTaskCompletion:
 
 
 # =============================================================================
+# task_message plumbing (CAPTURED-skill fix)
+# =============================================================================
+
+
+class TestTaskMessagePlumbing:
+    """``task_message`` flows from ``record_task_completion`` into
+    ``skill_usage_records.task_message`` on both the INSERT and
+    UPDATE branches.
+
+    Closes the CAPTURED-plumbing gap: the user-asked snapshot is
+    the canonical input to the skill-keeper LLM prompt. Without
+    this plumbing the column stays ``NULL`` forever and the
+    auto-extraction flow receives an empty string.
+    """
+
+    async def test_record_one_persists_task_message(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """``record_task_completion(..., task_message=...)`` writes
+        the column on the INSERT path.
+
+        No prior usage row exists, so ``_record_one`` takes the
+        ``usage_repo.create`` branch. Asserts the persisted row
+        carries the supplied snapshot verbatim — not truncated,
+        not coerced to ``None``, not stripped.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(skill_repo, project_id, "tm-insert")
+        instance_id = "inst-tm-insert"
+        metrics_service.instance_repo._instances[instance_id] = (
+            FakeInstance(
+                instance_id,
+                metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+            )
+        )
+
+        inserted = await metrics_service.record_task_completion(
+            instance_id=instance_id,
+            agent_id="agent-x",
+            project_id=project_id,
+            task_succeeded=True,
+            iterations=1,
+            duration_seconds=1,
+            task_message="my user task",
+        )
+        assert inserted == 1
+
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=instance_id
+        )
+        assert rec is not None
+        assert rec.task_message == "my user task"
+
+    async def test_record_one_update_completion_preserves_or_updates_task_message(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """Feedback-first path → row exists → completion hook
+        back-fills ``task_message`` via ``update_completion``.
+
+        Production sequence: the agent calls ``skill_feedback``
+        FIRST (no completion hook has fired yet), inserting a row
+        on the ``record_feedback`` on-miss branch. The
+        ``task_message`` column is ``NULL`` at that point because
+        the feedback path doesn't know what the user asked.
+        Then the completion hook fires later with the actual
+        snapshot. The UPDATE branch in
+        :meth:`SkillUsageRepository.update_completion` must
+        forward ``task_message`` and populate the column.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(skill_repo, project_id, "tm-update")
+        instance_id = "inst-tm-update"
+
+        # Step 1: feedback lands first, inserts an on-miss row
+        # without task_message (the feedback path can't know
+        # what the user asked — only the completion hook has
+        # that context).
+        await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=instance_id,
+            agent_id="tester",
+            project_id=project_id,
+            applied=True,
+            note="worked great",
+        )
+
+        # At this point, the latest usage row exists and
+        # task_message should be NULL.
+        pre = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=instance_id
+        )
+        assert pre is not None
+        assert pre.task_message is None, (
+            "feedback-first path inserts without task_message; the "
+            "completion hook back-fills it"
+        )
+
+        # Step 2: wire the injected-skill metadata so
+        # ``record_task_completion`` proceeds; then call the
+        # completion hook with the actual user snapshot.
+        metrics_service.instance_repo._instances[instance_id] = (
+            FakeInstance(
+                instance_id,
+                metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+            )
+        )
+        inserted = await metrics_service.record_task_completion(
+            instance_id=instance_id,
+            agent_id="tester",
+            project_id=project_id,
+            task_succeeded=True,
+            iterations=4,
+            duration_seconds=120,
+            task_message="late message",
+        )
+        assert inserted == 1
+
+        # Step 3: read back — task_message must now be set.
+        post = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=instance_id
+        )
+        assert post is not None
+        assert post.task_message == "late message", (
+            "Late-arriving completion hook must overwrite the "
+            "NULL task_message left by the on-miss feedback "
+            "insert with the real user snapshot"
+        )
+        # And the feedback signal must be preserved.
+        assert post.feedback_applied is True
+        assert post.feedback_note == "worked great"
+        # And the completion columns must be stamped (existing
+        # behavior — the regression guard for the original
+        # idempotency fix).
+        assert post.task_succeeded is True
+        assert post.iterations == 4
+        assert post.duration_seconds == 120
+
+
+# =============================================================================
 # record_feedback
 # =============================================================================
 

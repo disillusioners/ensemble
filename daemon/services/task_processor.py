@@ -552,7 +552,12 @@ class ProcessMessageProcessor(BaseProcessor):
             # — a regression vs the job-queue path. Mirrors
             # :meth:`JobQueueService._get_task_details` (see
             # ``job_queue_service.py`` lines 1915-2082).
-            iterations, duration_seconds = await self._compute_iterations_and_duration(
+            #
+            # Also computes ``task_message`` (the snapshot of the
+            # user's original request) so the CAPTURED skill-
+            # evolution flow has it. Same already-loaded ``messages``
+            # list is reused — no second DB roundtrip.
+            iterations, duration_seconds, task_message = await self._compute_iterations_and_duration(
                 task
             )
 
@@ -563,6 +568,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 task_succeeded=succeeded,
                 iterations=iterations,
                 duration_seconds=duration_seconds,
+                task_message=task_message,
             )
         except Exception as exc:
             logger.warning(
@@ -573,8 +579,8 @@ class ProcessMessageProcessor(BaseProcessor):
     async def _compute_iterations_and_duration(
         self,
         task: "Task",
-    ) -> tuple[int, int]:
-        """Best-effort ``(iterations, duration_seconds)`` for the metrics hook.
+    ) -> tuple[int, int, str]:
+        """Best-effort ``(iterations, duration_seconds, task_message)`` for the metrics hook.
 
         Mirrors the job-queue path's derivation in
         :meth:`JobQueueService._get_task_details`:
@@ -595,18 +601,28 @@ class ProcessMessageProcessor(BaseProcessor):
           neither is present (in-flight completion — should not
           happen here but kept as a defensive fallback). Clamped to
           ``>= 0`` so a clock skew never produces a negative metric.
+        * ``task_message`` — the FIRST ``type='human'`` message's
+          content on the same instance queue, truncated to
+          :data:`TASK_MESSAGE_MAX_LEN` (1000) characters with a
+          ``...[truncated]`` marker when longer. Same constants as
+          the job-queue path so the CAPTURED prompt sees
+          identical-shape snapshots regardless of the path. Empty
+          string (``""``) when no human message exists or the
+          queue repo is missing.
 
         Args:
             task: The terminal task whose iteration / duration we
                 need to derive.
 
         Returns:
-            ``(iterations, duration_seconds)`` — both non-negative
-            integers. Both are ``0`` if the lookup is unavailable.
+            ``(iterations, duration_seconds, task_message)`` —
+            iterations and duration are non-negative ints; the
+            message is an empty string when unavailable.
         """
-        # Default fallback (no repo, no created_at): 0/0.
+        # Default fallback (no repo, no created_at): 0/0/"".
         iterations = 0
         duration_seconds = 0
+        task_message = ""
 
         # ── duration_seconds ──────────────────────────────────────
         task_created_at: datetime | None = None
@@ -667,6 +683,12 @@ class ProcessMessageProcessor(BaseProcessor):
         queue_repo = getattr(
             self._manager, "_queue_repository", None
         )
+        # ``task_messages`` is the same already-loaded list used by
+        # the ``task_message`` extraction below — no second DB
+        # roundtrip. Default ``[]`` is the "no queue repo wired" case,
+        # which mirrors the JQ path's behaviour (extract returns
+        # ``""`` for empty input).
+        task_messages: list = []
         if queue_repo is not None:
             try:
                 messages = await asyncio.to_thread(
@@ -725,7 +747,22 @@ class ProcessMessageProcessor(BaseProcessor):
                     if getattr(m, "type", None) == "agent"
                 )
 
-        return iterations, duration_seconds
+        # ── task_message ─────────────────────────────────────────
+        # Reuse the already-loaded ``task_messages`` list to compute
+        # the CAPTURED-flow "what the user asked" snapshot. Same
+        # truncation rule as :meth:`JobQueueService._get_task_details`
+        # (1000-char cap with ``...[truncated]`` marker) so the
+        # CAPTURED prompt sees identical-shape snapshots regardless
+        # of the code path. ``from daemon.services.job_queue_service
+        # import _extract_task_message_from_messages`` keeps the
+        # duplication footprint at zero — both paths share one
+        # canonical implementation.
+        from daemon.services.job_queue_service import (
+            _extract_task_message_from_messages,
+        )
+        task_message = _extract_task_message_from_messages(task_messages)
+
+        return iterations, duration_seconds, task_message
 
     def _build_callbacks(self, task: "Task") -> PipelineCallbacks:
         """Build :class:`PipelineCallbacks` for the WorkerPool path.

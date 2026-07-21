@@ -401,6 +401,7 @@ class SkillMetricsService:
                     task_succeeded=task_succeeded,
                     iterations=iterations,
                     duration_seconds=duration_seconds,
+                    task_message=task_message,
                 )
             except Exception as exc:
                 # Per-skill isolation — a failure on one skill
@@ -655,6 +656,7 @@ class SkillMetricsService:
         task_succeeded: bool,
         iterations: int,
         duration_seconds: int,
+        task_message: str = "",
     ) -> int:
         """Record one (skill, instance) pair end-to-end (idempotent).
 
@@ -700,6 +702,17 @@ class SkillMetricsService:
                 ``completed``.
             iterations: LLM iterations the task took.
             duration_seconds: Wall-clock duration.
+            task_message: The user input for the task (snapshot
+                of the triggering request, truncated to
+                ``TASK_MESSAGE_MAX_LEN`` by the caller). Forwarded
+                to both the INSERT and UPDATE paths so the
+                ``skill_usage_records.task_message`` column carries
+                the user's actual ask — required by the CAPTURED
+                skill-evolution flow. Empty string when the caller
+                doesn't have it; ``None``-ish values are accepted
+                and forwarded verbatim (the repo coerces to
+                ``NULL`` on the update branch when the value
+                is ``None``).
 
         Returns:
             ``1`` if a usage record was inserted OR updated;
@@ -716,6 +729,11 @@ class SkillMetricsService:
             # on-miss insert already bumped ``total_selections``
             # (and ``total_fallbacks`` when ``applied is
             # False``), so this path must NOT bump them again.
+            # ``task_message`` is forwarded here so the
+            # CAPTURED flow gets the user's actual request even
+            # on the feedback-first path (the on-miss insert
+            # can't know what the user asked — only the
+            # completion hook can).
             existing = self.usage_repo.get_latest_for_skill_instance(
                 skill_id=skill_id, instance_id=instance_id
             )
@@ -725,6 +743,7 @@ class SkillMetricsService:
                     task_succeeded=task_succeeded,
                     iterations=iterations,
                     duration_seconds=duration_seconds,
+                    task_message=task_message,
                 )
                 if updated is None:
                     # Race — record was deleted between our
@@ -785,6 +804,7 @@ class SkillMetricsService:
                 project_id=project_id,
                 instance_id=instance_id,
                 agent_id=agent_id,
+                task_message=task_message if task_message else None,
                 selected=True,
                 applied=False,  # Set later by skill_feedback tool
                 task_succeeded=task_succeeded,

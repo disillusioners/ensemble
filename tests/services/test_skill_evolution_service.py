@@ -119,9 +119,31 @@ def fake_metrics_service():
 
 @pytest.fixture
 def fake_embedding_service():
-    """A mock :class:`SkillEmbeddingService` (async)."""
+    """A mock :class:`SkillEmbeddingService` (async).
+
+    Defaults match the "no-collision" case for the CAPTURED
+    two-layer dedup gate (Layer 2 must NOT trigger on tests that
+    aren't explicitly setting it up):
+
+    * ``embed_text`` returns a 1536-dim zero vector — tests that
+      want collisions override ``embedding_service.embed_text``
+      and ``embedding_service.cosine_similarity`` directly.
+    * ``cosine_similarity`` returns ``0.0`` by default (same
+      reason — its call signature is class-static in
+      production, but tests that need real arithmetic assign
+      a custom function).
+    * ``embedding_repo.get_all_for_project`` returns an empty
+      list — the "no existing embeddings" case.
+    * ``update_skill_embeddings`` (legacy) returns ``3`` so
+      the existing evolution tests keep working unchanged.
+    """
     svc = MagicMock()
     svc.update_skill_embeddings = AsyncMock(return_value=3)
+    # Layer-2 plumbing — tests can override per-case.
+    svc.embed_text = AsyncMock(return_value=[0.0] * 1536)
+    svc.cosine_similarity = MagicMock(return_value=0.0)
+    svc.embedding_repo = MagicMock()
+    svc.embedding_repo.get_all_for_project = MagicMock(return_value=[])
     return svc
 
 
@@ -653,6 +675,712 @@ class TestEvolveCaptured:
         # Falsy values raise.
         with pytest.raises(ValueError):
             await evolution_service._evolve_captured(None)
+
+
+# ---------------------------------------------------------------------
+# Helpers for the CAPTURED dedup tests below.
+# ---------------------------------------------------------------------
+
+
+def _make_fake_embedding(skill_id: str, vector: list[float]):
+    """Build a duck-typed ``SkillEmbedding`` row for Layer-2 mocking.
+
+    Mirrors the ``(skill_id, embedding=[...], trigger_query=...)``
+    surface that :meth:`SkillEmbeddingRepository.get_all_for_project`
+    yields — we only read ``.embedding`` from the row in production,
+    but a ``skill_id`` attribute is convenient for the second tuple
+    slot anyway.
+    """
+    fake = MagicMock()
+    fake.skill_id = skill_id
+    fake.embedding = list(vector)
+    fake.trigger_query = f"trigger-{skill_id}"
+    return fake
+
+
+class TestEvolveCapturedDedup:
+    """Tests for the two-layer CAPTURED deduplication gate.
+
+    Layer 1 — LLM-level: the prompt lists existing active project
+    skills and asks the LLM to optionally emit
+    ``SKIP_DUPLICATE: <id>`` instead of fabricating a new row.
+
+    Layer 2 — Embedding-similarity backstop: the candidate
+    ``(name, description, content)`` is embedded and compared
+    against every cached embedding for the SAME project. Max
+    ``cosine_similarity >= 0.85`` skips creation.
+
+    All tests here use the ``fake_embedding_service`` fixture's
+    defaults except where the gate must trip: those tests
+    override ``embed_text`` / ``cosine_similarity`` /
+    ``embedding_repo.get_all_for_project`` so the test owns the
+    vector arithmetic (no real embedding API involved).
+    """
+
+    # ------------------------------------------------------------------
+    # Test 1 — happy path: nothing in the project → create is called.
+    # ------------------------------------------------------------------
+    async def test_captured_creates_when_no_similar_skill_exists(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """CAPTURED creates a new skill when no similar skill exists.
+
+        With the fixture defaults (``get_all_for_project`` returns
+        ``[]``, ``cosine_similarity`` returns ``0.0``) Layer 2
+        has nothing to compare against and reports "no match".
+        ``repo.create()`` must therefore be called and a new
+        skill row must exist after the call.
+        """
+        llm_payload = json.dumps({
+            "name": "newly-captured-skill",
+            "description": "Freshly distilled from a successful task",
+            "content": "## Captured body\nDo the thing.",
+        })
+
+        task_details = {
+            "task_message": "captured direction",
+            "iterations": 10,
+            "duration_seconds": 60,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # No dedup triggered → ``new_skill_id`` is a fresh UUID and
+        # ``skipped`` is False.
+        assert result["skipped"] is False
+        assert "skip_reason" not in result
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.lineage_origin == "captured"
+        assert new_skill.status == "active"
+        assert new_skill.name == "newly-captured-skill"
+
+        # Embedding refresh still runs after a successful create.
+        fake_embedding_service.update_skill_embeddings.assert_awaited_once()
+
+    # ------------------------------------------------------------------
+    # Test 2 — Layer 1 hits: LLM emits SKIP_DUPLICATE.
+    # ------------------------------------------------------------------
+    async def test_captured_skips_on_llm_skip_duplicate(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Layer 1 gate: ``SKIP_DUPLICATE: <id>`` short-circuits creation.
+
+        The LLM response is the bare prefix — no JSON. The service
+        must NOT call ``repo.create()`` and must return the
+        existing skill id with ``skipped=True``.
+        """
+        existing_target_id = "00000000-0000-0000-0000-000000000abc"
+        llm_payload = f"SKIP_DUPLICATE: {existing_target_id}"
+
+        task_details = {
+            "task_message": "a task that's already covered",
+            "iterations": 7,
+            "duration_seconds": 45,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # Layer 1 result shape.
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "llm_skip_duplicate"
+        assert result["new_skill_id"] == existing_target_id
+
+        # ``repo.create()`` MUST NOT have been called.
+        # No LLM JSON ⇒ no parsed (name, description, content) ⇒ no
+        # skill row was created. Verify by counting project rows.
+        items, _total = skill_repo.list(project_id=project_id, active_only=True)
+        assert items == []
+
+        # Embedding refresh must NOT run on a Layer-1 skip.
+        fake_embedding_service.update_skill_embeddings.assert_not_awaited()
+
+        # Layer 2 must NOT run either — SKIP_DUPLICATE short-circuits.
+        fake_embedding_service.embed_text.assert_not_awaited()
+
+    async def test_captured_skip_duplicate_strips_trailing_punctuation(
+        self,
+        evolution_service,
+        skill_repo,
+        project_id,
+    ):
+        """``SKIP_DUPLICATE: <id>`` strips trailing commas / quotes.
+
+        Defensive against LLMs that emit the prefix with a trailing
+        period or bracket.
+        """
+        existing_id = "11111111-2222-3333-4444-555555555555"
+        llm_payload = f"SKIP_DUPLICATE: {existing_id}."
+
+        task_details = {
+            "task_message": "covered",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        assert result["skipped"] is True
+        assert result["new_skill_id"] == existing_id  # no trailing "."
+
+    async def test_captured_handles_bare_skip_duplicate_no_id(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+    ):
+        """Bare ``SKIP_DUPLICATE:`` (no skill_id) → short-circuit skip.
+
+        Regression for W4: the strict regex ``SKIP_DUPLICATE:(\\S+)``
+        requires ≥1 non-space token after the colon. When the LLM
+        emits the prefix without a usable id — e.g. a refusal like
+        ``SKIP_DUPLICATE:`` followed by free-form text, or just
+        ``SKIP_DUPLICATE:`` on its own — the regex silently misses
+        and the bare token falls through to
+        ``_parse_capture_response``. JSON parsing then fails and
+        the prose fallback creates a garbage skill literally named
+        ``SKIP_DUPLICATE:``.
+
+        The loose substring guard added in ``_evolve_captured``
+        short-circuits this case: if ``SKIP_DUPLICATE`` appears in
+        the response (case-insensitive) but the strict regex didn't
+        match, the method returns a skip-result with
+        ``new_skill_id=None`` and ``skip_reason=
+        "llm_skip_duplicate_no_id"``. ``repo.create()`` must NOT
+        be called and no skill row may appear in the project.
+        """
+        llm_payload = "SKIP_DUPLICATE:"  # bare prefix, no id at all
+
+        task_details = {
+            "task_message": "covered but LLM gave no id",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "test-agent",
+            "project_id": "test-project",
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # Loose-substring guard fired.
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "llm_skip_duplicate_no_id"
+        # LLM didn't actually pick a target — id is None, not
+        # the bogus literal "SKIP_DUPLICATE:".
+        assert result["new_skill_id"] is None
+
+        # CRITICAL: no skill row was created. The pre-fix code
+        # would have created a row named "SKIP_DUPLICATE:".
+        items, _total = skill_repo.list(
+            project_id="test-project", active_only=True
+        )
+        assert items == [], (
+            f"Bare SKIP_DUPLICATE should NOT create any skill row, "
+            f"but skill_repo has: {[s.name for s in items]!r}"
+        )
+
+        # Layer 2 must not have run — short-circuit happened at
+        # Layer 1.
+        fake_embedding_service.embed_text.assert_not_awaited()
+        fake_embedding_service.embedding_repo.get_all_for_project.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Test 3 — Layer 2 hits: similarity ABOVE threshold.
+    # ------------------------------------------------------------------
+    async def test_captured_skips_when_embedding_similarity_above_threshold(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Layer 2: cosine_similarity > 0.85 skips creation.
+
+        Configure the fake embedding service so that the candidate
+        vector aligns with an existing project embedding at
+        similarity ``0.92``. Creation MUST NOT happen.
+
+        The production code calls ``cosine_similarity`` once per
+        ``embedding_repo.get_all_for_project`` row, so we use
+        ``side_effect`` with one value per row — first call → 0.92
+        for skill A, second call → 0.30 for skill B. The
+        per-skill max plus overall max must be 0.92 → triggers the
+        Layer-2 skip.
+        """
+        # Seed ACTIVE skill rows in the DB so the new active-skill
+        # filter in ``_embedding_dedup_check`` doesn't strip them
+        # out. ``SkillRepository.create`` auto-generates UUIDs, so
+        # we read the ids back from the persisted rows.
+        existing_skill_a = _make_skill(skill_repo, project_id, "skill-a")
+        existing_skill_b = _make_skill(skill_repo, project_id, "skill-b")
+        existing_skill_id_a = existing_skill_a.id
+        existing_skill_id_b = existing_skill_b.id
+
+        existing_emb_a = _make_fake_embedding(existing_skill_id_a, [0.1, 0.2, 0.3])
+        existing_emb_b = _make_fake_embedding(existing_skill_id_b, [0.4, 0.5, 0.6])
+
+        # Order matters: skill A's embedding is yielded first.
+        fake_embedding_service.cosine_similarity = MagicMock(
+            side_effect=[0.92, 0.30]
+        )
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            return_value=[
+                (existing_emb_a, existing_skill_id_a),
+                (existing_emb_b, existing_skill_id_b),
+            ]
+        )
+
+        llm_payload = json.dumps({
+            "name": "candidate-similar",
+            "description": "candidate that should be blocked",
+            "content": "candidate content that semantically overlaps",
+        })
+
+        task_details = {
+            "task_message": "covered already",
+            "iterations": 8,
+            "duration_seconds": 50,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "embedding_similarity"
+        assert result["new_skill_id"] == existing_skill_id_a
+        assert result["similarity_score"] == pytest.approx(0.92)
+
+        # No NEW skill row was created. The seed skills remain
+        # in the DB; the assertion checks that the candidate was
+        # NOT captured.
+        items, _total = skill_repo.list(project_id=project_id, active_only=True)
+        candidate_names = {s.name for s in items}
+        assert "candidate-similar" not in candidate_names, (
+            f"Layer-2 skip failed — candidate skill was created: "
+            f"{candidate_names!r}"
+        )
+
+        # Embedding refresh must NOT fire on a Layer-2 skip.
+        fake_embedding_service.update_skill_embeddings.assert_not_awaited()
+
+    # ------------------------------------------------------------------
+    # Test 4 — boundary: similarity == 0.85 exactly SKIPS (≥ threshold).
+    # ------------------------------------------------------------------
+    async def test_captured_skips_when_similarity_is_exactly_threshold(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Boundary: ``cosine_similarity == 0.85`` is a SKIP.
+
+        The contract per the task spec is ``>= 0.85 → skip``; this
+        test pins the boundary so a regression to ``>`` would break.
+        """
+        # Seed an ACTIVE skill row so the new active-skill filter
+        # in ``_embedding_dedup_check`` keeps its embedding row.
+        # ``SkillRepository.create`` auto-generates the UUID.
+        existing_skill = _make_skill(skill_repo, project_id, "boundary-target")
+        existing_id = existing_skill.id
+        existing_emb = _make_fake_embedding(existing_id, [0.1, 0.2, 0.3])
+
+        # Return exactly the threshold regardless of inputs.
+        fake_embedding_service.cosine_similarity = MagicMock(return_value=0.85)
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            return_value=[(existing_emb, existing_id)]
+        )
+
+        llm_payload = json.dumps({
+            "name": "boundary-skill",
+            "description": "matches exactly at threshold",
+            "content": "candidate content",
+        })
+
+        task_details = {
+            "task_message": "boundary case",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "embedding_similarity"
+        assert result["new_skill_id"] == existing_id
+        assert result["similarity_score"] == pytest.approx(0.85)
+
+        # No NEW skill row was created — the seed skill stays,
+        # the candidate must not.
+        items, _total = skill_repo.list(project_id=project_id, active_only=True)
+        candidate_names = {s.name for s in items}
+        assert "boundary-skill" not in candidate_names, (
+            f"Layer-2 boundary skip failed — candidate skill was "
+            f"created: {candidate_names!r}"
+        )
+
+    async def test_captured_proceeds_just_under_threshold(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Boundary complement: ``0.8499 < 0.85`` PROCEEDS.
+
+        Pinning the off-by-one direction so a regression to
+        ``> 0.85 skip`` (forgetting the equality case) would
+        also fail.
+        """
+        existing_id = "00000000-dddd-dddd-dddd-000000000004"
+        existing_emb = _make_fake_embedding(existing_id, [0.1, 0.2, 0.3])
+
+        fake_embedding_service.cosine_similarity = MagicMock(return_value=0.8499)
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            return_value=[(existing_emb, existing_id)]
+        )
+
+        llm_payload = json.dumps({
+            "name": "just-under-threshold",
+            "description": "almost-but-not-quite a duplicate",
+            "content": "different enough content",
+        })
+
+        task_details = {
+            "task_message": "under threshold",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        assert result["skipped"] is False
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.name == "just-under-threshold"
+
+    # ------------------------------------------------------------------
+    # Test 5 — scope: only ACTIVE skills in the SAME project block.
+    # ------------------------------------------------------------------
+    async def test_dedup_scopes_to_active_same_project_skills_only(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Dedup scope rules.
+
+        Embedding scan MUST NOT match against:
+
+        * a deactivated (``is_active=False``) skill in the same
+          project,
+        * a high-similarity skill in a DIFFERENT project,
+        * a non-existent skill id,
+        * a vector that didn't reach the threshold.
+
+        Wiring: arrange ALL of those decoys and assert that
+        ``get_all_for_project`` is called ONLY with
+        ``project_id=project_id`` (i.e. not ``other_project_id``).
+        Layer 2 must then either find nothing above threshold or
+        find only active same-project matches — both produce
+        "no skip" because the similarity is below the threshold.
+        """
+        other_project_id = "other-project-for-scope-test"
+
+        # Seed all the decoys the test cares about.
+        inactive_same_project = _make_skill(
+            skill_repo, project_id, "inactive-twin",
+            description="a deactivated twin",
+        )
+        # Deactivate it explicitly so it must NOT appear in the
+        # active-only list returned by ``list(active_only=True)``.
+        skill_repo.deactivate(inactive_same_project.id)
+
+        other_project_twin = _make_skill(
+            skill_repo, other_project_id, "other-project-twin",
+            description="high-similarity twin in a different project",
+        )
+
+        # Track which ``project_id`` is passed to get_all_for_project.
+        called_with_projects: list[str | None] = []
+
+        def fake_get_all_for_project(project_id_arg):
+            called_with_projects.append(project_id_arg)
+            # Return no embeddings for the test's project — so
+            # no similarity match happens. The point is to
+            # ensure no cross-project / no-inactive leak.
+            return []
+
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            side_effect=fake_get_all_for_project
+        )
+        # All similarities stay below the threshold by default.
+        fake_embedding_service.cosine_similarity = MagicMock(return_value=0.10)
+
+        llm_payload = json.dumps({
+            "name": "candidate-after-decoys",
+            "description": "must NOT be blocked by decoys",
+            "content": "candidate content",
+        })
+
+        task_details = {
+            "task_message": "scoped dedup",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # CRITICAL: the dedup query MUST be scoped to the test's
+        # project_id — never to ``other_project_id``.
+        assert called_with_projects, (
+            "Layer 2 must query existing embeddings at least once"
+        )
+        assert all(
+            pid == project_id for pid in called_with_projects
+        ), (
+            f"Layer 2 leaked cross-project IDs: {called_with_projects!r}"
+        )
+        assert fake_embedding_service.embedding_repo.get_all_for_project.call_count == 1
+        # Cross-project skill id was NEVER passed in.
+        assert all(
+            pid != other_project_id for pid in called_with_projects
+        )
+        # And the cross-project skill row remains untouched.
+        assert skill_repo.get(other_project_twin.id) is not None
+
+        # Capture proceeds — no skip.
+        assert result["skipped"] is False
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.name == "candidate-after-decoys"
+        # No cross-project contamination in the created row.
+        assert new_skill.project_id == project_id
+
+    async def test_dedup_ignores_inactive_skill_embeddings(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Layer 2 must filter out embeddings of INACTIVE skills.
+
+        Regression for C1: ``embedding_repo.get_all_for_project``
+        only filters by ``project_id`` — it does NOT consult
+        ``Skill.is_active``. Without the active-skill filter in
+        ``_embedding_dedup_check``, a deactivated (or superseded)
+        skill's embedding row would still be compared against the
+        new candidate, and a high-similarity match would silently
+        block creation of the skill the user wanted by
+        deactivating the old one.
+
+        The previous "inactive skills don't trigger dedup" test
+        stubbed ``get_all_for_project`` to return ``[]``, so it
+        never exercised the bug path. This regression test
+        returns an embedding row for an INACTIVE skill at cosine
+        similarity ``0.95`` (well above the 0.85 threshold) and
+        asserts that capture STILL proceeds: ``repo.create()`` is
+        called, ``result["skipped"]`` is ``False``, and the
+        created row is present in the active-skill list.
+
+        Wiring:
+
+        * ``_make_skill`` + ``skill_repo.deactivate`` so the
+          real ``_list_existing_active_skills_for_project``
+          helper sees an empty active set.
+        * ``get_all_for_project`` returns the inactive skill's
+          embedding row directly (the raw repo does NOT filter
+          by ``is_active``).
+        * ``cosine_similarity`` returns ``0.95`` — high enough
+          to trigger the bug pre-fix.
+        """
+        # Create and then deactivate a real skill so the DB
+        # helper ``_list_existing_active_skills_for_project``
+        # (which calls ``skill_repo.list(active_only=True)``)
+        # returns an empty list. ``SkillRepository.create``
+        # auto-generates the UUID — read it back for the
+        # embedding row reference.
+        inactive_skill = _make_skill(
+            skill_repo,
+            project_id,
+            "deactivated-twin",
+            description="user-deactivated twin",
+        )
+        inactive_skill_id = inactive_skill.id
+        skill_repo.deactivate(inactive_skill.id)
+
+        # The raw embedding repo yields the inactive skill's
+        # row. Pre-fix this row would participate in the cosine
+        # scan and block capture (similarity 0.95 > 0.85).
+        inactive_emb = _make_fake_embedding(
+            inactive_skill_id, [0.1, 0.2, 0.3]
+        )
+        fake_embedding_service.cosine_similarity = MagicMock(
+            return_value=0.95
+        )
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            return_value=[(inactive_emb, inactive_skill_id)]
+        )
+
+        llm_payload = json.dumps({
+            "name": "recreated-after-deactivation",
+            "description": "user wants to re-create the deactivated one",
+            "content": "fresh content for the recreated skill",
+        })
+
+        task_details = {
+            "task_message": "re-create deactivated skill",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # Capture proceeds despite the high-similarity inactive
+        # embedding. This is the bug the fix addresses.
+        assert result["skipped"] is False, (
+            "Layer 2 wrongly blocked capture against an "
+            "INACTIVE skill's embedding — the active-skill "
+            "filter is missing or broken."
+        )
+        assert result.get("new_skill_id") is not None
+
+        # The new skill is now in the active list.
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.name == "recreated-after-deactivation"
+        assert new_skill.status == "active"
+        assert new_skill.project_id == project_id
+
+        # Active-only listing returns ONLY the new skill — the
+        # deactivated twin stays out of the dedup candidate set.
+        active_items, _total = skill_repo.list(
+            project_id=project_id, active_only=True
+        )
+        active_ids = {s.id for s in active_items}
+        assert result["new_skill_id"] in active_ids
+        assert inactive_skill_id not in active_ids
+
+        # The raw embedding fetch WAS exercised — the filter
+        # runs, but the post-filter scan finds nothing eligible.
+        fake_embedding_service.embedding_repo.get_all_for_project.assert_called_once_with(
+            project_id
+        )
+
+    async def test_dedup_does_not_query_when_project_id_is_none(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+    ):
+        """When ``project_id`` is ``None``, dedup gates are skipped.
+
+        No project → no meaningful "already exists" set → proceed
+        without Layer 2 (no ``embedding_repo`` query). The
+        capture still creates the skill.
+        """
+        llm_payload = json.dumps({
+            "name": "no-project-skill",
+            "description": "captured without a project",
+            "content": "no project, no dedup",
+        })
+
+        task_details = {
+            "task_message": "no project",
+            "iterations": 1,
+            "duration_seconds": 1,
+            "agent_id": "test-agent",
+            "project_id": None,  # explicitly no project
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        assert result["skipped"] is False
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.project_id is None
+
+        # Layer 2 MUST NOT query when there is no project to scope by.
+        fake_embedding_service.embedding_repo.get_all_for_project.assert_not_called()
+
+        # But Layer 1 still asks the LLM — it just gets an empty list
+        # to consider (no project → no existing skills fetched).
+        # That means ``_list_existing_active_skills_for_project``
+        # returns ``[]`` immediately, no DB call.
 
 
 class TestEvolveSkillDispatch:

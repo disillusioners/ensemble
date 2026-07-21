@@ -41,6 +41,55 @@ from daemon.registry import get_registry
 logger = logging.getLogger(__name__)
 
 
+# Maximum length of the ``task_message`` snapshot stored on
+# ``skill_usage_records.task_message`` — the CAPTURED-skill
+# evolution flow forwards this string into the skill-keeper
+# LLM prompt, so we cap it to keep prompts bounded. Strings
+# longer than this are truncated with ``TASK_MESSAGE_TRUNCATION_MARKER``
+# appended so the skill-keeper knows the content was clipped.
+TASK_MESSAGE_MAX_LEN: int = 1000
+TASK_MESSAGE_TRUNCATION_MARKER: str = "...[truncated]"
+
+
+def _extract_task_message_from_messages(messages: list) -> str:
+    """Return the first ``type='human'`` message's content (truncated).
+
+    Reused by :meth:`JobQueueService._get_task_details` and (via the
+    same constants) by the process_message path in
+    :mod:`daemon.services.task_processor`. Picks the FIRST
+    ``type='human'`` row in queue order — messages are enqueued in
+    chronological order so this is the user's earliest original
+    request that kicked off the task. Returns ``""`` (empty string,
+    NOT None — consumers expect str) when no human message exists
+    or the content is non-string.
+
+    Args:
+        messages: Iterable of message rows with ``.type`` and
+            ``.content`` attributes (typically the
+            :class:`MessageQueue` SQLModel).
+
+    Returns:
+        The first human message's content, truncated to
+        ``TASK_MESSAGE_MAX_LEN`` characters with
+        ``TASK_MESSAGE_TRUNCATION_MARKER`` appended if it exceeded
+        the cap. ``""`` when no human message is present.
+    """
+    task_message = ""
+    for message in messages:
+        if getattr(message, "type", None) == "human":
+            content = getattr(message, "content", "") or ""
+            if isinstance(content, str) and len(content) > TASK_MESSAGE_MAX_LEN:
+                # Truncate to MAX_LEN minus the marker length so the
+                # final string never exceeds the cap.
+                content = (
+                    content[: TASK_MESSAGE_MAX_LEN - len(TASK_MESSAGE_TRUNCATION_MARKER)]
+                    + TASK_MESSAGE_TRUNCATION_MARKER
+                )
+            task_message = content if isinstance(content, str) else ""
+            break
+    return task_message
+
+
 # Shared terminal instance statuses — used across job_queue_service,
 # instance_lifecycle, and job_processor for consistent cleanup behavior.
 TERMINAL_STATUSES = frozenset([
@@ -1848,6 +1897,7 @@ class JobQueueService:
                 task_succeeded=(derived_status == "completed"),
                 iterations=task_details.get("iterations", 0),
                 duration_seconds=task_details.get("duration_seconds", 0),
+                task_message=task_details.get("task_message", ""),
             )
         except Exception as exc:
             logger.warning(
@@ -1897,6 +1947,7 @@ class JobQueueService:
                     duration_seconds=task_details.get(
                         "duration_seconds", 0
                     ),
+                    task_message=task_details.get("task_message", ""),
                 ),
                 self._loop,
             )
@@ -1927,7 +1978,7 @@ class JobQueueService:
         * ``project_id`` — sourced from the JobItem, falls back to
           ``None`` when the job is project-less (rare for system
           queues but tolerated by the metrics service).
-        * ``iterations`` — count of AI (``role='agent'``)
+        * ``iterations`` — count of AI (``type='agent'``)
           messages created on or after the job's ``created_at`` on
           the instance's message queue. This is the best available
           approximation of "LLM iterations the task consumed" without
@@ -1937,6 +1988,14 @@ class JobQueueService:
         * ``duration_seconds`` — wall-clock seconds since the job's
           ``created_at`` (an ISO-8601 string or ``datetime``). Falls
           back to ``0`` on any parse failure.
+        * ``task_message`` — the FIRST ``type='human'`` message's
+          content on the same queue, truncated to
+          :data:`TASK_MESSAGE_MAX_LEN` (1000) characters with a
+          ``...[truncated]`` marker when longer. Fed into the
+          CAPTURED skill-evolution flow as the canonical "what the
+          user asked" snapshot. Empty string (``""``) when no human
+          message exists or the queue repo is unavailable — NEVER
+          None, because consumers expect ``str``.
 
         Args:
             job_id: The canonical :class:`JobItem` ID (already
@@ -1944,9 +2003,10 @@ class JobQueueService:
 
         Returns:
             A dict with keys ``instance_id``, ``agent_id``,
-            ``project_id``, ``iterations``, ``duration_seconds``;
-            ``None`` when the job row is missing (the caller treats
-            this as "no metrics to record" and skips the hook).
+            ``project_id``, ``iterations``, ``duration_seconds``,
+            ``task_message``; ``None`` when the job row is missing
+            (the caller treats this as "no metrics to record" and
+            skips the hook).
         """
         try:
             job = await asyncio.to_thread(self._repository.get, job_id)
@@ -2000,7 +2060,13 @@ class JobQueueService:
         # reached via the InstanceManager facade; missing facade OR
         # missing repository OR a query error all collapse to ``0`` so
         # the completion hook never raises.
+        #
+        # ``task_messages`` is the list of pre-filtered messages for
+        # THIS task — it's reused below by the ``task_message``
+        # extraction so the CAPTURED flow's "what the user asked"
+        # snapshot never costs a second DB roundtrip.
         iterations = 0
+        task_messages: list = []
         if instance_id:
             try:
                 instance_manager = getattr(
@@ -2072,6 +2138,19 @@ class JobQueueService:
                     f"{(instance_id or '')[:8]}...: {exc}"
                 )
                 iterations = 0
+                task_messages = []
+
+        # ── task_message ─────────────────────────────────────────
+        # Extract the FIRST ``type='human'`` message's content as
+        # the canonical "what the user asked" snapshot for the
+        # CAPTURED skill-evolution flow. Reuses the already-loaded
+        # ``task_messages`` list to avoid a second DB roundtrip.
+        # Truncated to ``TASK_MESSAGE_MAX_LEN`` (1000) chars with a
+        # ``...[truncated]`` marker so the snapshot never blows up
+        # the skill-keeper LLM prompt. Empty string when no human
+        # message exists or the queue repo is missing — NOT None;
+        # consumers expect ``str``.
+        task_message = _extract_task_message_from_messages(task_messages)
 
         return {
             "instance_id": instance_id,
@@ -2079,6 +2158,7 @@ class JobQueueService:
             "project_id": project_id,
             "iterations": iterations,
             "duration_seconds": duration_seconds,
+            "task_message": task_message,
         }
 
     async def _try_start_job(self, job: JobItem) -> bool:

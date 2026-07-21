@@ -351,6 +351,150 @@ class TestGetTaskDetails:
         assert details["iterations"] == 0
 
 
+class TestTaskMessageExtraction:
+    """``_get_task_details`` extracts ``task_message`` from the message queue.
+
+    CAPTURED-skill plumbing: the completion hook reads the user's
+    actual task text (first ``type='human'`` row, truncated to
+    :data:`TASK_MESSAGE_MAX_LEN`) so the skill-keeper LLM prompt
+    has the real ask instead of an empty string. These tests pin
+    the extraction contract end-to-end through the stub queue
+    repo. Pattern copies ``test_counts_agent_messages_from_queue_repo``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_task_message_from_first_human_message(
+        self, engine, job_repo, job_queue_service
+    ):
+        """First ``type='human'`` row's content becomes ``task_message``.
+
+        Stub ``queue_repo.get_by_instance`` to return a mix of
+        ``agent`` / ``human`` / ``system`` rows. The CAPTURED-skill
+        feed is the ``type='human'`` row's ``content`` — here
+        exactly the string ``"hello world"``. Asserts the
+        ``details["task_message"]`` carries that string verbatim.
+        """
+        stub_queue_repo = MagicMock()
+        stub_queue_repo.get_by_instance = MagicMock(
+            return_value=[
+                MagicMock(type="agent", content="thinking"),
+                MagicMock(type="human", content="hello world"),
+                MagicMock(type="system", content="system msg"),
+            ]
+        )
+        job_queue_service._instance_manager._queue_repository = (
+            stub_queue_repo
+        )
+
+        job = _make_and_start_job(
+            engine, job_repo, instance_id="inst-tm1"
+        )
+
+        details = await job_queue_service._get_task_details(job.job_id)
+        assert details is not None
+        assert details["task_message"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_task_message_empty_when_no_human_message(
+        self, engine, job_repo, job_queue_service
+    ):
+        """No ``type='human'`` row → ``task_message`` is ``""`` (not None).
+
+        A task with only agent + system messages has no "user
+        asked" snapshot. The hook surfaces ``""`` (empty string)
+        explicitly so downstream consumers can detect the absence
+        with truthiness rather than relying on ``None``. Asserts
+        the key IS present and equals ``""``.
+        """
+        stub_queue_repo = MagicMock()
+        stub_queue_repo.get_by_instance = MagicMock(
+            return_value=[
+                MagicMock(type="agent", content="ok"),
+                MagicMock(type="system", content="sys"),
+            ]
+        )
+        job_queue_service._instance_manager._queue_repository = (
+            stub_queue_repo
+        )
+
+        job = _make_and_start_job(
+            engine, job_repo, instance_id="inst-tm2"
+        )
+
+        details = await job_queue_service._get_task_details(job.job_id)
+        assert details is not None
+        assert "task_message" in details
+        assert details["task_message"] == ""
+
+    @pytest.mark.asyncio
+    async def test_task_message_truncates_at_1000_chars(
+        self, engine, job_repo, job_queue_service
+    ):
+        """Strings > 1000 chars are truncated with ``...[truncated]`` marker.
+
+        The CAPTURED-skill LLM prompt must never blow up. A
+        1500-char user request is truncated to 1000 chars total
+        (preserving ``...[truncated]`` at the tail). Asserts both
+        the exact length AND the marker presence.
+        """
+        long_content = "x" * 1500
+        stub_queue_repo = MagicMock()
+        stub_queue_repo.get_by_instance = MagicMock(
+            return_value=[
+                MagicMock(type="human", content=long_content),
+            ]
+        )
+        job_queue_service._instance_manager._queue_repository = (
+            stub_queue_repo
+        )
+
+        job = _make_and_start_job(
+            engine, job_repo, instance_id="inst-tm3"
+        )
+
+        details = await job_queue_service._get_task_details(job.job_id)
+        assert details is not None
+        task_message = details["task_message"]
+        # Exactly 1000 chars (caller's constant); marker at the end.
+        assert len(task_message) == 1000
+        assert task_message.endswith("...[truncated]")
+        # Leading slice intact (first ~987 chars are all 'x').
+        assert task_message[:900] == "x" * 900
+
+    @pytest.mark.asyncio
+    async def test_task_message_prefers_earliest_human_message(
+        self, engine, job_repo, job_queue_service
+    ):
+        """Earliest ``type='human'`` row wins (queue is chronological).
+
+        The helper iterates ``task_messages`` in order and breaks
+        on the first ``type='human'`` hit. Messages are enqueued
+        in chronological order on the instance's queue, so this
+        is the user's first ask in the conversation. Two human
+        messages here — the first one's content wins (the helper
+        does NOT look up "last" / "most recent").
+        """
+        stub_queue_repo = MagicMock()
+        stub_queue_repo.get_by_instance = MagicMock(
+            return_value=[
+                MagicMock(type="agent", content="ok"),
+                MagicMock(type="human", content="first"),
+                MagicMock(type="human", content="second"),
+            ]
+        )
+        job_queue_service._instance_manager._queue_repository = (
+            stub_queue_repo
+        )
+
+        job = _make_and_start_job(
+            engine, job_repo, instance_id="inst-tm4"
+        )
+
+        details = await job_queue_service._get_task_details(job.job_id)
+        assert details is not None
+        assert details["task_message"] == "first"
+
+
 # ─── Metrics hook integration ──────────────────────────────────────────────
 
 

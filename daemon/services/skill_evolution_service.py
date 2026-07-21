@@ -101,6 +101,35 @@ _RE_KV_CONTENT = re.compile(
     r'"?content"?\s*[:=]\s*"?(.*?)"?\s*(?:[,\n}]|$)', re.IGNORECASE
 )
 
+# CAPTURED-flow deduplication gates (Layer 1 + Layer 2).
+#
+# Layer 1 is an LLM-level gate (the skill-keeper is asked to either
+# emit SKIP_DUPLICATE: <id> or produce new content). Layer 2 is an
+# embedding-similarity backstop that runs after the LLM produces a
+# candidate but BEFORE ``repo.create()`` — it embeds the candidate,
+# computes ``cosine_similarity`` against every active project
+# embedding, and refuses to create when the max is at or above the
+# threshold.
+#
+# Boundary: ``>= _CAPTURED_DEDUP_THRESHOLD`` SKIPS creation. Exactly
+# 0.85 is a skip. Anything strictly less than 0.85 proceeds.
+_SKIP_DUPLICATE_RE = re.compile(
+    r"^\s*SKIP_DUPLICATE\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE
+)
+_CAPTURED_DEDUP_THRESHOLD = 0.85
+
+# Cap the number of "existing skills" handed to the capture prompt.
+# Beyond ~20 entries the prompt bloat dominates the model's context
+# budget; the rest of dedup is covered by Layer 2 (embedding scan)
+# which has no such limit.
+_CAPTURED_PROMPT_EXISTING_LIMIT = 20
+
+# Cap the candidate text we embed for Layer 2. The first ~2000
+# chars of ``name + description + content`` carry the semantic
+# meaning that matters for a duplicate test; longer content just
+# dilutes the mean pooling done by typical embedding APIs.
+_CAPTURED_DEDUP_EMBED_CHARS = 2000
+
 # Cap the per-note size we embed in LLM prompts. Feedback /
 # improvement notes are typed by humans (or copied from task
 # output) so a single long note could otherwise dominate the
@@ -535,6 +564,64 @@ class SkillEvolutionService:
             "skipped": False,
         }
 
+    async def _list_existing_active_skills_for_project(
+        self,
+        project_id: str | None,
+        limit: int = _CAPTURED_PROMPT_EXISTING_LIMIT,
+    ) -> list[Any]:
+        """Fetch active skills for ``project_id`` for the dedup prompt.
+
+        Returns a list of lightweight :class:`Skill` rows — only
+        ``id`` / ``name`` / ``description`` are read by the LLM,
+        but the full row is returned so callers can also use it
+        for the embedding-similarity scan if needed.
+
+        Defensive on every failure mode:
+
+        * ``project_id`` falsy → empty list (no project means we
+          cannot meaningfully scope a dedup candidate set).
+        * ``self._skill_repo`` missing → empty list.
+        * Repository or DB error → empty list (logged at
+          warning level). Layer 2 will still try to embed; if
+          that also fails we proceed with capture anyway.
+
+        Args:
+            project_id: Project ID to scope to. ``None`` returns
+                ``[]`` — the dedup gates intentionally do NOT
+                compare against other-project skills (avoids
+                cross-project false positives).
+            limit: Max rows to return. Capped at
+                ``_CAPTURED_PROMPT_EXISTING_LIMIT`` by the caller
+                side via the constant; accepts an override for
+                tests.
+
+        Returns:
+            List of :class:`Skill` rows (or duck-typed doubles)
+            with ``id`` / ``name`` / ``description`` populated.
+        """
+        if not project_id:
+            return []
+        repo = getattr(self, "_skill_repo", None)
+        if repo is None:
+            return []
+
+        def _fetch() -> list[Any]:
+            try:
+                items, _ = repo.list(
+                    project_id=project_id,
+                    active_only=True,
+                    limit=limit,
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    f"[SkillEvolution] Dedup list query failed for "
+                    f"project_id={project_id}: {e!s}"
+                )
+                return []
+            return list(items)
+
+        return await asyncio.to_thread(_fetch)
+
     async def _evolve_captured(self, task_details: dict) -> dict:
         """CAPTURED flow — extract a reusable skill from a successful task.
 
@@ -559,11 +646,39 @@ class SkillEvolutionService:
         response as the content body and derives ``name`` /
         ``description`` from its first 5 words / first sentence.
 
+        Two-layer deduplication gate
+        ----------------------------
+
+        Both gates deliberately fall through on any infrastructure
+        failure (embedding API down, DB error, missing repo) — a
+        capture is never blocked by dedup-infra issues, only by a
+        positive duplicate signal:
+
+        * **Layer 1 (LLM-level):** the prompt lists other active
+          project skills and asks the LLM to emit
+          ``SKIP_DUPLICATE: <id>`` instead of fabricating a new
+          row when the knowledge is already covered. The raw LLM
+          response is regex-checked for that prefix BEFORE JSON
+          parsing.
+        * **Layer 2 (embedding-similarity backstop):** after the
+          LLM produces a candidate (and it is NOT a
+          ``SKIP_DUPLICATE``), the candidate is embedded via
+          :meth:`SkillEmbeddingService.embed_text` and compared
+          against every cached embedding for the SAME project.
+          If ``max cosine_similarity >= _CAPTURED_DEDUP_THRESHOLD``
+          creation is skipped.
+
+        Boundary: ``>= 0.85`` SKIPS. Exactly ``0.85`` is a skip.
+        Strictly less than ``0.85`` proceeds.
+
         Args:
             task_details: Dict of CAPTURED-flow inputs.
 
         Returns:
-            Dict with ``new_skill_id`` and ``skipped``.
+            Dict with ``new_skill_id``, ``skipped`` (always
+            present), ``skip_reason`` (``"llm_skip_duplicate"`` /
+            ``"embedding_similarity"`` when skipped), and
+            ``similarity_score`` (set by Layer 2 only).
 
         Raises:
             ValueError: When ``task_details`` is empty / falsy.
@@ -584,18 +699,120 @@ class SkillEvolutionService:
         project_id = task_details.get("project_id")
         existing_skill = task_details.get("skill")
 
+        # ------------------------------------------------------------
+        # Layer 1 prep: fetch other active project skills (excluding
+        # the source ``existing_skill``) so the prompt can show them
+        # to the LLM. Failure here is non-fatal — the prompt will be
+        # built without a dedup list and Layer 2 will still scan.
+        # ------------------------------------------------------------
+        existing_skills_for_prompt: list[Any] = []
+        if project_id is not None:
+            try:
+                siblings = await self._list_existing_active_skills_for_project(
+                    project_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[SkillEvolution] Dedup-list fetch raised "
+                    f"unexpectedly for project_id={project_id}: {e!s}. "
+                    f"Proceeding without Layer 1 prompt context."
+                )
+                siblings = []
+            source_id = (
+                getattr(existing_skill, "id", None) if existing_skill else None
+            )
+            existing_skills_for_prompt = [
+                s for s in siblings if getattr(s, "id", None) != source_id
+            ]
+
         prompt = self._build_capture_prompt(
             task_message=task_message,
             iterations=iterations,
             duration_seconds=duration_seconds,
             agent_id=agent_id,
             existing_skill=existing_skill,
+            existing_skills=existing_skills_for_prompt,
         )
 
         raw = await self._call_llm(
             prompt, model=self._resolve_evolution_model()
         )
+
+        # ------------------------------------------------------------
+        # Layer 1 gate: SKIP_DUPLICATE prefix from the LLM.
+        # Checked BEFORE JSON parsing — a SKIP_DUPLICATE response is
+        # plain text, not JSON, so letting it flow through
+        # ``_parse_capture_response`` would derive a bogus name /
+        # description from the prefix string.
+        # ------------------------------------------------------------
+        skip_text = (raw or "").strip()
+        skip_match = _SKIP_DUPLICATE_RE.match(skip_text)
+        if skip_match:
+            skip_id = skip_match.group(1).strip().rstrip(",.;:)]>}\"'")
+            logger.info(
+                f"[SkillEvolution] CAPTURED Layer-1 LLM dedup hit: "
+                f"skipping creation — matched existing "
+                f"skill_id={skip_id!r}"
+            )
+            return {
+                "new_skill_id": skip_id,
+                "skipped": True,
+                "skip_reason": "llm_skip_duplicate",
+            }
+
+        # Loose fallback: the LLM emitted ``SKIP_DUPLICATE`` without
+        # a usable id (e.g. ``SKIP_DUPLICATE:`` with no token, or a
+        # free-form refusal prefixed with the keyword). The strict
+        # regex above requires ``(\S+)`` after the colon, so it
+        # silently misses those cases. Without this guard the bare
+        # token falls through to ``_parse_capture_response`` → JSON
+        # fails → prose fallback names the skill literally
+        # ``SKIP_DUPLICATE:`` (garbage capture). Honor the skip
+        # intent and short-circuit instead. ``new_skill_id`` is
+        # ``None`` because the LLM didn't actually pick a target;
+        # the distinct ``skip_reason`` lets callers tell this apart
+        # from a clean Layer-1 hit.
+        if "SKIP_DUPLICATE" in skip_text.upper():
+            logger.warning(
+                "[SkillEvolution] CAPTURED Layer-1 received "
+                "SKIP_DUPLICATE without a valid skill_id; "
+                "skipping capture (no target picked)."
+            )
+            return {
+                "new_skill_id": None,
+                "skipped": True,
+                "skip_reason": "llm_skip_duplicate_no_id",
+            }
+
         name, description, content = self._parse_capture_response(raw)
+
+        # ------------------------------------------------------------
+        # Layer 2 gate: embedding-similarity backstop.
+        # Bound to ``project_id`` so we never compare against other
+        # projects' skills. Refuses to fire when infra is missing
+        # (no embedding service, no embedding repo, missing API key,
+        # etc.) — a missing infra signal must NOT block captures.
+        # ------------------------------------------------------------
+        layer2 = await self._embedding_dedup_check(
+            name=name,
+            description=description,
+            content=content,
+            project_id=project_id,
+        )
+        if layer2 is not None:
+            matched_id, similarity = layer2
+            logger.info(
+                f"[SkillEvolution] CAPTURED Layer-2 embedding dedup hit: "
+                f"skipping creation — similarity={similarity:.4f} "
+                f">= {_CAPTURED_DEDUP_THRESHOLD} matched "
+                f"skill_id={matched_id!r}"
+            )
+            return {
+                "new_skill_id": matched_id,
+                "skipped": True,
+                "skip_reason": "embedding_similarity",
+                "similarity_score": similarity,
+            }
 
         new_skill = await asyncio.to_thread(
             self._skill_repo.create,
@@ -622,6 +839,188 @@ class SkillEvolutionService:
             "new_skill_id": new_skill.id,
             "skipped": False,
         }
+
+    async def _embedding_dedup_check(
+        self,
+        name: str,
+        description: str,
+        content: str,
+        project_id: str | None,
+    ) -> tuple[str, float] | None:
+        """Layer-2 embedding-similarity dedup gate.
+
+        Embeds the candidate ``(name, description, content)`` and
+        compares against every cached embedding for the SAME
+        project. Returns the ``(matched_skill_id, max_similarity)``
+        pair if ``max_similarity >= _CAPTURED_DEDUP_THRESHOLD``,
+        otherwise ``None`` (i.e. proceed with creation).
+
+        Defensive on every failure mode: any infrastructure error
+        (missing embedding service, missing embedding repo, API
+        failure, DB error) returns ``None`` with a warning log —
+        dedup never blocks captures.
+
+        Args:
+            name: Candidate name from the LLM.
+            description: Candidate description.
+            content: Candidate body.
+            project_id: Project to scope the comparison to.
+                ``None`` skips the check (no project scope → no
+                meaningful dedup set).
+
+        Returns:
+            ``(skill_id, similarity)`` tuple when a duplicate is
+            matched at or above the threshold, else ``None``.
+        """
+        # No project → nothing meaningful to compare against.
+        # Defaulting to "no match" preserves the previous behavior
+        # (always create) and avoids cross-project false-positives.
+        if not project_id:
+            return None
+
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None:
+            return None
+
+        embedding_repo = getattr(embedding_service, "embedding_repo", None)
+        if embedding_repo is None:
+            return None
+
+        # Build the candidate text the same way the embedding service
+        # treats existing skill bodies — name + description + first
+        # N chars of content. We deliberately do NOT embed JSON or
+        # anything that resembles trigger queries.
+        candidate_text_parts: list[str] = []
+        if name:
+            candidate_text_parts.append(str(name))
+        if description:
+            candidate_text_parts.append(str(description))
+        if content:
+            candidate_text_parts.append(
+                str(content)[:_CAPTURED_DEDUP_EMBED_CHARS]
+            )
+        candidate_text = "\n".join(candidate_text_parts).strip()
+        if not candidate_text:
+            return None
+
+        # Resolve the cosine_similarity callable. The real
+        # ``SkillEmbeddingService`` exposes it as a ``@staticmethod``
+        # so both ``SkillEmbeddingService.cosine_similarity(...)`` and
+        # ``embedding_service.cosine_similarity(...)`` work. In tests
+        # the embedding service is a ``MagicMock``, so accessing it
+        # via the class (``type(embedding_service)``) avoids spurious
+        # calls when the instance attribute has been replaced.
+        cosine_sim = getattr(
+            embedding_service,
+            "cosine_similarity",
+            getattr(type(embedding_service), "cosine_similarity", None),
+        )
+        if not callable(cosine_sim):
+            return None
+
+        try:
+            candidate_vec = await embedding_service.embed_text(candidate_text)
+        except Exception as e:
+            logger.warning(
+                f"[SkillEvolution] Layer-2 embed_text failed for "
+                f"project_id={project_id}: {e!s}. Skipping Layer-2 "
+                f"dedup; proceeding with capture."
+            )
+            return None
+
+        if not candidate_vec:
+            return None
+
+        try:
+            embedding_rows = await asyncio.to_thread(
+                embedding_repo.get_all_for_project,
+                project_id,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[SkillEvolution] Layer-2 embedding fetch failed "
+                f"for project_id={project_id}: {e!s}. Skipping "
+                f"Layer-2 dedup; proceeding with capture."
+            )
+            return None
+
+        # ``get_all_for_project`` filters ONLY by ``project_id`` —
+        # it does NOT consult ``Skill.is_active``. A deactivated /
+        # superseded skill still has embedding rows in the table,
+        # and the raw scan would let those rows block creation of
+        # the new skill the user wanted by reactivating the
+        # knowledge. Restrict the comparison set to ACTIVE skills
+        # so a user who intentionally deactivated the old one is
+        # not silently blocked from re-creating it.
+        try:
+            active_skills = (
+                await self._list_existing_active_skills_for_project(
+                    project_id, limit=10**9
+                )
+            )
+            active_skill_ids = {s.id for s in active_skills}
+            embedding_rows = [
+                r for r in embedding_rows if r[1] in active_skill_ids
+            ]
+        except Exception as e:
+            # Listing failures must NOT block capture — Layer 2
+            # already soft-fails on infra errors per its
+            # docstring. Log and proceed with the unfiltered
+            # embedding set (preserves the pre-fix behavior on
+            # infrastructure glitches).
+            logger.warning(
+                f"[SkillEvolution] Layer-2 active-skill filter "
+                f"failed for project_id={project_id}: {e!s}. "
+                f"Falling back to unfiltered embedding scan."
+            )
+
+        # ``get_all_for_project`` returns ``list[(SkillEmbedding,
+        # skill_id)]``. Each skill has multiple trigger embeddings,
+        # so we take the per-skill max first (most-aligned trigger
+        # wins for that skill), then the overall max across skills.
+        best_per_skill: dict[str, float] = {}
+        try:
+            for emb_row in embedding_rows:
+                # Support both the documented 2-tuple and the bare
+                # row shape in case a test or future repo variant
+                # returns embeddings directly.
+                if isinstance(emb_row, tuple) and len(emb_row) >= 2:
+                    emb, skill_id = emb_row[0], emb_row[1]
+                else:
+                    emb, skill_id = emb_row, getattr(emb_row, "skill_id", None)
+                if emb is None or not skill_id:
+                    continue
+                existing_vec = list(getattr(emb, "embedding", []) or [])
+                if not existing_vec:
+                    continue
+                sim_raw = cosine_sim(candidate_vec, existing_vec)
+                try:
+                    sim = float(sim_raw)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    continue
+                current = best_per_skill.get(skill_id, -1.0)
+                if sim > current:
+                    best_per_skill[skill_id] = sim
+        except Exception as e:
+            logger.warning(
+                f"[SkillEvolution] Layer-2 cosine_similarity scan "
+                f"failed for project_id={project_id}: {e!s}. "
+                f"Skipping Layer-2 dedup; proceeding with capture."
+            )
+            return None
+
+        if not best_per_skill:
+            return None
+
+        # Boundary: ``>= _CAPTURED_DEDUP_THRESHOLD`` skips.
+        # Exactly 0.85 is a skip.
+        matched_id, similarity = max(
+            best_per_skill.items(), key=lambda kv: kv[1]
+        )
+        if similarity >= _CAPTURED_DEDUP_THRESHOLD:
+            return matched_id, similarity
+
+        return None
 
     # --------------------------------------------------------
     # Public API: capture wrapper
@@ -1326,13 +1725,18 @@ class SkillEvolutionService:
         duration_seconds: int,
         agent_id: str,
         existing_skill: Any,
+        existing_skills: list[Any] | None = None,
     ) -> str:
         """Build the CAPTURED extraction prompt.
 
         Asks the LLM to distill a successful task into a reusable
         skill body. When an existing skill is supplied (rare —
         typically CAPTURED runs without one) its content is
-        included as a starting point.
+        included as a starting point. When ``existing_skills`` is
+        non-empty (the common case), the prompt lists those
+        other-project skills so the LLM can choose to emit
+        ``SKIP_DUPLICATE: <id>`` instead of fabricating a new
+        row — that is the Layer 1 dedup gate.
 
         Args:
             task_message: The user's input.
@@ -1341,6 +1745,12 @@ class SkillEvolutionService:
             agent_id: The agent that executed.
             existing_skill: Optional pre-existing skill to build
                 from. ``None`` for the common fresh-capture case.
+            existing_skills: Optional iterable of light-weight
+                "candidate duplicates" for Layer-1 dedup. Each
+                element is duck-typed on ``.id``, ``.name``,
+                ``.description``. Empty / ``None`` skips the
+                dedup-against-existing list (which is fine — Layer
+                2 still guards creation).
 
         Returns:
             The fully-formed prompt string.
@@ -1362,9 +1772,54 @@ class SkillEvolutionService:
                 f"- content (excerpt):\n"
                 f"{(getattr(existing_skill, 'content', '') or '')[:1500]}\n\n"
             )
+
+        # Layer-1 dedup context: a numbered list of other active
+        # skills in the same project so the LLM can match against
+        # them. ``existing_skill`` (the source) is intentionally
+        # excluded by the caller — only "siblings" are listed.
+        dedup_list_block = ""
+        if existing_skills:
+            dedup_lines: list[str] = []
+            for idx, s in enumerate(existing_skills, start=1):
+                s_name = getattr(s, "name", "") or ""
+                s_desc = getattr(s, "description", "") or ""
+                s_id = getattr(s, "id", "") or ""
+                if not s_name and not s_desc:
+                    continue
+                dedup_lines.append(
+                    f'  {idx}. id="{s_id}" name="{s_name}" '
+                    f'description="{s_desc}"'
+                )
+            if dedup_lines:
+                dedup_list_block = (
+                    "Other active skills in this project "
+                    "(consider whether any already covers this "
+                    "task):\n"
+                    + "\n".join(dedup_lines)
+                    + "\n\n"
+                )
+
+        # The Layer-1 instruction is only emitted when the list
+        # is non-empty — otherwise there is nothing to dedup
+        # against and asking the LLM to "review" would be noise.
+        dedup_instruction = ""
+        if dedup_list_block:
+            dedup_instruction = (
+                "Before creating a new skill, review the list of "
+                "other active skills above. If a similar skill "
+                "already covers this task, output "
+                "`SKIP_DUPLICATE: <existing_skill_id>` as your "
+                "ENTIRE response instead of creating a new "
+                "skill. Only create a new skill if the task "
+                "represents genuinely new knowledge not covered "
+                "by any existing skill.\n\n"
+            )
+
         return (
             header
             + existing_block
+            + dedup_list_block
+            + dedup_instruction
             + "Return a JSON object with exactly these keys:\n"
             '  "name": "<short kebab-case skill name>",\n'
             '  "description": "<one-line summary>",\n'

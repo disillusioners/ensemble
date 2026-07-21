@@ -1342,6 +1342,7 @@ class SkillUsageRepository:
         task_succeeded: bool,
         iterations: int,
         duration_seconds: int,
+        task_message: Optional[str] = None,
     ) -> SkillUsageRecord | None:
         """Stamp task-outcome signals onto an existing usage record.
 
@@ -1366,6 +1367,20 @@ class SkillUsageRepository:
         ``get_stats_filtered`` already excludes superseded rows from
         headline aggregation, so the headline metric is unaffected.
 
+        ``task_message`` plumbing (CAPTURED fix): when the feedback
+        path inserts a usage row on-miss (``skill_feedback`` landed
+        before the completion hook), it can't know what the user
+        asked — only the completion hook has that context. So we
+        forward ``task_message`` here too. Both ``None`` (default)
+        and the empty string ``""`` are no-ops: the column is left
+        untouched. Only truthy values overwrite the column. This
+        mirrors the INSERT path in :meth:`create`, where callers
+        in ``skill_metrics_service`` coerce ``""`` → ``None``
+        before insertion so the column stays ``NULL`` — the UPDATE
+        path must be symmetric to avoid producing a row whose
+        ``task_message`` is an empty string while a freshly
+        inserted sibling would be ``NULL``.
+
         Args:
             record_id: The record to update.
             task_succeeded: True iff the task ended ``completed``.
@@ -1373,6 +1388,15 @@ class SkillUsageRepository:
                 existing value — the completion hook is the only
                 legitimate source of this signal.
             duration_seconds: Wall-clock duration. OVERWRITES.
+            task_message: User-asked snapshot to forward to the
+                CAPTURED flow. ``None`` (default) is a no-op so
+                feedback-first paths that never learn the user's
+                task don't get a clobbered NULL. Empty string
+                (``""``) is also a no-op — it mirrors the INSERT
+                path's ``""`` → ``NULL`` coercion in
+                ``skill_metrics_service``, so both paths produce
+                identical column state. Truthy values OVERWRITE
+                the existing column.
 
         Returns:
             The updated :class:`SkillUsageRecord`, or ``None`` if
@@ -1401,6 +1425,18 @@ class SkillUsageRepository:
             record.task_succeeded = task_succeeded
             record.iterations = iterations
             record.duration_seconds = duration_seconds
+            # task_message: only mutate when caller provided a
+            # truthy value. ``None`` AND empty string ``""`` are
+            # both no-ops — leave the existing column value alone.
+            # The INSERT path in :meth:`create` (via the
+            # ``skill_metrics_service`` callers) coerces ``""``
+            # to ``None`` so the column stays ``NULL``; the UPDATE
+            # path here must mirror that to keep both paths in
+            # sync. The feedback path commonly inserts rows before
+            # the completion hook has loaded ``task_message``, so
+            # a None passthrough is essential there.
+            if task_message:
+                record.task_message = task_message
             session.commit()
             session.refresh(record)
             logger.debug(
