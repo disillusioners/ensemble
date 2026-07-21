@@ -6,10 +6,12 @@ The Agents Ensemble RAG knowledge system uses LightRAG as the backend for storin
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `LIGHTRAG_HOST` | Yes | — | LightRAG server URL (e.g., `http://localhost:8724`) |
+| `LIGHTRAG_HOST` | Yes | — | LightRAG server URL (e.g., `http://localhost:9621`) |
 | `LIGHTRAG_API_KEY` | No | — | API key for LightRAG authentication |
-| `LIGHTRAG_WORKSPACE` | No | `default` | Workspace name for multi-tenant setups |
-| `LIGHTRAG_TIMEOUT` | No | `60` | Request timeout in seconds |
+| `LIGHTRAG_WORKSPACE` | No | — | Workspace name for multi-tenant setups (omit for unscoped search). Workspaces namespace automatically in v1.7.0+ — no isolation flag needed. |
+| `LIGHTRAG_TIMEOUT` | No | `120` | Request timeout in seconds |
+
+> **LightRAG server vars (v1.7.0+):** Entity types are no longer set via an `ENTITY_TYPES` environment variable — the server refuses to boot if `ENTITY_TYPES` is present. Instead, configure entity types via the YAML prompt profile pointed at by `ENTITY_TYPE_PROMPT_FILE` (resolved from `PROMPT_DIR/entity_type/`). See [LightRAG Setup Guide](../lightrag-setup.md#step-2-configure-entity-type-prompt-profile) for the full workflow and shipped sample.
 
 ## Quick Setup
 
@@ -19,23 +21,23 @@ The Agents Ensemble RAG knowledge system uses LightRAG as the backend for storin
 # Using Docker
 docker run -d \
   --name lightrag \
-  -p 8724:8724 \
+  -p 9621:9621 \
   -v lightrag-data:/root/lightrag_data \
-  lightrag/lightrag:latest
+  disillusioners/lightrag:v1.7.0-workspace-v2
 
 # Or using pip
 pip install lightrag-hku
-python -m lightrag --host 0.0.0.0 --port 8724
+python -m lightrag --host 0.0.0.0 --port 9621
 ```
 
 ### 2. Configure Environment
 
 ```bash
 # In your .env file or environment
-export LIGHTRAG_HOST=http://localhost:8724
+export LIGHTRAG_HOST=http://localhost:9621
 export LIGHTRAG_API_KEY=your-api-key  # Optional
 export LIGHTRAG_WORKSPACE=my-project  # Optional
-export LIGHTRAG_TIMEOUT=60            # Optional
+export LIGHTRAG_TIMEOUT=120            # Optional
 ```
 
 ### 3. Restart Daemon
@@ -57,7 +59,7 @@ The knowledge tools automatically check RAG availability:
 You can manually check:
 
 ```bash
-curl http://localhost:8724/api/health
+curl http://localhost:9621/api/health
 ```
 
 ## Graceful Degradation
@@ -86,13 +88,13 @@ LIGHTRAG_WORKSPACE=project-a
 LIGHTRAG_WORKSPACE=project-b
 ```
 
-Workspaces isolate knowledge between projects while sharing the same LightRAG server.
+Workspaces isolate knowledge between projects while sharing the same LightRAG server. In v1.7.0+ workspaces always namespace automatically — no extra isolation flag is required.
 
 ## Performance Tuning
 
 | Setting | Recommendation | Notes |
 |---------|---------------|-------|
-| `LIGHTRAG_TIMEOUT` | 30-120s | Complex queries may need more time |
+| `LIGHTRAG_TIMEOUT` | 120-300s | Default is 120s. Complex queries may need more time. |
 | LightRAG server RAM | 4GB+ | Depends on knowledge base size |
 | Embedding model | Default (OpenAI) | Configured in LightRAG server |
 
@@ -101,23 +103,23 @@ Workspaces isolate knowledge between projects while sharing the same LightRAG se
 ### Connection Refused
 
 ```
-ERROR: Cannot connect to http://localhost:8724
+ERROR: Cannot connect to http://localhost:9621
 ```
 
 **Solution:** Ensure LightRAG server is running:
 ```bash
-curl http://localhost:8724/api/health
+curl http://localhost:9621/api/health
 ```
 
 ### Timeout Errors
 
 ```
-ERROR: Request timed out after 60s
+ERROR: Request timed out after 120s
 ```
 
 **Solution:** Increase timeout:
 ```bash
-export LIGHTRAG_TIMEOUT=120
+export LIGHTRAG_TIMEOUT=300
 ```
 
 ### Authentication Errors

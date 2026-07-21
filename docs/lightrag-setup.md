@@ -38,11 +38,12 @@ Create a file named `lightrag.env` with the following configuration:
 # REQUIRED: agents-ensemble Critical Settings
 # ============================================
 
-# CRITICAL: Must be "true" for project isolation
-WORKSPACE_ISOLATION="true"
+# Entity type prompt profile: bare filename resolved under PROMPT_DIR/entity_type/
+# In v1.7.0+, entity types are configured via a YAML prompt profile (see Step 2 below).
+ENTITY_TYPE_PROMPT_FILE=entity_type_prompt.yml
 
-# Entity types for knowledge graph extraction (14 types)
-ENTITY_TYPES='["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]'
+# Note: WORKSPACE_ISOLATION is no longer needed in v1.7.0+ — workspaces always namespace automatically.
+# Note: ENTITY_TYPES is deprecated/removed in v1.7.0+ — the server refuses to boot if present.
 
 # ============================================
 # LLM Configuration
@@ -99,7 +100,74 @@ LIGHTRAG_API_KEY="your-api-key"
 # LIGHTRAG_DOC_STATUS_STORAGE="PGDocStatusStorage"
 ```
 
-### Step 2: Run Docker Container
+### Step 2: Configure Entity Type Prompt Profile
+
+Starting with v1.7.0, entity types are configured through a YAML prompt profile file rather than an `ENTITY_TYPES` environment variable. The server reads the file referenced by `ENTITY_TYPE_PROMPT_FILE` from the directory specified by `PROMPT_DIR`.
+
+#### 2a. Create the profile directory
+
+```bash
+mkdir -p prompts/entity_type
+```
+
+#### 2b. Create `prompts/entity_type/entity_type_prompt.yml`
+
+Use the shipped sample as a starting point, then customize the guidance block:
+
+```bash
+cp prompts/samples/entity_type_prompt.sample.yml prompts/entity_type/entity_type_prompt.yml
+# Edit entity_type_prompt.yml to fit your project
+```
+
+The file must contain `entity_types_guidance` plus both extraction-mode example keys (text and JSON). Example contents:
+
+```yaml
+entity_types_guidance: |
+  Classify each entity using one of the following types. If no type fits, use `Other`.
+
+  - Person: Human individuals, real or fictional
+  - Creature: Non-human living beings (animals, mythical beings, etc.)
+  - Organization: Companies, institutions, government bodies, groups
+  - Location: Geographic places (cities, countries, buildings, regions)
+  - Event: Occurrences, incidents, ceremonies, meetings
+  - Concept: Abstract ideas, theories, principles, beliefs
+  - Method: Procedures, techniques, algorithms, workflows
+  - Content: Creative or informational works (books, articles, films, reports)
+  - Data: Quantitative or structured information (statistics, datasets, measurements)
+  - Artifact: Physical or digital objects created by humans (tools, software, devices)
+  - NaturalObject: Natural non-living objects (minerals, celestial bodies, chemical compounds)
+  - Pattern: Recurring solutions, design approaches, or implementation strategies in software architecture and systems design
+  - Decision: A deliberate choice or resolution made by a person, team, or organization, including architectural decisions, tech stack choices, and scope decisions
+  - Convention: An established practice, standard, norm, or coding convention that a team or project follows
+  - Constraint: A technical limitation, hard requirement, dependency rule, or invariant that governs system behavior
+  - Experience: Hard-won knowledge from a specific debugging session, incident, or project milestone — lessons learned that guide future work
+
+entity_extraction_examples:
+  - |
+    entity{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>
+    relation{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_description>
+    {completion_delimiter}
+
+entity_extraction_json_examples:
+  - |
+    {
+      "entities": [
+        {"name": "<entity_name>", "type": "<entity_type>", "description": "<entity_description>"}
+      ],
+      "relationships": [
+        {"source": "<entity_name>", "target": "<related_entity_name>",
+         "keywords": "<relationship_keywords>", "description": "<relationship_description>"}
+      ]
+    }
+```
+
+Notes:
+
+- `ENTITY_TYPE_PROMPT_FILE` value must be a bare filename, no path prefix — the server resolves it as `PROMPT_DIR/entity_type/ENTITY_TYPE_PROMPT_FILE`.
+- `PROMPT_DIR` defaults to `./prompts` if not set; override via the environment when running the container.
+- Keep **both** `entity_extraction_examples` and `entity_extraction_json_examples` keys in the YAML. The first is used for text extraction mode, the second for JSON mode — and if `ENTITY_EXTRACTION_USE_JSON=true` is ever set, the server requires the JSON examples key.
+
+### Step 3: Run Docker Container
 
 Start the LightRAG container with your environment file:
 
@@ -108,7 +176,7 @@ docker run -d \
   --name lightrag \
   -p 9621:9621 \
   --env-file lightrag.env \
-  disillusioners/lightrag:v1.6.7
+  disillusioners/lightrag:v1.7.0-workspace-v2
 ```
 
 #### Verify the container is running:
@@ -120,7 +188,7 @@ curl http://localhost:9621/health
 
 You should see a health response indicating the server is running.
 
-### Step 3: Configure agents-ensemble
+### Step 4: Configure agents-ensemble
 
 Add the following to your agents-ensemble `.env` file:
 
@@ -138,7 +206,7 @@ LIGHTRAG_API_KEY=your-api-key
 # LIGHTRAG_WORKSPACE=my-default-workspace
 ```
 
-### Step 4: Verify Connection
+### Step 5: Verify Connection
 
 Start (or restart) agents-ensemble. On startup, it will automatically test the RAG connection:
 
@@ -166,8 +234,8 @@ If the test fails, check the logs for the specific error (see Troubleshooting be
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKSPACE_ISOLATION` | **Yes** | `false` | Must be `"true"` for project isolation |
-| `ENTITY_TYPES` | **Yes** | - | JSON array of entity types for graph extraction |
+| `ENTITY_TYPE_PROMPT_FILE` | **Yes** | — | Bare filename of the entity type YAML profile. Resolved as `PROMPT_DIR/entity_type/ENTITY_TYPE_PROMPT_FILE`. See [Step 2: Configure Entity Type Prompt Profile](#step-2-configure-entity-type-prompt-profile). |
+| `PROMPT_DIR` | No | `./prompts` | Directory containing the `entity_type/` subfolder referenced by `ENTITY_TYPE_PROMPT_FILE`. |
 | `LLM_BINDING_HOST` | Yes | - | LLM API endpoint (OpenAI-compatible) |
 | `LLM_BINDING_API_KEY` | Yes | - | LLM API key |
 | `LLM_MODEL` | No | `quick` | LLM model name |
@@ -181,9 +249,11 @@ If the test fails, check the logs for the specific error (see Troubleshooting be
 | `TOKEN_SECRET` | No | - | JWT signing secret |
 | `LIGHTRAG_API_KEY` | No | - | API key for programmatic access |
 
-### Entity Types (14 types)
+Note: `WORKSPACE_ISOLATION` and `ENTITY_TYPES` are **no longer used** in v1.7.0+ — workspaces always namespace automatically, and entity types are configured via the YAML prompt profile above. The LightRAG server refuses to boot if `ENTITY_TYPES` is set.
 
-The default entity types are tuned for software project knowledge:
+### Entity Types (16 types)
+
+LightRAG v1.7.0+ classifies entities via the `entity_types_guidance` block in `entity_type_prompt.yml` (see Step 2). The shipped profile includes 16 types — 11 defaults plus 5 software/knowledge-graph additions:
 
 | Type | Description |
 |------|-------------|
@@ -198,9 +268,11 @@ The default entity types are tuned for software project knowledge:
 | `Data` | Database schemas, data structures |
 | `Artifact` | Files, configurations, builds |
 | `NaturalObject` | (Available for domain-specific use) |
-| `Experience` | Lessons learned, decisions made |
-| `Decision` | Architectural decisions, choices |
-| `Convention` | Coding standards, practices |
+| `Pattern` | Recurring solutions, design approaches, or implementation strategies in software architecture and systems design |
+| `Decision` | A deliberate choice or resolution made by a person, team, or organization, including architectural decisions, tech stack choices, and scope decisions |
+| `Convention` | An established practice, standard, norm, or coding convention that a team or project follows |
+| `Constraint` | A technical limitation, hard requirement, dependency rule, or invariant that governs system behavior |
+| `Experience` | Hard-won knowledge from a specific debugging session, incident, or project milestone — lessons learned that guide future work |
 
 ---
 
@@ -297,7 +369,7 @@ LightRAG sanitizes workspace names to alphanumeric + underscore only:
 
 ### Multi-Project Isolation
 
-With `WORKSPACE_ISOLATION="true"` (required), each project maintains its own:
+In v1.7.0+ workspaces always namespace automatically — no isolation flag is needed. Each project maintains its own:
 - Knowledge graph (entities, relations)
 - Indexed documents
 - Query results
@@ -411,13 +483,17 @@ LIGHTRAG_API_KEY=your-key
 **Error:** `RAG auto-test failed` with workspace-related message
 
 **Causes:**
-- `WORKSPACE_ISOLATION` not set to `"true"`
+- `ENTITY_TYPES` set in `lightrag.env` (removed in v1.7.0+) — the server refuses to boot with this variable present
+- Entity type YAML profile missing, malformed, or pointed at the wrong path
 - Invalid characters in project name
 
 **Solutions:**
 ```bash
-# Ensure WORKSPACE_ISOLATION is set
-WORKSPACE_ISOLATION="true"
+# Remove ENTITY_TYPES from lightrag.env if present — entity types are now YAML-configured
+grep -v '^ENTITY_TYPES=' lightrag.env > lightrag.env.tmp && mv lightrag.env.tmp lightrag.env
+
+# Ensure ENTITY_TYPE_PROMPT_FILE is set and the YAML file exists at PROMPT_DIR/entity_type/
+ls "$PROMPT_DIR/entity_type/$ENTITY_TYPE_PROMPT_FILE"
 
 # Check project names for invalid characters
 # Only alphanumeric + underscore allowed in workspace names
@@ -463,8 +539,7 @@ docker update --memory 4g --memory-swap 4g lightrag
 ### Minimal lightrag.env
 
 ```bash
-WORKSPACE_ISOLATION="true"
-ENTITY_TYPES='["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]'
+ENTITY_TYPE_PROMPT_FILE=entity_type_prompt.yml
 LLM_BINDING_HOST="https://api.openai.com/v1"
 LLM_BINDING_API_KEY="your-key"
 LLM_MODEL="gpt-4o"
@@ -479,14 +554,12 @@ EMBEDDING_MODEL="text-embedding-3-small"
 docker run -d \
   --name lightrag \
   -p 9621:9621 \
-  -e WORKSPACE_ISOLATION="true" \
-  -e ENTITY_TYPES='["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]' \
   -e LLM_BINDING_HOST="https://api.openai.com/v1" \
   -e LLM_BINDING_API_KEY="your-key" \
   -e EMBEDDING_BINDING_HOST="https://api.openai.com/v1" \
   -e EMBEDDING_BINDING_API_KEY="your-key" \
   -e EMBEDDING_MODEL="text-embedding-3-small" \
-  disillusioners/lightrag:v1.6.7
+  disillusioners/lightrag:v1.7.0-workspace-v2
 ```
 
 ### agents-ensemble .env (minimal)
