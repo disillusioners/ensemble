@@ -403,6 +403,78 @@ async def _resolve_instance_id(
             )
 
 
+# Custom attributes set on tool functions/StructuredTools by the
+# registration decorators in ``daemon.tools._tool_registry`` (``_tool_category``
+# for the category itself, ``_tool_category_first_party`` as the provenance
+# marker that gate category overrides in scan_tools_for_full_docs, and
+# ``_full_doc_`` for full documentation). The workdir/instance-id wrappers
+# rebuild the StructuredTool via ``from_function`` which does NOT propagate
+# these — losing them makes the downstream metadata scan infer the wrong
+# category (e.g. ``list_directory`` ends up under ``"list"`` instead of
+# ``"filesystem"``), which silently breaks the ``tools.allow`` category
+# filter. See instance.py:_make_workdir_aware.
+_TOOL_INHERITED_ATTRS = (
+    "_tool_category",
+    "_tool_category_first_party",
+    "_full_doc_",
+)
+
+
+def _rebuild_structured_tool(tool, wrapped_func) -> "StructuredTool":
+    """Rebuild a StructuredTool preserving metadata attributes.
+
+    ``StructuredTool.from_function`` only copies ``name`` / ``description`` /
+    ``args_schema``; any custom attributes set by ``@register_tool_category``
+    or ``_full_doc_`` registrations are dropped. This copy-step restores
+    them so that ``scan_tools_for_full_docs`` sees the correct category
+    instead of falling back to ``tool_name.split('_')[0]``.
+
+    Args:
+        tool: The original StructuredTool (source of attributes).
+        wrapped_func: The wrapped callable to use as the new tool's func.
+
+    Returns:
+        A new StructuredTool sharing the original's name/description/schema
+        plus any inherited metadata attributes.
+    """
+    from langchain_core.tools import StructuredTool
+
+    if asyncio.iscoroutinefunction(wrapped_func):
+        new_tool = tool.__class__.from_function(
+            func=wrapped_func,
+            name=tool.name,
+            description=tool.description,
+            args_schema=tool.args_schema,
+            coroutine=wrapped_func,
+        )
+    else:
+        new_tool = tool.__class__.from_function(
+            func=wrapped_func,
+            name=tool.name,
+            description=tool.description,
+            args_schema=tool.args_schema,
+        )
+    # Propagate custom metadata attributes lost by from_function().
+    # pydantic v2 StructuredTool accepts underscore-prefixed private attrs
+    # silently on vanilla instances, but a frozen/read-only subclass
+    # (or a future langchain_core version) could raise; catch broadly and
+    # log so the silent dependency on the warmup registry is observable
+    # rather than a hidden bug.
+    for attr in _TOOL_INHERITED_ATTRS:
+        if hasattr(tool, attr):
+            value = getattr(tool, attr)
+            try:
+                setattr(new_tool, attr, value)
+            except Exception as exc:  # noqa: BLE001 — broad on purpose
+                logger.warning(
+                    "Failed to propagate %s onto rebuilt StructuredTool "
+                    "%r: %s. Category filter will fall back to the warmup "
+                    "registry entry if present.",
+                    attr, getattr(tool, "name", "<unknown>"), exc,
+                )
+    return new_tool
+
+
 def _make_workdir_aware(
     tool,  # Can be a function or StructuredTool
     get_default_workdir: Callable[[], str | None]
@@ -445,23 +517,9 @@ def _make_workdir_aware(
                     kwargs['workdir'] = get_default_workdir()
                 return original_func(*args, **kwargs)
 
-        # Create a new StructuredTool with the wrapped function
-        # Use coroutine for async tools, func for sync
-        if asyncio.iscoroutinefunction(wrapped_func):
-            return tool.__class__.from_function(
-                func=wrapped_func,
-                name=tool.name,
-                description=tool.description,
-                args_schema=tool.args_schema,
-                coroutine=wrapped_func,
-            )
-        else:
-            return tool.__class__.from_function(
-                func=wrapped_func,
-                name=tool.name,
-                description=tool.description,
-                args_schema=tool.args_schema,
-            )
+        # Rebuild StructuredTool via shared helper so _tool_category / _full_doc_
+        # metadata is preserved (lossy in StructuredTool.from_function).
+        return _rebuild_structured_tool(tool, wrapped_func)
     else:
         # It's a plain function - wrap it directly
         func = tool
@@ -482,6 +540,8 @@ def _make_workdir_aware(
                     kwargs['workdir'] = get_default_workdir()
                 return func(*args, **kwargs)
 
+        # functools.wraps already copies __dict__ for plain functions; no
+        # extra propagation needed.
         return wrapped_func
 
 
@@ -528,23 +588,9 @@ def _make_instance_id_aware(
                     kwargs['instance_id'] = get_default_instance_id()
                 return original_func(*args, **kwargs)
 
-        # Create a new StructuredTool with the wrapped function
-        # Use coroutine for async tools, func for sync
-        if asyncio.iscoroutinefunction(wrapped_func):
-            return tool.__class__.from_function(
-                func=wrapped_func,
-                name=tool.name,
-                description=tool.description,
-                args_schema=tool.args_schema,
-                coroutine=wrapped_func,
-            )
-        else:
-            return tool.__class__.from_function(
-                func=wrapped_func,
-                name=tool.name,
-                description=tool.description,
-                args_schema=tool.args_schema,
-            )
+        # Rebuild StructuredTool via shared helper so _tool_category / _full_doc_
+        # metadata is preserved (lossy in StructuredTool.from_function).
+        return _rebuild_structured_tool(tool, wrapped_func)
     else:
         # It's a plain function - wrap it directly
         func = tool

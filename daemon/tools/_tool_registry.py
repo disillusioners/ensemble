@@ -32,6 +32,13 @@ def register_tool_category(category: str):
     """
     def decorator(func):
         func._tool_category = category
+        # First-party provenance marker. scan_tools_for_full_docs only
+        # honors a category OVERRIDE on rescan (existing entry) when this
+        # flag is present, so attacker-influenced tool lists (e.g. MCP
+        # tools whose ``name`` is server-controlled and may collide with
+        # first-party tool names) cannot silently re-categorize an
+        # already-registered entry via a spoofed ``_tool_category`` attr.
+        func._tool_category_first_party = True
         return func
     return decorator
 
@@ -174,8 +181,24 @@ def scan_tools_for_full_docs(tools: list) -> None:
                 "full_doc": _full_docs.get(tool_name, ""),
             }
         else:
-            # Update existing metadata
+            # Update existing metadata.
+            #
+            # short_doc/full_doc always reflect the latest scan (different
+            # closures may carry refreshed docstrings). category is sticky:
+            # it is only updated when the scanning tool carries the
+            # first-party provenance marker ``_tool_category_first_party``
+            # (set only by @register_tool_category). This blocks an
+            # attacker-influenced tool list (e.g. MCP tools with
+            # server-controlled names) from spoofing ``_tool_category``
+            # to re-categorize an already-registered first-party tool,
+            # which would silently break ``tools.allow`` category
+            # resolution. The workdir/instance_id wrappers in
+            # daemon.tools.instance rebuild StructuredTool via
+            # from_function which strips ``_tool_category``; the wrapper
+            # helper re-applies it AND the provenance marker.
             _tool_metadata[tool_name]["short_doc"] = short_doc
+            if getattr(tool_func, '_tool_category_first_party', False):
+                _tool_metadata[tool_name]["category"] = category
             if tool_name in _full_docs:
                 _tool_metadata[tool_name]["full_doc"] = _full_docs[tool_name]
 
