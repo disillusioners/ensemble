@@ -19,14 +19,27 @@ You can also search manually using `skill_search` to find skills relevant to you
 | `skill_view(skill_id)` | Read a skill's full content. |
 | `skill_create(name, description, content)` | Save a new reusable skill. |
 | `skill_fix(skill_id, issue_description)` | Request a fix for a broken or outdated skill. |
-| `skill_feedback(skill_id, applied, note)` | Tell the system if an injected skill was helpful. |
+| `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` | Record feedback on a skill's usefulness to drive skill evolution. |
+
+### Feedback Guidance
+
+The `skill_feedback` tool has evolved. Always provide these fields after consuming a skill:
+
+| Field | What it means |
+|-------|---------------|
+| `applied` (bool) | Did you actually follow the skill's guidance? |
+| `usefulness` (1-10) | How good was the skill? **1 = unusable, 10 = excellent.** Be honest — low scores are valuable, they trigger evolution. |
+| `note` (str) | General context — what scenario did you run the skill in? |
+| `improvement_note` (str) | **Specific, actionable** changes you'd make. e.g. *"Should mention PACKS.md lives at .agents/tester/ not test/packs/"* — not vague comments like "could be better." |
+
+**Best practice:** Always provide `usefulness` and `improvement_note` after consuming a skill — this is the primary intelligence source for skill evolution. Low scores are GOOD — they tell the system exactly what to fix.
 
 ## When to Use
 
 - **Need a procedure or pattern you think might exist?** → `skill_search` first; auto-injection only surfaces the top few.
 - **Discovered a reusable approach worth saving?** → `skill_create`. Keep it short (1–2 screens), concrete, and specific to one capability.
 - **Injected skill seems wrong or outdated?** → `skill_fix` with a clear description of the problem.
-- **Just used an injected skill?** → `skill_feedback` to record whether it helped (`applied=True` / `False`) and why. This is the main signal that shapes the skill corpus.
+- **Just used an injected skill?** → `skill_feedback` to record whether it helped (`applied=True` / `False`) and how useful it was (`usefulness` 1-10). Your `improvement_note` tells the evolution system exactly what to fix — this directly shapes how skills improve over time.
 
 ## Good Skills
 

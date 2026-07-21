@@ -2,7 +2,7 @@
 
 ## Dispatch Model (Glossary)
 
-- **Worker** = primary executor. Dispatched via `spawn_instance(agent="worker")` + `send_message(load_skill="<skill>")`. Receives exactly ONE skill. Calls `skill_feedback(skill_id, applied=True/False)` for clean 1:1 attribution. Use workers for skill-specific test execution (unit/mock/integration/e2e/pack/quick-fix/validation).
+- **Worker** = primary executor. Dispatched via `spawn_instance(agent="worker")` + `send_message(load_skill="<skill>")`. Receives exactly ONE skill. Calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` for clean 1:1 attribution — workers MUST supply `usefulness` (1-10) and `improvement_note` (actionable suggestions); low scores signal what to fix and may trigger skill evolution. Use workers for skill-specific test execution (unit/mock/integration/e2e/pack/quick-fix/validation).
 - **opencode** = infrastructure fallback. Used for tasks with no matching skill (standalone bash/file ops, git operations, source/test code analysis). Long-running opencode work uses `external_opencode_resume_session` for session resumption.
 - **Dual-mode** = workers are primary for skill-specific tasks; opencode is the fallback for infrastructure-only tasks.
 - **Tester (me)** = planner + dispatcher. I never execute test code directly. I plan, dispatch, monitor, and aggregate.

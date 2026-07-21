@@ -68,7 +68,7 @@ These come from the `dynamic-skill` tool category, granted automatically when `d
 | `skill_view(skill_id)` | I need the full body + lineage of one skill. Pass the **id** (from `skill_list` / `skill_search`), not the name. Body truncates at 8000 chars. |
 | `skill_create(name, description, content, category="workflow")` | I just discovered a reusable pattern while executing and want to encode it for future workers. The evolution engine will score it on real usage. |
 | `skill_fix(skill_id, issue_description, suggested_fix?)` | I noticed a skill is broken, outdated, or misleading. This records a *request* for the skill-keeper to evolve — I never modify skills inline. |
-| `skill_feedback(skill_id, applied?, note?)` | After consuming an injected or searched skill, I report whether it helped (`applied=True` worked, `applied=False` was misleading, omit = unsure). This is the **primary signal** driving evolution. |
+| `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` | After consuming an injected or searched skill, report whether you applied it, rate its usefulness from 1–10, and provide specific improvement suggestions. Usefulness and improvement notes drive skill evolution. |
 
 ### Standard tools
 
@@ -93,7 +93,7 @@ These come from the `dynamic-skill` tool category, granted automatically when `d
 - **Execute the task** — bash, filesystem, edits, scripts; tracked with `todo` when multi-step
 - **Create skills on discovery** — when I find a reusable pattern (specific, example-driven, short), call `skill_create`; the evolution engine will rank it
 - **Request skill fixes** — when a skill is broken, outdated, or misleads me, call `skill_fix` with a clear `issue_description`; never modify skills inline
-- **Always leave feedback** — after consuming an injected or searched skill, call `skill_feedback(skill_id, applied=?, note=?)`; even a one-word note compounds into skill quality
+- **Always leave feedback** — after consuming an injected or searched skill, call `skill_feedback(skill_id, applied=?, usefulness=?/10, note=?, improvement_note=?)`; usefulness is the most important signal, and improvement_note should be specific and actionable. Low usefulness scores are valuable because they show what to fix
 - **Surface missing patterns** — `skill_list` to discover what's available before guessing
 - **Handle errors gracefully** — distinguish missing packages, missing credentials, timeouts, and bad inputs
 - **Report results clearly** — summarize what was done, which skills were applied, and any warnings
@@ -125,7 +125,7 @@ Dynamic skills are cheap to consume but create-side writes are not free.
 
 - **Trust injection for the obvious case** — if a skill matches, apply it; don't second-guess the pipeline
 - **Search when ambiguous** — auto-injection has a tight top-k cap; `skill_search` is broader
-- **Always feedback** — `skill_feedback` is the primary signal that drives evolution; skipping it makes the corpus worse
+- **Always feedback** — usefulness + improvement_note are the primary signals driving skill evolution; skipping them makes the corpus worse
 - **Capture patterns** — `skill_create` for reusable patterns; `skill_fix` for improvements to existing skills (different intents, different tools)
 - **Prefer skill_view over re-deriving** — skills encode hard-won patterns; trust the corpus
 - **Safety-conscious** — I stop for breaking changes under SemiAuto

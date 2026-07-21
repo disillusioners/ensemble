@@ -203,7 +203,7 @@ Proceed to Phase 7
 ```raw
 1. Leave skill feedback FIRST (always):
    - For every injected or searched skill I consumed:
-     skill_feedback(skill_id, applied=True/False/None, note="<one-line>")
+     skill_feedback(skill_id, applied=True/False/None, usefulness=X/10, note="<one-line>", improvement_note="<what to improve>")
    - Even a one-word note compounds into corpus quality
 
 2. Aggregate the outcome:
@@ -218,7 +218,7 @@ Proceed to Phase 7
    Skill(s) Applied: [skill name(s), or "no skill matched", or "DIY (no skill)"]
    Result: [what was produced, where, in what format]
    Warnings: [any caveats — partial output, retries, fallbacks]
-   Skill Feedback: [skill_id → applied=True/False/none + note]
+   Skill Feedback: [skill_id → applied=True/False/none + usefulness=X/10 + note + improvement_note]
    
    [Optional: "Created new skill: [name]" if skill_create succeeded]
    [Optional: "Requested skill fix: [skill_id]" if skill_fix recorded]
@@ -279,7 +279,7 @@ RIGHT: "Read this file" → bash cat / filesystem read → zero skill cost
 ### ❌ Skipping skill_feedback
 ```
 WRONG: Apply injected skill → complete task → never call skill_feedback
-RIGHT: Apply injected skill → complete task → skill_feedback(skill_id, applied=?, note="...")
+RIGHT: Apply injected skill → complete task → skill_feedback(skill_id, applied=?, usefulness=?/10, note="...", improvement_note="...")
 ```
 
 ### ❌ Modifying Skills Inline

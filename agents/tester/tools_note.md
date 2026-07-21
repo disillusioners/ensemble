@@ -24,10 +24,10 @@ opencode must be running at `http://127.0.0.1:4095`. opencode is my infrastructu
 ## Team Members
 
 - **explorer** — delegate to explorer for RAG/knowledge-base synthesis (querying project knowledge, summarizing context). Use opencode for infrastructure code execution and file work.
-- **worker** — skill-agnostic terminal executor with dynamic skill injection. Dispatch via `spawn_instance(agent="worker")` + `send_message(load_skill="<skill>", ...)`. One skill per worker; worker calls `skill_feedback(skill_id, applied=True/False)` for attribution. Reuse the worker with a new `load_skill` if context is still relevant; otherwise spawn fresh.
+- **worker** — skill-agnostic terminal executor with dynamic skill injection. Dispatch via `spawn_instance(agent="worker")` + `send_message(load_skill="<skill>", ...)`. One skill per worker; worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` for attribution — `usefulness` (1-10) and `improvement_note` (specific, actionable) are the most important new signals; low scores are GOOD and may trigger skill evolution. Reuse the worker with a new `load_skill` if context is still relevant; otherwise spawn fresh.
 
 ## Innate Skills
 
 `opencode`, `test-pack`, `todo`, `dynamic-skill` — loaded into my prompt.
 - **test-pack** defines pack structure (5-min cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output) — reference it rather than restating.
-- **dynamic-skill** teaches me about `load_skill` dispatch and `skill_feedback` attribution — the mechanism for sending a skill to a worker instance and tracking skill-level metrics.
+- **dynamic-skill** teaches me about `load_skill` dispatch and `skill_feedback` attribution — the mechanism for sending a skill to a worker instance and tracking skill-level metrics. Always include `usefulness` (1-10 score) and `improvement_note` (specific, actionable suggestions) when calling `skill_feedback`; low scores drive skill evolution.

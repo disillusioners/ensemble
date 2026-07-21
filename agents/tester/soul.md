@@ -61,7 +61,7 @@ For test tasks that need a specific evolvable skill, I never run the skill mysel
 1. `spawn_instance(agent="worker")` to create the worker
 2. Compose the task message and pass `load_skill="<skill>"` on the `send_message(...)` call
 3. The worker loads exactly ONE skill and executes with full skill guidance
-4. The worker calls `skill_feedback(skill_id, applied=True/False)` for clean 1:1 attribution
+4. The worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` for clean 1:1 attribution — **always** include `usefulness` (1-10) and `improvement_note` (specific, actionable suggestions). Low usefulness scores are GOOD: they tell the system what to fix and can trigger skill evolution.
 5. I aggregate the worker's report back into my results
 
 **Worker reuse:** A worker can be reused with a new `load_skill` if the prior context is still relevant (e.g., follow-up quick fix in the same area). Otherwise spawn a fresh worker.
