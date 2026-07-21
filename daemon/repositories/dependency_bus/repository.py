@@ -194,6 +194,78 @@ class DependencyWatcherRepository:
             )
             return list(session.exec(stmt))
 
+    def fetch_pending_for_target_and_child(
+        self,
+        target_instance_id: str,
+        child_instance_id: str,
+    ) -> list[DependencyWatcher]:
+        """Return PENDING watchers for a (parent, child) instance pair.
+
+        Corrective emit primitive for multi-turn children: matches by
+        the parent's ``target_instance_id`` AND the ``child_id`` field
+        embedded in the FollowUp payload's ``metadata`` JSON, NOT by
+        ``source_task_id``. This is the fallback path that lets a
+        parent's watcher fire when the child reaches its terminal
+        graph turn on a task id ≠ the task that registered the
+        watcher (e.g. Wanderer processing subsequent
+        ``PROCESS_REPORT`` tasks rather than its first
+        ``process_message`` task).
+
+        Hot-path characteristics: hits the
+        ``(target_instance_id, state)`` composite index for the
+        parent/state filter, then filters these matches by
+        ``child_id`` in memory. Each parent has at most a few
+        PENDING watchers (one per running child), so the in-memory
+        filter is O(N) over a tiny set and avoids JSON-path query
+        dialect branches. GIN indexes on JSONB columns are
+        intentionally missing from this table (see
+        ``models.DependencyWatcher`` docstring) for the same hot-path
+        reason.
+
+        The matched rows are returned as full
+        :class:`DependencyWatcher` instances so the caller can pass
+        each ``watch_id`` to :meth:`transition_state` and each
+        ``source_task_id`` to the bus's per-task lock. The
+        ``follow_up_payload`` JSONB has already been deserialized by
+        :class:`JSONBType`, so the ``metadata.child_id`` access is
+        plain Python dict navigation.
+
+        Args:
+            target_instance_id: The parent instance id (the
+                watcher's ``target_instance_id``).
+            child_instance_id: The child instance id to match
+                against ``follow_up_payload``'s
+                ``metadata.child_id`` field.
+
+        Returns:
+            List of PENDING :class:`DependencyWatcher` rows whose
+            ``target_instance_id == target_instance_id`` and whose
+            payload's ``metadata.child_id == child_instance_id``.
+            Empty list if none match — the common case when the
+            task-keyed :meth:`DependencyBus.emit_terminal` already
+            fired the matching watcher.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(DependencyWatcher)
+                .where(
+                    DependencyWatcher.target_instance_id == target_instance_id
+                )
+                .where(DependencyWatcher.state == _PENDING_STATE)
+            )
+            rows = list(session.exec(stmt))
+            matched: list[DependencyWatcher] = []
+            for row in rows:
+                payload = row.follow_up_payload
+                if not isinstance(payload, dict):
+                    continue
+                meta = payload.get("metadata")
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("child_id") == child_instance_id:
+                    matched.append(row)
+            return matched
+
     def fetch_all_pending(self) -> list[DependencyWatcher]:
         """Return ALL PENDING watchers (unfiltered by source/target).
 

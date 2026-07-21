@@ -331,6 +331,96 @@ class ChildReportsService:
 
         return fired
 
+    async def _emit_terminal_for_child_instance_via_bus(
+        self,
+        parent_instance_id: str | None,
+        child_instance_id: str,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+    ) -> list:
+        """Fire PENDING watchers for a (parent, child) instance pair.
+
+        Corrective companion to :meth:`_emit_terminal_via_bus` for
+        multi-turn non-root children (Wanderer-class). The
+        task-keyed helper above matches watchers on the child task
+        id of the *current* graph turn — which is correct for
+        single-turn children but misses the parent's watcher when
+        the child registers the watcher on its FIRST
+        ``process_message`` task and reaches its terminal graph
+        turn on a LATER ``PROCESS_REPORT`` task. See the call site
+        in ``_dispatch_post_commit_side_effects`` (``regular_child_completed``
+        outcome) for the full timeline.
+
+        This helper routes the corrective emit through the bus's
+        instance-pair matcher (:meth:`DependencyBus.emit_terminal_for_child_instance`).
+        Exactly-once is preserved by the bus's underlying
+        ``transition_state`` guarded UPDATE — when the task-keyed
+        emit already fired the watcher, this call is a no-op.
+
+        Mirrors :meth:`_emit_terminal_via_bus`'s fail-safe shape:
+        ``bus is None`` / ``parent_instance_id is None`` short-
+        circuits with an empty list (logged at WARNING / DEBUG so
+        the wiring failure is observable without aborting the
+        parent's finalization).
+
+        Args:
+            parent_instance_id: The parent instance id (the watcher's
+                ``target_instance_id``). ``None`` short-circuits
+                (root instances have no parent to fire watchers for).
+            child_instance_id: The just-completed child instance id.
+            status: Terminal status string (``"completed"`` /
+                ``"error"`` / ``"terminated"``) — logging only; all
+                PENDING watchers fire regardless of outcome.
+            summary: Optional human-readable summary for structured
+                logging.
+            error: Optional error message when ``status == "error"``.
+
+        Returns:
+            List of FollowUps atomically transitioned from PENDING
+            to FIRED by this call (informational — finalization flows
+            through the report ``Task`` the DB-sync helper already
+            committed). Empty list when bus is None, parent is None,
+            no watchers exist, or the task-keyed emit already fired.
+        """
+        if parent_instance_id is None:
+            # Root instances have no parent → no watcher to fire.
+            logger.debug(
+                "_emit_terminal_for_child_instance_via_bus: "
+                "parent_instance_id is None — no watcher to fire "
+                "(root instance); returning empty FollowUp list"
+            )
+            return []
+
+        from .dependency_bus import (
+            Outcome,
+            get_dependency_bus,
+        )
+
+        bus = get_dependency_bus()
+        if bus is None:
+            logger.warning(
+                "_emit_terminal_for_child_instance_via_bus: bus "
+                "singleton is None — wiring failure, returning "
+                "empty FollowUp list (no fallback)"
+            )
+            return []
+
+        outcome = Outcome(status=status, error=error, summary=summary)
+        fired = await bus.emit_terminal_for_child_instance(
+            parent_instance_id=parent_instance_id,
+            child_instance_id=child_instance_id,
+            outcome=outcome,
+        )
+        # The bus's ``emit_terminal_for_child_instance`` stamps the
+        # ``enqueued_at`` dedup marker itself (per-row, by watch_id);
+        # no stamp loop is needed in this caller. The marker keeps a
+        # future restart's ``_recover_fired_unsent`` from re-delivering
+        # rows this method already fired — same invariant the
+        # task-keyed helper's stamp loop in ``_emit_terminal_via_bus``
+        # preserves.
+        return fired
+
     @property
     def _instance_repository(self) -> "SQLModelInstanceRepository":
         """Access instance repository through manager for test mockability."""
@@ -1992,6 +2082,41 @@ Provide a concise summary:"""
                     status="completed",
                     summary="regular child completed",
                 )
+
+            # ─── Corrective emit for multi-turn children ───────────────
+            # ``_emit_terminal_via_bus`` keys watchers on the CHILD
+            # TASK id of the current graph turn. That matches
+            # watchers whose source_task_id is the just-completed
+            # task — the single-turn case. It MISSES watchers whose
+            # source_task_id is the child's FIRST ``process_message``
+            # task (registered by ``send_message`` when the parent
+            # first sent the child a message), but the child reached
+            # its terminal graph turn on a LATER ``PROCESS_REPORT``
+            # task. This happens to multi-turn non-root children
+            # like Wanderer: parent → wanderer (task T0 registers
+            # the watcher), then wanderer → spawns coders → coder
+            # → wanderer re-runs on PROCESS_REPORT tasks T1, T2, …
+            # until finally wanderer emits its own completion_report
+            # to its parent from task TN.
+            #
+            # Without this corrective emit the parent's PENDING
+            # watcher keyed on T0 never fires — the parent stays
+            # PENDING forever and wedges in ``waiting_children``.
+            # The corrective emit matches the watcher on the
+            # (parent, child) instance pair (via the
+            # ``follow_up_payload.metadata.child_id`` field that
+            # ``send_message`` stamps on every watcher), so it
+            # fires regardless of which task id was the terminal
+            # one. ``transition_state``'s guarded ``WHERE state =
+            # 'PENDING'`` Core UPDATE enforces exactly-once: when
+            # the task-keyed emit above already fired the watcher
+            # (single-turn case), this is a safe no-op.
+            await self._emit_terminal_for_child_instance_via_bus(
+                parent_instance_id=parent_id,
+                child_instance_id=instance_id,
+                status="completed",
+                summary="regular child completed (corrective multi-turn emit)",
+            )
 
             # Phase 1 (2026-06-24, report-lane decoupling): Wake the
             # worker pool after the report Task is committed. Before

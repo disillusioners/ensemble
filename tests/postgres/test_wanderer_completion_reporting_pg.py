@@ -994,3 +994,368 @@ class TestFix3PendingForParentOffBy1:
         assert pending == 0, (
             f"No watchers: max(0, 0 - 1) = 0; got {pending}"
         )
+
+
+# =============================================================================
+# Corrective emit — multi-turn child regression (leader stuck in
+# waiting_children after Wanderer emits its completion_report from a
+# task id ≠ the task that registered the parent's watcher).
+# =============================================================================
+
+
+class TestCorrectiveEmitMultiTurnChild:
+    """Regression test for the leader-stuck-in-``waiting_children``
+    bug introduced by the Wanderer per-graph-turn fix (commit 8616ff45).
+
+    The Wanderer fix added an ``active-children guard`` that returns
+    the new outcome ``child_still_running_defer`` on the child's first
+    graph turn (when its spawned coders are still running). The
+    dispatch handler for that outcome never calls the bus's terminal
+    emit, so the parent's watcher (keyed on the child's FIRST
+    ``process_message`` task id) stays PENDING. When the child finally
+    reaches its terminal graph turn on a LATER ``PROCESS_REPORT``
+    task id, the task-keyed ``emit_terminal`` cannot match the watcher
+    → the parent wedges in ``waiting_children`` forever.
+
+    The fix adds a corrective emit hook
+    (:meth:`ChildReportsService._emit_terminal_for_child_instance_via_bus`)
+    that matches the watcher on the (parent, child) instance pair via
+    ``follow_up_payload.metadata.child_id`` (stamped by ``send_message``
+    when the watcher was registered) instead of the task id. Exactly-
+    once is preserved by the bus's guarded
+    ``transition_state`` UPDATE — the corrective emit is a no-op when
+    the task-keyed emit already fired the watcher.
+    """
+
+    def _seed_watcher_production_shape(
+        self,
+        engine: Engine,
+        *,
+        target_instance_id: str,
+        source_task_id: str,
+        child_instance_id: str,
+        state: str = DependencyWatcherState.PENDING.value,
+    ) -> str:
+        """Seed a DependencyWatcher row with the production FollowUp
+        payload shape ``send_message`` writes (so the (parent, child)
+        pair matcher in ``fetch_pending_for_target_and_child`` finds
+        it via ``follow_up_payload.metadata.child_id``).
+        """
+        watch_id = f"watch-{source_task_id}-{child_instance_id[:8]}"
+        # Mirror FollowUp.to_payload() shape so the bus's in-memory
+        # filter (metadata.child_id == child_instance_id) matches.
+        payload = {
+            "target_instance_id": target_instance_id,
+            "message": (
+                f"[dependency_bus] child {child_instance_id} "
+                f"completed for message msg-{source_task_id}"
+            ),
+            "source": f"internal_agent:{target_instance_id}",
+            "metadata": {
+                "kind": "child_complete",
+                "child_id": child_instance_id,
+                "parent_id": target_instance_id,
+                "message_id": f"msg-{source_task_id}",
+            },
+        }
+        watcher = DependencyWatcher(
+            watch_id=watch_id,
+            source_task_id=source_task_id,
+            target_instance_id=target_instance_id,
+            follow_up_payload=payload,
+            watcher_metadata={},
+            state=state,
+        )
+        with Session(engine) as session:
+            session.add(watcher)
+            session.commit()
+        return watch_id
+
+    def _build_async_child_reports_service(self, engine: Engine):
+        """Build a ChildReportsService for async dispatch tests.
+
+        Mirrors ``_build_child_reports_service`` but leaves
+        ``_task_repo`` as a MagicMock with ``get_by_message`` returning
+        ``None`` — that disables the task-keyed emit (returns []) and
+        forces the corrective emit path to do all the work, exactly as
+        in the production multi-turn scenario where the child's
+        terminal turn is on a task id that did NOT register a watcher.
+        """
+        from unittest.mock import MagicMock
+
+        manager = MagicMock(name="InstanceManager")
+        manager.engine = engine
+        manager.write_guard = WritePauseGuard()
+        manager._checkpointer = None
+        manager._live_hub = None
+        manager._queue_repository = MagicMock()
+        manager._instance_repository = MagicMock()
+        manager._worker_pool = None  # disables notify_work()
+
+        # ``_task_repo.get_by_message`` returns None — the task-keyed
+        # emit in ``_dispatch_post_commit_side_effects`` will then be
+        # called with task_id=None and short-circuit, leaving the
+        # corrective (parent, child) emit as the sole path to fire
+        # the watcher. This mirrors the production multi-turn case.
+        task_repo = MagicMock()
+        task_repo.get_by_message = MagicMock(return_value=None)
+        manager._task_repo = task_repo
+
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+        return service
+
+    @pytest.mark.asyncio
+    async def test_corrective_emit_fires_watcher_when_task_keyed_emit_misses(
+        self, pg_engine: Engine
+    ):
+        """The corrective emit must fire the parent's PENDING watcher
+        when the task-keyed emit cannot match (multi-turn child).
+
+        Scenario mirroring the production bug:
+          - Leader's watcher for wanderer is registered on
+            ``source_task_id="task-init-T0"`` (the FIRST
+            ``process_message`` task, when leader sent ``send_message``
+            to wanderer).
+          - Wanderer's terminal graph turn runs on a LATER
+            ``PROCESS_REPORT`` task "task-final-TN" (the task that
+            emits wanderer's completion_report back to leader).
+          - The task-keyed ``_emit_terminal_via_bus(task_id=TN)``
+            cannot match the watcher (keyed on T0), so without the
+            corrective emit the watcher stays PENDING and leader
+            wedges in ``waiting_children``.
+
+        With the fix, the corrective emit fires the watcher by
+        matching on the (parent, child) pair; the parent's pending
+        count drops to 0.
+        """
+        service = self._build_async_child_reports_service(pg_engine)
+        _seed_instance(pg_engine, instance_id="leader", parent_id=None)
+        _seed_instance(
+            pg_engine,
+            instance_id="wanderer",
+            parent_id="leader",
+            status=InstanceStatus.RUNNING.value,
+        )
+
+        # Watcher keyed on the FIRST task (T0) — what production
+        # ``send_message`` creates on the parent's first ``send_message``
+        # to wanderer. child_id (in metadata) is wanderer's instance id.
+        self._seed_watcher_production_shape(
+            pg_engine,
+            target_instance_id="leader",
+            source_task_id="task-init-T0",
+            child_instance_id="wanderer",
+        )
+        # Pre-condition: leader has 1 PENDING watcher.
+        assert _count_pending_watchers(
+            pg_engine, target_instance_id="leader"
+        ) == 1
+
+        # Wanderer reaches its terminal graph turn. The bus hook in
+        # ``_dispatch_post_commit_side_effects`` runs AFTER the
+        # sync DB helper commits wanderer's COMPLETED status and the
+        # completion_report to leader.
+        result = service._process_child_completion_db_sync(
+            instance_id="wanderer",
+            completed_message_id="msg-wanderer-final-TN",
+            last_content="wanderer completion_report to leader",
+        )
+        assert result.outcome == "regular_child_completed", (
+            f"Pre-condition: regular_child_completed outcome; "
+            f"got '{result.outcome}'"
+        )
+        assert result.parent_id == "leader"
+
+        # The sync helper does NOT fire the watcher — the bus emit hook
+        # runs post-commit in ``_dispatch_post_commit_side_effects``.
+        # Pre-fix this assertion would pass; post-fix this is where the
+        # watcher would be expected to still be PENDING if the bus hook
+        # had not run yet.
+        assert _count_pending_watchers(
+            pg_engine, target_instance_id="leader"
+        ) == 1, (
+            "Sync DB helper must NOT fire the watcher — the bus hook "
+            "fires post-commit in _dispatch_post_commit_side_effects"
+        )
+
+        # ── The corrective emit ───────────────────────────────────────
+        # The task repo mock returns None for ``get_by_message`` so the
+        # task-keyed emit short-circuits. Only the corrective
+        # (parent, child) emit can fire the watcher. Pre-fix this call
+        # did not exist; the watcher would stay PENDING forever.
+        await service._dispatch_post_commit_side_effects(
+            result,
+            last_content="wanderer completion_report to leader",
+            completed_message_id="msg-wanderer-final-TN",
+        )
+
+        # ── Post-fix assertions ─────────────────────────────────────
+        # The corrective emit MUST have transitioned the watcher to
+        # FIRED — pending count drops to 0, leader is no longer wedged.
+        assert _count_pending_watchers(
+            pg_engine, target_instance_id="leader"
+        ) == 0, (
+            "Corrective emit must fire the (parent, child)-matched "
+            "watcher when the task-keyed emit cannot match — "
+            "pre-fix the watcher stayed PENDING and the parent wedged "
+            "in waiting_children"
+        )
+
+        # The watcher row itself is FIRED (state transitioned, not
+        # deleted) and stamped with ``fired_at`` + ``enqueued_at``.
+        with Session(pg_engine) as session:
+            stmt = select(DependencyWatcher).where(
+                DependencyWatcher.target_instance_id == "leader"
+            )
+            row = session.scalars(stmt).first()
+            assert row is not None, "Watcher row must persist post-fire"
+            assert row.state == DependencyWatcherState.FIRED.value, (
+                f"Watcher state must be FIRED post-corrective emit; "
+                f"got {row.state}"
+            )
+            assert row.fired_at is not None, (
+                "fired_at must be stamped by transition_state"
+            )
+            assert row.enqueued_at is not None, (
+                "enqueued_at dedup marker must be stamped so a future "
+                "restart's _recover_fired_unsent does not re-deliver "
+                "this row"
+            )
+
+    @pytest.mark.asyncio
+    async def test_corrective_emit_is_noop_when_task_keyed_emit_already_fired(
+        self, pg_engine: Engine
+    ):
+        """When the task-keyed emit already fired the watcher (single-
+        turn child case), the corrective emit must be a no-op.
+
+        Exactly-once is enforced by ``transition_state``'s guarded
+        ``WHERE state = 'PENDING'`` Core UPDATE: a row already FIRED
+        returns ``rowcount == 0`` and the corrective emit appends
+        nothing to its fired list.
+
+        Scenario:
+          - Watcher registered with source_task_id="task-final-100"
+            (the same task that reaches the terminal graph turn —
+            single-turn child case).
+          - Task repo mock returns a Task with id=100 for
+            ``get_by_message``, so the task-keyed emit fires the
+            watcher via ``source_task_id=100``.
+          - The corrective emit then runs and finds no PENDING rows
+            (already FIRED) — returns [].
+        """
+        from unittest.mock import MagicMock
+
+        service = self._build_async_child_reports_service(pg_engine)
+        # Override the task repo mock to return a Task-like object
+        # whose ``id`` matches the watcher's source_task_id, so the
+        # task-keyed emit will fire the watcher.
+        task_like = MagicMock()
+        task_like.id = "task-final-100"
+        service._manager._task_repo.get_by_message = MagicMock(
+            return_value=task_like
+        )
+
+        _seed_instance(pg_engine, instance_id="leader", parent_id=None)
+        _seed_instance(
+            pg_engine,
+            instance_id="wanderer",
+            parent_id="leader",
+        )
+        # Watcher registered with the task id that will be the
+        # terminal turn — single-turn case where the task-keyed emit
+        # fires the watcher.
+        self._seed_watcher_production_shape(
+            pg_engine,
+            target_instance_id="leader",
+            source_task_id="task-final-100",
+            child_instance_id="wanderer",
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id="wanderer",
+            completed_message_id="msg-wanderer-fin",
+            last_content="wanderer completion report",
+        )
+        assert result.outcome == "regular_child_completed"
+
+        # Pre-dispatch: still PENDING — bus emit runs post-commit.
+        assert _count_pending_watchers(
+            pg_engine, target_instance_id="leader"
+        ) == 1
+
+        # Dispatch runs BOTH emits (task-keyed first, corrective second).
+        await service._dispatch_post_commit_side_effects(
+            result,
+            last_content="wanderer completion report",
+            completed_message_id="msg-wanderer-fin",
+        )
+
+        # Exactly-once: watcher FIRED once, not double-fired.
+        assert _count_pending_watchers(
+            pg_engine, target_instance_id="leader"
+        ) == 0
+        with Session(pg_engine) as session:
+            stmt = select(DependencyWatcher).where(
+                DependencyWatcher.target_instance_id == "leader"
+            )
+            row = session.scalars(stmt).first()
+            assert row is not None
+            assert row.state == DependencyWatcherState.FIRED.value
+
+    @pytest.mark.asyncio
+    async def test_corrective_emit_no_watcher_is_safe_noop(
+        self, pg_engine: Engine
+    ):
+        """When no PENDING watcher exists for the (parent, child)
+        pair, the corrective emit must be a safe no-op (returns [],
+        raises nothing).
+        """
+        service = self._build_async_child_reports_service(pg_engine)
+        _seed_instance(pg_engine, instance_id="leader", parent_id=None)
+        _seed_instance(
+            pg_engine,
+            instance_id="wanderer",
+            parent_id="leader",
+        )
+        # No watcher seeded.
+
+        result = service._process_child_completion_db_sync(
+            instance_id="wanderer",
+            completed_message_id="msg-no-watch",
+            last_content="response",
+        )
+        assert result.outcome == "regular_child_completed"
+
+        # Dispatch should NOT raise even with no watchers.
+        await service._dispatch_post_commit_side_effects(
+            result,
+            last_content="response",
+            completed_message_id="msg-no-watch",
+        )
+
+        # Still no watchers — no orphan row was created.
+        assert _count_pending_watchers(
+            pg_engine, target_instance_id="leader"
+        ) == 0
+
+
+def _count_pending_watchers(
+    engine: Engine, *, target_instance_id: str
+) -> int:
+    """Count PENDING DependencyWatcher rows targeting the given parent."""
+    with Session(engine) as session:
+        stmt = (
+            select(func.count())
+            .select_from(DependencyWatcher)
+            .where(
+                DependencyWatcher.target_instance_id == target_instance_id
+            )
+            .where(
+                DependencyWatcher.state
+                == DependencyWatcherState.PENDING.value
+            )
+        )
+        return int(session.scalar(stmt) or 0)

@@ -718,6 +718,220 @@ class DependencyBus:
 
         return fired
 
+    async def emit_terminal_for_child_instance(
+        self,
+        parent_instance_id: str,
+        child_instance_id: str,
+        outcome: Outcome,
+    ) -> list[FollowUp]:
+        """Fire PENDING watchers for a (parent, child) instance pair.
+
+        Corrective emit path for multi-turn children. The bus's
+        task-keyed :meth:`emit_terminal` matches watchers on the
+        ``source_task_id`` of the task that registered the watcher —
+        which is correct for single-turn children (one task in,
+        one terminal emit). It is INCORRECT for multi-turn children
+        like Wanderer: the parent's watcher is keyed on the child's
+        FIRST ``process_message`` task id (registered when the
+        parent called ``send_message``), but the child reaches its
+        terminal graph turn on a LATER ``PROCESS_REPORT`` task id
+        (the child processes the parent's recursive
+        ``completion_report`` messages and emits its final response
+        from a different task). The task-keyed
+        ``emit_terminal(task_id=child's_final_task)`` cannot match
+        the watcher — the parent stays PENDING forever (stuck
+        ``waiting_children``).
+
+        This method closes that gap by matching the watcher on the
+        (``target_instance_id``, ``follow_up_payload.metadata.child_id``)
+        pair instead of the task id. The ``child_id`` field is
+        stamped by ``send_message`` (see
+        ``daemon.tools.instance._send_message``'s ``FollowUp``
+        construction) when the watcher is registered, so the
+        corrective emit always matches the watcher the task-keyed
+        emit missed.
+
+        Exactly-once is preserved through the same primitive that
+        enforces it in :meth:`emit_terminal`:
+        :meth:`DependencyWatcherRepository.transition_state` is a
+        guarded ``WHERE state = 'PENDING'`` Core UPDATE. When the
+        task-keyed :meth:`emit_terminal` already fired the watcher
+        (the single-turn case), this method's
+        ``transition_state`` returns ``rowcount == 0`` and the row
+        is skipped. So calling this method is unconditionally safe
+        to issue alongside the existing task-keyed emit — it is a
+        no-op when its work was already done.
+
+        Per-task lock semantics: each matched watcher's
+        ``source_task_id`` has its own lock in ``_locks``; this
+        method acquires the per-task lock for each matched row
+        before its ``transition_state`` + cache-pop pair. This is
+        the same lock used by ``watch`` and :meth:`emit_terminal`,
+        so a concurrent task-keyed :meth:`emit_terminal` on the
+        same source_task_id is serialized against this method's
+        transition (preventing cache + DB inconsistency: the
+        loser's ``transition_state`` returns ``rowcount == 0``, no
+        cache pop). Locks are per task and held one-at-a-time (no
+        nesting, no deadlock cycle).
+
+        Per-parent error signal: mirroring
+        :meth:`emit_terminal`'s Phase 5 logic, the parent's
+        ``_parent_errored`` flag and ``_parent_error_message``
+        are stamped OUTSIDE the per-task lock when the outcome is
+        an error. These dicts are plain CPython dict assignments
+        (atomic by the GIL), so no extra synchronization is
+        required — same pattern :meth:`emit_terminal` uses.
+
+        Finalization routing: this method, like
+        :meth:`emit_terminal`, does NOT re-trigger
+        ``JobFeedbackObserver._finalize_job`` directly. The
+        report ``Task`` (``PROCESS_REPORT``) for the child's
+        ``completion_report`` message is committed in
+        ``child_reports._process_child_completion_db_sync`` BEFORE
+        the async caller dispatches this corrective emit (see
+        ``_dispatch_post_commit_side_effects`` for the
+        ``regular_child_completed`` outcome). The natural finalize
+        path runs when the worker pool processes that report
+        ``Task``.
+
+        Args:
+            parent_instance_id: The parent instance id (matches
+                the watcher's ``target_instance_id``).
+            child_instance_id: The child instance id whose terminal
+                event is firing (matched against
+                ``follow_up_payload.metadata.child_id``).
+            outcome: Same semantics as :meth:`emit_terminal`'s
+                ``outcome`` — currently logged and used to set
+                the per-parent error flag; all PENDING watchers
+                fire regardless of success/failure (the parent
+                needs to know about both outcomes).
+
+        Returns:
+            The list of FollowUps atomically transitioned from
+            PENDING to FIRED by this call. Empty list when the
+            task-keyed :meth:`emit_terminal` already fired the
+            matching watcher (single-turn child) or when no
+            PENDING watchers for the (parent, child) pair exist
+            (no correlation was registered).
+        """
+        # Per-parent error signal — mirrors emit_terminal's Phase 5
+        # block: stamp the parent's _parent_errored flag when the
+        # child errored. Sticky per parent ("any error → parent
+        # error") and consulted by the finalize path in
+        # JobFeedbackObserver._process_event. Plain dict writes,
+        # atomic in CPython, no lock needed (same as emit_terminal).
+        if outcome.status == "error":
+            self._parent_errored[parent_instance_id] = True
+            if outcome.error:
+                self._parent_error_message[parent_instance_id] = (
+                    outcome.error
+                )
+            else:
+                self._parent_error_message.setdefault(
+                    parent_instance_id, "child agent error"
+                )
+
+        # DB is source of truth — read PENDING watchers by (parent,
+        # child) pair, NOT the cache. The cache is keyed on
+        # source_task_id, not (parent, child); a cache read here
+        # would miss multi-process writes and any watcher whose
+        # source_task_id the caller does not know.
+        matched_rows = await asyncio.to_thread(
+            self._repo.fetch_pending_for_target_and_child,
+            parent_instance_id,
+            child_instance_id,
+        )
+        if not matched_rows:
+            logger.debug(
+                f"bus emit_terminal_for_child_instance: "
+                f"parent={parent_instance_id[:8]}, "
+                f"child={child_instance_id[:8]}, "
+                f"outcome={outcome.status}, no pending watchers",
+                extra={"completion_delivery_path": "bus"},
+            )
+            return []
+
+        fired: list[FollowUp] = []
+        fired_at = self._now_iso()
+        fired_state = DependencyWatcherState.FIRED.value
+
+        # Each matched watcher belongs to a different source_task_id
+        # (each was registered by a different ``send_message`` call);
+        # take the per-task lock individually so concurrent
+        # ``watch`` / ``emit_terminal`` on the same task is
+        # serialized against our transition (no cache/DB divergence).
+        for row in matched_rows:
+            task_id = row.source_task_id
+            lock = await self._get_lock(task_id)
+            async with lock:
+                transitioned = await asyncio.to_thread(
+                    self._repo.transition_state,
+                    row.watch_id,
+                    fired_state,
+                    fired_at,
+                )
+                if not transitioned:
+                    # Another caller (task-keyed emit_terminal or
+                    # a parallel corrective emit on the same task)
+                    # already fired this watcher — exactly-once
+                    # preserved by the guarded UPDATE.
+                    logger.debug(
+                        f"bus emit_terminal_for_child_instance: "
+                        f"watch_id={row.watch_id[:8]} already "
+                        f"fired (skipped, no double-deliver)",
+                        extra={"completion_delivery_path": "bus"},
+                    )
+                    continue
+                fu = FollowUp.from_payload(row.follow_up_payload)
+                fired.append(fu)
+                # Per-row dedup stamp (crash-recovery marker C1, matching
+                # the stamp loop in _emit_terminal_via_bus for the
+                # task-keyed path). Stamps ``enqueued_at`` on the row
+                # we just transitioned to FIRED so a future restart's
+                # ``_recover_fired_unsent`` does NOT re-deliver it.
+                # Best-effort: a crash before stamp leaves the row
+                # un-stamped → next restart retries; the downstream
+                # finalize path is idempotent, so the worst case is a
+                # harmless duplicate finalize attempt.
+                try:
+                    await asyncio.to_thread(
+                        self._repo.mark_enqueued,
+                        row.watch_id,
+                        fired_at,
+                    )
+                except Exception as stamp_err:
+                    logger.debug(
+                        f"bus emit_terminal_for_child_instance: stamp "
+                        f"failed (non-fatal) for watch_id="
+                        f"{row.watch_id[:8]}: {stamp_err}",
+                        extra={"completion_delivery_path": "bus"},
+                    )
+                # Pop the cache entry for this task — all its
+                # PENDING watchers are now FIRED (or were already
+                # FIRED by a concurrent emit). A new ``watch()``
+                # that lands later for this task re-creates the
+                # entry. Mirrors emit_terminal's cache-pop epilogue.
+                self._pending.pop(task_id, None)
+                logger.debug(
+                    f"bus emit_terminal_for_child_instance fired: "
+                    f"parent={parent_instance_id[:8]}, "
+                    f"child={child_instance_id[:8]}, "
+                    f"task_id={task_id[:8]}, "
+                    f"watch_id={row.watch_id[:8]}, "
+                    f"outcome={outcome.status}",
+                    extra={"completion_delivery_path": "bus"},
+                )
+
+        logger.info(
+            f"bus emit_terminal_for_child_instance: "
+            f"parent={parent_instance_id[:8]}, "
+            f"child={child_instance_id[:8]}, "
+            f"outcome={outcome.status}, "
+            f"matched={len(matched_rows)}, fired={len(fired)}",
+            extra={"completion_delivery_path": "bus"},
+        )
+        return fired
+
     async def pending_watchers(
         self, source_task_id: str
     ) -> list[FollowUp]:
