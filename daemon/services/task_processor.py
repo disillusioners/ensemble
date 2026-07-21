@@ -128,6 +128,59 @@ class ProcessMessageProcessor(BaseProcessor):
             )
         self._pipeline = pipeline
 
+    async def _skip_task_as_completed(self, task: "Task") -> dict[str, Any]:
+        """Mark a task completed (skipped) + fire watcher notification.
+
+        Shared by the two no-op skip paths in :meth:`process`:
+        * the report-injection dedup skip (``process_report`` whose
+          report was already delivered via the live drain), and
+        * the already-COMPLETED-message idempotency skip (resume
+          re-claim).
+
+        Consolidating them here prevents the drift that caused the
+        prior "orphan-retry-task bug" (see the comment at the
+        COMPLETED-message guard): both paths must atomically
+        ``complete_task``, fire ``notify_work_watchers`` only when the
+        atomic status guard was won, and return the canonical skipped
+        dict. One authoritative site, one shape.
+
+        Args:
+            task: The task to mark completed as a no-op skip.
+
+        Returns:
+            The canonical skipped-result dict expected by the worker
+            pool (``{success, content: None, message_id, skipped}``).
+        """
+        completed_task = await asyncio.to_thread(
+            self._task_repo.complete_task,
+            task.id,
+            {"success": True, "message_id": task.message_id, "skipped": True},
+        )
+        # Fire watcher notification only if the atomic complete_task
+        # returned non-None (we won the ``status='running'`` guard
+        # race). The TaskRepository's WHERE status='running' check is
+        # what makes the guard effective; without gating the notify on
+        # the return value, a recovery racing with this skip path could
+        # double-notify.
+        if (
+            completed_task is not None
+            and self._work_resolver is not None
+            and self._watcher_repo is not None
+        ):
+            await notify_work_watchers(
+                work_id=completed_task.work_id,
+                status="completed",
+                instance_manager=self._manager,
+                work_resolver=self._work_resolver,
+                watcher_repo=self._watcher_repo,
+            )
+        return {
+            "success": True,
+            "content": None,
+            "message_id": task.message_id,
+            "skipped": True,
+        }
+
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a message task with full lifecycle.
 
@@ -202,55 +255,36 @@ class ProcessMessageProcessor(BaseProcessor):
         # ``process_report`` task is the FALLBACK delivery path for when
         # no parent turn is live (and the crash-recovery path). To keep
         # delivery exactly-once across the two paths, claim the
-        # companion ``report_injections`` row here: if the claim
-        # succeeds (``PENDING → TASK_DELIVERED``), this task OWNS
-        # delivery and proceeds normally. If it returns ``None``, the
-        # live turn already drained the report (``INJECTED``) — skip
-        # the graph turn entirely (mark the task completed, no-op).
-        #
-        # The per-instance serialization guard (one RUNNING task per
-        # instance) guarantees this task and the parent's live
-        # agent-node never run concurrently, so the atomic claim is
-        # defense-in-depth for the restart / cross-instance window.
+        # companion ``report_injections`` row here. The claim is a
+        # TRI-STATE (see ``TaskDeliveryClaim``):
+        #   * ``"claimed"``        — PENDING→TASK_DELIVERED; this task
+        #                            OWNS delivery → proceed normally.
+        #   * ``"already_delivered"`` — row is terminal (INJECTED by the
+        #                            live drain, or TASK_DELIVERED by a
+        #                            prior run) → SKIP (dedup gate).
+        #   * ``"missing"``        — no companion row (PROCESS_REPORT
+        #                            task from older code, or a path that
+        #                            did not enqueue) → PROCEED normally
+        #                            so the report is NOT lost. Conflating
+        #                            "missing" with "already_delivered"
+        #                            would silently drop reports.
         if task.task_type == TaskType.PROCESS_REPORT.value:
             repo = getattr(self._manager, "_report_injection_repo", None)
             if repo is not None:
-                claimed = await asyncio.to_thread(
+                claim = await asyncio.to_thread(
                     repo.claim_for_task_delivery, task.message_id
                 )
-                if claimed is None:
+                if claim.status == "already_delivered":
                     logger.info(
                         f"Task {task.id}: report {task.message_id[:8]}... "
                         f"already delivered via report-injection "
                         f"(INJECTED) — skipping PROCESS_REPORT graph turn"
                     )
-                    completed_task = await asyncio.to_thread(
-                        self._task_repo.complete_task,
-                        task.id,
-                        {
-                            "success": True,
-                            "message_id": task.message_id,
-                            "skipped": True,
-                        },
-                    )
-                    if (
-                        completed_task is not None
-                        and self._work_resolver is not None
-                        and self._watcher_repo is not None
-                    ):
-                        await notify_work_watchers(
-                            work_id=completed_task.work_id,
-                            status="completed",
-                            instance_manager=self._manager,
-                            work_resolver=self._work_resolver,
-                            watcher_repo=self._watcher_repo,
-                        )
-                    return {
-                        "success": True,
-                        "content": None,
-                        "message_id": task.message_id,
-                        "skipped": True,
-                    }
+                    return await self._skip_task_as_completed(task)
+                # "claimed" or "missing" → fall through to normal
+                # delivery below. "missing" intentionally does NOT skip:
+                # there is no row to dedup against, so the report must
+                # be delivered by this task.
 
         # ---- Idempotency guard: skip already-completed messages ----
         # On resume of a paused root instance, two graph-driving paths
@@ -280,49 +314,15 @@ class ProcessMessageProcessor(BaseProcessor):
         # 3 retries, the recovery service would permanently fail the
         # task and fire a spurious error report to the parent — even
         # though the underlying message and the actual agent work had
-        # already completed successfully. We now mark the task as
-        # ``completed`` synchronously here, before returning, so the
-        # worker pool's success counter increments and the recovery
-        # service never touches it. The status-guard in
-        # ``TaskRepository.complete_task`` (``WHERE status = 'running'``)
-        # makes this a no-op if the task has already been transitioned
-        # by a concurrent writer (e.g. recovery). The worker's own
-        # heartbeat thread will be stopped by ``_process_with_timeout``'s
-        # ``finally`` block once this method returns.
+        # already completed successfully. This is now handled by the
+        # shared :meth:`_skip_task_as_completed` helper (one
+        # authoritative skip shape for both no-op paths).
         if message.status == MessageStatus.COMPLETED.value:
             logger.info(
                 f"Task {task.id}: message {task.message_id[:8]}... already "
                 f"COMPLETED — skipping graph turn (resume re-claim no-op)"
             )
-            completed_task = await asyncio.to_thread(
-                self._task_repo.complete_task,
-                task.id,
-                {"success": True, "message_id": task.message_id, "skipped": True},
-            )
-            # Phase 2 Batch 2 — fire watcher notification only if the
-            # atomic complete_task returned non-None (i.e. we won the
-            # status=running guard race). The TaskRepository's WHERE
-            # status='running' check is what makes the guard effective;
-            # without gating the notify on the return value, a recovery
-            # racing with this idempotency path could double-notify.
-            if (
-                completed_task is not None
-                and self._work_resolver is not None
-                and self._watcher_repo is not None
-            ):
-                await notify_work_watchers(
-                    work_id=completed_task.work_id,
-                    status="completed",
-                    instance_manager=self._manager,
-                    work_resolver=self._work_resolver,
-                    watcher_repo=self._watcher_repo,
-                )
-            return {
-                "success": True,
-                "content": None,
-                "message_id": task.message_id,
-                "skipped": True,
-            }
+            return await self._skip_task_as_completed(task)
 
         message_content = message.content if message else ""
         message_source = message.source if message else None

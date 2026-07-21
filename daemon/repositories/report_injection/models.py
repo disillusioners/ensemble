@@ -57,11 +57,6 @@ class ReportInjectionState(str, enum.Enum):
     INJECTED = "INJECTED"
     TASK_DELIVERED = "TASK_DELIVERED"
 
-    @classmethod
-    def is_valid(cls, value: str) -> bool:
-        """Return ``True`` iff ``value`` is a known state."""
-        return value in cls._value2member_map_
-
 
 class ReportInjection(SQLModel, table=True):
     """One queued child→parent completion report awaiting delivery.

@@ -141,23 +141,40 @@ class TestQueueingMultipleReports:
 
 
 class TestClaimForTaskDelivery:
-    """The fallback task delivery path."""
+    """The fallback task delivery path (tri-state TaskDeliveryClaim)."""
 
-    def test_task_claim_returns_row_and_marks_task_delivered(self, repo, engine):
+    def test_task_claim_claimed_when_pending(self, repo, engine):
         _enqueue(repo, engine, report_msg="rmsg-1")
-        claimed = repo.claim_for_task_delivery("rmsg-1")
+        claim = repo.claim_for_task_delivery("rmsg-1")
 
-        assert claimed is not None
-        assert claimed.state == ReportInjectionState.TASK_DELIVERED.value
+        assert claim.status == "claimed"
+        assert claim.row is not None
+        assert claim.row.state == ReportInjectionState.TASK_DELIVERED.value
 
-    def test_task_claim_returns_none_after_first_claim(self, repo, engine):
-        """Exactly-once: a second task claim is a no-op."""
+    def test_task_claim_already_delivered_after_first_claim(self, repo, engine):
+        """Exactly-once: a second task claim is 'already_delivered' (skip)."""
         _enqueue(repo, engine, report_msg="rmsg-1")
-        assert repo.claim_for_task_delivery("rmsg-1") is not None
-        assert repo.claim_for_task_delivery("rmsg-1") is None
+        assert repo.claim_for_task_delivery("rmsg-1").status == "claimed"
+        second = repo.claim_for_task_delivery("rmsg-1")
+        assert second.status == "already_delivered"
+        assert second.row is None
 
-    def test_task_claim_returns_none_for_unknown_report(self, repo, engine):
-        assert repo.claim_for_task_delivery("never-enqueued") is None
+    def test_task_claim_missing_when_no_row_exists(self, repo, engine):
+        """CRITICAL (review B2): a missing row is 'missing', NOT
+        'already_delivered' — the caller must proceed (not skip) so the
+        report is not silently lost. Covers PROCESS_REPORT tasks from
+        older code / paths that did not enqueue a report_injections row."""
+        claim = repo.claim_for_task_delivery("never-enqueued")
+        assert claim.status == "missing"
+        assert claim.row is None
+
+    def test_task_claim_missing_after_drain_is_actually_delivered(self, repo, engine):
+        """After the live drain delivers (INJECTED), a task claim must read
+        'already_delivered' (the row exists and is terminal), NOT 'missing'."""
+        _enqueue(repo, engine, report_msg="rmsg-1")
+        repo.claim_for_injection("parent-1")  # drain → INJECTED
+        claim = repo.claim_for_task_delivery("rmsg-1")
+        assert claim.status == "already_delivered"
 
 
 # =============================================================================
@@ -173,13 +190,13 @@ class TestExactlyOnceAcrossPaths:
         _enqueue(repo, engine, report_msg="rmsg-1")
 
         assert len(repo.claim_for_injection("parent-1")) == 1
-        # Fallback task now finds nothing PENDING → None → skip.
-        assert repo.claim_for_task_delivery("rmsg-1") is None
+        # Fallback task now finds the row terminal → 'already_delivered' → skip.
+        assert repo.claim_for_task_delivery("rmsg-1").status == "already_delivered"
 
     def test_task_then_drain_loses(self, repo, engine):
         """If the fallback task delivers first, a later drain skips it."""
         _enqueue(repo, engine, report_msg="rmsg-1")
 
-        assert repo.claim_for_task_delivery("rmsg-1") is not None
+        assert repo.claim_for_task_delivery("rmsg-1").status == "claimed"
         # A subsequent live-turn drain finds nothing PENDING for this report.
         assert repo.claim_for_injection("parent-1") == []

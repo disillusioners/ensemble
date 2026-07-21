@@ -21,10 +21,11 @@ atomic ``state = PENDING → terminal`` claim in
 """
 
 from .models import ReportInjection, ReportInjectionState
-from .repository import ReportInjectionRepository
+from .repository import ReportInjectionRepository, TaskDeliveryClaim
 
 __all__ = [
     "ReportInjection",
     "ReportInjectionState",
     "ReportInjectionRepository",
+    "TaskDeliveryClaim",
 ]

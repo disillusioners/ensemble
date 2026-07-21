@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import update as sa_update
 from sqlalchemy.engine import Engine
@@ -54,6 +54,32 @@ _PENDING_STATE: str = ReportInjectionState.PENDING.value
 _INJECTED_STATE: str = ReportInjectionState.INJECTED.value
 _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
 _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
+
+
+class TaskDeliveryClaim(NamedTuple):
+    """Tri-state result of :meth:`ReportInjectionRepository.claim_for_task_delivery`.
+
+    Distinguishes three outcomes so the caller never silently loses a
+    report by conflating "no row" with "already delivered":
+
+    * ``"claimed"`` — a PENDING row existed and this call atomically
+      transitioned it to ``TASK_DELIVERED``. The task OWNS delivery and
+      proceeds with the normal message-processing pipeline. ``row`` is
+      the claimed :class:`ReportInjection`.
+    * ``"already_delivered"`` — a row exists but is terminal
+      (``INJECTED`` by the live agent-node drain, or
+      ``TASK_DELIVERED`` by a prior task run). The task MUST skip
+      (dedup gate). ``row`` is ``None``.
+    * ``"missing"`` — no ``report_injections`` row exists for this
+      ``report_message_id`` at all (e.g. a ``PROCESS_REPORT`` task
+      created by older code before this table existed, or a code path
+      that forgot to enqueue). The task MUST proceed with normal
+      delivery — treating "missing" as "delivered" would silently lose
+      the report. ``row`` is ``None``.
+    """
+
+    status: str
+    row: ReportInjection | None
 
 
 class ReportInjectionRepository:
@@ -177,39 +203,38 @@ class ReportInjectionRepository:
             reports exist for the parent.
         """
         now_iso = self._now_iso()
-        drained: list[dict[str, Any]] = []
         with Session(self.engine) as session:
-            # Read PENDING rows for this parent, oldest first (stable
-            # delivery order so the parent sees reports in the order
-            # workers completed). create_at is an ISO timestamp; the
-            # primary-key UUID4 is monotonic-ish but create_at is the
-            # intended ordering signal.
+            # Single atomic ``UPDATE ... RETURNING``: transitions every
+            # PENDING report for this parent to INJECTED and returns
+            # ONLY the rows this call actually claimed. This is symmetric
+            # with :meth:`claim_for_task_delivery`'s guarded UPDATE — a
+            # row concurrently claimed by the fallback task (already
+            # non-PENDING) is invisible to RETURNING, so exactly-once
+            # holds without relying on the per-instance serialization
+            # guard. Both SQLite (>=3.35) and PostgreSQL support
+            # RETURNING.
             stmt = (
-                select(ReportInjection)
+                sa_update(ReportInjection)
                 .where(ReportInjection.parent_instance_id == parent_instance_id)
                 .where(ReportInjection.state == _PENDING_STATE)
-                .order_by(ReportInjection.created_at)
-            )
-            rows = list(session.exec(stmt))
-            if not rows:
-                return drained
-
-            report_message_ids = [r.report_message_id for r in rows]
-
-            # Mark each row INJECTED (guarded Core UPDATE — only
-            # PENDING rows transition; a concurrent task-claim that
-            # raced ahead leaves its row untouched here).
-            session.execute(
-                sa_update(ReportInjection)
-                .where(ReportInjection.injection_id.in_([r.injection_id for r in rows]))
-                .where(ReportInjection.state == _PENDING_STATE)
                 .values(state=_INJECTED_STATE, delivered_at=now_iso)
+                .returning(
+                    ReportInjection.content,
+                    ReportInjection.report_message_id,
+                    ReportInjection.created_at,
+                )
             )
+            claimed = list(session.execute(stmt).all())
+
+            if not claimed:
+                return []
+
+            report_message_ids = [r.report_message_id for r in claimed]
 
             # Mark companion message_queue rows COMPLETED so the
             # parent's own-queue pending count does not include
-            # already-delivered reports. Best-effort / guarded — see
-            # method docstring.
+            # already-delivered reports. Best-effort / guarded by
+            # ``status = 'ready'`` — see method docstring.
             session.execute(
                 sa_update(MessageQueue)
                 .where(MessageQueue.message_id.in_(report_message_ids))
@@ -219,20 +244,20 @@ class ReportInjectionRepository:
 
             session.commit()
 
-            for r in rows:
-                drained.append(
-                    {
-                        "content": r.content,
-                        "report_message_id": r.report_message_id,
-                    }
-                )
+            # Stable delivery order: oldest first. created_at is an ISO
+            # timestamp (TEXT); lexicographic sort is chronological for
+            # same-format ISO strings.
+            claimed.sort(key=lambda r: r.created_at)
+            drained = [
+                {"content": r.content, "report_message_id": r.report_message_id}
+                for r in claimed
+            ]
 
-        if drained:
-            logger.info(
-                f"[ReportInjection] Drained {len(drained)} pending "
-                f"report(s) for parent {parent_instance_id[:8]}... "
-                f"(marked INJECTED)"
-            )
+        logger.info(
+            f"[ReportInjection] Drained {len(drained)} pending "
+            f"report(s) for parent {parent_instance_id[:8]}... "
+            f"(marked INJECTED)"
+        )
         return drained
 
     # --------------------------------------------------------
@@ -241,65 +266,83 @@ class ReportInjectionRepository:
 
     def claim_for_task_delivery(
         self, report_message_id: str
-    ) -> ReportInjection | None:
+    ) -> TaskDeliveryClaim:
         """Atomically claim a single report for fallback task delivery.
 
         Called by ``ProcessMessageProcessor`` at the start of a
         ``process_report`` task, before the normal message-processing
-        pipeline runs. If this call returns a row, the task OWNS
-        delivery and proceeds normally. If it returns ``None``, the
-        report was already delivered by the injection path (the
-        parent's live agent-node drained it) and the task MUST skip
-        — calling this method is the dedup gate.
+        pipeline runs. Returns a :class:`TaskDeliveryClaim` tri-state so
+        the caller can distinguish three outcomes:
+
+        * ``"claimed"`` — a PENDING row existed and was atomically
+          transitioned to ``TASK_DELIVERED``; the task OWNS delivery and
+          proceeds normally.
+        * ``"already_delivered"`` — a row exists but is terminal
+          (``INJECTED`` by the live agent-node drain, or
+          ``TASK_DELIVERED`` by a prior run); the task MUST skip
+          (dedup gate).
+        * ``"missing"`` — no ``report_injections`` row exists for this
+          ``report_message_id`` (a ``PROCESS_REPORT`` task from older
+          code, or a path that did not enqueue); the task MUST proceed
+          with normal delivery so the report is NOT lost.
+
+        The ``"missing"`` distinction is critical: conflating it with
+        ``"already_delivered"`` would silently drop reports for any
+        task without a companion row. ``report_injections`` rows are
+        created in the SAME transaction as the ``PROCESS_REPORT`` task
+        (see ``child_reports``), so the live path always has a row;
+        ``"missing"`` covers upgrade / legacy / future code paths.
 
         Exactly-once: the guarded ``WHERE state = 'PENDING'`` UPDATE
-        means only one caller (this method or the injection drain)
-        can transition a given row out of PENDING. The loser sees
-        ``None`` (no PENDING row matched) and skips.
+        means only one caller (this method or the injection drain) can
+        transition a given row out of PENDING.
 
         Args:
             report_message_id: The ``message_id`` of the companion
-                ``completion_report`` row this task is responsible
-                for.
+                ``completion_report`` row this task is responsible for.
 
         Returns:
-            The claimed :class:`ReportInjection` row (now
-            ``TASK_DELIVERED``) if this call won the race, or ``None``
-            if the row was already terminal (injected by the live
-            turn, or already delivered by a prior task run).
+            A :class:`TaskDeliveryClaim` with ``status`` in
+            ``{"claimed", "already_delivered", "missing"}`` and ``row``
+            set only on ``"claimed"``.
         """
         now_iso = self._now_iso()
         with Session(self.engine) as session:
-            stmt = (
-                select(ReportInjection)
-                .where(ReportInjection.report_message_id == report_message_id)
-                .where(ReportInjection.state == _PENDING_STATE)
-            )
-            row = session.exec(stmt).first()
-            if row is None:
-                return None
+            # Does ANY row exist for this report (any state)? This
+            # distinguishes "missing" (no row ever created) from
+            # "already_delivered" (row exists but terminal). Rows are
+            # created transactionally with the task, so for the live
+            # path a row always exists by the time the task runs; the
+            # missing case is upgrade/legacy.
+            any_row = session.exec(
+                select(ReportInjection).where(
+                    ReportInjection.report_message_id == report_message_id
+                )
+            ).first()
+            if any_row is None:
+                return TaskDeliveryClaim("missing", None)
 
-            # Guarded transition — only PENDING → TASK_DELIVERED.
+            # Guarded transition — only PENDING → TASK_DELIVERED. A row
+            # that is already INJECTED/TASK_DELIVERED yields rowcount 0.
             result = session.execute(
                 sa_update(ReportInjection)
-                .where(ReportInjection.injection_id == row.injection_id)
+                .where(ReportInjection.injection_id == any_row.injection_id)
                 .where(ReportInjection.state == _PENDING_STATE)
                 .values(state=_TASK_DELIVERED_STATE, delivered_at=now_iso)
             )
             if result.rowcount == 0:
-                # Lost the race to a concurrent injection drain
-                # between the SELECT and the UPDATE — treat as
-                # already-delivered.
-                return None
+                # Row exists but is terminal — the live turn (or a
+                # prior task run) already delivered this report.
+                return TaskDeliveryClaim("already_delivered", None)
 
             session.commit()
-            session.refresh(row)
+            session.refresh(any_row)
             logger.info(
                 f"[ReportInjection] Report {report_message_id[:8]}... "
                 f"claimed for TASK delivery (parent="
-                f"{row.parent_instance_id[:8]}...)"
+                f"{any_row.parent_instance_id[:8]}...)"
             )
-            return row
+            return TaskDeliveryClaim("claimed", any_row)
 
     # --------------------------------------------------------
     # DIAGNOSTIC

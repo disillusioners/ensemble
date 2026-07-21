@@ -697,6 +697,16 @@ class InstanceManager:
         # ``SQLModel.metadata.create_all()`` (model registered via
         # ``daemon/repositories/__init__.py``).
         self._report_injection_repo = ReportInjectionRepository(engine=self._engine)
+
+        # Fast-path hint set for the report-injection drain: holds the
+        # parent instance ids that have at least one PENDING
+        # ``report_injections`` row. Bumped post-commit in
+        # ``child_reports._dispatch_post_commit_side_effects`` and
+        # discarded by ``ReportInjectionSlot.drain`` once a DB drain
+        # confirms empty. Best-effort (the DB claim is the source of
+        # truth) — lets the per-LLM-call drain skip the DB round-trip
+        # for instances with no pending reports.
+        self._report_injection_pending: set[str] = set()
         
         # discard_on_startup: safe "backlog clear". Clears only unstarted
         # / terminal work (PENDING tasks + their messages); RUNNING and

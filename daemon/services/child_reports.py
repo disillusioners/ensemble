@@ -2171,6 +2171,18 @@ Provide a concise summary:"""
                         f"failed for report Task (non-fatal): {notify_err}"
                     )
 
+            # Fast-path hint for the report-injection drain: mark this
+            # parent as having a pending report so the parent's next
+            # live LLM call knows to hit the DB drain. Post-commit (the
+            # report_injections row is already committed in the same tx
+            # as the message+task above). Best-effort — runs on the
+            # event loop, serialized against the drain's set check, so
+            # the worst case of a missed bump is a one-LLM-call delivery
+            # delay, never a lost report.
+            pending_set = getattr(self._manager, "_report_injection_pending", None)
+            if pending_set is not None and parent_id:
+                pending_set.add(parent_id)
+
             # CompletionRegistry
             from .completion_registry import get_completion_registry
             get_completion_registry().complete(instance_id, result=last_content)
