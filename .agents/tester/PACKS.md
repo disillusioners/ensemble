@@ -372,3 +372,9 @@ Update after each test run:
 | c2_core_regression_unit_test | test/packs/c2_core_regression_unit_test.sh | C2 core regression: manager (InstanceManager init, spawn, send, terminate, streaming), paused_instance_ttl, context_usage_emission, dispatcher_path_equivalence, phase4_manager_decomposition, title_generation_trigger | 2 min | 2026-07-17 | ⚠️ 165 passed, 38 pre-existing failures (SQLite migration bug 843e2c34, NOT C2-related) |
 | c2_question_deferred_pause_edge_cases | tests/unit/test_question_deferred_pause_edge_cases.py | C2 edge cases: second cycle marker re-set, non-question no-marker, marker idempotency pop-once, concurrent instance isolation, _process_message_with_tracking Path B | 2 min | 2026-07-17 | ✅ PASS (5/5, NEW tests, commit 4ad66982) |
 | c2_pg_manager_unit_test | test/packs/c2_pg_manager_unit_test.sh | C2 PostgreSQL verification: test_manager.py + C2 invariant tests against PostgreSQL (DATABASE_URL override). Confirms migration is valid PG, C2 tests pass on PG | 5 min | 2026-07-17 | ⚠️ C2 tests PASS on PG, test_manager.py still SQLite-locked by fixture |
+
+## Skill Completion Counter Bugfix Packs (2026-07-21)
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| process_message_metrics_unit_test | tests/services/test_process_message_metrics.py | Skill completion counter bugfix: `_record_metrics_for_task` hook in ProcessMessageProcessor. Service-layer success/failure paths (6 tests), wiring into real ProcessMessageProcessor (success/work_fn_error/post_processing_error paths, 3 tests), gap-coverage tests (cancellation OperationCancelledError/asyncio.CancelledError NOT fired, requeue NOT fired, real iterations/duration non-zero, zero-iterations complement — 5 tests). 14 tests total. | 2 min | 2026-07-21 | ✅ PASS (14/14 in 1.0s, feature/skill-feedback-upgrade, commit 128ad317, 0 failures) |
