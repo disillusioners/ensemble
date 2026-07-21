@@ -553,7 +553,14 @@ class TestFormatInjection:
             {"injected": [{"skill": skill, "score": 0.9}], "low_match": []}
         )
         assert "[System Inject] Relevant skills loaded:" in text
-        assert "📋 **Skill: review** (match score: 0.90)" in text
+        # Skill ID is inlined next to the name + score so the
+        # consuming agent can call skill_feedback / skill_fix /
+        # skill_view without an extra skill_search round-trip.
+        # Default ``make_skill`` assigns ``id="skill-1"``.
+        assert (
+            "📋 **Skill: review** (id: skill-1, match score: 0.90)"
+            in text
+        )
         # Separator is emitted.
         assert "─" * 30 in text
         # Skill body.
@@ -574,21 +581,26 @@ class TestFormatInjection:
                     {"skill": s2, "score": 0.8},
                 ],
                 "low_match": [
-                    {"name": "gamma", "score": 0.4, "description": "gamma desc"},
-                    {"name": "delta", "score": 0.3, "description": "delta desc"},
+                    {"name": "gamma", "id": "gamma-uuid",
+                     "score": 0.4, "description": "gamma desc"},
+                    {"name": "delta", "id": "delta-uuid",
+                     "score": 0.3, "description": "delta desc"},
                 ],
             }
         )
-        # Injected headers + skill bodies.
+        # Injected headers + skill bodies + each skill's id is
+        # inlined so the agent has the UUID ready for tool calls.
         assert "Skill: alpha" in text
+        assert "(id: s1, match score: 0.95)" in text
         assert "Skill: beta" in text
+        assert "(id: s2, match score: 0.80)" in text
         assert "alpha body" in text
         assert "beta body" in text
         # Low-match header + bullet format
-        # ``• {name} ({score:.2f}) — {description}``.
+        # ``• {name} ({id}, score: {score:.2f}) — {description}``.
         assert "Other available skills" in text
-        assert "• gamma (0.40) — gamma desc" in text
-        assert "• delta (0.30) — delta desc" in text
+        assert "• gamma (gamma-uuid, score: 0.40) — gamma desc" in text
+        assert "• delta (delta-uuid, score: 0.30) — delta desc" in text
         # Closing hint.
         assert "Use `skill_search` tool to find more skills." in text
 

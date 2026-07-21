@@ -580,14 +580,24 @@ class SkillInjectionService:
 
             [System Inject] Relevant skills loaded:
 
-            📋 **Skill: {name}** (match score: {score:.2f})
+            📋 **Skill: {name}** (id: {skill.id}, match score: {score:.2f})
             ────────────────────────────
             {full_markdown_content}
 
             📋 **Other available skills** (low match):
-            • {name2} ({score2:.2f}) — {description2}
+            • {name2} ({id2}, score: {score2:.2f}) — {description2}
 
             Use `skill_search` tool to find more skills.
+
+        Each skill's UUID4 ``id`` is rendered inline alongside the
+        name and score so the consuming agent can pass it directly
+        into ``skill_feedback(skill_id=...)`` /
+        ``skill_fix(skill_id=...)`` /
+        ``skill_view(skill_id=...)`` without paying for an extra
+        ``skill_search`` round-trip just to resolve the name back to
+        its UUID. Low-match candidates get the same ``id`` exposure
+        so they remain one tool-call away if the agent decides to
+        promote a low-match skill.
 
         Notes:
 
@@ -605,6 +615,10 @@ class SkillInjectionService:
           always emitted, even when both lists are empty (the
           service never reaches here for both-empty, but the
           formatter is defensive).
+        * Skill IDs are read via ``getattr(skill, "id", None)``
+          so missing-id fixtures (test mocks) don't crash the
+          formatter — the ``(id: …)`` segment is omitted when
+          the id is falsy.
 
         Args:
             results: Dict with ``injected`` and ``low_match``
@@ -635,7 +649,23 @@ class SkillInjectionService:
             except (TypeError, ValueError):
                 score_val = 0.0
             content = getattr(skill, "content", "") or ""
-            lines.append(f"📋 **Skill: {name}** (match score: {score_val:.2f})")
+            skill_id = getattr(skill, "id", None)
+            # Inline the skill ID next to the name + score so the
+            # consuming agent has every signal it needs to call
+            # ``skill_feedback`` / ``skill_fix`` / ``skill_view``
+            # in ONE tool call — doesn't have to resolve the
+            # name→UUID via ``skill_search``. When the id is
+            # missing (test fixtures, legacy rows), the segment is
+            # omitted entirely so the layout stays legible.
+            if skill_id:
+                lines.append(
+                    f"📋 **Skill: {name}** "
+                    f"(id: {skill_id}, match score: {score_val:.2f})"
+                )
+            else:
+                lines.append(
+                    f"📋 **Skill: {name}** (match score: {score_val:.2f})"
+                )
             lines.append("─" * 30)
             lines.append(content)
             lines.append("")
@@ -655,9 +685,23 @@ class SkillInjectionService:
                 except (TypeError, ValueError):
                     score_val = 0.0
                 description = item.get("description") or ""
-                lines.append(
-                    f"• {name} ({score_val:.2f}) — {description}"
-                )
+                # Surface the low-match skill's id too so a
+                # promotion decision emits ``skill_view`` /
+                # ``skill_feedback`` with the id in one call rather
+                # than re-running ``skill_search`` just to look it
+                # up. ``item.get("id")`` matches the dict shape
+                # used by the search service for low-match rows;
+                # missing or falsy → omit gracefully.
+                item_id = item.get("id")
+                if item_id:
+                    lines.append(
+                        f"• {name} ({item_id}, score: {score_val:.2f})"
+                        f" — {description}"
+                    )
+                else:
+                    lines.append(
+                        f"• {name} ({score_val:.2f}) — {description}"
+                    )
             lines.append("")
 
         # Closing hint — always present so the agent knows it
