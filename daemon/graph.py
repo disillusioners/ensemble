@@ -13,7 +13,7 @@ from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
-from typing import Any, ClassVar, Mapping, cast
+from typing import Any, ClassVar, Mapping, Optional, cast
 from dataclasses import dataclass, field
 import asyncio
 import json
@@ -2105,7 +2105,7 @@ def create_post_tools_router(manager: Any):
         A callable ``router(state, config) -> str`` returning the
         next-node name (``"agent"`` or ``"question_pause_node"``).
     """
-    def post_tools_router(state: Any, config: RunnableConfig | None = None) -> str:
+    def post_tools_router(state: Any, config: Optional[RunnableConfig] = None) -> str:
         instance_id: str | None = None
         try:
             if config is not None:
@@ -2167,7 +2167,7 @@ def create_question_pause_node(manager: Any):
     Returns:
         An async callable suitable for ``graph.add_node("name", ...)``.
     """
-    async def question_pause_node(state: Any, config: RunnableConfig | None = None) -> dict:
+    async def question_pause_node(state: Any, config: Optional[RunnableConfig] = None) -> dict:
         instance_id: str | None = None
         try:
             if config is not None:
