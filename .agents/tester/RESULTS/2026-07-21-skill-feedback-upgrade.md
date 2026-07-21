@@ -4,9 +4,10 @@ Branch: `feature/skill-feedback-upgrade` (commit da5ef6ee)
 New tests commit: `a30dd72f` — "test: add coverage for skill_feedback upgrade gaps"
 
 ## Summary
-- **Existing tests: PASS** (103 tests in touched files, 0 failures, 0 regressions)
+- **Existing tests: PASS** — baseline 92 confirmed (50 tool+trigger, 42 evolution), 0 failures
 - **New tests added: 24** (all PASS)
-- **Total skill-related tests verified: 103+** (existing Phase 5 suite + new gap-fillers)
+- **Verification (post-new-tests): PASS** — 148 tests across verify runs (70 tool+trigger+sanitizer, 78 evolution+metrics), 0 failures, 0 regressions
+- **New tests reconciled exactly:** verify-A − baseline-A = 70 − 50 = +20 (13 sanitizer + 2 boundaries + 5 trigger edges) ✅
 - **ensure.md: PASS** — all in-scope Critical + Important requirements met
 - **PostgreSQL parity: COMPLETE (code) / PENDING (live DB self-heal on next daemon start)**
 - **Overall Status: ✅ READY**
@@ -29,7 +30,10 @@ New tests commit: `a30dd72f` — "test: add coverage for skill_feedback upgrade 
 ## Test Results
 
 ### Existing Tests (Baseline) — PASS
-All existing 124+ tests across the 4 skill test files pass. No regressions.
+All existing tests pass. No regressions. Verified by two parallel baseline workers:
+- **baseline-A** (`test_skill_feedback_tool.py` + `test_skill_trigger_engine.py`): **50 passed**, 0 failed, ~1.3s
+- **baseline-B** (`test_skill_evolution_service.py`): **42 passed**, 0 failed, 1.40s
+- **Baseline total: 92 passed, 0 failures**
 - `tests/tools/test_skill_feedback_tool.py` — PASS (incl. TestSkillFeedbackToolPhase5Params, TestSkillFeedbackToolPhase5RoundTrip)
 - `tests/services/test_skill_evolution_service.py` — PASS (incl. TestAnalysisPromptPhase5, 8 tests)
 - `tests/services/test_skill_trigger_engine.py` — PASS (incl. TestLowUsefulnessCondition, 8 tests)
@@ -43,8 +47,13 @@ All existing 124+ tests across the 4 skill test files pass. No regressions.
 | `tests/services/test_skill_trigger_engine.py` (APPEND) | `TestLowUsefulnessEdgeCases` | 5 | `_eval_low_usefulness` usage_repo=None, repo exception swallow, custom threshold via condition_json, custom min_samples, "scored usages" reason wording |
 | `tests/services/test_skill_evolution_service.py` (APPEND) | `TestAnalysisPromptMixedScoring` | 4 | mixed scoring (partial NULL), fractional avg precision (3.7/10), per-record NULL usefulness, NOTE-framing line |
 
-Combined run of all 24 new tests: **24 passed in 0.86s**.
-Full touched-file run (existing + new): **103 passed — no existing tests broken.**
+Combined run of all 24 new tests: **24 passed in 0.86s** (write-tests session).
+
+### Verification Runs (post-new-tests) — PASS
+Two parallel verification workers confirmed no regressions after the new tests were added:
+- **verify-A** (tool + trigger + sanitizer): **70 passed**, 0 failed, ~1.5s — delta of +20 over baseline-A (50) = exactly the new tests ✅
+- **verify-B** (evolution + metrics): **78 passed**, 0 failed, 2.00s
+- **Verification total: 148 passed, 0 failures, 0 regressions**
 
 ### Behavior Surprises
 None. All test assumptions matched actual source behavior. Source works as documented.
@@ -120,8 +129,9 @@ All code changes are TEST CODE ONLY (no production/source changes):
 ---
 
 ### Overall Status
-- Existing Tests: ✅ PASS (103 tests, 0 failures, 0 regressions)
-- New Tests: ✅ PASS (24 tests, all pass, committed)
+- Existing Tests: ✅ PASS (92 baseline, 0 failures, 0 regressions)
+- New Tests: ✅ PASS (24 tests, all pass, committed `a30dd72f`)
+- Verification: ✅ PASS (148 tests post-new-tests, 0 failures, 0 regressions — reconciled exactly)
 - ensure.md: ✅ PASS (Critical 2/2, Important 1/1, Nice-to-have 1/1)
 - PostgreSQL: ✅ Code COMPLETE; dev DB self-heals on next boot
 - **Testing Complete: ✅ READY**
