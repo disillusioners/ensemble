@@ -37,11 +37,14 @@ live in :class:`TestRecordMetricsWiring` at the bottom of this file.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 # Reuse the fakes / fixtures from the sibling metrics test so this
 # file stays focused on the new behaviour rather than rebuilding
 # the test scaffolding.
+from daemon.cancellation import OperationCancelledError
 from tests.services.test_skill_metrics_service import (
     FakeConfig,
     FakeInstance,
@@ -485,6 +488,7 @@ class TestRecordMetricsWiring:
         *,
         manager_process_fn=None,
         post_processing_error: Exception | None = None,
+        requeued_result: bool = False,
     ):
         """Build a real :class:`ProcessMessageProcessor` wired with mocks.
 
@@ -494,13 +498,19 @@ class TestRecordMetricsWiring:
 
         ``manager_process_fn`` is the side-effect for
         ``manager._process_message_with_tracking`` — by default it
-        returns a benign ``MessageResult``. ``post_processing_error``
+        returns a benign ``MessageResult``. Set it to a callable that
+        raises (e.g. ``OperationCancelledError``, ``RuntimeError``) to
+        drive the work_fn-error / cancellation branches in
+        :meth:`ProcessMessageProcessor.process`. ``post_processing_error``
         patches ``processor._pipeline.execute`` to short-circuit and
         return a ``ProcessingResult`` with ``error`` set — that
         drives the ``result.error is not None`` branch in
         :meth:`ProcessMessageProcessor.process` without having to
         coax the pipeline's internal stage methods into raising
-        (they all swallow their own exceptions).
+        (they all swallow their own exceptions). ``requeued_result``
+        patches ``pipeline.execute`` to return
+        ``ProcessingResult(success=False, should_defer=True)`` so the
+        caller can assert the hook is NOT fired on the requeue path.
         """
         import asyncio
         from datetime import datetime, timedelta, timezone
@@ -593,6 +603,18 @@ class TestRecordMetricsWiring:
                 return ProcessingResult(success=False, error=err)
 
             processor._pipeline.execute = _execute_with_error  # type: ignore[assignment]
+        elif requeued_result:
+            # Drive the ``result.should_defer`` (requeue) branch
+            # directly. In production this result comes from
+            # ``on_contention`` re-queueing the task with backoff.
+            # Reaching it via the real pipeline requires gate
+            # contention, which the passthrough gate never
+            # produces — patching ``execute`` is the deterministic
+            # way to assert the hook is NOT fired on this path.
+            async def _execute_with_defer(**_kwargs):
+                return ProcessingResult(success=False, should_defer=True)
+
+            processor._pipeline.execute = _execute_with_defer  # type: ignore[assignment]
         else:
             # Real pipeline: claim + complete run as no-ops.
             queue_repo_for_pipeline = MagicMock()
@@ -826,3 +848,407 @@ class TestRecordMetricsWiring:
         refreshed = metrics_service.skill_repo.get(skill.id)
         assert refreshed.total_completions == 0
         assert refreshed.consecutive_failures == 1
+
+    # ------------------------------------------------------------------
+    # Gap-coverage tests (cancellation, requeue, real iteration/duration)
+    # ------------------------------------------------------------------
+    # These close the coverage gaps flagged in the task's "What to Test"
+    # list. They assert the NEGATIVE contract (the metrics hook is NOT
+    # fired on cancellation / requeue) and the POSITIVE contract
+    # (iterations / duration passed to ``record_task_completion`` are
+    # real non-zero values, not the hardcoded 0/0 that silently
+    # disabled the CAPTURED eligibility gate).
+
+    async def test_cancellation_path_operation_cancelled_does_not_fire_hook(
+        self, metrics_service, project_id
+    ):
+        """Cancellation via ``OperationCancelledError`` must skip the hook.
+
+        Production scenario: a child task is paused (or the daemon is
+        shutting down) and the cancellation token fires, raising
+        ``OperationCancelledError`` out of
+        ``_process_message_with_tracking``. The exception propagates
+        through the gate → ``pipeline.execute`` (``_handle_cancel``
+        re-raises because ``on_cancel`` is ``None``) → ``process()``'s
+        ``except OperationCancelledError`` clause, which re-raises
+        WITHOUT calling ``_record_metrics_for_task``.
+
+        Asserting this pins the documented contract (see the inline
+        NOTE in ``process()`` at the ``OperationCancelledError``
+        branch): a pause / shutdown cancellation must NOT bump
+        ``consecutive_failures`` or ``total_completions`` — the task
+        will run again (pause) or be terminated (shutdown) and the
+        real terminal path will fire the hook.
+        """
+        from daemon.cancellation import CancellationReason
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-cancel"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        # Inject the cancellation into the work_fn path. The real
+        # ``_process_message_with_tracking`` raises
+        # ``OperationCancelledError`` when the cancellation token fires.
+        cancel_exc = OperationCancelledError(
+            CancellationReason.SESSION_TERMINATED
+        )
+
+        async def _cancel(**_kwargs):
+            raise cancel_exc
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(
+                    metrics_service, manager_process_fn=_cancel
+                )
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+
+            # The cancellation propagates all the way out of process().
+            with pytest.raises(OperationCancelledError):
+                await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        # NEGATIVE contract: the hook MUST NOT have fired.
+        assert calls == [], (
+            f"Cancellation (OperationCancelledError) must NOT fire "
+            f"the metrics hook — got {len(calls)} call(s): {calls}"
+        )
+
+        # And the skill counters must be untouched.
+        refreshed = metrics_service.skill_repo.get(skill.id)
+        assert refreshed.total_completions == 0
+        assert refreshed.consecutive_failures == 0
+        assert refreshed.total_selections == 0
+
+    async def test_cancellation_path_asyncio_cancelled_does_not_fire_hook(
+        self, metrics_service, project_id
+    ):
+        """Cancellation via ``asyncio.CancelledError`` must skip the hook.
+
+        Second cancellation flavour: the worker thread pool cancels the
+        asyncio task during pause (``asyncio.CancelledError`` rather
+        than the token-driven ``OperationCancelledError``). Same
+        contract — the ``except asyncio.CancelledError`` clause in
+        ``process()`` logs and re-raises WITHOUT firing the hook.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-cancel2"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        async def _asyncio_cancel(**_kwargs):
+            raise asyncio.CancelledError()
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(
+                    metrics_service, manager_process_fn=_asyncio_cancel
+                )
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+
+            with pytest.raises(asyncio.CancelledError):
+                await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        assert calls == [], (
+            f"Cancellation (asyncio.CancelledError) must NOT fire "
+            f"the metrics hook — got {len(calls)} call(s): {calls}"
+        )
+
+        refreshed = metrics_service.skill_repo.get(skill.id)
+        assert refreshed.total_completions == 0
+        assert refreshed.consecutive_failures == 0
+
+    async def test_requeue_path_does_not_fire_hook(
+        self, metrics_service, project_id
+    ):
+        """Requeue path (``result.should_defer=True``) must skip the hook.
+
+        Production scenario: gate contention triggers the
+        ``on_contention`` callback, which re-queues the task with
+        jittered backoff and returns
+        ``ProcessingResult(success=False, should_defer=True)``. The
+        ``process()`` method sees ``result.should_defer`` and returns
+        ``{"success": False, "requeued": True, ...}`` WITHOUT calling
+        ``_record_metrics_for_task``.
+
+        This test patches ``pipeline.execute`` to return the
+        ``should_defer=True`` result directly (reaching it via the real
+        pipeline would require gate contention, which the passthrough
+        gate never produces). Asserts the hook was NOT called and the
+        skill counters are untouched — a requeue is not a terminal
+        outcome and the next run will fire the hook with the real
+        outcome.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-requeue"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(
+                    metrics_service, requeued_result=True
+                )
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+
+            result = await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        # The requeue path returns the "re-queued, not failed" dict.
+        assert result["success"] is False
+        assert result["requeued"] is True
+
+        # NEGATIVE contract: the hook MUST NOT have fired.
+        assert calls == [], (
+            f"Requeue (should_defer=True) must NOT fire the metrics "
+            f"hook — got {len(calls)} call(s): {calls}"
+        )
+
+        refreshed = metrics_service.skill_repo.get(skill.id)
+        assert refreshed.total_completions == 0
+        assert refreshed.consecutive_failures == 0
+        assert refreshed.total_selections == 0
+
+    async def test_iterations_and_duration_are_non_zero(
+        self, metrics_service, project_id
+    ):
+        """Iterations / duration passed to the hook are real, not 0/0.
+
+        Regression guard for the bug where the completion hook passed
+        hardcoded ``iterations=0, duration_seconds=0`` — which silently
+        tripped the CAPTURED-skill eligibility gate in
+        ``SkillMetricsService._record_one`` (the gate requires
+        ``iterations > min_iter OR duration_seconds > min_dur``) so
+        child-instance ``process_message`` tasks could NEVER trigger
+        skill capture.
+
+        This wiring test drives the success path with a task whose
+        ``created_at`` / ``completed_at`` span a non-trivial interval
+        (set by ``_build_processor`` to ``created_at = now - 2s``) and
+        whose instance has one ``type='agent'`` message on the queue.
+        Asserts the spy captured ``iterations >= 1`` AND
+        ``duration_seconds > 0``.
+
+        NOTE: the wiring harness sets ``created_at`` to 2 seconds in the
+        past and ``completed_at`` to ``now``. ``_compute_iterations_and_duration``
+        reads ``completed_at`` off the task, so the duration is derived
+        from the real timestamp delta (not a sleep). No real sleep is
+        used — this keeps the test deterministic and under 2 min.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-iter-dur"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(metrics_service)
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+
+            # Seed the manager's queue repo with ONE agent-type
+            # message created at-or-after the task's ``created_at``.
+            # ``_compute_iterations_and_duration`` counts ``type='agent'``
+            # rows on the queue for the instance; without this the
+            # iteration count is 0 (the default in ``_build_processor``).
+            from datetime import datetime, timezone
+            from types import SimpleNamespace
+            from unittest.mock import MagicMock
+
+            agent_msg = SimpleNamespace(
+                type="agent",
+                created_at=datetime.now(timezone.utc),
+                enqueued_at=datetime.now(timezone.utc),
+            )
+            manager._queue_repository.get_by_instance = MagicMock(
+                return_value=[agent_msg]
+            )
+
+            result = await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        assert result["success"] is True
+        assert len(calls) == 1, (
+            f"Expected exactly one hook call on the success path, "
+            f"got {len(calls)}: {calls}"
+        )
+
+        call = calls[0]
+        assert call["task_succeeded"] is True
+
+        # POSITIVE contract: iterations and duration must be real.
+        # The regression being guarded against is the hardcoded 0/0
+        # that silently disabled the CAPTURED eligibility gate.
+        assert call["iterations"] >= 1, (
+            f"iterations must be a real count (>= 1 when the instance "
+            f"has agent messages), not the hardcoded 0 that silently "
+            f"trips the CAPTURED eligibility gate. Got "
+            f"iterations={call['iterations']!r}"
+        )
+        assert call["duration_seconds"] > 0, (
+            f"duration_seconds must be a real span (> 0 when the task "
+            f"has a created_at → completed_at interval), not the "
+            f"hardcoded 0 that silently trips the CAPTURED eligibility "
+            f"gate. Got duration_seconds={call['duration_seconds']!r}"
+        )
+
+    async def test_zero_iterations_when_no_agent_messages(
+        self, metrics_service, project_id
+    ):
+        """``_compute_iterations_and_duration`` returns 0 iterations cleanly.
+
+        Complement to ``test_iterations_and_duration_are_non_zero``:
+        when the instance's queue has NO ``type='agent'`` messages
+        (the ``_build_processor`` default), the iteration count is 0
+        and the duration is still derived from the timestamp delta.
+        This guards against a regression where the helper raises or
+        returns a sentinel value instead of the documented 0.
+
+        The duration is still > 0 because the harness sets
+        ``created_at = now - 2s``, so we only assert the iteration
+        contract here (the duration contract is covered by the
+        non-zero test above).
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-zero-iter"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(metrics_service)
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+            # Default: get_by_instance returns [] (no agent messages).
+            assert manager._queue_repository.get_by_instance.return_value == []
+
+            result = await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        assert result["success"] is True
+        assert len(calls) == 1
+        assert calls[0]["iterations"] == 0, (
+            "iterations must be 0 when the instance has no agent "
+            "messages on its queue"
+        )
+        # Duration is still derived from the timestamp delta.
+        assert calls[0]["duration_seconds"] > 0
