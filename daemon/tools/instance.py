@@ -1197,7 +1197,7 @@ Returns:
     tools.extend(todo_tool_list)
 
     # ── Question tools (per-instance user-pause-and-answer flow, always available) ──
-    # Mirrors the todo wiring above. The single ``question`` tool stores a
+    # Mirrors the todo wiring above. The single ``ask_questions`` tool stores a
     # QuestionPack, emits a ``question_pack`` SSE event, sets the pause flag,
     # and the conditional post-tools edge in ``daemon.graph`` routes the
     # graph to ``question_pause_node`` (which sets the deferred-pause

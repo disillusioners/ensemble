@@ -3,12 +3,12 @@
 Mirrors the closure-injection pattern of ``daemon.tools.todo_tools``:
 ``create_question_tools(manager, current_instance_id, live_event_hub)``
 is invoked from ``create_instance_tools`` to assemble the per-instance
-tool list. The single ``question`` tool delegates to
+tool list. The single ``ask_questions`` tool delegates to
 ``manager._question_manager`` for state and emits a ``question_pack``
 SSE event before setting the pause flag.
 
 Lifecycle:
-    1. Agent calls ``question(questions=[...])``.
+    1. Agent calls ``ask_questions(questions=[...])``.
     2. Tool stores the pack via ``QuestionManager.set_question_pack``
        (rejects duplicate pending packs — F8/F11).
     3. Tool emits ``question_pack`` SSE event with ``status="pending"``.
@@ -52,7 +52,7 @@ CATEGORY_DOC = """\
 Question tools for asking the user a batch of structured questions and
 pausing the instance until they answer.
 
-- question(questions): store a QuestionPack, emit ``question_pack`` SSE
+- ask_questions(questions): store a QuestionPack, emit ``question_pack`` SSE
   (status=pending), set the pause flag, and return a compaction-safe
   echo of the question text. The graph's conditional post-tools edge
   routes to ``question_pause_node`` which sets the deferred-pause
@@ -62,7 +62,7 @@ pausing the instance until they answer.
 The user submits answers through the Phase 2 answer API
 (``POST /api/instances/{id}/answer``), which resumes the instance and
 delivers the answers as a HumanMessage. Only one pack may be pending
-per instance — a second ``question`` call while a pack is still
+per instance — a second ``ask_questions`` call while a pack is still
 pending returns an error string.
 """
 
@@ -116,12 +116,12 @@ def create_question_tools(
             ``daemon.tools.todo_tools``).
 
     Returns:
-        A single-element list containing the ``question`` tool.
+        A single-element list containing the ``ask_questions`` tool.
     """
 
     @register_tool_category("question")
     @tool
-    async def question(questions: list[dict] | None = None) -> str:
+    async def ask_questions(questions: list[dict] | None = None) -> str:
         """Ask the user one or more questions; pause the instance until they answer.
 
         Each entry in ``questions`` is a dict with:
@@ -210,7 +210,7 @@ def create_question_tools(
             "The instance will pause until the user answers."
         )
 
-    question._full_doc_ = """\
+    ask_questions._full_doc_ = """\
 Ask the user one or more structured questions; pause the instance
 until they answer.
 
@@ -232,7 +232,7 @@ Lifecycle:
 
 Input shape::
 
-    question(questions=[
+    ask_questions(questions=[
         {
             "id": "approach",          # optional — auto-generated when missing
             "text": "Approach A or B?",
@@ -257,12 +257,12 @@ Returns:
 
 Edge cases:
   * Empty / missing ``questions`` → ``ERROR: ...`` returned.
-  * Second ``question`` call while a pack is still ``pending`` →
+  * Second ``ask_questions`` call while a pack is still ``pending`` →
     ``"Already have a pending question pack for this instance. Wait
     for answers before asking more."`` — at most one pending pack per
     instance.
-  * Once answered (Phase 2), the next ``question`` call replaces the
+  * Once answered (Phase 2), the next ``ask_questions`` call replaces the
     answered pack with a fresh pending pack.
 """
 
-    return [question]
+    return [ask_questions]

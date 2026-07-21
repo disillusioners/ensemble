@@ -2,7 +2,7 @@
 
 Mirrors the structure of ``tests/test_todo_tools.py``:
 
-  1. **Factory** — ``create_question_tools`` returns a single ``question``
+  1. **Factory** — ``create_question_tools`` returns a single ``ask_questions``
      tool tagged ``_tool_category == "question"``.
   2. **Invocation** — each test exercises the tool through
      ``await tool.coroutine(...)`` (langchain ``@tool`` contract).
@@ -71,7 +71,7 @@ def _make_manager() -> MagicMock:
 
 
 def _build_tool(manager: MagicMock | None = None, live_event_hub=None):
-    """Build the single ``question`` tool with default instance_id.
+    """Build the single ``ask_questions`` tool with default instance_id.
 
     Returns ``[question_tool]`` (the factory returns a list of one).
     """
