@@ -55,6 +55,9 @@ class InstanceInfo(BaseModel):
     created_at: datetime = Field(..., description="Instance creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
     pending_count: int | None = Field(default=None, description="Count of incomplete message jobs (READY + PROCESSING + RETRYING)")
+    pinned: bool | None = Field(default=None, description="Whether this instance is pinned in the UI (UI-only preference)")
+    color_tag: str | None = Field(default=None, description="UI color tag (e.g., 'red', 'blue', '#ff0000') for this instance (UI-only preference)")
+    pinned_at: datetime | None = Field(default=None, description="When this instance was pinned (UI-only preference)")
 
     model_config = ConfigDict(
         json_schema_extra={

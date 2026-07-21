@@ -81,6 +81,15 @@ from .dependency_bus.repository import DependencyWatcherRepository
 from .report_injection.models import ReportInjection, ReportInjectionState
 from .report_injection.repository import ReportInjectionRepository
 
+# Instance UI preferences (pin + color tag).
+# Imported here so ``SQLModel.metadata.create_all()`` registers the
+# ``instance_ui_prefs`` table. This is a brand-new table (not an
+# additive column), so ``create_all`` handles it on every backend
+# (fresh + existing) and no ``_ensure_postgres_columns`` entry is
+# needed.
+from .instance_ui_prefs.models import InstanceUiPrefs
+from .instance_ui_prefs.repository import InstanceUiPrefsRepository
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -180,6 +189,9 @@ __all__ = [
     "ReportInjection",
     "ReportInjectionState",
     "ReportInjectionRepository",
+    # Instance UI preferences (pin + color tag)
+    "InstanceUiPrefs",
+    "InstanceUiPrefsRepository",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",

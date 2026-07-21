@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -143,6 +144,53 @@ class AnswerRequest(BaseModel):
     )
 
 
+class InstanceUiPrefsUpdateRequest(BaseModel):
+    """Request body for ``PUT /api/instances/{id}/ui-prefs``.
+
+    Both fields are optional: pass only the ones you want to change.
+    At the repo layer (see
+    :meth:`daemon.repositories.instance_ui_prefs.InstanceUiPrefsRepository.upsert`),
+    a field whose value is ``None`` means "leave the existing value
+    unchanged" (no-op merge). Distinguishing "omit the field" from
+    "explicit ``null``" matters only at the API edge — the current
+    contract treats them identically (partial-update with the value
+    ``None`` preserved): passing ``{"color_tag": null}`` keeps the
+    existing color tag; the corresponding ``pinned_at`` side-effect
+    (set on True, clear on False, leave-alone on None) is documented
+    on the repo.
+    """
+
+    pinned: bool | None = Field(
+        default=None,
+        description=(
+            "Pin state. True pins, False unpins (clears pinned_at), "
+            "null leaves unchanged."
+        ),
+    )
+    color_tag: str | None = Field(
+        default=None,
+        description=(
+            "Color tag (e.g., 'red', '#ff0000'). null leaves "
+            "unchanged; pass a string to set / overwrite."
+        ),
+    )
+
+
+class InstanceUiPrefsResponse(BaseModel):
+    """Response shape for ``GET/PUT /api/instances/{id}/ui-prefs``.
+
+    Mirrors the ``instance_ui_prefs`` table. Note ``pinned`` is a
+    required field on the response (not nullable) — the row always
+    has a concrete boolean. ``pinned_at`` and ``color_tag`` are
+    nullable to reflect the un-pinned / no-tag state.
+    """
+
+    instance_id: str
+    pinned: bool
+    pinned_at: datetime | None
+    color_tag: str | None
+
+
 # Create router with /instances prefix
 router = APIRouter(prefix="/instances", tags=["instances"])
 
@@ -245,7 +293,7 @@ async def list_instances(
     # Input validation
     limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
-    
+
     instances_data, total = manager.list_instances(
         limit=limit,
         offset=offset,
@@ -253,8 +301,20 @@ async def list_instances(
         exclude_kb=exclude_kb,
         include_descendants=True,
     )
+
+    # Merge UI preferences (pin + color tag) into each InstanceInfo on
+    # this page. The repo stays generic — merging happens here at the
+    # API layer to keep agent tools insulated (``Instance.to_dict()``
+    # is NOT modified). The batch fetch issues a single SELECT against
+    # the ``instance_ui_prefs`` table with an ``IN (?, ?, ...)`` over
+    # the current page's IDs; rows the user has never touched are
+    # simply absent from the dict (the merge falls back to ``None``).
+    instance_ids = [inst["instance_id"] for inst in instances_data]
+    prefs_map = manager._instance_ui_prefs_repo.get_all(instance_ids)
+
     instances = []
     for inst in instances_data:
+        prefs = prefs_map.get(inst["instance_id"])
         instances.append(InstanceInfo(
             instance_id=inst["instance_id"],
             agent_id=inst["agent_id"],
@@ -267,6 +327,12 @@ async def list_instances(
             created_at=parse_utc_datetime(inst["created_at"]),
             updated_at=parse_utc_datetime(inst.get("updated_at")),
             project_id=inst.get("project_id"),
+            pinned=prefs.pinned if prefs else None,
+            color_tag=prefs.color_tag if prefs else None,
+            pinned_at=(
+                parse_utc_datetime(prefs.pinned_at)
+                if prefs and prefs.pinned_at else None
+            ),
         ))
     
     has_more = (offset + limit) < total
@@ -300,6 +366,8 @@ async def get_instance(
             ).model_dump()
         )
 
+    prefs = manager._instance_ui_prefs_repo.get(instance_id)
+
     return InstanceInfo(
         instance_id=instance_meta["instance_id"],
         agent_id=instance_meta["agent_id"],
@@ -313,6 +381,12 @@ async def get_instance(
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),
         pending_count=(await manager.get_queue_stats(instance_id)).get("pending_count"),
+        pinned=prefs.pinned if prefs else None,
+        color_tag=prefs.color_tag if prefs else None,
+        pinned_at=(
+            parse_utc_datetime(prefs.pinned_at)
+            if prefs and prefs.pinned_at else None
+        ),
     )
 
 
@@ -1215,3 +1289,82 @@ async def set_todo_comment(
             )
 
     return updated
+
+
+# ---------------------------------------------------------------------------
+# Instance UI preferences (pin + color tag) — separate table
+# ``instance_ui_prefs``; merge with ``GET /instances`` happens at this
+# router (the instances table itself stays insulated — see
+# :mod:`daemon.repositories.instance_ui_prefs`).
+# ---------------------------------------------------------------------------
+
+
+@router.put("/{instance_id}/ui-prefs", response_model=InstanceUiPrefsResponse)
+async def set_instance_ui_prefs(
+    instance_id: str,
+    body: InstanceUiPrefsUpdateRequest,
+    request: Request,
+) -> InstanceUiPrefsResponse:
+    """Set or replace UI-only preferences for an instance.
+
+    Request body: ``{"pinned": bool|null, "color_tag": str|null}``.
+    Both fields are optional; only the fields you pass are changed.
+    Pass ``null`` explicitly to keep a field unchanged (the repo's
+    "apply non-None fields" semantics).
+
+    The ``pinned_at`` timestamp is managed by the repo: setting
+    ``pinned=true`` stamps it; setting ``pinned=false`` clears it;
+    omitting / ``null``-ing ``pinned`` leaves it unchanged.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``503`` if the daemon is in write-paused mode (migration).
+    """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+    await _check_instance_exists(manager, instance_id)
+
+    prefs = manager._instance_ui_prefs_repo.upsert(
+        instance_id,
+        pinned=body.pinned,
+        color_tag=body.color_tag,
+    )
+    return InstanceUiPrefsResponse(
+        instance_id=prefs.instance_id,
+        pinned=prefs.pinned,
+        pinned_at=(
+            parse_utc_datetime(prefs.pinned_at) if prefs.pinned_at else None
+        ),
+        color_tag=prefs.color_tag,
+    )
+
+
+@router.delete("/{instance_id}/ui-prefs")
+async def delete_instance_ui_prefs(
+    instance_id: str,
+    request: Request,
+) -> dict:
+    """Delete UI-only preferences for an instance. Idempotent.
+
+    Returns ``{"deleted": bool}`` indicating whether a row was
+    removed (always ``true`` on success, ``false`` when no prefs row
+    existed). The instance itself is NOT deleted — only the UI prefs
+    row.
+
+    Errors:
+        * ``503`` if the daemon is in write-paused mode (migration).
+    """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+    deleted = manager._instance_ui_prefs_repo.delete(instance_id)
+    return {"deleted": deleted}

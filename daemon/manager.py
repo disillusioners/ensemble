@@ -46,6 +46,7 @@ from .repositories import (
     create_skill_ab_test_repository,
     create_skill_bank_repository,
     ReportInjectionRepository,
+    InstanceUiPrefsRepository,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -697,6 +698,14 @@ class InstanceManager:
         # ``SQLModel.metadata.create_all()`` (model registered via
         # ``daemon/repositories/__init__.py``).
         self._report_injection_repo = ReportInjectionRepository(engine=self._engine)
+
+        # Instance UI preferences (pin + color tag). Global-scope table
+        # keyed by instance_id; merge happens at the API router layer so
+        # the repository stays generic. Shares the engine with the
+        # other repos. The ``instance_ui_prefs`` table is created by
+        # ``SQLModel.metadata.create_all()`` (model registered via
+        # ``daemon/repositories/__init__.py``).
+        self._instance_ui_prefs_repo = InstanceUiPrefsRepository(engine=self._engine)
 
         # Fast-path hint set for the report-injection drain: holds the
         # parent instance ids that have at least one PENDING

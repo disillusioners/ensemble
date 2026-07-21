@@ -21,6 +21,7 @@ from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.dependency_bus.models import DependencyWatcher
 from daemon.repositories.source.models import InstanceMapping
+from daemon.repositories.instance_ui_prefs.models import InstanceUiPrefs
 
 logger = logging.getLogger(__name__)
 
@@ -801,7 +802,8 @@ class SQLModelInstanceRepository:
     def _cascade_instance_deps(db_session: SQLModelSession, instance_id: str) -> None:
         """Delete all dependent records for an instance (except the instance itself).
 
-        Order: JobWatcher → Task → Event → MessageQueue → InstanceHierarchy (parent) → InstanceHierarchy (child).
+        Order: JobWatcher → Task → Event → MessageQueue → InstanceUiPrefs →
+        InstanceHierarchy (parent) → InstanceHierarchy (child).
         JobWatcher must come first since it has a real FK to instances.instance_id.
         Does NOT commit — the caller handles the commit.
         """
@@ -820,6 +822,10 @@ class SQLModelInstanceRepository:
         # MessageQueue
         db_session.exec(
             sql_delete(MessageQueue).where(MessageQueue.instance_id == instance_id)
+        )
+        # InstanceUiPrefs
+        db_session.exec(
+            sql_delete(InstanceUiPrefs).where(InstanceUiPrefs.instance_id == instance_id)
         )
         # InstanceHierarchy where instance is parent
         db_session.exec(
@@ -897,6 +903,16 @@ class SQLModelInstanceRepository:
            parent and child sides in a single statement so the cascade is
            symmetric (a tree root has no parent link; a tree leaf has no
            child link).
+        9b. ``instance_ui_prefs`` — keyed by ``instance_id``. Logical FK
+           via ``instance_id`` (no DB-level FK declared; the model lives
+           in a separate repository package to keep the agent-tool's
+           ``Instance`` model insulated from UI-only fields). MUST be
+           cleaned before the matching ``instances`` rows go; otherwise
+           the prefs rows become orphans pointing at non-existent
+           instance IDs (no formal DB FK means SQLite/PG silently keep
+           them, but they then re-surface in the next
+           ``GET /instances`` as orphan rows the merge step would
+           silently swallow).
         10. ``instances`` — last; every dependent row above must be gone.
 
         All ten DELETEs run inside a single ``SQLModelSession`` so a
@@ -939,6 +955,7 @@ class SQLModelInstanceRepository:
                         "dependency_watchers": int,
                         "instance_mappings": int,
                         "instance_hierarchy": int,
+                        "instance_ui_prefs": int,
                         "instances": int,
                     },
                 }
@@ -962,6 +979,7 @@ class SQLModelInstanceRepository:
                     "dependency_watchers": 0,
                     "instance_mappings": 0,
                     "instance_hierarchy": 0,
+                    "instance_ui_prefs": 0,
                     "instances": 0,
                 },
             }
@@ -1074,6 +1092,21 @@ class SQLModelInstanceRepository:
                 )
             ).rowcount or 0
 
+            # 9b. instance_ui_prefs — keyed by ``instance_id``.
+            # Logical FK via ``instance_id`` (no DB-level FK declared
+            # on the model because the ``instance_ui_prefs`` package
+            # is separate to keep the agent-tool's ``Instance`` model
+            # insulated from UI-only fields). MUST be cleaned before
+            # the matching ``instances`` rows go; otherwise the prefs
+            # rows become orphans pointing at non-existent instance
+            # IDs and silently re-surface in the next ``GET`` /
+            # ``list_instances`` as rows the merge step swallows.
+            ui_prefs_count = db_session.exec(
+                sql_delete(InstanceUiPrefs).where(
+                    col(InstanceUiPrefs.instance_id).in_(ids)
+                )
+            ).rowcount or 0
+
             # 10. instances — last. Single bulk DELETE so the planner
             # can issue one statement instead of N round-trips.
             instances_result = db_session.exec(
@@ -1086,8 +1119,8 @@ class SQLModelInstanceRepository:
             logger.info(
                 "hard_delete_tree: removed instances=%d, hierarchy=%d, "
                 "watchers=%d, jobs=%d, locks=%d, tasks=%d, events=%d, "
-                "msgq=%d, dep_watchers=%d, instance_mappings=%d "
-                "(tree_size=%d)",
+                "msgq=%d, dep_watchers=%d, instance_mappings=%d, "
+                "ui_prefs=%d (tree_size=%d)",
                 instances_count,
                 hierarchy_count,
                 watchers_count,
@@ -1098,6 +1131,7 @@ class SQLModelInstanceRepository:
                 msgq_count,
                 dep_watchers_count,
                 instance_mappings_count,
+                ui_prefs_count,
                 len(ids),
             )
 
@@ -1114,6 +1148,7 @@ class SQLModelInstanceRepository:
                     "dependency_watchers": int(dep_watchers_count),
                     "instance_mappings": int(instance_mappings_count),
                     "instance_hierarchy": int(hierarchy_count),
+                    "instance_ui_prefs": int(ui_prefs_count),
                     "instances": int(instances_count),
                 },
             }
