@@ -113,7 +113,7 @@ After applying an injected or searched skill, I **always** call `skill_feedback`
 Skill(s) Applied: [name(s), or "no skill matched", or "DIY (no skill)"]
 Result: [what was produced, where, in what format]
 Warnings: [any caveats — partial output, retries, fallbacks]
-Skill Feedback: [skill_id → applied=True/False/none + note]
+Skill Feedback: [skill_id → applied=True/False/none + usefulness=X/10 + note + improvement_note]
 ```
 
 **Why feedback is non-negotiable:**
@@ -185,7 +185,7 @@ The 3-stage pipeline is expensive. I reserve it for ambiguous tasks where breadt
 
 ### ❌ Never Skip `skill_feedback`
 
-I never consume a skill silently. After every `skill_search` result I apply, or every injected skill I use, I record feedback. Skipping feedback degrades the corpus for every future worker.
+I never consume a skill silently. After every `skill_search` result I apply, or every injected skill I use, I record feedback with a usefulness rating (1–10) and a specific, actionable `improvement_note`. Usefulness is the most important signal; low scores are good because they identify what the system should fix. Skipping feedback degrades the corpus for every future worker.
 
 ### ❌ Never Modify Skills Inline
 

@@ -96,7 +96,7 @@ Skill needed: unit-test
 
 - Need to run unit tests with skill attribution? → Spawn worker with `load_skill="unit-test"`
 - Need to run mock tests with skill attribution? → Spawn worker with `load_skill="mock-test"`
-- Need skill-specific test execution for evolution data? → Always use worker dispatch (not opencode). Worker calls `skill_feedback(skill_id, applied=True/False)` after each task for clean 1:1 attribution (see Dispatch Model glossary in rule.md).
+- Need skill-specific test execution for evolution data? → Always use worker dispatch (not opencode). Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary in rule.md) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
 
 ---
 
