@@ -92,13 +92,14 @@
     class="instance-item"
     [class.active]="isActive"
     [class.has-children]="hasChildren"
+    [class.pinned]="isPinned(instance)"
     [style.padding-left.px]="16 + depth * 16"
   >
     <div class="instance-content">
       <div class="instance-info">
         @if (hasChildren) {
-          <button 
-            class="toggle-btn" 
+          <button
+            class="toggle-btn"
             (click)="toggleExpand(instance.instance_id, $event)"
             [title]="expanded ? 'Collapse' : 'Expand'"
           >
@@ -116,18 +117,46 @@
               [style.background-color]="getStatusStyle(instance.status).color"
               [title]="instance.status"
             ></span>
+            <!-- Color tag square: opens a mat-menu picker on click.
+                 Shows the user-selected color, or a faint placeholder
+                 outline when no tag is set so the affordance stays
+                 discoverable. ``stopPropagation`` prevents the row's
+                 routerLink from firing on the same click. -->
+            <span
+              class="color-tag"
+              [class.has-color]="!!instance.color_tag"
+              [style.background-color]="instance.color_tag || 'transparent'"
+              [title]="instance.color_tag ? ('Color tag: ' + instance.color_tag) : 'Set color tag'"
+              [matMenuTriggerFor]="colorMenu"
+              (click)="$event.stopPropagation()"
+              (contextmenu)="$event.preventDefault(); $event.stopPropagation()"
+              #colorTagTrigger
+            ></span>
           </p>
           <p class="instance-id">{{ instance.title || getInstanceIdShort(instance.instance_id) }}</p>
         </div>
       </div>
-      
+
       <div class="instance-meta">
         <span class="timestamp">
           {{ formatDate(instance.created_at) }}
         </span>
       </div>
     </div>
-    
+
+    <!-- Pin toggle (always visible; right:72px in SCSS). Uses the
+         same opacity-on-hover convention as pause/terminate so the
+         cluster stays calm until the user reaches for the row. -->
+    <button
+      class="pin-btn"
+      [class.pinned]="isPinned(instance)"
+      (click)="onTogglePin(instance.instance_id, instance.pinned, $event)"
+      [title]="isPinned(instance) ? 'Unpin instance' : 'Pin instance to top'"
+      [attr.aria-pressed]="isPinned(instance)"
+    >
+      <mat-icon>push_pin</mat-icon>
+    </button>
+
     <!-- Pause/Resume button -->
     @if (instance.status === 'running' || instance.status === 'waiting_children' || instance.status === 'queued') {
       <button
@@ -146,7 +175,7 @@
         <mat-icon>play_arrow</mat-icon>
       </button>
     }
-    
+
     @if (!instance.parent_id) {
       <!-- Terminate button -->
       <button
@@ -158,6 +187,38 @@
       </button>
     }
   </a>
+
+  <!-- Color picker popup. Triggered by the .color-tag square above.
+       Mirrors the notification-bell pattern: a ``mat-menu`` whose
+       contents are a grid of swatches plus a "Remove" entry that
+       clears the tag. ``stopPropagation`` on menu clicks keeps the
+       parent <a> from also interpreting them as navigation. -->
+  <mat-menu #colorMenu="matMenu" class="color-tag-menu">
+    <ng-template matMenuContent>
+      <div class="color-tag-picker" (click)="$event.stopPropagation()">
+        <div class="color-tag-grid">
+          @for (color of colorOptions; track color.value) {
+            <button
+              type="button"
+              class="color-swatch"
+              [style.background-color]="color.value"
+              [title]="color.name"
+              [attr.aria-label]="'Set color tag to ' + color.name"
+              (click)="onSelectColorTag(instance.instance_id, color.value, $event)"
+            ></button>
+          }
+        </div>
+        <button
+          type="button"
+          class="color-clear-btn"
+          (click)="onSelectColorTag(instance.instance_id, null, $event)"
+        >
+          <mat-icon>close</mat-icon>
+          <span>Remove color</span>
+        </button>
+      </div>
+    </ng-template>
+  </mat-menu>
 
   <!-- Render children recursively when expanded -->
   @if (hasChildren && expanded) {

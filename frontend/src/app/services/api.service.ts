@@ -108,6 +108,28 @@ export class ApiService {
     });
   }
 
+  // UI preferences (pinned + color tag).
+  //
+  // Body fields are independent: the caller may send only ``pinned``,
+  // only ``color_tag``, or both. The backend applies a partial update
+  // so any field omitted from the body keeps its current value.
+  updateInstanceUiPrefs(
+    instanceId: string,
+    body: { pinned?: boolean | null; color_tag?: string | null },
+  ): Observable<{ instance_id: string; pinned: boolean | null; pinned_at: string | null; color_tag: string | null }> {
+    return this.http.put<{
+      instance_id: string;
+      pinned: boolean | null;
+      pinned_at: string | null;
+      color_tag: string | null;
+    }>(`${this.API_BASE}/instances/${instanceId}/ui-prefs`, body);
+  }
+
+  // Clear all UI preferences (pinned + color_tag) for an instance.
+  resetInstanceUiPrefs(instanceId: string): Observable<DeleteResponse> {
+    return this.http.delete<DeleteResponse>(`${this.API_BASE}/instances/${instanceId}/ui-prefs`);
+  }
+
   // Messages
   sendMessage(instanceId: string, content: string, images?: string[]): Observable<MessageResponse> {
     const body = images?.length ? { content, images } : { content };

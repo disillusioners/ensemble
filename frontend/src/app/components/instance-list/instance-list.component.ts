@@ -4,10 +4,12 @@ import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatDialog } from '@angular/material/dialog';
 import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
 import { InstanceService } from '../../services/instance.service';
+import { InstancePrefsService, COLOR_OPTIONS } from '../../services/instance-prefs.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceDeleteDialogComponent, InstanceDeleteDialogData } from '../instance-delete-dialog/instance-delete-dialog.component';
 
@@ -16,15 +18,58 @@ export interface InstanceTreeNode {
   children: InstanceTreeNode[];
 }
 
+/**
+ * In-place stable sort for a tree level. Pinned rows come first,
+ * ordered by ``pinned_at`` DESC (most recently pinned wins ties).
+ * Unpinned rows follow, ordered by ``created_at`` DESC (newest first).
+ * Recurses into ``children`` so the rule applies at every level.
+ *
+ * ``pinned_at`` is preferred over ``created_at`` for pinned rows so
+ * a user can pin an old instance and have it float above a newly
+ * created unpinned one (it also floats above newer pinned rows until
+ * the user pins them too).
+ */
+function sortNodesPinnedFirst(nodes: InstanceTreeNode[]): void {
+  nodes.sort((a, b) => {
+    const aPinned = a.instance.pinned === true;
+    const bPinned = b.instance.pinned === true;
+
+    if (aPinned !== bPinned) {
+      // Pinned group always wins.
+      return aPinned ? -1 : 1;
+    }
+
+    if (aPinned) {
+      // Both pinned: most recent pinned_at first.
+      const aTime = a.instance.pinned_at ? new Date(a.instance.pinned_at).getTime() : 0;
+      const bTime = b.instance.pinned_at ? new Date(b.instance.pinned_at).getTime() : 0;
+      if (aTime !== bTime) return bTime - aTime;
+    }
+
+    // Same group + same primary key: fall back to created_at DESC.
+    const aCreated = a.instance.created_at ? new Date(a.instance.created_at).getTime() : 0;
+    const bCreated = b.instance.created_at ? new Date(b.instance.created_at).getTime() : 0;
+    return bCreated - aCreated;
+  });
+
+  // Recurse so the rule holds at every depth.
+  for (const node of nodes) {
+    if (node.children.length > 0) {
+      sortNodesPinnedFirst(node.children);
+    }
+  }
+}
+
 @Component({
   selector: 'app-instance-list',
   standalone: true,
-  imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule, AgentSwitcherComponent],
+  imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule, MatMenuModule, AgentSwitcherComponent],
   templateUrl: './instance-list.html',
   styleUrl: './instance-list.scss'
 })
 export class InstanceListComponent implements AfterViewInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
+  protected readonly prefsService = inject(InstancePrefsService);
   private readonly tabStateService = inject(TabStateService);
   private readonly dialog = inject(MatDialog);
 
@@ -60,13 +105,20 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     this.isScrolledByUser = this.scrollTop > 0;
   };
 
-  // Build tree structure from flat instance list
+  // Build tree structure from flat instance list.
+  //
+  // Ordering: at each level (roots AND children) pinned instances appear
+  // before unpinned ones. Within each group we sort by ``pinned_at`` DESC
+  // for pinned (most recently pinned wins) and ``created_at`` DESC for
+  // unpinned (newest first). This keeps existing tree-building logic
+  // (parent-child via ``parent_id``, Map-based node lookup) intact and
+  // only changes the final sort.
   readonly instanceTree = computed(() => {
     const instances = this.instances();
     if (!instances?.length) return [];
 
     const instanceMap = new Map<string, InstanceTreeNode>();
-    
+
     // Create nodes for all instances
     instances.forEach(instance => {
       instanceMap.set(instance.instance_id, { instance, children: [] });
@@ -83,6 +135,11 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
         rootNodes.push(node);
       }
     });
+
+    // Apply pinned-first ordering at every level (mutates the children
+    // arrays we just built; safe because each node has exactly one
+    // owner at this point).
+    sortNodesPinnedFirst(rootNodes);
 
     return rootNodes;
   });
@@ -259,6 +316,43 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined).finally(() => {
       this.isRefreshing.set(false);
     });
+  }
+
+  /**
+   * Pin / unpin handler. ``stopPropagation`` keeps the row's
+   * ``routerLink`` navigation from firing on the same click; the
+   * InstancePrefsService does an optimistic local update + backend
+   * PUT, and rolls back if the server rejects.
+   */
+  onTogglePin(instanceId: string, currentPinned: boolean | null | undefined, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    // Subscribe to the cold Observable so the HTTP PUT actually fires and
+    // the service's `tap` reconciliation / `catchError` rollback run. The
+    // service swallows errors via `catchError(() => EMPTY)`, so a bare
+    // `.subscribe()` is safe — the rollback already mutated the signal
+    // before the empty completion.
+    this.prefsService.setPin(instanceId, !(currentPinned === true)).subscribe();
+  }
+
+  /**
+   * Apply a color picked from the mat-menu swatch grid. ``null``
+   * clears the tag (used by the "Remove" entry in the menu).
+   */
+  onSelectColorTag(instanceId: string, color: string | null, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    // Subscribe so the optimistic PUT actually fires; the service handles
+    // reconcile + rollback internally and swallows errors with EMPTY.
+    this.prefsService.setColorTag(instanceId, color).subscribe();
+  }
+
+  /** Color swatch palette surfaced to the template. */
+  protected readonly colorOptions = COLOR_OPTIONS;
+
+  /** Convenience predicate for the template's pinned styling. */
+  isPinned(instance: InstanceInfo): boolean {
+    return instance.pinned === true;
   }
 
   private saveScrollPosition(): void {

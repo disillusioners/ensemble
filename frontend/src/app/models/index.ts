@@ -11,6 +11,14 @@ export interface InstanceInfo {
   title?: string | null;
   created_at: string;
   updated_at: string | null;
+  // UI preferences (pinned + color tag). Optional because older
+  // backend responses may omit them; the InstancePrefsService writes
+  // through PUT /api/instances/{id}/ui-prefs and reads them via
+  // GET /api/instances. ``pinned_at`` is set server-side when ``pinned``
+  // flips true and used for pinned-first ordering at the same level.
+  pinned?: boolean | null;
+  color_tag?: string | null;
+  pinned_at?: string | null;
 }
 
 export interface InstanceListResponse {

@@ -219,7 +219,8 @@
     background-color: rgba(30, 41, 59, 0.5);
 
     .pause-btn,
-    .terminate-btn {
+    .terminate-btn,
+    .pin-btn {
       opacity: 1;
     }
   }
@@ -233,6 +234,15 @@
     .agent-name {
       font-weight: 600;
     }
+  }
+
+  // Pinned rows get a subtle left accent so the user can scan for
+  // them at a glance without competing with the active-row border.
+  // ``box-shadow`` inset (rather than a real ``border-left``) avoids
+  // shifting the row's content by 2px, which would desync the
+  // depth-based padding applied inline on the <a>.
+  &.pinned {
+    box-shadow: inset 2px 0 0 0 #f59e0b;
   }
 }
 
@@ -319,6 +329,34 @@
 
   &:hover {
     transform: scale(1.2);
+  }
+}
+
+// Color-tag swatch: a small square next to the status dot. Same
+// 8x8 footprint as the dot but ``border-radius: 2px`` (square). When
+// no color is set we draw a faint outline so the affordance stays
+// discoverable; the user can still click it to open the picker.
+.color-tag {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-sizing: border-box;
+
+  // Empty state: faint outlined placeholder so users see the affordance.
+  // Uses inset ``box-shadow`` instead of ``border`` so the square stays
+  // exactly 8x8 (border would shrink the inner visible area to 6x6
+  // because ``box-sizing: border-box`` is in effect).
+  &:not(.has-color) {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+    background-color: transparent !important;
+  }
+
+  &:hover {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
   }
 }
 
@@ -410,6 +448,57 @@
   }
 }
 
+// Pin toggle. Same shape/size as pause/terminate but kept at a fixed
+// opacity (not hover-faded) so the current pinned state is always
+// visible — the user shouldn't need to hover the row to see whether
+// it's pinned.
+.pin-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background-color: rgba(15, 23, 42, 0.6);
+  color: #64748b;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.2s ease;
+
+  &:hover {
+    background-color: rgba(245, 158, 11, 0.18);
+    color: #f59e0b;
+    opacity: 1;
+  }
+
+  // Pinned state: more prominent (filled icon, full opacity, warm
+  // tint) so the row's pinned-ness reads even without hover.
+  &.pinned {
+    opacity: 1;
+    background-color: rgba(245, 158, 11, 0.18);
+    color: #f59e0b;
+
+    // push_pin has both an outlined and a filled glyph; the filled
+    // variant is more emphatic when pinned. ``font-variation-settings``
+    // is the Material Symbols way to do this; ``FILL`` 1 = filled.
+    mat-icon {
+      font-variation-settings: 'FILL' 1, 'wght' 600, 'GRAD' 0, 'opsz' 24;
+    }
+  }
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    // Default (unpinned) state uses the outlined variant of push_pin.
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+}
+
 .load-more-container {
   padding: 12px 16px;
   display: flex;
@@ -450,6 +539,78 @@
   border-top-color: #94a3b8;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+// Color-tag picker popup (rendered inside a ``mat-menu``).
+// Lives in the CDK overlay so we deliberately scope under
+// ::ng-deep to pierce the menu's view-encapsulated DOM.
+::ng-deep .color-tag-menu {
+  .mat-mdc-menu-content {
+    padding: 0 !important;
+  }
+}
+
+.color-tag-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  min-width: 180px;
+  background-color: #1e293b;
+  color: #cbd5e1;
+}
+
+.color-tag-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+
+  &:hover {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.2);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px #3b82f6;
+  }
+}
+
+.color-clear-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  background-color: transparent;
+  color: #94a3b8;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    background-color: rgba(244, 63, 94, 0.1);
+    color: #f43f5e;
+  }
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
 }
 
 @keyframes spin {
