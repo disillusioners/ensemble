@@ -1,48 +1,45 @@
-# ensure.md Validation Lessons — skill_feedback upgrade (2026-07-21)
+# LESSONS — ensure.md Validation: Skill Completion Counter Bugfix
 
-**Outcome:** Clean PASS. No failures, no contradictions. This document records
-the validation approach for future reference.
+- **Date:** 2026-07-21
+- **Commit:** `02794c1f`
+- **Outcome:** ✅ All in-scope requirements PASS. No failures, no contradictions, no quick fixes needed.
 
-## What was validated
-Scoped ensure.md requirements for the `feature/skill-feedback-upgrade` change
-set (commit `da5ef6ee`). The key async-conversion concern was that
-`skill_trigger_engine.py` had three methods converted from sync to async
-(`_eval_low_usefulness`, `_evaluate_condition`, `_build_reason`) with DB repo
-calls wrapped in `asyncio.to_thread`.
+## Notable Findings
 
-## Pattern: static-check validation for async-conversion safety
+### 1. Blast-radius OUT-OF-SCOPE determination is valid for additive, non-locking hooks
 
-When a change converts sync methods to async and wraps DB calls in
-`asyncio.to_thread`, the critical safety invariants are:
+The `concurrency_atomic_unit_test` requirement (Critical, always-on) was assessed as **OUT OF SCOPE** for this change. The change adds a fire-and-soft-fail metrics hook (`_record_metrics_for_task`) to `ProcessMessageProcessor`. Validation lesson: an additive async hook that
 
-1. **Every DB repo call inside an async method is wrapped** — grep for
-   `_repo.` / `self.<name>_repo.` patterns and confirm each is inside an
-   `await asyncio.to_thread(...)` block (or runs in a closure passed to it).
-2. **Every caller awaits the converted function** — grep for the function name
-   and confirm each call site is preceded by `await`.
-3. **No dead code** — the converted functions are still called (covered by #2).
+- fires **outside** any held lock (after `pipeline.execute()` / `execution_gate.run()` returns),
+- wraps all sync DB helpers in `asyncio.to_thread`, and
+- swallows its own exceptions
 
-This is a fast, read-only validation that complements (but does not replace)
-the `concurrency_atomic_unit_test` pack when the change touches concurrency code.
-For this change set, concurrency/atomic code was NOT touched — only the trigger
-engine — so the static check was sufficient and the heavy pack was correctly
-out of scope.
+introduces **no concurrency/lock interaction** and can be excluded from `concurrency_atomic_unit_test` via static analysis alone — no pack run needed. This mirrors the ensure.md skill's guidance: "Prefer static checks (grep/read) over pytest where the requirement is a static property."
 
-## Grep recipe used
-```bash
-# R2: confirm all DB calls wrapped
-grep -n "asyncio.to_thread\|\.get_avg_usefulness\|skill_repo.get\|usage_repo\." daemon/services/skill_trigger_engine.py
-# broader: catch any repo call
-grep -n "_repo\.\|self\.trigger_repo\|self\.skill_repo\|self\.metrics_service\." daemon/services/skill_trigger_engine.py
+The static analysis chain that proved it:
+- `ProcessMessageProcessor.process()` calls `await self._pipeline.execute(...)` (task_processor.py:317)
+- `MessageProcessingPipeline.execute()` calls `self._execution_gate.run(...)` (message_processing_pipeline.py:413) — gate lock acquired/released **inside** this call
+- `on_success` callback invoked at pipeline line 491-493 — **after** the gate run and all post-turn stages
+- Failure-path hooks in `process()`'s try/except fire after `execute()` raises/returns — gate already released
 
-# R3: confirm all callers await
-grep -n "_eval_low_usefulness\|_evaluate_condition\|_build_reason\|await " daemon/services/skill_trigger_engine.py
-```
+**Reusable for future validations:** when a change is purely an additive async hook with no lock acquisition and full exception swallowing, the concurrency requirement can be discharged by reading the call-site context rather than running the pack.
 
-Both must be paired with line-context reading — grep alone can miss a call that
-spans multiple lines or runs inside a closure. The `_list_skills` closure pattern
-(L273-276) is a good example: the repo call is on L274 but the wrapping is on L276.
+### 2. The `process_message_metrics` test file is NOT yet a PACKS.md entry
 
-## No issues found
-All repo calls wrapped. All callers await. No dead code. No contradictions with
-ensure.md requirements.
+The new test file `tests/services/test_process_message_metrics.py` (9 tests) is covered by the in-scope Req1 but does not have its own row in `.agents/tester/PACKS.md`. Currently it would be picked up by `skill_services_unit_test`'s glob `tests/services/test_skill_*.py` — but its filename (`test_process_message_metrics.py`) does **not** match that glob (`test_skill_*`).
+
+**Action item (not blocking):** Consider either (a) renaming to `test_skill_process_message_metrics.py` so it falls under the existing `skill_services_unit_test` pack glob, or (b) adding a dedicated `process_message_metrics` row to PACKS.md. Without one of these, future scoped runs targeting "skill metrics" may miss this file. Flagged for the tester/leader to decide; not a failure of this change.
+
+### 3. Static checks suffice for async/await and dead-code requirements
+
+Requirements 3 (no sync DB calls on event loop), 5 (callers properly await), and 6 (no dead code) were all discharged by grep + targeted reads — zero pytest invocations. The 3 hook call sites (lines 382, 396, 747) and the two new methods (`_record_metrics_for_task`, `_compute_iterations_and_duration`) are all `async def`, all awaited, and all reachable. This is the intended pattern per ensure.md: "static file check — fast, no pytest."
+
+## No Failures / No Contradictions
+
+- No requirement failed.
+- No ensure.md method contradicted tester optimization rules (no bare `pytest`, no `-x`, no unbounded suite).
+- No quick fixes were needed or applied.
+
+## Verdict
+
+The change is clean from an ensure.md standpoint. Safe to merge.
