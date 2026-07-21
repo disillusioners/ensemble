@@ -609,3 +609,67 @@ class TestSkillFeedbackToolPhase5RoundTrip:
         assert record is not None
         assert record.feedback_usefulness == 9
         assert record.feedback_improvement == "Add timeout checklist example"
+
+
+# ─── Phase 5: usefulness boundary coverage (2026-07-21) ────────────────────
+
+
+class TestSkillFeedbackUsefulnessBoundaries:
+    """Pin the inclusive 1-10 range boundaries for ``usefulness``.
+
+    The existing :class:`TestSkillFeedbackToolPhase5Params` covers
+    out-of-range rejection (``0`` and ``11``), the valid middle
+    (``7``), and type-rejection (non-int, ``bool``). These tests
+    explicitly cover the two boundary values the existing suite
+    only implied — ``1`` (lowest valid) and ``10`` (highest
+    valid). Both must be accepted and forwarded verbatim to the
+    metrics service.
+    """
+
+    @pytest.mark.asyncio
+    async def test_usefulness_one_accepted(self):
+        """``usefulness=1`` (the lowest valid rating) is accepted —
+        no ``ERROR:`` string, and the service is called with the
+        exact value."""
+        metrics = MagicMock()
+        metrics.record_feedback = AsyncMock(return_value=True)
+        manager = _build_manager(metrics_service=metrics)
+        tools = create_skill_tools(manager, current_instance_id="inst-tool")
+        feedback = _find_tool(tools, "skill_feedback")
+
+        result = await feedback.ainvoke(
+            {"skill_id": "abc-12345", "applied": True, "usefulness": 1}
+        )
+
+        # No error string in the response — boundary is accepted.
+        assert not result.startswith("ERROR:")
+        assert "Feedback recorded" in result
+        assert "Usefulness: 1/10" in result
+        # Service called with the exact value.
+        metrics.record_feedback.assert_awaited_once()
+        kwargs = metrics.record_feedback.await_args.kwargs
+        assert kwargs["usefulness"] == 1
+
+    @pytest.mark.asyncio
+    async def test_usefulness_ten_accepted(self):
+        """``usefulness=10`` (the highest valid rating) is accepted —
+        no ``ERROR:`` string, and the service is called with the
+        exact value."""
+        metrics = MagicMock()
+        metrics.record_feedback = AsyncMock(return_value=True)
+        manager = _build_manager(metrics_service=metrics)
+        tools = create_skill_tools(manager, current_instance_id="inst-tool")
+        feedback = _find_tool(tools, "skill_feedback")
+
+        result = await feedback.ainvoke(
+            {"skill_id": "abc-12345", "applied": True, "usefulness": 10}
+        )
+
+        # No error string in the response — boundary is accepted.
+        assert not result.startswith("ERROR:")
+        assert "Feedback recorded" in result
+        assert "Usefulness: 10/10" in result
+        # Service called with the exact value.
+        metrics.record_feedback.assert_awaited_once()
+        kwargs = metrics.record_feedback.await_args.kwargs
+        assert kwargs["usefulness"] == 10

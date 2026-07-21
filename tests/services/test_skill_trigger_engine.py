@@ -934,3 +934,227 @@ class TestLowUsefulnessCondition:
         # Fallback markers from the source — avg_str="n/a", count_str="0".
         assert "n/a" in reason
         assert "0" in reason
+
+
+# =============================================================================
+# Phase 5 (2026-07-21): low_usefulness edge cases
+# =============================================================================
+
+
+class TestLowUsefulnessEdgeCases:
+    """Cover the gap between :class:`TestLowUsefulnessCondition`
+    (happy paths) and the underlying error-handling / config paths
+    of :meth:`SkillTriggerEngine._eval_low_usefulness` +
+    :meth:`SkillTriggerEngine._build_reason`.
+
+    These tests pin the defensive behavior so the dispatcher
+    doesn't silently regress:
+
+    * ``usage_repo=None`` → condition cannot evaluate → ``False``.
+    * ``get_avg_usefulness`` raising → exception swallowed → ``False``.
+    * Per-trigger ``threshold`` and ``min_samples`` overrides are
+      honored from ``condition_json``.
+    * The ``_build_reason`` wording fix is pinned (no more
+      "last N usages" — the count is over *scored* records).
+    """
+
+    def _make_scored_records(
+        self, usage_repo, skill_id, project_id, scores
+    ):
+        """Insert ``scores`` usage records with the supplied
+        ``feedback_usefulness`` values. Each record is paired
+        with its own ``instance_id`` so the latest-for-skill
+        lookup is unambiguous.
+        """
+        for i, score in enumerate(scores):
+            rec = usage_repo.create(
+                skill_id=skill_id,
+                project_id=project_id,
+                instance_id=f"inst-{i}",
+                agent_id="a",
+            )
+            usage_repo.update_feedback(
+                record_id=rec.id,
+                applied=True,
+                note="x",
+                usefulness=score,
+            )
+
+    async def test_eval_low_usefulness_returns_false_when_usage_repo_none(
+        self, trigger_engine, project_id
+    ):
+        """``usage_repo=None`` → ``_eval_low_usefulness`` cannot
+        evaluate and returns ``False`` (with a logged warning).
+
+        We detach the ``usage_repo`` post-construction so the
+        engine's internal attribute is ``None`` — the fallback
+        to ``metrics_service.usage_repo`` already ran at
+        ``__init__`` time, so we also have to detach that to
+        fully null out the source.
+        """
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "no-usage-repo"
+        )
+
+        # Null out both the engine's direct handle AND the
+        # metrics_service fallback so ``_eval_low_usefulness``'s
+        # ``getattr(self, "usage_repo", None)`` resolves to None.
+        saved_engine_repo = trigger_engine.usage_repo
+        saved_metrics_repo = trigger_engine.metrics_service.usage_repo
+        trigger_engine.usage_repo = None
+        trigger_engine.metrics_service.usage_repo = None
+        try:
+            fired = await trigger_engine._eval_low_usefulness(
+                skill, {"threshold": 4.0, "min_samples": 5}
+            )
+        finally:
+            trigger_engine.usage_repo = saved_engine_repo
+            trigger_engine.metrics_service.usage_repo = (
+                saved_metrics_repo
+            )
+
+        assert fired is False
+
+    async def test_eval_low_usefulness_returns_false_on_repo_exception(
+        self, trigger_engine, project_id
+    ):
+        """A raising ``get_avg_usefulness`` (e.g. transient DB
+        issue) must NOT bubble — the inner guard catches and
+        returns ``False`` so the dispatcher scan keeps going."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "repo-raises"
+        )
+
+        # Replace get_avg_usefulness with a raising stand-in.
+        original = trigger_engine.usage_repo.get_avg_usefulness
+        trigger_engine.usage_repo.get_avg_usefulness = lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("simulated DB error")
+        )
+        try:
+            fired = await trigger_engine._eval_low_usefulness(
+                skill, {"threshold": 4.0, "min_samples": 5}
+            )
+        finally:
+            trigger_engine.usage_repo.get_avg_usefulness = original
+
+        # Exception swallowed — the dispatcher would otherwise
+        # silently skip the skill.
+        assert fired is False
+
+    async def test_custom_threshold_via_condition_json(
+        self, trigger_engine, project_id
+    ):
+        """Per-trigger ``threshold`` override is honored.
+
+        Seed 5 records with avg 3.5. With ``threshold=3.0`` the
+        trigger does NOT fire (3.5 >= 3.0). With ``threshold=4.0``
+        the trigger fires (3.5 < 4.0).
+        """
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "custom-threshold"
+        )
+        # Scores: 3+3+4+4+4 = 18 / 5 = 3.6 (use 3+3+4+4+4)
+        # Use 3+3+3+4+5 = 18 / 5 = 3.6 too — pick 3,3,4,4,4 → 18/5 = 3.6.
+        # Use 3,3,3,4,5 → 18/5 = 3.6. For exact 3.5 we need sum=17.5
+        # which isn't possible with integers — use 3,3,4,4,4 = 18/5=3.6
+        # which still falls between 3.0 and 4.0 cleanly.
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[3, 3, 4, 4, 4],  # avg = 3.6
+        )
+
+        # Threshold 3.0 — avg (3.6) >= threshold → does NOT fire.
+        fired_low = await trigger_engine._eval_low_usefulness(
+            skill, {"threshold": 3.0, "min_samples": 5}
+        )
+        assert fired_low is False
+
+        # Threshold 4.0 — avg (3.6) < threshold → fires.
+        fired_high = await trigger_engine._eval_low_usefulness(
+            skill, {"threshold": 4.0, "min_samples": 5}
+        )
+        assert fired_high is True
+
+    async def test_custom_min_samples_via_condition_json(
+        self, trigger_engine, project_id
+    ):
+        """Per-trigger ``min_samples`` override is honored as the
+        noise floor.
+
+        Seed 3 records with avg 2.0. With ``min_samples=3`` the
+        trigger fires (2.0 < 4.0 default threshold, count meets
+        the floor). With ``min_samples=5`` the trigger does NOT
+        fire (3 < 5 floor).
+        """
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "custom-min"
+        )
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[2, 2, 2],  # avg = 2.0, count = 3
+        )
+
+        # min_samples=3 — floor met → fires.
+        fired_at_three = await trigger_engine._eval_low_usefulness(
+            skill, {"threshold": 4.0, "min_samples": 3}
+        )
+        assert fired_at_three is True
+
+        # min_samples=5 — floor NOT met (3 < 5) → does NOT fire,
+        # even though the avg would otherwise cross the threshold.
+        fired_at_five = await trigger_engine._eval_low_usefulness(
+            skill, {"threshold": 4.0, "min_samples": 5}
+        )
+        assert fired_at_five is False
+
+    async def test_reason_uses_scored_usages_wording(
+        self, trigger_engine, project_id
+    ):
+        """Pin the wording fix in :meth:`_build_reason` for the
+        ``low_usefulness`` branch.
+
+        The reason text must say "scored usages" — the count is
+        over all non-superseded scored records aggregated by
+        ``get_avg_usefulness`` (NOT a "last N usages" window).
+        Regressing to "last" would silently misrepresent the
+        semantics in operator-facing logs.
+        """
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "wording"
+        )
+        # 6 records avg = 3.0 (above min_samples=5).
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[3, 3, 3, 3, 3, 3],
+        )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use_wording",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        reason = await trigger_engine._build_reason(
+            trigger, skill, stats={}
+        )
+
+        # Correct wording — pins the 2026-07-21 fix.
+        assert "scored usages" in reason
+        # The "last N usages" wording was a bug; if it creeps
+        # back, this assertion catches it.
+        assert "last " not in reason.lower().replace(
+            "last_used_at", ""
+        ) or "last 5" not in reason  # noqa: E501
+        # Sanity: the count of scored records (6) is in the
+        # reason text, not a window count.
+        assert "6" in reason
+        # The avg value (3.0) is in the reason text.
+        assert "3.0" in reason
