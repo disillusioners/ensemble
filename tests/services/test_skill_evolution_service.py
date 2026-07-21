@@ -1383,6 +1383,410 @@ class TestEvolveCapturedDedup:
         # returns ``[]`` immediately, no DB call.
 
 
+class TestEvolveCapturedDedupFailOpen:
+    """Layer-2 embedding dedup MUST fail-open on every infra error.
+
+    The documented contract (``_embedding_dedup_check`` docstring at
+    ``skill_evolution_service.py`` ~line 858): any infrastructure
+    failure (missing embedding service, missing embedding repo, API
+    failure, DB error, non-numeric similarity, …) returns ``None``
+    so capture proceeds. Dedup must NEVER block a capture on an
+    infra signal — only a *positive* duplicate match (similarity
+    >= threshold) may skip.
+
+    These are the four fail-open paths that had no coverage:
+
+    1. ``embed_text`` raises (embedding API down).
+    2. ``get_all_for_project`` raises (DB error).
+    3. ``cosine_similarity`` returns a non-numeric value
+       (``float(sim_raw)`` raises → row skipped → no match).
+    4. ``_list_existing_active_skills_for_project`` raises during
+       the Layer-2 active-skill filter → the code falls back to the
+       UNFILTERED embedding scan (which still finds a high-similarity
+       active skill and skips). This pins that the fallback path
+       does not silently disable Layer 2.
+
+    All tests reuse the ``TestEvolveCapturedDedup`` fixtures
+    (``evolution_service``, ``skill_repo``, ``fake_embedding_service``,
+    ``project_id``) and the ``_make_skill`` / ``_make_fake_embedding``
+    helpers — see ``tests/services/test_skill_evolution_service.py``
+    top of file.
+    """
+
+    async def test_embed_text_failure_proceeds_with_capture(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """``embed_text`` raising → Layer 2 returns None → capture proceeds.
+
+        The embedding API being down (RuntimeError) must NOT block a
+        CAPTURED create. The fail-open contract: candidate embed fails
+        → Layer 2 logs a warning and returns ``None`` → ``repo.create``
+        runs. We assert a new skill row exists and ``skipped is False``.
+        """
+        # embed_text blows up — simulates a dead embedding API.
+        fake_embedding_service.embed_text = AsyncMock(
+            side_effect=RuntimeError("embedding API down")
+        )
+
+        llm_payload = json.dumps({
+            "name": "captured-despite-embed-failure",
+            "description": "capture must survive embed_text errors",
+            "content": "## body\nskill created even when embeddings are unavailable",
+        })
+
+        task_details = {
+            "task_message": "capture while embedding API is down",
+            "iterations": 6,
+            "duration_seconds": 40,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # Fail-open: no skip, a real row was created.
+        assert result["skipped"] is False
+        assert "skip_reason" not in result
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.name == "captured-despite-embed-failure"
+        assert new_skill.lineage_origin == "captured"
+
+        # embed_text was reached (and raised) — confirming Layer 2
+        # was attempted, not short-circuited before the call.
+        fake_embedding_service.embed_text.assert_awaited_once()
+
+    async def test_get_all_for_project_failure_proceeds_with_capture(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """``embedding_repo.get_all_for_project`` raising → capture proceeds.
+
+        The embedding-vector lookup works (``embed_text`` returns a
+        real vector), but the downstream DB query that lists existing
+        embeddings raises. Layer 2 must soft-fail (return ``None``)
+        and let the capture through — a DB error must NEVER silently
+        block a new skill.
+        """
+        # embed_text succeeds; the embedding-row fetch explodes.
+        fake_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2])
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            side_effect=RuntimeError("DB error")
+        )
+
+        llm_payload = json.dumps({
+            "name": "captured-despite-db-failure",
+            "description": "capture must survive embedding-row DB errors",
+            "content": "## body\nskill created when the embedding DB is unreachable",
+        })
+
+        task_details = {
+            "task_message": "capture while embedding DB is down",
+            "iterations": 5,
+            "duration_seconds": 30,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        assert result["skipped"] is False
+        assert "skip_reason" not in result
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.name == "captured-despite-db-failure"
+
+        # The DB fetch was attempted and raised — confirming Layer 2
+        # progressed past the embed step.
+        fake_embedding_service.embedding_repo.get_all_for_project.assert_called_once_with(
+            project_id
+        )
+
+    async def test_cosine_similarity_non_numeric_proceeds_with_capture(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Non-numeric ``cosine_similarity`` → row skipped → no match → capture.
+
+        ``_embedding_dedup_check`` does ``float(sim_raw)`` for each
+        candidate row; when the callable returns garbage (a string),
+        the per-row ``except (TypeError, ValueError): continue`` skips
+        that row. With all rows skipped ``best_per_skill`` is empty
+        → ``None`` returned → capture proceeds. This pins that a
+        malformed similarity value doesn't raise out of the gate
+        and doesn't fabricate a false skip.
+        """
+        # Seed one ACTIVE skill so its embedding row participates in
+        # the scan — the non-numeric cosine result must skip it.
+        existing = _make_skill(skill_repo, project_id, "non-numeric-cosine-target")
+        existing_emb = _make_fake_embedding(existing.id, [0.1, 0.2])
+
+        fake_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2])
+        # cosine_similarity returns a STRING — ``float("not-a-number")``
+        # raises ValueError → the row is skipped inside the scan loop.
+        fake_embedding_service.cosine_similarity = MagicMock(
+            return_value="not-a-number"
+        )
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            return_value=[(existing_emb, existing.id)]
+        )
+
+        llm_payload = json.dumps({
+            "name": "captured-despite-non-numeric-cosine",
+            "description": "non-numeric similarity is skipped, not fatal",
+            "content": "## body\nskill created when cosine returns garbage",
+        })
+
+        task_details = {
+            "task_message": "capture when cosine_similarity is non-numeric",
+            "iterations": 4,
+            "duration_seconds": 20,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # The garbage similarity was skipped, so no match → capture.
+        assert result["skipped"] is False
+        assert "skip_reason" not in result
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill is not None
+        assert new_skill.name == "captured-despite-non-numeric-cosine"
+
+        # cosine_similarity WAS invoked (the row was scanned); it just
+        # couldn't be coerced to float.
+        fake_embedding_service.cosine_similarity.assert_called_once()
+
+    async def test_active_skill_filter_failure_falls_back_to_unfiltered_scan(
+        self,
+        evolution_service,
+        skill_repo,
+        fake_embedding_service,
+        project_id,
+    ):
+        """Active-skill filter raising → UNFILTERED fallback scan STILL works.
+
+        The C1-fix's defensive path: ``_embedding_dedup_check`` wraps
+        ``_list_existing_active_skills_for_project`` in try/except
+        (production lines ~955-975). On failure it keeps the
+        UNFILTERED ``embedding_rows`` and proceeds with the cosine
+        scan against ALL of them. This test pins that the fallback is
+        functional — it doesn't silently skip Layer 2.
+
+        Setup: an ACTIVE skill exists with a high-similarity embedding
+        (0.95, above threshold). The active-filter call is patched to
+        raise. The fallback unfiltered scan then compares the candidate
+        against that active skill's row and SHOULD trigger the skip
+        (``skip_reason == "embedding_similarity"``).
+
+        Without the fallback logic (or if the fallback silently emptied
+        the row set), Layer 2 would return ``None`` and capture would
+        wrongly proceed despite the obvious duplicate.
+        """
+        # Seed an ACTIVE skill — it will be found by the unfiltered
+        # embedding scan even though the active-filter helper raises.
+        active_skill = _make_skill(
+            skill_repo, project_id, "active-filter-fallback-target"
+        )
+        active_emb = _make_fake_embedding(active_skill.id, [0.1, 0.2, 0.3])
+
+        fake_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        # Similarity above threshold so the fallback scan trips the skip.
+        fake_embedding_service.cosine_similarity = MagicMock(return_value=0.95)
+        fake_embedding_service.embedding_repo.get_all_for_project = MagicMock(
+            return_value=[(active_emb, active_skill.id)]
+        )
+        # The active-skill filter helper raises — the fallback path
+        # must keep the unfiltered row set above.
+        evolution_service._list_existing_active_skills_for_project = AsyncMock(
+            side_effect=RuntimeError("listing failed")
+        )
+
+        llm_payload = json.dumps({
+            "name": "would-be-duplicate-of-active",
+            "description": "candidate that duplicates the active skill",
+            "content": "## body\nsemantically overlaps with the active skill",
+        })
+
+        task_details = {
+            "task_message": "dedup fallback must still find the duplicate",
+            "iterations": 3,
+            "duration_seconds": 15,
+            "agent_id": "test-agent",
+            "project_id": project_id,
+        }
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(task_details)
+
+        # The fallback unfiltered scan FOUND the high-similarity active
+        # skill → Layer 2 skips. This is the contract: a filter failure
+        # degrades to the unfiltered scan (which is more permissive,
+        # not less), so duplicates are still caught.
+        assert result["skipped"] is True, (
+            "Active-skill filter failure must fall back to the "
+            "unfiltered embedding scan, which should still find the "
+            "high-similarity active skill and skip. A silent Layer-2 "
+            "disarmament here is the bug this pins."
+        )
+        assert result["skip_reason"] == "embedding_similarity"
+        assert result["new_skill_id"] == active_skill.id
+        assert result["similarity_score"] == pytest.approx(0.95)
+
+        # No NEW skill row was created — the candidate was blocked.
+        items, _total = skill_repo.list(project_id=project_id, active_only=True)
+        candidate_names = {s.name for s in items}
+        assert "would-be-duplicate-of-active" not in candidate_names, (
+            f"Fallback scan failed to skip the duplicate candidate: "
+            f"{candidate_names!r}"
+        )
+
+
+class TestBuildCapturePrompt:
+    """Tests for ``_build_capture_prompt`` Layer-1 dedup wiring.
+
+    ``_build_capture_prompt`` (a ``@staticmethod``) must:
+
+    * include the ``SKIP_DUPLICATE: <existing_skill_id>`` instruction
+      when ``existing_skills`` is non-empty (this is the Layer-1 gate
+      the LLM is asked to use).
+    * list every supplied existing skill's ``id`` AND ``name`` so the
+      LLM has the candidate-duplicate set in front of it.
+
+    NOTE on wiring: the ``SKIP_DUPLICATE`` instruction block is only
+    emitted when ``dedup_list_block`` is non-empty — i.e. when
+    ``existing_skills`` contains at least one skill with a name or
+    description. Calling with ``existing_skills=[]`` produces NO skip
+    instruction (nothing to dedup against), so these tests pass a
+    non-empty list. The empty-list case is implicitly covered by the
+    ``TestEvolveCapturedDedup`` "no similar skill exists" happy path.
+    """
+
+    def test_capture_prompt_includes_skip_duplicate_instruction(
+        self, evolution_service
+    ):
+        """The prompt carries the ``SKIP_DUPLICATE`` instruction.
+
+        When ``existing_skills`` is non-empty, the returned prompt
+        must contain the literal ``SKIP_DUPLICATE`` token and the
+        ``<existing_skill_id>`` placeholder so the LLM knows the
+        escape hatch. A regression that dropped the instruction would
+        silently disable Layer-1 dedup.
+        """
+        from types import SimpleNamespace
+
+        # One existing skill is enough to light up the dedup block.
+        existing_skill = SimpleNamespace(
+            id="00000000-1111-2222-3333-444444444444",
+            name="some-existing-skill",
+            description="covers some area",
+        )
+        prompt = evolution_service._build_capture_prompt(
+            task_message="do X",
+            iterations=5,
+            duration_seconds=30,
+            agent_id="agent-a",
+            existing_skill=None,
+            existing_skills=[existing_skill],
+        )
+
+        # The SKIP_DUPLICATE instruction must be present.
+        assert "SKIP_DUPLICATE" in prompt.upper(), (
+            "Layer-1 dedup instruction missing — the prompt must "
+            "tell the LLM about the SKIP_DUPLICATE escape hatch "
+            "when existing_skills is non-empty."
+        )
+        # And it references the placeholder so the LLM knows the
+        # token shape to emit.
+        assert "existing_skill_id" in prompt, (
+            "The SKIP_DUPLICATE instruction must reference the "
+            "<existing_skill_id> placeholder."
+        )
+
+    def test_capture_prompt_lists_existing_skills_for_dedup(
+        self, evolution_service
+    ):
+        """Every supplied existing skill's ``id`` AND ``name`` is in the prompt.
+
+        Layer-1 dedup is only as good as the candidate list the LLM
+        sees. If the prompt omits an existing skill, the LLM cannot
+        match against it and Layer-2 becomes the only backstop. This
+        test pins that 2-3 fake skills all surface in the rendered
+        prompt string.
+        """
+        from types import SimpleNamespace
+
+        skills_for_dedup = [
+            SimpleNamespace(
+                id="aaaaaaaa-0000-0000-0000-000000000001",
+                name="skill-one",
+                description="first candidate duplicate",
+            ),
+            SimpleNamespace(
+                id="bbbbbbbb-0000-0000-0000-000000000002",
+                name="skill-two",
+                description="second candidate duplicate",
+            ),
+            SimpleNamespace(
+                id="cccccccc-0000-0000-0000-000000000003",
+                name="skill-three",
+                description="third candidate duplicate",
+            ),
+        ]
+
+        prompt = evolution_service._build_capture_prompt(
+            task_message="do Y",
+            iterations=8,
+            duration_seconds=120,
+            agent_id="agent-b",
+            existing_skill=None,
+            existing_skills=skills_for_dedup,
+        )
+
+        # Each skill's id AND name must appear so the LLM can both
+        # identify and reference them.
+        for s in skills_for_dedup:
+            assert s.id in prompt, (
+                f"Existing skill id {s.id!r} (name={s.name!r}) is "
+                f"missing from the capture prompt — the LLM cannot "
+                f"dedup against a skill it can't see."
+            )
+            assert s.name in prompt, (
+                f"Existing skill name {s.name!r} (id={s.id!r}) is "
+                f"missing from the capture prompt."
+            )
+
+
 class TestEvolveSkillDispatch:
     """Tests for ``SkillEvolutionService.evolve_skill`` dispatch logic."""
 

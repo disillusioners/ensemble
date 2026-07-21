@@ -526,6 +526,16 @@ class TestRecordMetricsWiring:
         # ---- Build a minimal task + message pair ----
         created = datetime.now(timezone.utc) - timedelta(seconds=2)
         completed = datetime.now(timezone.utc)
+        # NOTE: ``task_type`` is added so this stub matches the
+        # production ``Task`` model, whose ``process()`` reads
+        # ``task.task_type`` (``task_processor.py`` ~line 272) to
+        # branch the PROCESS_REPORT lane. The model's column default
+        # is ``TaskType.PROCESS_MESSAGE.value``, so a real
+        # process_message task always carries that value — the stub
+        # mirrors it. Without this attribute the harness raises
+        # ``AttributeError`` before reaching the metrics hook.
+        from daemon.repositories.task.models import TaskType
+
         task = SimpleNamespace(
             id="task-wiring-1",
             instance_id="inst-wiring",
@@ -534,6 +544,7 @@ class TestRecordMetricsWiring:
             created_at=created,
             completed_at=completed,
             work_id="work-wiring",
+            task_type=TaskType.PROCESS_MESSAGE.value,
         )
         message = SimpleNamespace(
             message_id="msg-wiring",
@@ -1252,3 +1263,210 @@ class TestRecordMetricsWiring:
         )
         # Duration is still derived from the timestamp delta.
         assert calls[0]["duration_seconds"] > 0
+
+    # ------------------------------------------------------------------
+    # task_message extraction (GAP 3) — ``_compute_iterations_and_duration``
+    # now returns a 3-tuple ``(iterations, duration_seconds, task_message)``
+    # and forwards the message snapshot to the metrics hook. The tests
+    # above pin iterations + duration; these pin the task_message
+    # contract. They follow the EXACT pattern of
+    # ``test_iterations_and_duration_are_non_zero`` (spy on
+    # ``record_task_completion``, seed the manager's queue repo, assert
+    # on ``calls[0][...]``).
+    # ------------------------------------------------------------------
+
+    async def test_compute_iterations_and_duration_extracts_task_message(
+        self, metrics_service, project_id
+    ):
+        """``task_message`` kwarg is the FIRST ``type='human'`` message's content.
+
+        Pins the CAPTURED-flow ``task_message`` plumbing on the
+        process_message path. ``_compute_iterations_and_duration``
+        (``task_processor.py`` ~line 590) returns a 3-tuple whose third
+        element is the first human message's content, derived via the
+        shared ``_extract_task_message_from_messages`` helper. The hook
+        then forwards it to ``record_task_completion(task_message=...)``
+        so the CAPTURED skill-evolution prompt has the user's original ask.
+
+        Wiring mirrors ``test_iterations_and_duration_are_non_zero``:
+        seed the manager's queue repo with a mix of agent/human/system
+        messages (the human one is NOT first in the list, to confirm
+        the extractor picks the first human row regardless of position),
+        drive the success path, and assert the spy-captured
+        ``calls[0]["task_message"]`` equals that human message's
+        content — NOT the agent/system messages' content.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-task-message"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(metrics_service)
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+
+            # Seed the queue with a MIX of message types, deliberately
+            # NOT putting the human message first. The extractor must
+            # return the FIRST ``type='human'`` row's content — not the
+            # agent/system messages, and not None.
+            from datetime import datetime, timezone
+            from types import SimpleNamespace
+            from unittest.mock import MagicMock
+
+            now = datetime.now(timezone.utc)
+            messages = [
+                SimpleNamespace(
+                    type="agent",
+                    content="I am thinking about it",
+                    created_at=now,
+                    enqueued_at=now,
+                ),
+                SimpleNamespace(
+                    type="system",
+                    content="system note",
+                    created_at=now,
+                    enqueued_at=now,
+                ),
+                # The human message — this is what must surface.
+                SimpleNamespace(
+                    type="human",
+                    content="please refactor the auth module",
+                    created_at=now,
+                    enqueued_at=now,
+                ),
+                SimpleNamespace(
+                    type="agent",
+                    content="another agent turn",
+                    created_at=now,
+                    enqueued_at=now,
+                ),
+            ]
+            manager._queue_repository.get_by_instance = MagicMock(
+                return_value=messages
+            )
+
+            result = await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        assert result["success"] is True
+        assert len(calls) == 1, (
+            f"Expected exactly one hook call on the success path, "
+            f"got {len(calls)}: {calls}"
+        )
+
+        # POSITIVE contract: task_message is the FIRST human message's
+        # content, not "" and not any of the agent/system contents.
+        assert calls[0]["task_message"] == "please refactor the auth module", (
+            f"task_message must be the first type='human' message's "
+            f"content. Got {calls[0]['task_message']!r}"
+        )
+
+    async def test_compute_task_message_empty_when_no_human_message(
+        self, metrics_service, project_id
+    ):
+        """No human message on the queue → ``task_message == ""``.
+
+        Complement to the positive test: when the queue has only
+        agent + system messages (no ``type='human'`` row), the
+        shared ``_extract_task_message_from_messages`` helper returns
+        ``""`` (empty string, NOT None — consumers expect str). The
+        hook then forwards ``task_message=""`` and the downstream
+        ``SkillUsageRepository.update_completion`` treats it as a
+        no-op (see GAP 4 repo test). This pins the empty-queue
+        contract so a regression to ``None`` (which would break the
+        INSERT/UPDATE symmetry) is caught here.
+        """
+        from daemon.services.skill_metrics_service import (
+            INJECTED_SKILLS_METADATA_KEY,
+        )
+
+        skill = _make_skill(
+            metrics_service.skill_repo, project_id, "gap-task-message-empty"
+        )
+        instance_id = "inst-wiring"
+        wire_inst = FakeInstance(
+            instance_id,
+            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
+        )
+        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
+        wire_inst.project_id = project_id  # type: ignore[attr-defined]
+        metrics_service.instance_repo._instances[instance_id] = wire_inst
+
+        original = metrics_service.record_task_completion
+        calls: list[dict] = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return await original(**kwargs)
+
+        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
+
+        try:
+            processor, manager, _message_repo, task = (
+                await self._build_processor(metrics_service)
+            )
+            manager._instance_repository._instances[instance_id] = (
+                wire_inst
+            )
+
+            # Seed agent + system messages ONLY — no human row.
+            from datetime import datetime, timezone
+            from types import SimpleNamespace
+            from unittest.mock import MagicMock
+
+            now = datetime.now(timezone.utc)
+            messages = [
+                SimpleNamespace(
+                    type="agent",
+                    content="doing the work",
+                    created_at=now,
+                    enqueued_at=now,
+                ),
+                SimpleNamespace(
+                    type="system",
+                    content="system note",
+                    created_at=now,
+                    enqueued_at=now,
+                ),
+            ]
+            manager._queue_repository.get_by_instance = MagicMock(
+                return_value=messages
+            )
+
+            result = await processor.process(task)  # type: ignore[arg-type]
+        finally:
+            metrics_service.record_task_completion = original  # type: ignore[assignment]
+
+        assert result["success"] is True
+        assert len(calls) == 1
+
+        # EMPTY contract: no human message → "" (str, not None).
+        assert calls[0]["task_message"] == "", (
+            f"task_message must be empty string (not None) when no "
+            f"type='human' message exists. Got {calls[0]['task_message']!r}"
+        )

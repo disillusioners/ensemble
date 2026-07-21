@@ -790,6 +790,142 @@ class TestSkillUsage:
             "ghost-record", True, 1, 1
         ) is None
 
+    def test_update_completion_task_message_empty_string_is_noop(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """``task_message=""`` must NOT clobber an existing value.
+
+        Pins the INSERT/UPDATE symmetry contract for the CAPTURED-flow
+        ``task_message`` column at the repo layer. The completion hook
+        (``SkillUsageRepository.update_completion``) has a ``if task_message:``
+        guard (``repository.py`` ~line 1438): only TRUTHY values
+        overwrite the column. ``None`` AND the empty string ``""`` are
+        both no-ops — they leave the existing column untouched.
+
+        Why this matters: the INSERT path (``create()``) coerces ``""``
+        → ``None`` so the column stays ``NULL``; the UPDATE path here
+        must mirror that so both code paths produce identical column
+        state. The feedback path commonly inserts a row BEFORE the
+        completion hook has loaded ``task_message`` (the worker called
+        ``skill_feedback`` first), so a late-arriving completion with
+        ``task_message=""`` must NOT erase the value that an earlier
+        ``create(task_message="...")`` already stamped.
+
+        Without the guard, a single ``update_completion(..., task_message="")``
+        would silently null out the row's user-ask snapshot, breaking
+        the CAPTURED skill-evolution prompt for that record.
+        """
+        skill = _make_skill(skill_repo, project_id, "tm-noop-empty")
+        # Pre-existing task_message from a feedback-first insert path.
+        record = usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="i-tm-empty",
+            agent_id="a",
+            task_message="original ask",
+        )
+        # Sanity: the column was seeded before the update.
+        assert record.task_message == "original ask"
+
+        updated = usage_repo.update_completion(
+            record.id,
+            task_succeeded=True,
+            iterations=3,
+            duration_seconds=45,
+            task_message="",  # empty string → must be a no-op
+        )
+        assert updated is not None
+        # The OTHER columns were updated normally.
+        assert updated.task_succeeded is True
+        assert updated.iterations == 3
+        assert updated.duration_seconds == 45
+        # CRITICAL: task_message is UNCHANGED — empty string did not
+        # clobber the pre-existing value.
+        assert updated.task_message == "original ask", (
+            f"task_message='' must be a no-op (leave existing value "
+            f"untouched), but the column was clobbered to "
+            f"{updated.task_message!r}"
+        )
+
+        # Re-fetch to confirm persistence, not just the in-session mirror.
+        items, _ = usage_repo.get_by_skill(skill.id)
+        assert len(items) == 1
+        assert items[0].task_message == "original ask"
+
+    def test_update_completion_task_message_none_is_noop(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """``task_message=None`` must NOT clobber an existing value.
+
+        Companion to the empty-string test. ``None`` is the default
+        for ``update_completion`` (feedback-first paths that never
+        learned the user's task call it without ``task_message``).
+        The ``if task_message:`` guard treats ``None`` as falsy → no-op,
+        mirroring the INSERT path's ``None`` handling. Without this, a
+        bare ``update_completion(record_id, True, 1, 1)`` (the common
+        call shape used by the existing tests above) would silently
+        null the column on every completion.
+        """
+        skill = _make_skill(skill_repo, project_id, "tm-noop-none")
+        record = usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="i-tm-none",
+            agent_id="a",
+            task_message="original ask",
+        )
+        assert record.task_message == "original ask"
+
+        # task_message omitted → defaults to None → no-op.
+        updated = usage_repo.update_completion(
+            record.id,
+            task_succeeded=True,
+            iterations=2,
+            duration_seconds=30,
+            # task_message deliberately omitted (None default).
+        )
+        assert updated is not None
+        assert updated.iterations == 2
+        # task_message UNCHANGED.
+        assert updated.task_message == "original ask"
+
+        # Re-fetch to confirm persistence.
+        items, _ = usage_repo.get_by_skill(skill.id)
+        assert len(items) == 1
+        assert items[0].task_message == "original ask"
+
+    def test_update_completion_task_message_truthy_overwrites(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """A TRUTHY ``task_message`` DOES overwrite the existing column.
+
+        Positive contract for the ``if task_message:`` guard: only
+        truthy values mutate the column. This pins the "overwrite"
+        direction so a regression that made the guard a no-op for ALL
+        values (including truthy ones) would be caught here. It also
+        documents the call shape the completion hook uses when it
+        DOES have the user's ask.
+        """
+        skill = _make_skill(skill_repo, project_id, "tm-overwrite")
+        record = usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="i-tm-ow",
+            agent_id="a",
+            task_message="original ask",
+        )
+
+        updated = usage_repo.update_completion(
+            record.id,
+            task_succeeded=True,
+            iterations=1,
+            duration_seconds=10,
+            task_message="newer user ask",
+        )
+        assert updated is not None
+        # TRUTHY value DID overwrite.
+        assert updated.task_message == "newer user ask"
+
     def test_get_latest_for_skill_instance_returns_most_recent(
         self, usage_repo, skill_repo, project_id
     ):
