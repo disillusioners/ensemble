@@ -180,10 +180,20 @@ class SkillCloneService:
         if existing is not None:
             return existing
 
-        # Step 2: find template in skill_bank.
+        # Step 2: find template in skill_bank. First an exact
+        # ``(name, agent_id)`` lookup — the agent_id is the OWNING
+        # agent of the template. When this misses it usually means
+        # the skill was requested by a dispatcher that is NOT the
+        # template owner (e.g. tester dispatches load_skill="unit-test"
+        # to a worker; the worker's agent_id is "worker" but
+        # "unit-test" is owned by "tester"). Skill names are
+        # conventionally unique across the bank, so a name-only
+        # fallback resolves the template the dispatcher intended.
         template = self._skill_bank_repo.get_by_name_and_agent(
             name, agent_id
         )
+        if template is None:
+            template = self._skill_bank_repo.get_by_name_any_agent(name)
         if template is None:
             logger.debug(
                 f"No skill template for clone: name={name}, "

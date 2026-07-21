@@ -267,6 +267,41 @@ class SkillBankRepository:
             )
             return session.exec(stmt).first()
 
+    def get_by_name_any_agent(
+        self,
+        name: str,
+    ) -> SkillBankItem | None:
+        """Fetch a skill bank template by name across all agents.
+
+        Fallback used by the clone-on-miss path when an exact
+        ``(name, agent_id)`` lookup misses — e.g. when a parent
+        agent (tester) dispatches ``load_skill="unit-test"`` to a
+        child instance whose own agent_id (worker) is not the
+        template owner. Skill names are conventionally unique
+        across the bank, so the fallback finds the template that
+        would otherwise be invisible to the dispatcher.
+
+        When multiple rows share the same name across agents
+        (explicit collisions, intentional or otherwise), the
+        most recently created row wins — ``order_by created_at
+        DESC`` makes the choice deterministic and biases toward
+        the latest seeded template.
+
+        Args:
+            name: Human-readable skill name.
+
+        Returns:
+            The newest matching :class:`SkillBankItem` regardless
+            of owning agent, or ``None`` when no row exists.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(SkillBankItem)
+                .where(SkillBankItem.name == name)
+                .order_by(col(SkillBankItem.created_at).desc())
+            )
+            return session.exec(stmt).first()
+
     def get_auto_load_by_agent(
         self,
         agent_id: str,

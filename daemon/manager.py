@@ -1,5 +1,6 @@
 """Instance manager orchestrating all agent instances."""
 
+import sys
 import uuid
 import logging
 import asyncio
@@ -1765,8 +1766,24 @@ class InstanceManager:
         # version guard (W4). NOT gated by skill_evolution — the Skill
         # Bank is standalone infrastructure. Soft-fail: any error is
         # logged and swallowed so startup never crashes.
+        #
+        # Path resolution mirrors the convention used by
+        # :func:`daemon.registry.get_registry` and
+        # ``daemon.tools.agent_mother.BASE_DIR``:
+        #   * frozen (PyInstaller prod binary) → ``Path(sys.executable).parent``
+        #     → the install dir whose ``agents/`` is copied there by
+        #     ``make install`` (Makefile line ~149). The bundled
+        #     ``__file__`` is inside the ephemeral ``_MEIxxxx`` archive
+        #     which has no ``agents/`` subdir, so the source-relative
+        #     join would silently miss every manifest and leave
+        #     ``skill_bank`` empty (the prod bug).
+        #   * dev / packaged interpreter → ``Path(__file__).parent.parent``
+        #     → the repo root, where ``agents/`` lives next to ``daemon/``.
         try:
-            agents_base = Path(__file__).parent.parent / "agents"
+            if getattr(sys, 'frozen', False):
+                agents_base = Path(sys.executable).parent / "agents"
+            else:
+                agents_base = Path(__file__).parent.parent / "agents"
             seed_service = SkillSeedService(
                 skill_bank_repo=self._skill_bank_repo,
                 agents_dir=agents_base,

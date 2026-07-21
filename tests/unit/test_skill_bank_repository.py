@@ -948,6 +948,62 @@ class TestGetByNameAndAgent:
         )
 
 
+class TestGetByNameAnyAgent:
+    """``SkillBankRepository.get_by_name_any_agent``.
+
+    The name-only fallback used by the clone-on-miss path when
+    the exact ``(name, agent_id)`` lookup misses — covers the
+    dispatcher-spawns-child-from-another-agent case (e.g. tester
+    dispatches ``load_skill="unit-test"`` onto a worker instance).
+    """
+
+    def test_returns_row_regardless_of_owning_agent(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Lookup without an agent filter finds any matching row."""
+        target = repository.create(
+            name="unit-test", content="x", agent_id="tester"
+        )
+
+        fetched = repository.get_by_name_any_agent("unit-test")
+
+        assert fetched is not None
+        assert fetched.id == target.id
+
+    def test_returns_none_when_no_name_match(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """When no row matches the name at all, returns ``None``."""
+        repository.create(name="other", content="x", agent_id="tester")
+
+        assert repository.get_by_name_any_agent("missing") is None
+
+    def test_returns_none_when_table_empty(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """Empty bank returns ``None`` (not raise)."""
+        assert repository.get_by_name_any_agent("anything") is None
+
+    def test_newest_wins_on_collision(
+        self, repository: SkillBankRepository
+    ) -> None:
+        """When multiple agents own the same name, the most
+        recently created row is returned (deterministic choice).
+        """
+        repository.create(
+            name="shared", content="older", agent_id="tester"
+        )
+        newest = repository.create(
+            name="shared", content="newer", agent_id="developer"
+        )
+
+        fetched = repository.get_by_name_any_agent("shared")
+
+        assert fetched is not None
+        assert fetched.id == newest.id
+        assert fetched.content == "newer"
+
+
 class TestGetAutoLoadByAgent:
     """``SkillBankRepository.get_auto_load_by_agent``."""
 

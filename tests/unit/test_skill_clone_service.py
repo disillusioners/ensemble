@@ -280,6 +280,76 @@ class TestMissingTemplate:
 
 
 # ============================================================================
+# Case 5b — cross-agent fallback (tester dispatch → worker child)
+# ============================================================================
+
+
+class TestCrossAgentFallback:
+    """``load_skill`` from a dispatcher that isn't the template owner.
+
+    Reproduces the prod bug where ``tester`` (parent) spawns a
+    ``worker`` (child) instance and passes ``load_skill="unit-test"``.
+    The skill is owned by ``tester`` in the bank, but the child's
+    ``agent_id`` is ``worker``. The exact ``(name, agent_id)``
+    lookup misses; the name-only fallback is what finds the template.
+    """
+
+    def test_clone_falls_back_to_any_agent(
+        self,
+        clone_service: SkillCloneService,
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """Template owned by ``tester`` resolves via ``worker`` lookup."""
+        _seed_template(
+            skill_bank_repo,
+            name="unit-test",
+            agent_id="tester",
+            content="# Unit test\ncoverage analysis.",
+        )
+
+        cloned = clone_service.clone_on_miss_sync(
+            name="unit-test",
+            agent_id="worker",  # child's agent_id, NOT the template owner
+            project_id="proj-x",
+        )
+
+        assert cloned is not None
+        assert cloned.name == "unit-test"
+        assert cloned.project_id == "proj-x"
+
+    def test_exact_agent_match_wins_over_fallback(
+        self,
+        clone_service: SkillCloneService,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """When both agent-scoped and other-agent templates exist,
+        the agent-scoped match wins (deterministic precedence).
+        """
+        _seed_template(
+            skill_bank_repo,
+            name="shared",
+            agent_id="worker",
+            content="# Worker's shared",
+        )
+        _seed_template(
+            skill_bank_repo,
+            name="shared",
+            agent_id="tester",
+            content="# Tester's shared",
+        )
+
+        cloned = clone_service.clone_on_miss_sync(
+            name="shared",
+            agent_id="worker",
+            project_id="proj-y",
+        )
+
+        assert cloned is not None
+        assert cloned.content == "# Worker's shared"
+
+
+# ============================================================================
 # Case 6 — source_skill_bank_id back-link
 # ============================================================================
 
