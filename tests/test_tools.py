@@ -292,6 +292,20 @@ class TestListDirectoryTool:
         assert "ERROR" in result
         assert "does not exist" in result
 
+    def test_list_directory_nonexistent_workdir_surfaces_workdir_error(self, tmp_path):
+        """Regression: list_directory benefits from the shared workdir-existence
+        check. A typo'd workdir must produce the workdir-specific error, not the
+        downstream "Path does not exist" it would have produced previously.
+        """
+        ghost = str(tmp_path / "does_not_exist_xyz")
+        result = list_directory.invoke({"path": ".", "workdir": ghost})
+
+        assert "ERROR" in result
+        assert "Working directory does not exist" in result
+        assert ghost in result
+        # Must NOT be reported as a missing directory inside a valid workdir.
+        assert "Path does not exist" not in result
+
     def test_list_directory_not_a_directory(self, tmp_path):
         """Test error when path is a file, not a directory."""
         test_file = tmp_path / "testfile.txt"
@@ -367,6 +381,35 @@ class TestReadFileTool:
 
         assert "ERROR" in result
         assert "does not exist" in result
+
+    def test_read_file_nonexistent_workdir_surfaces_workdir_error(self, tmp_path):
+        """Regression: typo'd / hallucinated workdir must report workdir missing,
+        not a misleading "File does not exist" downstream.
+
+        Reproduces the real-world failure mode where an LLM agent types
+        ``/Users/ngienminhkha/...`` instead of ``/Users/nguyenminhkha/...``.
+        The resolver must report the workdir itself as the root cause.
+        """
+        typo_workdir = "/Users/ngienminhkha/All/Code/missing-project"
+        result = read_file.invoke({"path": "any.txt", "workdir": typo_workdir})
+
+        assert "ERROR" in result
+        assert "Working directory does not exist" in result
+        # Original workdir string preserved verbatim so the agent can spot its typo.
+        assert typo_workdir in result
+        # Critical: must NOT be reported as a missing file inside a valid workdir.
+        assert "File does not exist" not in result
+
+    def test_read_file_valid_workdir_missing_file_keeps_existing_message(self, tmp_path):
+        """Negative control: when the workdir is real and the file is missing,
+        the classic "File does not exist" message is preserved.
+        """
+        result = read_file.invoke({"path": "not_here.txt", "workdir": str(tmp_path)})
+
+        assert "ERROR" in result
+        assert "File does not exist" in result
+        # Must NOT regress to the new workdir error in this valid-workdir case.
+        assert "Working directory does not exist" not in result
 
     def test_read_file_is_directory(self, tmp_path):
         """Test error when path is a directory, not a file."""
