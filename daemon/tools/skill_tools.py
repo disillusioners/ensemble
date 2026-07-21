@@ -614,7 +614,9 @@ Returns:
     async def skill_feedback(
         skill_id: str,
         applied: bool | None = None,
+        usefulness: int | None = None,
         note: str = "",
+        improvement_note: str = "",
     ) -> str:
         """Record feedback on a skill's usefulness.
 
@@ -626,21 +628,59 @@ Returns:
         row; ``project_id`` / ``agent_id`` are resolved from the
         instance repository when available, falling back to ``None``.
 
+        Phase 5 (2026-07-21): additionally captures the optional
+        ``usefulness`` quality score (1–10) and the ``improvement_note``
+        suggestion text. Both feed the per-skill usefulness rollup and
+        the skill-keeper evolution loop directly — the agent's
+        judgments become training signal for the next skill revision.
+
         Soft-fail contract: the tool NEVER raises. Every failure mode
         — missing service, missing instance repo, no usage record to
-        update, service-raised exception — returns a deterministic
-        string the agent loop can render.
+        update, service-raised exception, out-of-range ``usefulness``
+        — returns a deterministic string the agent loop can render.
 
         Args:
             skill_id: The skill's UUID4 identifier.
             applied: ``True`` if the skill was directly useful, ``False``
                 if it was not relevant, or ``None`` / omitted if unsure.
-            note: Optional free-form feedback note. Defaults to empty
-                string.
+            usefulness: Optional agent-judged quality score 1-10.
+                Be honest — 1 means the skill was unusable or actively
+                harmful, 5 means mediocre (it didn't help much), 10
+                means excellent and directly helpful. Optional but
+                encouraged; out-of-range values (≤0, >10, non-int) are
+                rejected with a clear error string instead of being
+                clamped, so the agent can correct and retry. ``None``
+                = no numeric rating (the ``note`` / ``improvement_note``
+                still get recorded).
+            note: Optional general context observation about how the
+                skill was used. Distinct from ``improvement_note``
+                below — ``note`` describes the situation, not what
+                the skill should change.
+            improvement_note: Optional actionable suggestions for
+                improving the skill content itself (e.g. "Should
+                mention PACKS.md location", "Add example of timeout
+                checklist"). Distinct from ``note`` which is general
+                context observation. Feeds the skill-keeper
+                evolution loop directly — write specific, actionable
+                edits you'd want a human reviewer to apply.
         """
         metrics_service = getattr(manager, "_skill_metrics_service", None)
         if metrics_service is None:
             return "Skill metrics service is not yet available."
+        # Range-validate ``usefulness`` before forwarding — out-of-range
+        # values are explicitly rejected (not clamped) so the agent loop
+        # can correct and retry rather than silently recording garbage.
+        if usefulness is not None:
+            if not isinstance(usefulness, int) or isinstance(usefulness, bool):
+                return (
+                    f"ERROR: skill_feedback 'usefulness' must be an int "
+                    f"1-10, got {type(usefulness).__name__}: {usefulness!r}"
+                )
+            if usefulness < 1 or usefulness > 10:
+                return (
+                    f"ERROR: skill_feedback 'usefulness' must be in "
+                    f"range 1-10, got {usefulness}"
+                )
         project_id = _get_project_id()
         agent_id = _get_agent_id()
         short_id = skill_id[:8] if isinstance(skill_id, str) and skill_id else str(skill_id)
@@ -652,6 +692,8 @@ Returns:
                 project_id=project_id,
                 applied=applied,
                 note=note,
+                usefulness=usefulness,
+                improvement_note=improvement_note,
             )
         except Exception as e:
             try:
@@ -664,9 +706,20 @@ Returns:
                 pass
             return f"ERROR: skill_feedback failed: {e}"
         if applied_ok:
+            # Compose a multi-line confirmation that surfaces the new
+            # Phase 5 fields when present so the agent loop can see
+            # exactly what got recorded.
+            usefulness_line = (
+                f" Usefulness: {usefulness}/10." if usefulness is not None else ""
+            )
+            improvement_line = (
+                f" Improvement: {improvement_note!r}"
+                if improvement_note
+                else ""
+            )
             return (
                 f"\u2705 Feedback recorded for skill {short_id}... "
-                f"Applied={applied}. Note: {note!r}"
+                f"Applied={applied}.{usefulness_line} Note: {note!r}.{improvement_line}"
             )
         return (
             f"\u26a0\ufe0f No usage record found for skill {short_id}... "
@@ -682,6 +735,13 @@ backend) which locates the latest :class:`SkillUsageRecord` for
 plus ``feedback_note`` onto it. When ``applied=True``, the skill
 row's ``total_applied`` counter is also bumped by the service.
 
+Phase 5 (2026-07-21): the tool also captures the optional
+``usefulness`` quality score (1-10) and ``improvement_note``
+suggestion text. These are stamped onto ``feedback_usefulness``
+and ``feedback_improvement`` respectively and feed the skill-keeper
+evolution loop directly — what you record here directly influences
+how the next skill revision gets generated.
+
 The closure-injected ``current_instance_id`` is forwarded as
 ``instance_id``; ``project_id`` and ``agent_id`` are resolved from
 ``manager._instance_repository`` via the ``_get_project_id`` /
@@ -694,13 +754,31 @@ Args:
     applied: ``True`` if the skill was directly useful, ``False``
         if it was not relevant or unhelpful, ``None`` (default) if
         the caller is unsure and is leaving a note only.
-    note: Optional free-form feedback note. Defaults to empty string.
+    usefulness: Optional agent-judged quality score 1-10.
+        Be honest. 1 = skill was unusable or actively harmful,
+        5 = mediocre (didn't help much), 10 = excellent and
+        directly helpful. Out-of-range values are rejected with
+        an ``ERROR: ...`` return string (not clamped) so the
+        agent loop can correct and retry. ``None`` (default)
+        means no numeric rating — the note / improvement_note
+        still get recorded.
+    note: Optional general context observation about how the
+        skill was used. Defaults to empty string. Distinct
+        from ``improvement_note`` which is the actionable
+        suggestion about the skill content itself.
+    improvement_note: Optional actionable suggestions for
+        improving the skill content itself. Be specific —
+        e.g. "Should mention PACKS.md location", "Add
+        example of timeout checklist", "Troubleshooting
+        section is missing the K8s pod restart case".
+        Feeds the skill-keeper evolution loop directly.
+        Defaults to empty string.
 
 Returns:
     On a record update (``metrics_service.record_feedback(...)``
     returned ``True``)::
 
-        ✅ Feedback recorded for skill <short_id>... Applied=<applied>. Note: '<note>'
+        ✅ Feedback recorded for skill <short_id>... Applied=<applied>. [Usefulness: <n>/10.] Note: '<note>'. [Improvement: '<improvement_note>']
 
     When the service returns ``False`` (no usage record to stamp)::
 
@@ -710,6 +788,14 @@ Returns:
     in progress)::
 
         Skill metrics service is not yet available.
+
+    When ``usefulness`` is out of range::
+
+        ERROR: skill_feedback 'usefulness' must be in range 1-10, got <value>
+
+    When ``usefulness`` is the wrong type::
+
+        ERROR: skill_feedback 'usefulness' must be an int 1-10, got <type>: <value>
 
     When the service raises, an ``ERROR: ...`` string is returned
     containing the exception message; the underlying exception is

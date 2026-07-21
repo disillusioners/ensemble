@@ -837,15 +837,25 @@ class SkillMetricsService:
         project_id: Optional[str],
         applied: Optional[bool],
         note: str,
+        usefulness: Optional[int] = None,
+        improvement_note: str = "",
     ) -> bool:
         """Stamp feedback onto the most recent usage record (insert on miss).
 
         Backend for the ``skill_feedback`` tool (Phase 2 stub,
         implemented here). Locates the latest
         :class:`SkillUsageRecord` for ``(skill_id, instance_id)``
-        and stamps ``feedback_applied`` + ``feedback_note``.
-        When ``applied`` is explicitly ``True``, the skill row's
+        and stamps ``feedback_applied`` + ``feedback_note``. When
+        ``applied`` is explicitly ``True``, the skill row's
         ``total_applied`` counter is also bumped.
+
+        Phase 5 (2026-07-21): additionally stamps the optional
+        ``feedback_usefulness`` (1–10 quality score) and
+        ``feedback_improvement`` (actionable skill-content
+        suggestions) columns. Both are optional — callers who do
+        not provide them get the existing behavior unchanged. The
+        new columns feed the per-skill usefulness rollup and the
+        skill-keeper evolution loop.
 
         **On-miss insert contract (production fix):** when no
         usage record exists yet, this method INSERTS one on
@@ -870,7 +880,7 @@ class SkillMetricsService:
         1. Find the latest :class:`SkillUsageRecord` for the
            pair (most recent by ``created_at``).
         2. If the record exists →
-           ``update_feedback(record_id, applied, note)`` —
+           ``update_feedback(record_id, applied, note, ...)`` —
            ``applied=None`` is treated as
            "feedback recorded but outcome unknown" and skips
            the counter bump.
@@ -898,6 +908,16 @@ class SkillMetricsService:
                 the agent is unsure.
             note: Free-form feedback note. Empty string when
                 no note.
+            usefulness: Optional agent-judged quality score
+                1-10. ``None`` (default) = not recorded. The
+                tool layer is responsible for validating range
+                before calling; the service trusts the caller.
+            improvement_note: Optional actionable suggestion
+                text for improving the skill content itself.
+                Empty string (default) = not recorded. Distinct
+                from ``note`` which is the general context
+                observation. Feeds the skill-keeper evolution
+                loop directly.
 
         Returns:
             ``True`` if a usage record was updated OR inserted
@@ -962,11 +982,20 @@ class SkillMetricsService:
                 # ``fallback=None`` here so the update is a no-op
                 # for fallback (avoids double-counting the
                 # total_fallbacks bump we already did inline below).
+                #
+                # Phase 5 (2026-07-21): also forward the optional
+                # ``usefulness`` / ``improvement_note`` so the
+                # freshly-inserted row carries the full feedback
+                # signal set. Empty string / None map to
+                # "no change" in update_feedback, so callers that
+                # don't provide them get the existing behavior.
                 self.usage_repo.update_feedback(
                     record_id=inserted.id,
                     applied=bool(applied_bool) if applied_bool is not None else False,
                     note=note or "",
                     fallback=None,
+                    usefulness=usefulness,
+                    improvement_note=improvement_note or None,
                 )
                 logger.info(
                     f"SkillMetricsService.record_feedback: created "
@@ -1004,6 +1033,8 @@ class SkillMetricsService:
                     applied=False,
                     note=note or "",
                     fallback=True,
+                    usefulness=usefulness,
+                    improvement_note=improvement_note or None,
                 )
                 # Issue 6: Increment total_fallbacks ONLY on state change (False->True)
                 if not _prev_fallback:
@@ -1015,6 +1046,8 @@ class SkillMetricsService:
                     applied=True,
                     note=note or "",
                     fallback=False,
+                    usefulness=usefulness,
+                    improvement_note=improvement_note or None,
                 )
                 # Issue 6: Decrement total_fallbacks if this reverses a previous fallback
                 if _prev_fallback:
@@ -1026,6 +1059,8 @@ class SkillMetricsService:
                     record_id=record.id,
                     applied=False,  # stored as False when None
                     note=note or "",
+                    usefulness=usefulness,
+                    improvement_note=improvement_note or None,
                 )
 
             return record.id

@@ -107,7 +107,7 @@ def trigger_engine(engine, project_id):
 class TestBuiltInConditions:
     """Tests for the per-condition_type evaluators."""
 
-    def test_low_completion_rate_below_threshold(
+    async def test_low_completion_rate_below_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "low")
@@ -125,10 +125,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is True
 
-    def test_low_completion_rate_above_threshold(
+    async def test_low_completion_rate_above_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "ok")
@@ -146,10 +146,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_low_completion_rate_min_selections_gate(
+    async def test_low_completion_rate_min_selections_gate(
         self, trigger_engine, project_id
     ):
         """Below min_selections: condition does NOT fire."""
@@ -167,10 +167,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_high_fallback_rate_above_threshold(
+    async def test_high_fallback_rate_above_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "fb")
@@ -188,10 +188,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is True
 
-    def test_high_fallback_rate_below_threshold(
+    async def test_high_fallback_rate_below_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "fb2")
@@ -209,10 +209,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_consecutive_failures_meets_threshold(
+    async def test_consecutive_failures_meets_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "streak")
@@ -227,10 +227,10 @@ class TestBuiltInConditions:
             "evolve_fix",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is True
 
-    def test_consecutive_failures_below_threshold(
+    async def test_consecutive_failures_below_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "streak2")
@@ -245,10 +245,10 @@ class TestBuiltInConditions:
             "evolve_fix",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_task_count_scan_meets_threshold(
+    async def test_task_count_scan_meets_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "hot")
@@ -263,10 +263,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is True
 
-    def test_task_count_scan_below_threshold(
+    async def test_task_count_scan_below_threshold(
         self, trigger_engine, project_id
     ):
         skill = _make_skill(trigger_engine.skill_repo, project_id, "cold")
@@ -281,10 +281,10 @@ class TestBuiltInConditions:
             "analyze",
         )
 
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_periodic_scan_old_last_used(
+    async def test_periodic_scan_old_last_used(
         self, trigger_engine, project_id
     ):
         """``last_used_at`` older than interval fires the trigger."""
@@ -304,10 +304,10 @@ class TestBuiltInConditions:
             {"interval_days": 7},
             "analyze",
         )
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is True
 
-    def test_periodic_scan_recent_last_used(
+    async def test_periodic_scan_recent_last_used(
         self, trigger_engine, project_id
     ):
         """Recent activity: condition does not fire."""
@@ -326,10 +326,10 @@ class TestBuiltInConditions:
             {"interval_days": 7},
             "analyze",
         )
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_periodic_scan_never_used_skipped(
+    async def test_periodic_scan_never_used_skipped(
         self, trigger_engine, project_id
     ):
         """``last_used_at IS NULL`` -> periodic_scan does not fire."""
@@ -344,10 +344,10 @@ class TestBuiltInConditions:
             {"interval_days": 7},
             "analyze",
         )
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
-    def test_unknown_condition_type_returns_false(
+    async def test_unknown_condition_type_returns_false(
         self, trigger_engine, project_id
     ):
         """An unknown condition_type returns False (no error)."""
@@ -359,7 +359,7 @@ class TestBuiltInConditions:
             {"threshold": 1},
             "analyze",
         )
-        fired = trigger_engine._evaluate_condition(trigger, skill)
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
         assert fired is False
 
 
@@ -651,9 +651,286 @@ class TestSeedDefaultTriggers:
             "consecutive_failures",
             "periodic_scan",
             "task_count_scan",
+            "low_usefulness",
         }
         for trigger in DEFAULT_TRIGGERS:
             assert "condition_type" in trigger
             assert "condition_json" in trigger
             assert "action" in trigger
             assert trigger["action"] in {"analyze", "evolve_fix"}
+
+
+# =============================================================================
+# Phase 5 (2026-07-21): low_usefulness condition evaluator
+# =============================================================================
+
+
+class TestLowUsefulnessCondition:
+    """Tests for the new ``low_usefulness`` trigger condition.
+
+    Fires when the average ``feedback_usefulness`` (1-10 quality
+    score on each ``SkillUsageRecord``) is below ``threshold``
+    (default 4.0) AND at least ``min_samples`` (default 5)
+    records carry a score. Distinct from the other five
+    conditions — it reads the usage table directly rather than
+    denormalized counters on the skill row.
+    """
+
+    def _make_scored_records(
+        self, usage_repo, skill_id, project_id, scores
+    ):
+        """Insert ``scores`` usage records with the supplied
+        ``feedback_usefulness`` values. Each record is paired
+        with its own ``instance_id`` so the latest-for-skill
+        lookup is unambiguous.
+        """
+        for i, score in enumerate(scores):
+            rec = usage_repo.create(
+                skill_id=skill_id,
+                project_id=project_id,
+                instance_id=f"inst-{i}",
+                agent_id="a",
+            )
+            usage_repo.update_feedback(
+                record_id=rec.id,
+                applied=True,
+                note="x",
+                usefulness=score,
+            )
+
+    async def test_low_usefulness_fires_when_avg_below_threshold(
+        self, trigger_engine, project_id
+    ):
+        """5 records avg=3.0 < threshold=4.0 → fires."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "low-rated"
+        )
+        # 5 records: 3, 3, 3, 3, 3 → avg=3.0 < 4.0.
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[3, 3, 3, 3, 3],
+        )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
+        assert fired is True
+
+    async def test_low_usefulness_does_not_fire_above_threshold(
+        self, trigger_engine, project_id
+    ):
+        """5 records avg=7.0 ≥ threshold=4.0 → does NOT fire."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "high-rated"
+        )
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[7, 7, 7, 7, 7],
+        )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
+        assert fired is False
+
+    async def test_low_usefulness_below_min_samples_does_not_fire(
+        self, trigger_engine, project_id
+    ):
+        """Only 4 scored records (below min_samples=5) — even if
+        avg is low, the trigger does NOT fire (noise floor)."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "too-few"
+        )
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[1, 1, 1, 1],  # 4 records, avg=1.0
+        )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
+        assert fired is False
+
+    async def test_low_usefulness_with_no_scored_records_does_not_fire(
+        self, trigger_engine, project_id
+    ):
+        """No scored records at all → trigger does NOT fire (no
+        signal to act on)."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "no-scores"
+        )
+        # 3 records, none scored.
+        for i in range(3):
+            trigger_engine.usage_repo.create(
+                skill_id=skill.id,
+                project_id=project_id,
+                instance_id=f"inst-{i}",
+                agent_id="a",
+            )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
+        assert fired is False
+
+    async def test_low_usefulness_at_threshold_does_not_fire(
+        self, trigger_engine, project_id
+    ):
+        """avg == threshold → strict ``<`` so the trigger does
+        NOT fire (boundary case)."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "boundary"
+        )
+        # 5 records avg = exactly 4.0.
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[4, 4, 4, 4, 4],
+        )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
+        assert fired is False  # strict < comparison
+
+    async def test_low_usefulness_dispatcher_routes(
+        self, trigger_engine, project_id
+    ):
+        """The ``low_usefulness`` condition_type is wired into the
+        ``_evaluate_condition`` dispatcher (not just the static
+        method) — proves the routing works end-to-end via the
+        public surface."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "routed"
+        )
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[2, 2, 2, 2, 2],
+        )
+
+        # Build the trigger via the repo so the row shape matches
+        # what ``_evaluate_condition`` expects.
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use_routed",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        # Call through the public dispatcher — if routing were
+        # broken, this would hit the ``unknown condition_type``
+        # warning branch and return False.
+        fired = await trigger_engine._evaluate_condition(trigger, skill)
+        assert fired is True
+
+    async def test_low_usefulness_evaluate_all_end_to_end(
+        self, trigger_engine, project_id
+    ):
+        """``evaluate_all`` surfaces a flagged entry with a
+        ``reason`` that includes the avg and sample count when
+        ``low_usefulness`` fires."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "e2e"
+        )
+        # 6 records: avg = 3.0, above min_samples=5.
+        self._make_scored_records(
+            trigger_engine.usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            scores=[3, 3, 3, 3, 3, 3],
+        )
+
+        _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use_e2e",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        flagged = await trigger_engine.evaluate_all()
+        assert len(flagged) == 1
+        entry = flagged[0]
+        assert entry["skill_id"] == skill.id
+        assert entry["trigger_name"] == "low_use_e2e"
+        assert entry["trigger_action"] == "analyze"
+        # Reason includes the condition type, skill name, the
+        # avg usefulness (3.0/10), and the sample count (6).
+        assert "low_usefulness" in entry["reason"]
+        assert "e2e" in entry["reason"]
+        assert "3.0/10" in entry["reason"]
+        assert "6" in entry["reason"]
+
+    async def test_low_usefulness_reason_when_unavailable(
+        self, trigger_engine, project_id
+    ):
+        """``_build_reason`` for ``low_usefulness`` degrades to
+        ``avg=n/a, count=0`` when ``usage_repo`` is unavailable
+        (does NOT raise)."""
+        skill = _make_skill(
+            trigger_engine.skill_repo, project_id, "no-repo"
+        )
+
+        trigger = _make_trigger(
+            trigger_engine.trigger_repo,
+            "low_use_reason",
+            "low_usefulness",
+            {"threshold": 4.0, "min_samples": 5},
+            "analyze",
+        )
+
+        # Detach the usage_repo so the reason fallback fires.
+        saved_usage_repo = trigger_engine.usage_repo
+        trigger_engine.usage_repo = None
+        try:
+            reason = await trigger_engine._build_reason(
+                trigger, skill, stats={}
+            )
+        finally:
+            trigger_engine.usage_repo = saved_usage_repo
+
+        assert "low_usefulness" in reason
+        assert "no-repo" in reason
+        # Fallback markers from the source — avg_str="n/a", count_str="0".
+        assert "n/a" in reason
+        assert "0" in reason

@@ -130,7 +130,7 @@ I work almost exclusively through the `dynamic-skill` and `skill-evolution` tool
 - **`skill_view(skill_id)`** — Read a skill's content and lineage before evolving it.
 - **`skill_create(...)`** / **`skill_update(...)`** — Apply FIX/DERIVED/CAPTURED writes.
 - **`skill_fix(skill_id, issue_description)`** — Submit structured feedback when an issue is detected but analysis is deferred.
-- **`skill_feedback(skill_id, ...)`** — Record feedback on evolved skills during A/B resolution.
+- **`skill_feedback(skill_id, applied=None, usefulness=None, note="", improvement_note="")`** — Record feedback on a skill's usefulness. Phase 5 (2026-07-21) added two new params I care about: `usefulness` is an agent-judged 1-10 quality score (1 = unusable/harmful, 5 = mediocre, 10 = excellent and directly helpful) that feeds the per-skill usefulness rollup and the `low_usefulness` trigger; `improvement_note` is an actionable suggestion text (e.g. "Add timeout checklist example", "Mention PACKS.md location") that I surface verbatim into the Tier 2 analysis prompt's "Agent Improvement Suggestions (recent)" section and into the Tier 3 evolution prompt's "Agent Suggested Improvements" section. The agent-facing agent calls `skill_feedback` after every task that injects a skill; both new params are optional but encouraged — they are the primary training signal I receive between major revs.
 
 ### `skill-evolution` (Phase 5 — wired when evolution is configured)
 - `analyze_skill(skill_id)` — Convenience wrapper over the Tier 2 analysis pipeline.

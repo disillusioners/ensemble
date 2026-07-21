@@ -57,7 +57,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, Column, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlmodel import Field, PrimaryKeyConstraint, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
@@ -352,6 +352,16 @@ class SkillUsageRecord(SQLModel, table=True):
             column to keep the row count low.
         feedback_note: Optional free-form note attached to the
             feedback (typically from the user).
+        feedback_usefulness: Agent-judged quality score 1–10
+            (1 = unusable/harmful, 10 = excellent and directly
+            helpful). ``NULL`` when the agent did not provide
+            a numeric rating — distinct from ``feedback_note``,
+            which is the free-form context observation.
+        feedback_improvement: Actionable suggestions for
+            improving the skill content itself (e.g. "Should
+            mention PACKS.md location", "Add example of timeout
+            checklist"). Distinct from ``feedback_note`` which is
+            general context. Feeds the skill-keeper evolution loop.
         created_at: ISO-8601 timestamp of the usage event.
     """
 
@@ -421,6 +431,42 @@ class SkillUsageRecord(SQLModel, table=True):
         ),
     )
 
+    # Phase: skill_feedback usefulness + improvement scoring (2026-07-21).
+    # Both columns follow the dual-driver CREATE pattern: declared here on
+    # the model, added to existing SQLite databases via the .sql migration in
+    # ``daemon/migrations/versions/20260721_000001_skill_usage_feedback_columns.sql``,
+    # and added to existing PostgreSQL databases via the ALTER statements in
+    # ``daemon/manager.py::_ensure_postgres_columns``. Fresh databases of
+    # either flavor pick up the columns from SQLModel.metadata.create_all.
+    #
+    # ``feedback_usefulness`` is the agent-judged quality score (1-10) the
+    # ``skill_feedback`` tool collects. ``feedback_improvement`` is the
+    # actionable suggestion text — distinct from ``feedback_note`` which is
+    # the general context observation. Together they feed the skill-keeper
+    # evolution loop and the per-skill usefulness rollup.
+    feedback_usefulness: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True),
+        description=(
+            "Agent-judged quality score 1-10 (1=unusable/harmful, "
+            "10=excellent and directly helpful). NULL when the agent did "
+            "not provide a numeric rating. Optional but encouraged — feeds "
+            "the per-skill usefulness rollup and the skill-keeper evolution "
+            "loop."
+        ),
+    )
+    feedback_improvement: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+        description=(
+            "Actionable suggestions for improving the skill content itself "
+            "(e.g. 'Should mention PACKS.md location', 'Add example of "
+            "timeout checklist'). Distinct from feedback_note which is "
+            "general context observation. Feeds the skill-keeper evolution "
+            "loop directly."
+        ),
+    )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe view of the row."""
         return {
@@ -438,6 +484,8 @@ class SkillUsageRecord(SQLModel, table=True):
             "fallback": self.fallback,
             "feedback_applied": self.feedback_applied,
             "feedback_note": self.feedback_note,
+            "feedback_usefulness": self.feedback_usefulness,
+            "feedback_improvement": self.feedback_improvement,
             "created_at": self.created_at,
             "ab_test_group": self.ab_test_group,
             "superseded": self.superseded,

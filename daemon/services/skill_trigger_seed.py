@@ -26,6 +26,14 @@ type-specific parameter bag (threshold, min_selections, etc.).
   inspected" skills.
 * ``periodic_scan`` — weekly freshness check regardless of
   counters. Catches stale skills that haven't been touched.
+* ``low_usefulness`` — flag skills whose agent-judged
+  ``feedback_usefulness`` (1-10 quality score, collected via the
+  ``skill_feedback`` tool) averages below ``threshold`` (default
+  ``4.0``) across at least ``min_samples`` (default ``5``)
+  scored usage records. Catches skills that complete tasks
+  successfully but are still subjectively unhelpful. Reads
+  ``skill_usage_records`` directly (the score is not
+  denormalized onto the skill row).
 
 The ``min_selections`` floor on rate-based triggers avoids
 flapping on a single early data point — a skill with one
@@ -84,6 +92,22 @@ DEFAULT_TRIGGERS: list[dict[str, Any]] = [
         "name": "task_count_scan",
         "condition_type": "task_count_scan",
         "condition_json": {"threshold": 20},
+        "action": "analyze",
+    },
+    {
+        "name": "low_usefulness",
+        "condition_type": "low_usefulness",
+        # Agent-judged 1-10 quality score averaged across
+        # ``feedback_usefulness`` on ``skill_usage_records``.
+        # ``min_samples`` enforces a noise floor so a single low
+        # rating doesn't flap the trigger.
+        "condition_json": {"threshold": 4.0, "min_samples": 5},
+        # Route through Tier 2 analysis so the skill-keeper LLM
+        # can read the per-skill usefulness rollup + the
+        # ``feedback_improvement`` notes before deciding whether
+        # to evolve the skill. The subjective score is noisier
+        # than the denormalized counters (low_completion_rate
+        # etc.) so we don't skip straight to ``evolve_fix``.
         "action": "analyze",
     },
 ]

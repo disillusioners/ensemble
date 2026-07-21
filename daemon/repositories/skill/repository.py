@@ -1166,6 +1166,81 @@ class SkillUsageRepository:
             "fallback_rate": fallbacks / total,
         }
 
+    def get_avg_usefulness(
+        self,
+        skill_id: str,
+        min_samples: int = 5,
+    ) -> Optional[tuple[float, int]]:
+        """Return ``(avg_usefulness, sample_count)`` for a skill.
+
+        Aggregates non-null ``feedback_usefulness`` scores over
+        non-superseded usage records for ``skill_id``. Powers the
+        ``low_usefulness`` trigger condition (Phase 5,
+        2026-07-21) — agent-judged quality scores let the
+        evolution pipeline catch skills that complete tasks
+        successfully but are still subjectively unhelpful.
+
+        Excludes SUPERSEDED rows (same convention as
+        :meth:`get_stats_filtered` — they're neutral worker-reuse
+        markers and must not pollute the signal).
+
+        Only counts records where ``feedback_usefulness IS NOT
+        NULL`` (the agent-judged score is optional). The
+        ``min_samples`` parameter is a soft floor for callers —
+        it does NOT filter the query, it just lets the caller
+        distinguish "below the noise floor" from
+        "above the noise floor" without re-issuing the count
+        query. Return ``(0.0, 0)`` semantics are deliberately
+        NOT used — when no scored records exist, returns
+        ``None`` so callers can treat "no signal" separately
+        from "average is zero".
+
+        Args:
+            skill_id: The skill to aggregate over.
+            min_samples: Reserved for caller's noise floor
+                handling. Not enforced server-side — kept on
+                the signature so the trigger engine can pass
+                its configured floor and rely on the count in
+                the returned tuple.
+
+        Returns:
+            Tuple of ``(avg_usefulness: float,
+            sample_count: int)`` when at least one scored
+            record exists. ``None`` when no non-null
+            ``feedback_usefulness`` rows are present (caller
+            should treat as "no signal, don't fire").
+        """
+        del min_samples  # See docstring — noise floor lives at the caller.
+        avg_expr = func.avg(SkillUsageRecord.feedback_usefulness)
+        # Mirror the ``== True`` pattern used by
+        # :meth:`get_stats_filtered` so the type checker sees a
+        # ``ColumnElement[bool]`` predicate on the ``case`` overload
+        # rather than the raw bool returned by ``.is_not(None)``.
+        count_expr = func.sum(
+            case(
+                (
+                    SkillUsageRecord.feedback_usefulness != None,  # noqa: E711
+                    1,
+                ),
+                else_=0,
+            )
+        )
+        stmt = select(avg_expr, count_expr).where(
+            SkillUsageRecord.skill_id == skill_id,
+            SkillUsageRecord.superseded == False,  # noqa: E712
+        )
+        with Session(self.engine) as session:
+            row = session.exec(stmt).first()
+        if row is None:
+            return None
+        avg_val, count_val = row
+        count = int(count_val or 0)
+        if count == 0:
+            return None
+        # ``avg`` may be Decimal under SQLAlchemy + SQLite/Postgres;
+        # coerce to float for the engine's threshold comparison.
+        return (float(avg_val) if avg_val is not None else 0.0, count)
+
     def get_global_averages(self) -> dict[str, float]:
         """Compute global avg iterations + duration across all records.
 
@@ -1197,6 +1272,8 @@ class SkillUsageRepository:
         applied: bool,
         note: str,
         fallback: bool | None = None,
+        usefulness: int | None = None,
+        improvement_note: str | None = None,
     ) -> SkillUsageRecord | None:
         """Stamp feedback onto an existing usage record.
 
@@ -1207,6 +1284,16 @@ class SkillUsageRepository:
             note: Free-form note attached to the feedback.
             fallback: When provided (not None), sets the fallback flag
                 based on worker judgment (Option C). None = no change.
+            usefulness: Optional agent-judged quality score 1-10.
+                ``None`` (default) = no change. Out-of-range values
+                are clamped / rejected at the service layer; this
+                method trusts the caller.
+            improvement_note: Optional actionable suggestion text
+                for improving the skill content. ``None`` (default)
+                = no change. Empty string is treated as "explicit
+                clear" (overwrites the column with ``""``); callers
+                that want to preserve the existing value must pass
+                ``None``.
 
         Returns:
             The updated SkillUsageRecord, or None if not found.
@@ -1230,11 +1317,22 @@ class SkillUsageRepository:
                 record.applied = True
             if fallback is not None:
                 record.fallback = fallback
+            # New skill_feedback usefulness + improvement scoring columns
+            # (2026-07-21). ``None`` = no change so callers can update one
+            # without clobbering the other; explicit values (including 0
+            # for usefulness or "" for improvement_note) overwrite the
+            # stored value.
+            if usefulness is not None:
+                record.feedback_usefulness = usefulness
+            if improvement_note is not None:
+                record.feedback_improvement = improvement_note
             session.commit()
             session.refresh(record)
             logger.debug(
                 f"Updated skill usage feedback: id={record_id}, "
-                f"applied={applied}, fallback={fallback}"
+                f"applied={applied}, fallback={fallback}, "
+                f"usefulness={usefulness}, improvement_provided="
+                f"{improvement_note is not None}"
             )
             return record
 

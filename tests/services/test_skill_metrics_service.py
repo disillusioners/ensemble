@@ -1003,3 +1003,194 @@ class TestGetABComparisonStats:
 
         result = await metrics_service.get_ab_comparison_stats(group)
         assert result["extension_count"] == 2
+
+
+# =============================================================================
+# Phase 5 (2026-07-21): record_feedback forwards usefulness + improvement_note
+# =============================================================================
+
+
+class TestRecordFeedbackPhase5:
+    """The Phase 5 ``skill_feedback`` upgrade persists two new fields
+    on the usage row:
+
+    * ``feedback_usefulness`` (1-10 quality score)
+    * ``feedback_improvement`` (actionable suggestion text)
+
+    These tests pin the contract: ``record_feedback`` must forward
+    the new fields to ``update_feedback`` for every existing-record
+    branch (applied=True / False / None) AND for the on-miss insert
+    path. Backward compat: callers that omit the new params get
+    the existing behavior unchanged.
+    """
+
+    async def test_persists_usefulness_and_improvement(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """``record_feedback(usefulness=8, improvement_note=...)``
+        persists both new fields onto the latest usage record."""
+        skill = _make_skill(skill_repo, project_id, "zeta-phase5")
+        inst_id = "inst-phase5-1"
+        metrics_service.usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id=inst_id,
+            agent_id="a",
+        )
+
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=inst_id,
+            agent_id="a",
+            project_id=project_id,
+            applied=True,
+            note="worked",
+            usefulness=8,
+            improvement_note="Should mention PACKS.md location",
+        )
+
+        assert ok is True
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=inst_id
+        )
+        assert rec is not None
+        assert rec.feedback_usefulness == 8
+        assert (
+            rec.feedback_improvement
+            == "Should mention PACKS.md location"
+        )
+
+    async def test_backward_compat_without_new_params(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """Calling ``record_feedback`` without the new params leaves
+        the new columns at their default ``None`` value — no
+        regression for existing callers."""
+        skill = _make_skill(skill_repo, project_id, "compat-skill")
+        inst_id = "inst-compat"
+        metrics_service.usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id=inst_id,
+            agent_id="a",
+        )
+
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=inst_id,
+            agent_id="a",
+            project_id=project_id,
+            applied=True,
+            note="helpful",
+        )
+
+        assert ok is True
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=inst_id
+        )
+        assert rec is not None
+        # New columns are nullable defaults — the service didn't
+        # touch them, so they're None.
+        assert rec.feedback_usefulness is None
+        assert rec.feedback_improvement is None
+
+    async def test_applied_false_forwards_new_params(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """The ``applied=False`` branch forwards the new fields too
+        — a negative-rated skill can still carry improvement
+        suggestions for the next revision."""
+        skill = _make_skill(skill_repo, project_id, "neg-skill")
+        inst_id = "inst-neg"
+        metrics_service.usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id=inst_id,
+            agent_id="a",
+        )
+
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=inst_id,
+            agent_id="a",
+            project_id=project_id,
+            applied=False,
+            note="not relevant",
+            usefulness=2,
+            improvement_note="Add troubleshooting section",
+        )
+
+        assert ok is True
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=inst_id
+        )
+        assert rec.feedback_usefulness == 2
+        assert rec.feedback_improvement == "Add troubleshooting section"
+
+    async def test_applied_none_forwards_new_params(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """The ``applied=None`` (unsure) branch forwards the new
+        fields too."""
+        skill = _make_skill(skill_repo, project_id, "unsure-skill")
+        inst_id = "inst-unsure"
+        metrics_service.usage_repo.create(
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id=inst_id,
+            agent_id="a",
+        )
+
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=inst_id,
+            agent_id="a",
+            project_id=project_id,
+            applied=None,
+            note="ambiguous",
+            usefulness=5,
+            improvement_note="Maybe clarify scope",
+        )
+
+        assert ok is True
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=inst_id
+        )
+        assert rec.feedback_usefulness == 5
+        assert rec.feedback_improvement == "Maybe clarify scope"
+
+    async def test_on_miss_insert_forwards_new_params(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """On-miss insert path (no existing record) also persists
+        the new fields. Mirrors the existing-record branch.
+
+        Production fix: the on-miss insert path runs through
+        ``update_feedback`` to stamp the feedback signals, so
+        ``usefulness`` / ``improvement_note`` are forwarded there
+        too.
+        """
+        skill = _make_skill(skill_repo, project_id, "onmiss-skill")
+
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id="inst-onmiss-phase5",
+            agent_id="a",
+            project_id=project_id,
+            applied=True,
+            note="first-time feedback",
+            usefulness=7,
+            improvement_note="Add timeout checklist example",
+        )
+
+        assert ok is True
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id="inst-onmiss-phase5"
+        )
+        assert rec is not None
+        assert rec.feedback_usefulness == 7
+        assert (
+            rec.feedback_improvement == "Add timeout checklist example"
+        )
+        # Sanity: the on-miss path also bumps the selection counter.
+        assert skill_repo.get(skill.id).total_selections == 1

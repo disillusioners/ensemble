@@ -3452,6 +3452,26 @@ class InstanceManager:
             "ALTER TABLE skill_usage_records ADD COLUMN IF NOT EXISTS superseded BOOLEAN NOT NULL DEFAULT false",
             "CREATE INDEX IF NOT EXISTS ix_skill_usage_records_ab_group ON skill_usage_records(ab_test_group)",
             "CREATE INDEX IF NOT EXISTS ix_skill_usage_records_skill_created ON skill_usage_records(skill_id, created_at)",
+            # ── Skill usage records: feedback_usefulness + feedback_improvement (2026-07-21) ──
+            # Phase: skill_feedback usefulness + improvement scoring. Two new
+            # columns on the ``skill_usage_records`` table backing the
+            # upgraded ``skill_feedback`` tool: ``feedback_usefulness`` is an
+            # INTEGER holding the agent-judged quality score 1-10 (NULL =
+            # not recorded — preserved by the absence of a DEFAULT so
+            # existing rows don't get a corrupt "rated 0" signal), and
+            # ``feedback_improvement`` is a TEXT column for actionable
+            # suggestions about the skill content itself (distinct from
+            # ``feedback_note`` which is the general context observation).
+            # Together they feed the skill-keeper evolution loop and the
+            # per-skill usefulness rollup. SQLite counterpart lives in
+            # ``daemon/migrations/versions/20260721_000001_skill_usage_feedback_columns.sql``.
+            # Fresh PG databases pick up the columns from
+            # ``SQLModel.metadata.create_all()`` via the SkillUsageRecord
+            # model field declarations; existing PG databases rely on
+            # these statements because the .sql migration runner is a
+            # NO-OP on PostgreSQL (runner.py lines 446-448).
+            "ALTER TABLE skill_usage_records ADD COLUMN IF NOT EXISTS feedback_usefulness INTEGER",
+            "ALTER TABLE skill_usage_records ADD COLUMN IF NOT EXISTS feedback_improvement TEXT",
             # ── Widen job_queues.queue_type CHECK constraint (2026-07-14) ──
             # The job_queues.queue_type column must accept 'defer' and
             # 'background' values in addition to 'fifo' and 'parallel' so

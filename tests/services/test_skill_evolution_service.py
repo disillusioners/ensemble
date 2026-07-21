@@ -1137,3 +1137,362 @@ class TestGetSkillMetrics:
 
         assert result["found"] is True
         assert result["ab_test"] is None
+
+
+# =============================================================================
+# Phase 5 (2026-07-21): prompt surfaces for usefulness + improvement_note
+# =============================================================================
+
+
+class TestAnalysisPromptPhase5:
+    """Phase 5 of the ``skill_feedback`` upgrade touches two prompt
+    surfaces:
+
+    * :meth:`SkillEvolutionService._build_analysis_prompt` now
+      shows ``avg_usefulness`` (a per-record ``usefulness=N/10``
+      and ``improvement='...'`` annotation on each recent-usage
+      line) and a dedicated "Agent Improvement Suggestions (recent)"
+      section.
+    * :meth:`SkillEvolutionService._generate_evolved_content` now
+      renders an "Agent Suggested Improvements" section near the
+      top of the evolution prompt when ``improvement_hints`` is
+      non-empty.
+
+    These tests pin the prompt-builder contract. We invoke
+    ``analyze_skill`` / ``evolve_skill`` with the LLM patched and
+    inspect the captured prompt text — no live LLM, no DB-write
+    side effects beyond skill creation.
+    """
+
+    @staticmethod
+    def _make_usage_rec(
+        usage_repo,
+        skill_id,
+        project_id,
+        instance_id,
+        *,
+        usefulness=None,
+        improvement="",
+        task_succeeded=False,
+    ):
+        """Create one usage record, optionally stamping the new
+        ``feedback_usefulness`` / ``feedback_improvement`` columns
+        via the existing ``update_feedback`` API."""
+        rec = usage_repo.create(
+            skill_id=skill_id,
+            project_id=project_id,
+            instance_id=instance_id,
+            agent_id="a",
+            task_succeeded=task_succeeded,
+        )
+        if usefulness is not None or improvement:
+            usage_repo.update_feedback(
+                record_id=rec.id,
+                applied=True,
+                note="x",
+                usefulness=usefulness,
+                improvement_note=improvement or None,
+            )
+        return rec
+
+    async def test_analysis_prompt_includes_avg_usefulness(
+        self, evolution_service, skill_repo, usage_repo, project_id
+    ):
+        """When records carry ``feedback_usefulness`` scores, the
+        prompt shows ``avg_usefulness``."""
+        skill = _make_skill(skill_repo, project_id, "avg-usefulness")
+        # Three scored records: 8, 6, 10 → avg 8.0.
+        for i, score in enumerate([8, 6, 10]):
+            self._make_usage_rec(
+                usage_repo,
+                skill_id=skill.id,
+                project_id=project_id,
+                instance_id=f"inst-{i}",
+                usefulness=score,
+            )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return json.dumps({
+                "should_evolve": False,
+                "evolution_type": "NONE",
+                "direction": "",
+                "analysis_summary": "",
+            })
+
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service.analyze_skill(skill.id)
+
+        prompt = captured["prompt"]
+        assert "avg_usefulness" in prompt
+        # 8.0/10 is the average of [8, 6, 10].
+        assert "8.0/10" in prompt
+
+    async def test_analysis_prompt_shows_na_when_no_scores(
+        self, evolution_service, skill_repo, usage_repo, project_id
+    ):
+        """No ``feedback_usefulness`` records → ``avg_usefulness: N/A``
+        (no rating corruption from nulls)."""
+        skill = _make_skill(skill_repo, project_id, "no-scores")
+        # Three records, none scored.
+        for i in range(3):
+            self._make_usage_rec(
+                usage_repo,
+                skill_id=skill.id,
+                project_id=project_id,
+                instance_id=f"inst-{i}",
+            )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return json.dumps({
+                "should_evolve": False,
+                "evolution_type": "NONE",
+                "direction": "",
+                "analysis_summary": "",
+            })
+
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service.analyze_skill(skill.id)
+
+        prompt = captured["prompt"]
+        assert "avg_usefulness" in prompt
+        # "N/A" exactly — not "0.0/10", not "None".
+        assert "avg_usefulness: N/A" in prompt
+
+    async def test_analysis_prompt_per_record_usefulness_and_improvement(
+        self, evolution_service, skill_repo, usage_repo, project_id
+    ):
+        """Each recent-usage line carries its own
+        ``usefulness=N/10`` and ``improvement='...'`` annotation
+        when present."""
+        skill = _make_skill(skill_repo, project_id, "per-record")
+        self._make_usage_rec(
+            usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-1",
+            usefulness=9,
+            improvement="Mention PACKS.md",
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return json.dumps({
+                "should_evolve": False,
+                "evolution_type": "NONE",
+                "direction": "",
+                "analysis_summary": "",
+            })
+
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service.analyze_skill(skill.id)
+
+        prompt = captured["prompt"]
+        # Per-record usefulness annotation.
+        assert "usefulness=9/10" in prompt
+        # Per-record improvement annotation (repr quotes the text).
+        assert "improvement=" in prompt
+        assert "Mention PACKS.md" in prompt
+
+    async def test_analysis_prompt_includes_improvement_suggestions_section(
+        self, evolution_service, skill_repo, usage_repo, project_id
+    ):
+        """When at least one record has a non-empty
+        ``feedback_improvement``, the prompt emits a dedicated
+        "Agent Improvement Suggestions (recent)" section."""
+        skill = _make_skill(skill_repo, project_id, "suggestions")
+        self._make_usage_rec(
+            usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-1",
+            usefulness=5,
+            improvement="Add timeout checklist",
+        )
+        self._make_usage_rec(
+            usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-2",
+            usefulness=4,
+            improvement="Clarify scope",
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return json.dumps({
+                "should_evolve": False,
+                "evolution_type": "NONE",
+                "direction": "",
+                "analysis_summary": "",
+            })
+
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service.analyze_skill(skill.id)
+
+        prompt = captured["prompt"]
+        assert "## Agent Improvement Suggestions (recent)" in prompt
+        assert "Add timeout checklist" in prompt
+        assert "Clarify scope" in prompt
+
+    async def test_analysis_prompt_omits_suggestions_section_when_empty(
+        self, evolution_service, skill_repo, usage_repo, project_id
+    ):
+        """No non-empty ``feedback_improvement`` → the suggestions
+        section is absent from the prompt (would be empty filler)."""
+        skill = _make_skill(skill_repo, project_id, "no-suggestions")
+        # Three records, all with empty improvement notes.
+        for i in range(3):
+            self._make_usage_rec(
+                usage_repo,
+                skill_id=skill.id,
+                project_id=project_id,
+                instance_id=f"inst-{i}",
+                usefulness=7,
+            )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return json.dumps({
+                "should_evolve": False,
+                "evolution_type": "NONE",
+                "direction": "",
+                "analysis_summary": "",
+            })
+
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service.analyze_skill(skill.id)
+
+        prompt = captured["prompt"]
+        assert "## Agent Improvement Suggestions (recent)" not in prompt
+
+    async def test_evolved_content_prompt_includes_suggestions(
+        self, evolution_service, skill_repo
+    ):
+        """``_generate_evolved_content`` renders the "Agent
+        Suggested Improvements" section when ``improvement_hints``
+        is non-empty."""
+        skill = _make_skill(skill_repo, "proj-p5", "evolve-skill")
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return "new content"
+
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service._generate_evolved_content(
+                skill,
+                "tighten error handling",
+                improvement_hints=[
+                    "Add timeout checklist example",
+                    "Mention PACKS.md location",
+                ],
+            )
+
+        prompt = captured["prompt"]
+        assert "## Agent Suggested Improvements" in prompt
+        assert "Add timeout checklist example" in prompt
+        assert "Mention PACKS.md location" in prompt
+
+    async def test_evolved_content_prompt_omits_section_when_no_hints(
+        self, evolution_service, skill_repo
+    ):
+        """``improvement_hints=None`` or ``[]`` → no "Agent Suggested
+        Improvements" section. Tested for both shapes."""
+        skill = _make_skill(skill_repo, "proj-p5", "evolve-empty")
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_call(prompt: str, model: str | None = None) -> str:
+            captured["prompt"] = prompt
+            return "new content"
+
+        # ``None`` case.
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service._generate_evolved_content(
+                skill, "tighten", improvement_hints=None
+            )
+        assert (
+            "## Agent Suggested Improvements" not in captured["prompt"]
+        )
+
+        # Empty list case — also omits the section.
+        captured.clear()
+        with patch.object(
+            evolution_service, "_call_llm", side_effect=_fake_call
+        ):
+            await evolution_service._generate_evolved_content(
+                skill, "tighten", improvement_hints=[]
+            )
+        assert (
+            "## Agent Suggested Improvements" not in captured["prompt"]
+        )
+
+    async def test_collect_recent_improvement_hints_dedup(
+        self, evolution_service, skill_repo, usage_repo, project_id
+    ):
+        """``_collect_recent_improvement_hints`` deduplicates
+        identical notes and preserves most-recent-first ordering."""
+        skill = _make_skill(skill_repo, project_id, "hints-dedup")
+        # First record: unique note A.
+        self._make_usage_rec(
+            usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-oldest",
+            improvement="Note A",
+        )
+        # Second record: same Note A again (should be deduped).
+        self._make_usage_rec(
+            usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-middle",
+            improvement="Note A",
+        )
+        # Third record: new note B.
+        self._make_usage_rec(
+            usage_repo,
+            skill_id=skill.id,
+            project_id=project_id,
+            instance_id="inst-newest",
+            improvement="Note B",
+        )
+
+        hints = await evolution_service._collect_recent_improvement_hints(
+            skill.id
+        )
+
+        # Note A appears once; Note B is the most recent (first).
+        # Order: most-recent-first per the repo's get_by_skill.
+        assert "Note A" in hints
+        assert "Note B" in hints
+        assert hints.count("Note A") == 1
+        # Most-recent-first: Note B before Note A.
+        assert hints.index("Note B") < hints.index("Note A")
