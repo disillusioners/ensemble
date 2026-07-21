@@ -164,9 +164,34 @@ class TestUpsertPartialUpdate:
         assert row.pinned_at is not None
         assert row.pinned_at >= original_pinned_at
 
+    def test_upsert_clear_color_tag_explicit(self, repo, engine):
+        """``upsert(id, color_tag=None, clear_color_tag=True)`` CLEARs the
+        existing color tag to None — the explicit-clear path the frontend
+        uses when sending ``{"color_tag": null}``.
 
-# =============================================================================
-# get — single-row read
+        Control assertion: passing ``color_tag=None`` WITHOUT
+        ``clear_color_tag=True`` must leave the existing color unchanged
+        (preserves partial-update semantics).
+        """
+        # Seed with a color tag.
+        repo.upsert("inst-1", color_tag="blue")
+        seeded = repo.get("inst-1")
+        assert seeded is not None and seeded.color_tag == "blue"
+
+        # Control: color_tag=None without clear_color_tag → leave unchanged.
+        repo.upsert("inst-1", color_tag=None)
+        control = repo.get("inst-1")
+        assert control is not None
+        assert control.color_tag == "blue"  # preserved
+
+        # Explicit clear: color_tag=None WITH clear_color_tag=True → cleared.
+        repo.upsert("inst-1", color_tag=None, clear_color_tag=True)
+        cleared = repo.get("inst-1")
+        assert cleared is not None
+        assert cleared.color_tag is None
+
+
+
 # =============================================================================
 
 

@@ -1165,7 +1165,11 @@ class SQLModelInstanceRepository:
 
             # Delete all hierarchy links
             db_session.exec(sql_delete(InstanceHierarchy))
-            
+
+            # Delete all instance_ui_prefs (FK → instances.instance_id).
+            # Without this, delete_all() leaves orphan prefs rows.
+            db_session.exec(sql_delete(InstanceUiPrefs))
+
             # Delete all instances
             db_session.exec(sql_delete(Instance))
             

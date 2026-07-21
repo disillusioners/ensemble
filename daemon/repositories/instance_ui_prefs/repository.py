@@ -137,13 +137,14 @@ class InstanceUiPrefsRepository:
         instance_id: str,
         pinned: bool | None = None,
         color_tag: str | None = None,
+        clear_color_tag: bool = False,
     ) -> InstanceUiPrefs:
         """Partial-update the prefs row for ``instance_id``.
 
         Creates the row lazily on first call (with the defaults
         ``pinned=False``, ``pinned_at=None``, ``color_tag=None``,
         ``created_at=now``). On subsequent calls, only the fields
-        whose argument is not ``None`` are mutated.
+        explicitly changed by the caller are mutated.
 
         ``pinned_at`` side-effect:
 
@@ -159,28 +160,32 @@ class InstanceUiPrefsRepository:
 
         ``color_tag`` follow-up:
 
-        * ``color_tag=value`` was passed → ``color_tag`` is set to
-          ``value`` (including the empty string, if a caller wants
-          to normalize an existing tag).
-        * ``color_tag=None`` was passed → ``color_tag`` is cleared
-          (``None``). Pass ``{}`` if you want a true no-op
-          (impossible at the type level — but plain ``{"pinned":
-          true}`` for example results in the color-tag field being
-          preserved, not cleared).
+        * ``color_tag="blue"`` (or another string) was passed →
+          ``color_tag`` is set to that value, including the empty
+          string if a caller wants to normalize an existing tag.
+        * ``color_tag=None`` without ``clear_color_tag=True`` was
+          passed → ``color_tag`` is left unchanged.
+        * ``color_tag=None`` with ``clear_color_tag=True`` was passed
+          → ``color_tag`` is cleared to ``None``.
         * ``color_tag`` omitted → ``color_tag`` is left unchanged.
+        * Both ``color_tag="x"`` and ``clear_color_tag=True`` passed →
+          ``clear_color_tag=True`` wins (value is cleared to ``None``).
 
         Args:
             instance_id: The instance whose prefs to upsert.
-            pinned: Optional new pin state. ``True`` pins,
-                ``False`` unpins (and clears ``pinned_at``),
-                ``None`` leaves both fields unchanged.
-            color_tag: Optional new color tag. ``str`` sets it,
-                ``None`` clears it, omitted (keyword arg not
-                passed) leaves it unchanged. NOTE: at the Python
-                call site you cannot truly "omit" a positional
-                argument; the API router layer distinguishes
-                "missing" vs "explicit null" by examining the
-                request body, not this method's signature.
+            pinned: Optional new pin state. ``True`` pins and sets
+                ``pinned_at``, ``False`` unpins and clears
+                ``pinned_at``, and ``None`` leaves both fields
+                unchanged.
+            color_tag: Optional new color tag. A string sets it;
+                ``None`` leaves it unchanged unless
+                ``clear_color_tag`` is ``True``.
+            clear_color_tag: When True, force ``color_tag`` to ``None`` even if
+                ``color_tag`` is None. Used by the API router to translate an
+                explicit JSON ``"color_tag": null`` into a clear operation,
+                disambiguating it from "field omitted" (no-op). Defaults to
+                False (preserve the partial-update "leave unchanged" semantics
+                when ``color_tag`` is None).
 
         Returns:
             The persisted :class:`InstanceUiPrefs` row (refreshed
@@ -214,8 +219,11 @@ class InstanceUiPrefsRepository:
                 if pinned is not None:
                     row.pinned = pinned
                     row.pinned_at = now_iso if pinned else None
-                if color_tag is not None:
+                if clear_color_tag:
+                    row.color_tag = None
+                elif color_tag is not None:
                     row.color_tag = color_tag
+                # else: leave unchanged
                 row.updated_at = now_iso
                 session.add(row)
                 session.commit()
@@ -229,8 +237,11 @@ class InstanceUiPrefsRepository:
             if pinned is not None:
                 existing.pinned = pinned
                 existing.pinned_at = now_iso if pinned else None
-            if color_tag is not None:
+            if clear_color_tag:
+                existing.color_tag = None
+            elif color_tag is not None:
                 existing.color_tag = color_tag
+            # else: leave unchanged
             existing.updated_at = now_iso
 
             session.add(existing)

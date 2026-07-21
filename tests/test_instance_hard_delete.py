@@ -40,6 +40,7 @@ from sqlmodel import SQLModel, Session, select
 from daemon.repositories.event.models import Event
 from daemon.repositories.instance.models import Instance, InstanceHierarchy
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.instance_ui_prefs.models import InstanceUiPrefs
 from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.message_queue.models import MessageQueue
@@ -97,7 +98,8 @@ def write_guard() -> WritePauseGuard:
 @pytest.fixture
 def seed_tree(engine: Engine):
     """Factory for a 3-instance tree (parent + 2 children) with one of every
-    dependent row type pointing at the parent or one of the children.
+    dependent row type, including UI preferences, pointing at the parent or
+    one of the children.
 
     Returns a dict with the instance IDs and the seeded dependency counts so
     individual tests can assert on the exact starting state.
@@ -178,7 +180,9 @@ def seed_tree(engine: Engine):
         # 1 Task, 1 Event, 1 MessageQueue, 1 DependencyWatcher
         # (target_instance_id → instances.instance_id, logical FK only),
         # 1 InstanceMapping (agent_instance_id → instances.instance_id,
-        # with source_id FK to the pre-seeded SourceConfig rows above).
+        # with source_id FK to the pre-seeded SourceConfig rows above), and
+        # 1 InstanceUiPrefs (instance_id is a logical FK). This represents a
+        # realistic tree whose instances have each been touched in the UI.
         # JobLocks share (project_id, queue_id) but use a unique lock_slot
         # per instance because the table has a UNIQUE(project_id,
         # queue_id, lock_slot) constraint (C5).
@@ -225,13 +229,17 @@ def seed_tree(engine: Engine):
                     agent_id=agent_id,
                     agent_dir=f"/tmp/agents/{agent_id}",
                 ))
+                s.add(InstanceUiPrefs(
+                    instance_id=iid,
+                    color_tag="blue",
+                ))
             s.commit()
 
         return {
             "tree_ids": ids,
             "root_id": root_id,
             "child_ids": [child_a_id, child_b_id],
-            "per_instance_deps": 8,  # JobItem + Watcher + Lock + Task + Event + MsgQ + DepWatcher + InstanceMapping
+            "per_instance_deps": 9,  # Includes one row for each dependent table.
             "hierarchy_rows": 2,
             "instances": 3,
         }
@@ -264,7 +272,7 @@ def _count_all(session: Session, model) -> int:
 
 class TestHardDeleteTreeFullCascade:
     """``hard_delete_tree([root, child_a, child_b])`` removes every dependent
-    row across all eight tables in a single transaction.
+    row across all dependent tables in a single transaction.
     """
 
     def test_cascade_wipes_every_dependent_table_for_tree(
@@ -284,6 +292,7 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, JobLock, instance_id=iid) == 1
                 assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 1
                 assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 1
+                assert _count_where(s, InstanceUiPrefs, instance_id=iid) == 1
             assert _count_all(s, Instance) == 3
             assert _count_all(s, InstanceHierarchy) == 2
 
@@ -302,6 +311,7 @@ class TestHardDeleteTreeFullCascade:
         assert counts["dependency_watchers"] == 3
         assert counts["instance_mappings"] == 3
         assert counts["instance_hierarchy"] == 2
+        assert counts["instance_ui_prefs"] == 3
         assert counts["instances"] == 3
 
         # Every table is empty for these IDs.
@@ -315,6 +325,7 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, JobLock, instance_id=iid) == 0
                 assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 0
                 assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 0
+                assert _count_where(s, InstanceUiPrefs, instance_id=iid) == 0
             assert _count_all(s, Instance) == 0
             assert _count_all(s, InstanceHierarchy) == 0
 
@@ -345,6 +356,7 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, JobLock, instance_id=iid) == 0
                 assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 0
                 assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 0
+                assert _count_where(s, InstanceUiPrefs, instance_id=iid) == 0
             # Other tree is untouched.
             for iid in other["tree_ids"]:
                 assert s.get(Instance, iid) is not None
@@ -356,6 +368,7 @@ class TestHardDeleteTreeFullCascade:
                 assert _count_where(s, JobLock, instance_id=iid) == 1
                 assert _count_where(s, DependencyWatcher, target_instance_id=iid) == 1
                 assert _count_where(s, InstanceMapping, agent_instance_id=iid) == 1
+                assert _count_where(s, InstanceUiPrefs, instance_id=iid) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,6 +433,7 @@ class TestFKCascadeOrder:
             assert _count_all(s, JobLock) == 0
             assert _count_all(s, DependencyWatcher) == 0
             assert _count_all(s, InstanceMapping) == 0
+            assert _count_all(s, InstanceUiPrefs) == 0
             assert _count_all(s, InstanceHierarchy) == 0
 
 
@@ -453,6 +467,7 @@ class TestIdempotency:
             "dependency_watchers": 0,
             "instance_mappings": 0,
             "instance_hierarchy": 0,
+            "instance_ui_prefs": 0,
             "instances": 0,
         }
 
@@ -513,6 +528,7 @@ class TestEmptyTreeFallback:
                     "dependency_watchers": 0,
                     "instance_mappings": 0,
                     "instance_hierarchy": 0,
+                    "instance_ui_prefs": 0,
                     "instances": 0,
                 },
             }

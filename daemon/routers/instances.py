@@ -148,16 +148,13 @@ class InstanceUiPrefsUpdateRequest(BaseModel):
     """Request body for ``PUT /api/instances/{id}/ui-prefs``.
 
     Both fields are optional: pass only the ones you want to change.
-    At the repo layer (see
-    :meth:`daemon.repositories.instance_ui_prefs.InstanceUiPrefsRepository.upsert`),
-    a field whose value is ``None`` means "leave the existing value
-    unchanged" (no-op merge). Distinguishing "omit the field" from
-    "explicit ``null``" matters only at the API edge — the current
-    contract treats them identically (partial-update with the value
-    ``None`` preserved): passing ``{"color_tag": null}`` keeps the
-    existing color tag; the corresponding ``pinned_at`` side-effect
-    (set on True, clear on False, leave-alone on None) is documented
-    on the repo.
+    For ``color_tag``, omission leaves the existing value unchanged,
+    explicit ``null`` clears it, and a string sets or replaces it. The
+    router preserves that distinction at the API edge and translates an
+    explicit ``null`` into the repository's clear operation. For
+    ``pinned``, ``None`` leaves the value unchanged; its corresponding
+    ``pinned_at`` side-effect (set on True, clear on False, leave alone
+    on None) is documented on the repo.
     """
 
     pinned: bool | None = Field(
@@ -170,8 +167,8 @@ class InstanceUiPrefsUpdateRequest(BaseModel):
     color_tag: str | None = Field(
         default=None,
         description=(
-            "Color tag (e.g., 'red', '#ff0000'). null leaves "
-            "unchanged; pass a string to set / overwrite."
+            "Color tag (e.g., 'red', '#ff0000'). Omit to leave unchanged; "
+            "explicit null clears; a string sets or replaces."
         ),
     )
 
@@ -1308,9 +1305,8 @@ async def set_instance_ui_prefs(
     """Set or replace UI-only preferences for an instance.
 
     Request body: ``{"pinned": bool|null, "color_tag": str|null}``.
-    Both fields are optional; only the fields you pass are changed.
-    Pass ``null`` explicitly to keep a field unchanged (the repo's
-    "apply non-None fields" semantics).
+    Both fields are optional. Omitting ``color_tag`` leaves it unchanged,
+    explicit ``null`` clears it, and a string sets or replaces it.
 
     The ``pinned_at`` timestamp is managed by the repo: setting
     ``pinned=true`` stamps it; setting ``pinned=false`` clears it;
@@ -1329,10 +1325,13 @@ async def set_instance_ui_prefs(
 
     await _check_instance_exists(manager, instance_id)
 
+    fields_set = body.model_fields_set
+    clear_color = "color_tag" in fields_set and body.color_tag is None
     prefs = manager._instance_ui_prefs_repo.upsert(
         instance_id,
         pinned=body.pinned,
         color_tag=body.color_tag,
+        clear_color_tag=clear_color,
     )
     return InstanceUiPrefsResponse(
         instance_id=prefs.instance_id,
