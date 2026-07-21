@@ -6,7 +6,8 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 
 from .main_loop_bridge import MainLoopBridge
 from .message_processing_pipeline import (
@@ -325,12 +326,25 @@ class ProcessMessageProcessor(BaseProcessor):
             # shutdown). Re-raise silently — the worker pool's
             # ``_handle_cancellation`` distinguishes pause from
             # shutdown via the cancellation reason.
+            #
+            # NOTE: the skill-metrics completion hook is
+            # INTENTIONALLY NOT fired here. A pause / shutdown
+            # cancellation is not a work failure — the task will be
+            # retried (pause) or terminated (shutdown) and the
+            # ``consecutive_failures`` counter must not be
+            # incremented on a transient operator-driven pause.
+            # The retry / resume path will fire the hook with the
+            # real terminal outcome.
             raise
         except asyncio.CancelledError:
             # asynqio task cancellation (e.g. worker thread pool
             # cancellation during pause). Log a friendly message
             # so the operator can correlate the log line with the
             # task, then re-raise.
+            #
+            # NOTE: same rationale as ``OperationCancelledError``
+            # above — cancellation during pause is not a work
+            # failure and must not bump ``consecutive_failures``.
             logger.info(
                 f"Task {task.id} paused (instance {task.instance_id[:8]}...)"
             )
@@ -352,14 +366,34 @@ class ProcessMessageProcessor(BaseProcessor):
                 message_id=task.message_id,
                 task_id=task.id,
             )
+
+            # Phase 4 fix: fire the skill metrics completion hook
+            # for the failure path so ``total_completions`` is NOT
+            # bumped (only on success) but ``consecutive_failures``
+            # IS incremented for any injected skills. Mirrors the
+            # success-side hook in ``on_success`` — both routes
+            # flow through the same idempotent helper so a worker
+            # that called ``skill_feedback`` before failing still
+            # has its row's ``task_succeeded`` updated from
+            # ``False`` placeholder to the real failure outcome.
+            # Soft-fail inside the helper; we always re-raise below
+            # so the worker pool's ``_handle_task_failure`` still
+            # marks the task FAILED via ``fail_task``.
+            await self._record_metrics_for_task(task, succeeded=False)
             raise
 
         # If the pipeline returned a result with an error
         # (post-processing error from stages 4-6), the pipeline
-        # already ran ``handle_message_processing_error``. Re-raise
-        # so the worker pool's ``_handle_task_failure`` marks the
-        # task FAILED via ``fail_task``.
+        # already ran ``handle_message_processing_error``. Fire the
+        # skill-metrics completion hook so ``total_completions`` is
+        # NOT bumped (only on success) but ``consecutive_failures``
+        # IS incremented for any injected skills — same rationale as
+        # the ``except Exception`` branch above (mirrors the
+        # work_fn-error failure path). Soft-fail inside the helper,
+        # then re-raise so the worker pool's ``_handle_task_failure``
+        # marks the task FAILED via ``fail_task``.
         if result.error is not None:
+            await self._record_metrics_for_task(task, succeeded=False)
             raise result.error
 
         # Map ``ProcessingResult`` back to the dict the worker loop
@@ -369,6 +403,13 @@ class ProcessMessageProcessor(BaseProcessor):
             # jittered backoff. Return a dict that signals
             # "re-queued, not failed" so the worker loop can move
             # on to the next claim.
+            #
+            # NOTE: the skill-metrics completion hook is
+            # INTENTIONALLY NOT fired here. A requeue is not a
+            # terminal outcome — the task will run again and fire
+            # the hook with the real terminal outcome. Firing it
+            # here would double-count ``total_completions`` /
+            # ``consecutive_failures`` on every retry.
             return {
                 "success": False,
                 "requeued": True,
@@ -381,6 +422,253 @@ class ProcessMessageProcessor(BaseProcessor):
             "content": result.result_content,
             "message_id": task.message_id,
         }
+
+    async def _record_metrics_for_task(
+        self,
+        task: "Task",
+        succeeded: bool,
+    ) -> None:
+        """Phase 4: fire the skill metrics completion hook for process_message tasks.
+
+        Mirrors :meth:`JobQueueService._record_task_metrics` for the
+        ``process_message`` path that bypasses the job queue.
+        ``_record_task_metrics`` is wired into
+        ``JobQueueService._finalize_terminal``, but child instances
+        (workers, coders, any spawned agent) execute via
+        ``process_message`` tasks that NEVER route through that hook.
+        Without this method, a worker that calls ``skill_feedback``
+        would have its ``total_selections`` bumped but
+        ``total_completions`` would stay at 0 forever (the on-miss
+        feedback row's ``task_succeeded=False`` placeholder is never
+        overwritten).
+
+        Reads injected skill IDs from instance metadata
+        (``INJECTED_SKILLS_METADATA_KEY``) via the manager's
+        ``_instance_repository`` and bumps the denormalized counters
+        via :meth:`SkillMetricsService.record_task_completion`. That
+        method is idempotent — if the agent's ``skill_feedback``
+        already inserted a usage row, this call updates the existing
+        row's ``task_succeeded`` column without double-bumping
+        ``total_selections``.
+
+        Soft-fail: never raises. Metrics code must never block task
+        completion. A failure is logged at WARNING and swallowed so
+        the caller (the success / failure paths in ``process()`` /
+        ``on_success``) sees the same outcome whether metrics
+        recording succeeded or not.
+
+        Args:
+            task: The terminal task whose completion should be recorded.
+            succeeded: True iff the task ended in the completed
+                status; False for any failure path.
+        """
+        metrics_service = getattr(
+            self._manager, "_skill_metrics_service", None
+        )
+        if metrics_service is None:
+            return
+
+        try:
+            instance_repo = getattr(
+                self._manager, "_instance_repository", None
+            )
+            agent_id = ""
+            project_id: Optional[str] = None
+            if instance_repo is not None:
+                inst = await asyncio.to_thread(
+                    instance_repo.get, task.instance_id
+                )
+                if inst is not None:
+                    agent_id = (
+                        getattr(inst, "agent_id", "") or ""
+                    )
+                    project_id = getattr(inst, "project_id", None)
+
+            # Compute real ``iterations`` and ``duration_seconds`` so
+            # the CAPTURED-skill eligibility gate in
+            # :class:`SkillMetricsService._record_one` (which requires
+            # ``iterations > min_iter OR duration_seconds > min_dur``)
+            # can fire for child-instance ``process_message`` tasks.
+            # Without these, the hardcoded 0/0 the previous commit
+            # passed in always tripped the gate's early ``return None``
+            # and child instances could NEVER trigger skill capture
+            # — a regression vs the job-queue path. Mirrors
+            # :meth:`JobQueueService._get_task_details` (see
+            # ``job_queue_service.py`` lines 1915-2082).
+            iterations, duration_seconds = await self._compute_iterations_and_duration(
+                task
+            )
+
+            await metrics_service.record_task_completion(
+                instance_id=task.instance_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                task_succeeded=succeeded,
+                iterations=iterations,
+                duration_seconds=duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Skill metrics recording failed for process_message "
+                f"task {getattr(task, 'id', '?')}: {exc}"
+            )
+
+    async def _compute_iterations_and_duration(
+        self,
+        task: "Task",
+    ) -> tuple[int, int]:
+        """Best-effort ``(iterations, duration_seconds)`` for the metrics hook.
+
+        Mirrors the job-queue path's derivation in
+        :meth:`JobQueueService._get_task_details`:
+
+        * ``iterations`` — count of ``type='agent'`` rows on the
+          instance's message queue created at or after this task's
+          ``created_at``. Falls back to ``0`` when the queue
+          repository, instance, or message timestamps are unavailable
+          or unparseable — a missing count must NEVER block the
+          completion hook. Best-effort lookup, same shape as the JQ
+          path so the CAPTURED gate sees comparable values.
+        * ``duration_seconds`` — wall-clock seconds from the task's
+          ``created_at`` to whichever terminal timestamp exists:
+          ``completed_at`` (success path), ``failed_at`` (failure
+          path; the Task model doesn't currently carry a
+          ``failed_at`` column, so the ``getattr`` fallback
+          gracefully returns ``None`` for now), or ``utcnow()`` when
+          neither is present (in-flight completion — should not
+          happen here but kept as a defensive fallback). Clamped to
+          ``>= 0`` so a clock skew never produces a negative metric.
+
+        Args:
+            task: The terminal task whose iteration / duration we
+                need to derive.
+
+        Returns:
+            ``(iterations, duration_seconds)`` — both non-negative
+            integers. Both are ``0`` if the lookup is unavailable.
+        """
+        # Default fallback (no repo, no created_at): 0/0.
+        iterations = 0
+        duration_seconds = 0
+
+        # ── duration_seconds ──────────────────────────────────────
+        task_created_at: datetime | None = None
+        raw_created_at = getattr(task, "created_at", None)
+        if isinstance(raw_created_at, datetime):
+            task_created_at = raw_created_at
+            if task_created_at.tzinfo is None:
+                task_created_at = task_created_at.replace(
+                    tzinfo=timezone.utc
+                )
+        elif isinstance(raw_created_at, str) and raw_created_at:
+            try:
+                task_created_at = datetime.fromisoformat(
+                    raw_created_at.replace("Z", "+00:00")
+                )
+                if task_created_at.tzinfo is None:
+                    task_created_at = task_created_at.replace(
+                        tzinfo=timezone.utc
+                    )
+            except (ValueError, TypeError):
+                task_created_at = None
+
+        terminal_at: datetime | None = None
+        for attr in ("completed_at", "failed_at"):
+            raw_terminal = getattr(task, attr, None)
+            if raw_terminal is None:
+                continue
+            if isinstance(raw_terminal, datetime):
+                terminal_at = raw_terminal
+                if terminal_at.tzinfo is None:
+                    terminal_at = terminal_at.replace(tzinfo=timezone.utc)
+                break
+            if isinstance(raw_terminal, str) and raw_terminal:
+                try:
+                    terminal_at = datetime.fromisoformat(
+                        raw_terminal.replace("Z", "+00:00")
+                    )
+                    if terminal_at.tzinfo is None:
+                        terminal_at = terminal_at.replace(
+                            tzinfo=timezone.utc
+                        )
+                    break
+                except (ValueError, TypeError):
+                    terminal_at = None
+
+        if task_created_at is not None:
+            end_at = terminal_at or datetime.now(timezone.utc)
+            delta = end_at - task_created_at
+            duration_seconds = max(0, int(delta.total_seconds()))
+
+        # ── iterations ────────────────────────────────────────────
+        # Best-effort count of agent-typed message rows enqueued
+        # at-or-after ``task.created_at``. ``_queue_repository`` is
+        # the same handle ``JobQueueService._get_task_details``
+        # reaches via the manager facade. Soft-fail: missing repo,
+        # missing timestamps, or a query error all collapse to
+        # ``0`` so the completion hook never raises.
+        queue_repo = getattr(
+            self._manager, "_queue_repository", None
+        )
+        if queue_repo is not None:
+            try:
+                messages = await asyncio.to_thread(
+                    queue_repo.get_by_instance, task.instance_id
+                )
+            except Exception as exc:
+                logger.debug(
+                    f"ProcessMessageProcessor: failed to fetch "
+                    f"messages for instance "
+                    f"{(task.instance_id or '')[:8]}... for "
+                    f"iteration count: {exc}"
+                )
+                messages = None
+
+            if messages:
+                task_messages = list(messages)
+                if task_created_at is not None:
+                    filtered: list[Any] = []
+                    parse_failed = False
+                    for message in task_messages:
+                        msg_at = getattr(message, "created_at", None)
+                        if msg_at is None:
+                            # MessageQueue's timestamp column is
+                            # ``enqueued_at``; fall back to that
+                            # before declaring the row unusable.
+                            msg_at = getattr(
+                                message, "enqueued_at", None
+                            )
+                        parsed: datetime | None = None
+                        if isinstance(msg_at, datetime):
+                            parsed = msg_at
+                        elif isinstance(msg_at, str) and msg_at:
+                            try:
+                                parsed = datetime.fromisoformat(
+                                    msg_at.replace("Z", "+00:00")
+                                )
+                            except (ValueError, TypeError):
+                                parsed = None
+                        if parsed is None:
+                            parse_failed = True
+                            break
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        if parsed >= task_created_at:
+                            filtered.append(message)
+                    if parse_failed:
+                        # Mirror the JQ path's "count all" fallback
+                        # — the gate still sees non-zero iterations
+                        # when timestamps are missing.
+                        task_messages = list(messages)
+                    else:
+                        task_messages = filtered
+                iterations = sum(
+                    1
+                    for m in task_messages
+                    if getattr(m, "type", None) == "agent"
+                )
+
+        return iterations, duration_seconds
 
     def _build_callbacks(self, task: "Task") -> PipelineCallbacks:
         """Build :class:`PipelineCallbacks` for the WorkerPool path.
@@ -447,6 +735,17 @@ class ProcessMessageProcessor(BaseProcessor):
                     instance_manager=instance_manager,
                     work_resolver=work_resolver,
                     watcher_repo=watcher_repo,
+                )
+
+            # Phase 4 fix: fire the skill metrics completion hook
+            # for ``process_message`` tasks that bypass the
+            # job-queue path. ``complete_task`` returning non-None
+            # is the canonical "we won the status=running race" gate
+            # — same gate as the watcher notify above. Soft-fail
+            # inside the helper; never blocks the success path.
+            if completed_task is not None:
+                await self._record_metrics_for_task(
+                    task, succeeded=True
                 )
 
         async def on_error(result: ProcessingResult) -> None:
