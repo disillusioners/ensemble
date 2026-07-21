@@ -656,13 +656,39 @@ class SkillMetricsService:
         iterations: int,
         duration_seconds: int,
     ) -> int:
-        """Record one (skill, instance) pair end-to-end.
+        """Record one (skill, instance) pair end-to-end (idempotent).
 
         Sync helper called from :meth:`record_task_completion`
-        via ``asyncio.to_thread`` (one block per skill). Reads
-        the current ``consecutive_failures`` from the skill
-        row, writes a :class:`SkillUsageRecord`, then bumps
-        the denormalized counters.
+        via ``asyncio.to_thread`` (one block per skill).
+
+        **Idempotent insert-or-update contract (production fix):**
+        the agent's ``skill_feedback`` tool may fire BEFORE this
+        completion hook runs (it always runs from inside the
+        agent turn, while the hook fires when the message task
+        transitions to terminal — i.e. AFTER the turn). When
+        ``skill_feedback`` lands first AND finds no usage record
+        (e.g. on ``process_message`` task paths that don't go
+        through the job-queue completion hook at all), it inserts
+        a fresh record with feedback signals stamped. This method
+        MUST NOT insert a duplicate row in that case — instead it
+        calls :meth:`SkillUsageRepository.update_completion` so the
+        task-outcome columns (``task_succeeded`` /
+        ``iterations`` / ``duration_seconds``) get filled in on
+        the existing row without losing the feedback signal or
+        double-bumping ``total_selections``.
+
+        Steps:
+
+        1. Look up the existing latest :class:`SkillUsageRecord`
+           for ``(skill_id, instance_id)``.
+           - EXISTS → ``update_completion`` (skip counter bumps
+             — the on-miss insertion already counted
+             ``total_selections`` and possibly
+             ``total_fallbacks``).
+           - MISSING → standard INSERT path: read
+             ``consecutive_failures``, write the row, bump
+             denormalized counters (``total_selections`` and
+             ``total_completions`` on success).
 
         Args:
             skill_id: Skill to record.
@@ -676,11 +702,56 @@ class SkillMetricsService:
             duration_seconds: Wall-clock duration.
 
         Returns:
-            ``1`` if the usage record was inserted, ``0`` if
-            the skill row was missing (no-op).
+            ``1`` if a usage record was inserted OR updated;
+            ``0`` if the skill row was missing (no-op).
         """
 
         def _do_record() -> int:
+            # Idempotency guard: if the feedback path already
+            # inserted a row (because the agent called
+            # ``skill_feedback`` first or this is a
+            # ``process_message`` task that has no completion
+            # hook), UPDATE the existing row's completion
+            # columns instead of inserting a duplicate. The
+            # on-miss insert already bumped ``total_selections``
+            # (and ``total_fallbacks`` when ``applied is
+            # False``), so this path must NOT bump them again.
+            existing = self.usage_repo.get_latest_for_skill_instance(
+                skill_id=skill_id, instance_id=instance_id
+            )
+            if existing is not None:
+                updated = self.usage_repo.update_completion(
+                    record_id=existing.id,
+                    task_succeeded=task_succeeded,
+                    iterations=iterations,
+                    duration_seconds=duration_seconds,
+                )
+                if updated is None:
+                    # Race — record was deleted between our
+                    # get_latest and update_completion. Fall
+                    # through to the INSERT path so we still
+                    # record something; this is the rarer case
+                    # and the denormalized counters get bumped
+                    # exactly once.
+                    logger.debug(
+                        f"SkillMetricsService: completion row raced "
+                        f"away for skill={skill_id}, falling back to "
+                        f"INSERT"
+                    )
+                else:
+                    # Counter bump for completions OUTSIDE the
+                    # on-miss insert path. ``total_completions``
+                    # is the only counter that's safe to bump
+                    # here — ``total_selections`` was already
+                    # bumped by the on-miss insert, and the
+                    # fallback/total_applied counters are owned
+                    # by the feedback path.
+                    if task_succeeded:
+                        self.skill_repo.increment_counter(
+                            skill_id, "total_completions", amount=1
+                        )
+                    return 1
+
             skill = self.skill_repo.get(skill_id)
             if skill is None:
                 logger.warning(
@@ -767,7 +838,7 @@ class SkillMetricsService:
         applied: Optional[bool],
         note: str,
     ) -> bool:
-        """Stamp feedback onto the most recent usage record.
+        """Stamp feedback onto the most recent usage record (insert on miss).
 
         Backend for the ``skill_feedback`` tool (Phase 2 stub,
         implemented here). Locates the latest
@@ -776,15 +847,38 @@ class SkillMetricsService:
         When ``applied`` is explicitly ``True``, the skill row's
         ``total_applied`` counter is also bumped.
 
+        **On-miss insert contract (production fix):** when no
+        usage record exists yet, this method INSERTS one on
+        demand with feedback signals stamped directly. This is
+        necessary because the agents-facing ``skill_feedback``
+        tool can be invoked BEFORE ``record_task_completion``
+        ever fires — and on parent-dispatched child instances
+        (``process_message`` task type, no job-queue completion
+        hook) ``record_task_completion`` never fires at all. The
+        injected record carries ``selected=True`` (the skill was
+        in fact injected — the agent wouldn't be giving feedback
+        otherwise), ``applied=applied``, ``feedback_applied=True``,
+        ``fallback=(applied is False)``, and neutral
+        ``task_succeeded=False`` / ``iterations=0`` /
+        ``duration_seconds=0`` so the late-arriving
+        ``record_task_completion`` can update those columns via
+        :meth:`SkillUsageRepository.update_completion` without
+        losing the feedback signal.
+
         Steps:
 
         1. Find the latest :class:`SkillUsageRecord` for the
            pair (most recent by ``created_at``).
-        2. ``update_feedback(record_id, applied, note)`` —
+        2. If the record exists →
+           ``update_feedback(record_id, applied, note)`` —
            ``applied=None`` is treated as
            "feedback recorded but outcome unknown" and skips
            the counter bump.
-        3. If ``applied is True``: increment
+        3. If no record exists → INSERT a fresh usage record
+           (see the on-miss contract above). Counter bumps apply
+           to the inserted row exactly as if it had been created
+           by ``record_task_completion`` first.
+        4. If ``applied is True``: increment
            ``total_applied`` on the skill row.
 
         Args:
@@ -792,11 +886,13 @@ class SkillMetricsService:
             instance_id: The instance that produced the usage
                 event.
             agent_id: The agent that produced the feedback
-                (unused at the row layer but kept on the
-                signature for Phase 5 audit hooks).
-            project_id: Project scope (unused at the row
-                layer; kept on signature for symmetry with
-                ``record_task_completion``).
+                (recorded on the on-miss inserted row, unused
+                when updating an existing record — the original
+                insert already captured it).
+            project_id: Project scope (used to satisfy the
+                ``SkillUsageRecord.project_id`` NOT NULL on the
+                on-miss insert path; ``None`` is coerced to
+                ``""``).
             applied: True if the skill was actually applied,
                 False if recorded-but-not-applied, None when
                 the agent is unsure.
@@ -804,11 +900,16 @@ class SkillMetricsService:
                 no note.
 
         Returns:
-            ``True`` if a usage record was found and updated;
-            ``False`` otherwise (no record to attach feedback
-            to).
+            ``True`` if a usage record was updated OR inserted
+            (and the skill row still exists); ``False`` if the
+            skill row itself is missing (the skill was deleted
+            between injection and feedback).
         """
-        del agent_id, project_id  # Reserved for Phase 5 audit.
+        # SkillUsageRecord.project_id is NOT NULL; tolerate
+        # ``None`` from older callers by coercing to "" so the
+        # on-miss insert path doesn't blow up on the NOT NULL
+        # constraint.
+        usage_project_id = project_id or ""
         applied_bool: Optional[bool] = (
             bool(applied) if applied is not None else None
         )
@@ -818,13 +919,80 @@ class SkillMetricsService:
                 skill_id=skill_id, instance_id=instance_id
             )
             if record is None:
-                logger.warning(
-                    f"SkillMetricsService.record_feedback: no "
-                    f"usage record found for skill={skill_id}, "
-                    f"instance={instance_id}"
+                # On-miss insert path. The agent would not be
+                # giving feedback on a skill it never received,
+                # so ``selected=True`` is the honest default for
+                # the inserted row. The skill row's
+                # ``ab_test_group`` is propagated so A/B isolation
+                # still works even when feedback lands before the
+                # completion hook. A missing skill row (deleted
+                # between injection and feedback) means there's
+                # nothing to attach the signal to — return None
+                # and the tool surfaces the soft failure string.
+                skill = self.skill_repo.get(skill_id)
+                if skill is None:
+                    logger.warning(
+                        f"SkillMetricsService.record_feedback: "
+                        f"skill row not found for on-miss insert: "
+                        f"id={skill_id}"
+                    )
+                    return None
+                _ab_group = getattr(skill, "ab_test_group", None)
+                _fallback_miss = applied_bool is False
+                inserted = self.usage_repo.create(
+                    skill_id=skill_id,
+                    project_id=usage_project_id,
+                    instance_id=instance_id,
+                    agent_id=agent_id or "",
+                    selected=True,
+                    applied=bool(applied_bool) if applied_bool is not None else False,
+                    task_succeeded=False,  # Completion hook updates later if it fires.
+                    iterations=0,
+                    duration_seconds=0,
+                    fallback=_fallback_miss,
+                    ab_test_group=_ab_group,
                 )
-                return None
+                # Stamp feedback_applied / feedback_note onto the
+                # freshly-inserted row. ``usage_repo.create`` does
+                # not expose these columns (its signature is the
+                # narrow completion-hook contract), so we route
+                # through ``update_feedback`` — the same code path
+                # the existing-record branch uses. ``fallback`` is
+                # already set on the inserted row above; we pass
+                # ``fallback=None`` here so the update is a no-op
+                # for fallback (avoids double-counting the
+                # total_fallbacks bump we already did inline below).
+                self.usage_repo.update_feedback(
+                    record_id=inserted.id,
+                    applied=bool(applied_bool) if applied_bool is not None else False,
+                    note=note or "",
+                    fallback=None,
+                )
+                logger.info(
+                    f"SkillMetricsService.record_feedback: created "
+                    f"usage record on-miss for skill={skill_id[:8]}..., "
+                    f"instance={instance_id[:8]}..., applied={applied_bool}"
+                )
+                # Bump total_selections so the trigger engine's
+                # denominator includes this feedback event even
+                # if the completion hook never runs (which is
+                # the prod bug for process_message child tasks).
+                # Fractions of work: only +1 selection bump per
+                # on-miss insert — the completion hook can later
+                # run ``update_completion`` without double-counting
+                # (it sees the row exists and skips its INSERT
+                # path).
+                self.skill_repo.increment_counter(
+                    skill_id, "total_selections", amount=1
+                )
+                if _fallback_miss:
+                    self.skill_repo.increment_counter(
+                        skill_id, "total_fallbacks", amount=1
+                    )
+                self.skill_repo.touch_last_used(skill_id)
+                return inserted.id
 
+            # Found an existing record → standard update path.
             # Option C (D20): Fallback is driven by worker's applied judgment.
             # Capture previous fallback state to detect state transitions.
             _prev_fallback = bool(getattr(record, "fallback", False))

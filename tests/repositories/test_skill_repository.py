@@ -713,6 +713,83 @@ class TestSkillUsage:
         assert items[0].feedback_applied is True
         assert items[0].feedback_note == "helped user fix typo"
 
+    def test_update_completion_stamps_task_outcome(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """update_completion stamps task_succeeded / iterations / duration."""
+        skill = _make_skill(skill_repo, project_id, "comp-a")
+        record = usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="i-comp", agent_id="a",
+        )
+        # Sanity: defaults before update.
+        assert record.task_succeeded is False
+        assert record.iterations == 0
+
+        updated = usage_repo.update_completion(
+            record.id,
+            task_succeeded=True,
+            iterations=4,
+            duration_seconds=120,
+        )
+        assert updated is not None
+        assert updated.task_succeeded is True
+        assert updated.iterations == 4
+        assert updated.duration_seconds == 120
+
+    def test_update_completion_skips_superseded_rows(
+        self, usage_repo, skill_repo, project_id
+    ):
+        """SUPERSEDED rows are returned untouched.
+
+        A superseded row represents "this skill was selected but
+        immediately replaced — we don't actually know the task
+        outcome." A downstream completion event has no
+        legitimate authority to flip it to ``task_succeeded=True``
+        and doing so would corrupt the audit trail. The method
+        still returns the row (not ``None``) so callers treat this
+        as a handled UPDATE rather than a missing-record INSERT
+        path — avoiding double-counting on
+        ``total_selections`` / ``total_completions``.
+        """
+        skill = _make_skill(skill_repo, project_id, "sup-a")
+        record = usage_repo.create(
+            skill_id=skill.id, project_id=project_id,
+            instance_id="i-sup", agent_id="a",
+            superseded=True,
+            task_succeeded=False,  # Neutral default for superseded.
+        )
+
+        updated = usage_repo.update_completion(
+            record.id,
+            task_succeeded=True,  # Would normally flip the field.
+            iterations=99,
+            duration_seconds=999,
+        )
+        assert updated is not None  # Return value signals "handled".
+        assert updated.id == record.id
+        # But the row's fields are NOT mutated — protected as an
+        # audit marker.
+        assert updated.task_succeeded is False
+        assert updated.iterations == 0
+        assert updated.duration_seconds == 0
+        assert updated.superseded is True
+
+        # Re-fetch to confirm persistence, not just the in-session
+        # object mirror.
+        items, _ = usage_repo.get_by_skill(skill.id)
+        assert len(items) == 1
+        assert items[0].task_succeeded is False
+        assert items[0].superseded is True
+
+    def test_update_completion_nonexistent_returns_none(
+        self, usage_repo
+    ):
+        """update_completion on an unknown record returns None."""
+        assert usage_repo.update_completion(
+            "ghost-record", True, 1, 1
+        ) is None
+
     def test_get_latest_for_skill_instance_returns_most_recent(
         self, usage_repo, skill_repo, project_id
     ):

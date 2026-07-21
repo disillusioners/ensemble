@@ -1238,6 +1238,79 @@ class SkillUsageRepository:
             )
             return record
 
+    def update_completion(
+        self,
+        record_id: str,
+        task_succeeded: bool,
+        iterations: int,
+        duration_seconds: int,
+    ) -> SkillUsageRecord | None:
+        """Stamp task-outcome signals onto an existing usage record.
+
+        Companion to :meth:`update_feedback`. Used by the
+        ``record_task_completion`` path when a usage record was
+        already inserted by the feedback path (worker called
+        ``skill_feedback`` before the completion hook ran, or the
+        skill got injected via ``<meta>`` onto a child instance whose
+        task pipeline is ``process_message`` and therefore never hits
+        the job-queue metrics hook at all).
+
+        Updates only the task-outcome columns — never touches
+        ``feedback_applied`` / ``feedback_note`` so the agent's
+        feedback signal is preserved verbatim. When the existing row
+        is a SUPERSEDED marker (``superseded=True``), the method
+        returns the row WITHOUT mutating it: a SUPERSEDED row
+        represents "this skill was selected but immediately replaced
+        — we don't actually know the task outcome", and a downstream
+        completion event has no legitimate authority to flip it to
+        ``task_succeeded=True``. Mutating the row would corrupt the
+        audit trail (the row's meaning changes retroactively) while
+        ``get_stats_filtered`` already excludes superseded rows from
+        headline aggregation, so the headline metric is unaffected.
+
+        Args:
+            record_id: The record to update.
+            task_succeeded: True iff the task ended ``completed``.
+            iterations: LLM iterations consumed. OVERWRITES the
+                existing value — the completion hook is the only
+                legitimate source of this signal.
+            duration_seconds: Wall-clock duration. OVERWRITES.
+
+        Returns:
+            The updated :class:`SkillUsageRecord`, or ``None`` if
+            no row with ``record_id`` exists.
+        """
+        with Session(self.engine) as session:
+            record = session.get(SkillUsageRecord, record_id)
+            if record is None:
+                logger.warning(
+                    f"Skill usage record not found for completion: "
+                    f"id={record_id}"
+                )
+                return None
+            if getattr(record, "superseded", False):
+                # SUPERSEDED audit marker — leave untouched. See
+                # docstring for the rationale. Return the row so
+                # the caller's idempotency guard treats it as a
+                # successful UPDATE (no INSERT, no double-count),
+                # but no columns change.
+                logger.debug(
+                    f"update_completion: skipping SUPERSEDED row "
+                    f"id={record_id} (preserving audit marker)"
+                )
+                session.refresh(record)
+                return record
+            record.task_succeeded = task_succeeded
+            record.iterations = iterations
+            record.duration_seconds = duration_seconds
+            session.commit()
+            session.refresh(record)
+            logger.debug(
+                f"Updated skill usage completion: id={record_id}, "
+                f"task_succeeded={task_succeeded}, iterations={iterations}"
+            )
+            return record
+
     def count_comparisons(self, ab_test_group: str) -> dict[str, int]:
         """Count usage records per skill in an A/B test group.
 

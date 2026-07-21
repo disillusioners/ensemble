@@ -561,11 +561,25 @@ class TestRecordFeedback:
         assert ok is True
         assert skill_repo.get(skill.id).total_applied == 0
 
-    async def test_no_record_returns_false(
+    async def test_missing_skill_returns_false(
         self, metrics_service, skill_repo, project_id
     ):
-        """No matching record -> ``False``, no error."""
+        """Skill row deleted between injection and feedback → False.
+
+        Previously this asserted "no record exists → False". The
+        record-on-miss path now inserts a usage record when the
+        skill row still exists, so the only way to land back on
+        ``False`` is when the skill itself was removed from the
+        ``skills`` table (the on-miss insert can't lookup
+        ``ab_test_group`` and has nothing to attach to). Covers
+        the soft-failure contract: the tool returns ``False``,
+        never raises.
+        """
+        # Create the skill, then delete it before feedback runs.
+        # (Without a row in ``skills`` the on-miss insert path
+        # falls back to the ``False`` return.)
         skill = _make_skill(skill_repo, project_id, "kappa")
+        skill_repo.delete(skill.id)
         ok = await metrics_service.record_feedback(
             skill_id=skill.id,
             instance_id="inst-NEVER",
@@ -575,6 +589,109 @@ class TestRecordFeedback:
             note="",
         )
         assert ok is False
+
+    async def test_no_record_inserts_on_miss(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """On-miss insert: feedback recorded even when no usage row exists.
+
+        Reproduces the prod bug where a worker (``process_message``
+        task path, no job-queue completion hook) called
+        ``skill_feedback`` on a skill that was injected via
+        ``<meta load_skill=...>``. The completion hook never ran,
+        so no usage record existed — the feedback was silently
+        dropped ("No usage record found..."). The on-miss insert
+        path now creates the record with feedback signals stamped
+        directly so the signal is preserved.
+        """
+        skill = _make_skill(skill_repo, project_id, "lambda")
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id="inst-onmiss",
+            agent_id="a",
+            project_id=project_id,
+            applied=False,
+            note="skill loaded but task needed test-pack-execution",
+        )
+        assert ok is True
+
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id="inst-onmiss"
+        )
+        assert rec is not None
+        # Selected=True because the agent wouldn't be giving
+        # feedback on a skill it never received.
+        assert rec.selected is True
+        assert rec.feedback_applied is False
+        assert (
+            rec.feedback_note
+            == "skill loaded but task needed test-pack-execution"
+        )
+        assert rec.fallback is True  # applied=False falls back
+        # On-miss insert bumped selection + fallback counters.
+        refreshed = skill_repo.get(skill.id)
+        assert refreshed.total_selections == 1
+        assert refreshed.total_fallbacks == 1
+
+    async def test_on_miss_insert_then_completion_updates(
+        self, metrics_service, skill_repo, project_id
+    ):
+        """On-miss insert + late completion hook → UPDATE, no duplicate.
+
+        The agent calls ``skill_feedback`` first (creates row on
+        miss), then the completion hook fires (via
+        ``record_task_completion``) for the same (skill,
+        instance). The completion hook MUST NOT insert a second
+        row — it calls ``update_completion`` on the existing
+        row to stamp the task-outcome columns without losing
+        the feedback signal or double-bumping
+        ``total_selections``.
+        """
+        skill = _make_skill(skill_repo, project_id, "mu")
+        instance_id = "inst-interleave"
+        metrics_service.instance_repo._instances[instance_id] = (
+            FakeInstance(
+                instance_id,
+                metadata={"last_injected_skill_ids": [skill.id]},
+            )
+        )
+
+        ok = await metrics_service.record_feedback(
+            skill_id=skill.id,
+            instance_id=instance_id,
+            agent_id="tester",
+            project_id=project_id,
+            applied=True,
+            note="helpful for discovery",
+        )
+        assert ok is True
+
+        inserted = await metrics_service.record_task_completion(
+            instance_id=instance_id,
+            agent_id="tester",
+            project_id=project_id,
+            task_succeeded=True,
+            iterations=4,
+            duration_seconds=120,
+        )
+        assert inserted == 1
+
+        records, total = metrics_service.usage_repo.get_by_skill(skill.id)
+        assert total == 1, (
+            f"Expected EXACTLY ONE row after feedback-then-completion, "
+            f"got {total}: {[r.id for r in records]}"
+        )
+        rec = records[0]
+        assert rec.feedback_applied is True  # Preserved from feedback
+        assert rec.feedback_note == "helpful for discovery"
+        assert rec.task_succeeded is True  # Stamped by completion
+        assert rec.iterations == 4
+        assert rec.duration_seconds == 120
+        # ``total_selections`` bumped ONCE (by the on-miss insert);
+        # the completion path must not double-count.
+        assert skill_repo.get(skill.id).total_selections == 1
+        assert skill_repo.get(skill.id).total_applied == 1
+        assert skill_repo.get(skill.id).total_completions == 1
 
 
 # =============================================================================
