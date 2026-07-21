@@ -1,4 +1,5 @@
-import { Component, Input, Output, EventEmitter, signal, computed, input, inject, ViewChild, ElementRef, effect, AfterViewInit, OnDestroy } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, input, inject, ViewChild, ElementRef, effect, AfterViewInit, OnDestroy, DestroyRef } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -144,7 +145,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     return rootNodes;
   });
 
-  constructor() {
+  constructor(private destroyRef: DestroyRef) {
     // Effect to restore scroll position after data refresh
     effect(() => {
       const loading = this.instanceService.loading();
@@ -250,6 +251,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
         restoreFocus: true,
       })
       .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => {
         // List refresh is driven by the polling service; nothing to do here.
       });
@@ -332,7 +334,9 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     // service swallows errors via `catchError(() => EMPTY)`, so a bare
     // `.subscribe()` is safe — the rollback already mutated the signal
     // before the empty completion.
-    this.prefsService.setPin(instanceId, !(currentPinned === true)).subscribe();
+    this.prefsService.setPin(instanceId, !(currentPinned === true))
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe();
   }
 
   /**
@@ -344,7 +348,9 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     event.stopPropagation();
     // Subscribe so the optimistic PUT actually fires; the service handles
     // reconcile + rollback internally and swallows errors with EMPTY.
-    this.prefsService.setColorTag(instanceId, color).subscribe();
+    this.prefsService.setColorTag(instanceId, color)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe();
   }
 
   /** Color swatch palette surfaced to the template. */
