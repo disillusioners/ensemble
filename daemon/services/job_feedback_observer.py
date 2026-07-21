@@ -76,14 +76,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Terminal instance statuses — instance is no longer active. Mirrors the
-# ``_TERMINAL_INSTANCE_STATUSES`` set in ``daemon.services.job_recovery_service``
-# (kept local to avoid a hard import cycle through the recovery service).
+# Statuses where the observer must NOT run completion/finalize
+# processing — includes PAUSED as a defense against the question()
+# tool's PAUSED → COMPLETED overwrite race (2026-07-21 bug).
+#
+# PAUSED is a user-intervention checkpoint; the pause cascade commits
+# PAUSED to the DB before the lifecycle event returns, but a timing
+# gap between the cascade and the observer's completion path can let
+# ``_finalize_job`` / ``_finalize_instance`` fire afterwards and
+# overwrite PAUSED → COMPLETED. Adding PAUSED here makes every guard
+# below skip finalize for paused instances, so the in-flight answer
+# submission / resume flow is preserved. When the user resumes
+# (PAUSED → running) the instance leaves this set and normal
+# completion processing resumes.
+#
+# This is intentionally a separate set from the one in
+# ``daemon.services.job_recovery_service`` — that one means
+# "permanently stopped at startup, safe to clean up", where PAUSED
+# must remain alive/recoverable. Here the semantic is
+# "skip finalize / idempotency guard", where PAUSED belongs.
 _TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
     InstanceStatus.COMPLETED.value,
     InstanceStatus.ERROR.value,
     InstanceStatus.TERMINATED.value,
     InstanceStatus.FAILED.value,
+    InstanceStatus.PAUSED.value,  # question() tool — guard against PAUSED → COMPLETED overwrite
 })
 
 # Fallback error string when the bus has a parent-error flag set but no

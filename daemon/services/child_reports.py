@@ -887,10 +887,15 @@ Provide a concise summary:"""
                 f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
                 f"(Race #3) is disabled by design."
             )
+        # PAUSED excluded too: a paused question() parent must not be
+        # auto-completed by a child's completion (resume() owns its
+        # terminal transition). This is a skip guard, not a legitimate
+        # transition write.
         if (
             is_parent_complete
             and parent.status != InstanceStatus.COMPLETED.value
             and parent.status != InstanceStatus.ERROR.value
+            and parent.status != InstanceStatus.PAUSED.value
         ):
             # Phase 3 (Cascade Unification): when the bus is active,
             # the inline cascade + SELECT COUNT(*) + inline status
@@ -1233,13 +1238,17 @@ Provide a concise summary:"""
             # ``completed_message_id`` (or with None) where the row has
             # already been finalized. The status check is the
             # coarser-grained safety net that supersedes both.
+            # PAUSED is also excluded: a paused question() instance must not
+            # be overwritten by a stale completion report while the user is
+            # editing/inspecting it (resume() owns the terminal transition).
             if instance.status in (
                 InstanceStatus.COMPLETED.value,
                 InstanceStatus.ERROR.value,
+                InstanceStatus.PAUSED.value,
             ):
                 logger.info(
                     f"Instance {instance_id[:8]}... already in terminal "
-                    f"state ({instance.status}), skipping "
+                    f"or paused state ({instance.status}), skipping "
                     f"_process_child_completion_db_sync (idempotency)"
                 )
                 return _ChildCompletionDbResult(
@@ -1505,9 +1514,25 @@ Provide a concise summary:"""
 
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... no parent, skipping notification")
-                
+
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
+
+                # Defense-in-depth: if this instance became PAUSED during processing
+                # (e.g. question() tool), do NOT overwrite with COMPLETED.
+                # The primary cross-session race protection is the pipeline's
+                # _is_instance_paused() fresh-DB check before _check_child_completion.
+                if instance.status == InstanceStatus.PAUSED.value:
+                    logger.info(
+                        f"Instance {instance_id[:8]}... is PAUSED at root-completion "
+                        f"write, skipping COMPLETED transition (idempotency)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
 
                 # Update instance status to COMPLETED in DB
                 instance.status = InstanceStatus.COMPLETED.value
@@ -1809,10 +1834,15 @@ Provide a concise summary:"""
             parent_waiting_children_sse: bool = False
             waiting_children_parent_agent_id: str | None = None
             
+            # PAUSED excluded too: a paused question() parent must not be
+            # auto-completed by a child's completion (resume() owns its
+            # terminal transition). This is a skip guard, not a legitimate
+            # transition write.
             if (
                 is_parent_complete
                 and parent.status != InstanceStatus.COMPLETED.value
                 and parent.status != InstanceStatus.ERROR.value
+                and parent.status != InstanceStatus.PAUSED.value
             ):
                 if bus is not None:
                     # Bus is active — bus callback handles completion.
