@@ -1947,6 +1947,34 @@ def create_agent_node(
                 )
                 full_messages.append(report_msg)
                 injected_report_msgs.append(report_msg)
+
+                # Surface the injected report to the frontend in real time.
+                # Mirrors the user-injection SSE path (above): the report is
+                # injected as a user-role ``HumanMessage``, so emit a
+                # ``user_message`` SSE event so the FE renders a message
+                # bubble for it. Without this, the report is in the LLM
+                # context (and checkpointed via the C2 return) but the FE
+                # never sees it until a later message fetch. Emit the RAW
+                # report content (not the ``_frame_injected_report``
+                # wrapper, which is LLM-internal). Best-effort: a failure
+                # here must not block the LLM call.
+                if live_hub is not None:
+                    try:
+                        report_sse = HumanMessage(content=report_content)
+                        report_serialized = serialize_message(report_sse)
+                        report_serialized["instance_id"] = instance_id
+                        await live_hub.stream_message(
+                            instance_id=instance_id,
+                            message=report_serialized,
+                            event_type="user_message",
+                            checkpoint_id="user",
+                        )
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.warning(
+                            f"[ReportInjection] user_message SSE emit "
+                            f"failed for {instance_short}: "
+                            f"{type(e).__name__}: {e}"
+                        )
             if injected_report_msgs:
                 logger.info(
                     f"[ReportInjection] Injected {len(injected_report_msgs)} "
