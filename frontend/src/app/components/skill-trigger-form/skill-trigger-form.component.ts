@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, DestroyRef } from '@angular/core';
+import { Component, computed, inject, OnInit, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators, AbstractControl } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -6,9 +6,10 @@ import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/materia
 import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
-import { MatSelectModule } from '@angular/material/select';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatIconModule } from '@angular/material/icon';
+
+import { SearchableSelectComponent } from '../searchable-select/searchable-select.component';
 
 import {
   SkillTrigger,
@@ -32,7 +33,7 @@ export interface SkillTriggerFormDialogData {
 }
 
 /**
- * Human-readable labels for the condition-type `<mat-select>`. Exported
+ * Human-readable labels for the condition-type selector. Exported
  * so the list component (and any future shared selector) can render
  * the same canonical strings without having to redeclare the mapping.
  */
@@ -71,9 +72,9 @@ const ACTION_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
     MatButtonModule,
     MatFormFieldModule,
     MatInputModule,
-    MatSelectModule,
     MatSlideToggleModule,
     MatIconModule,
+    SearchableSelectComponent,
   ],
   templateUrl: './skill-trigger-form.component.html',
   styleUrl: './skill-trigger-form.component.scss',
@@ -88,8 +89,12 @@ export class SkillTriggerFormComponent implements OnInit {
   /** True when the dialog was opened with an existing trigger to edit. */
   protected readonly isEditMode = !!this.data?.trigger;
 
-  protected readonly conditionTypeOptions = CONDITION_TYPE_OPTIONS;
-  protected readonly actionOptions = ACTION_OPTIONS;
+  protected readonly conditionTypeOptions = computed(() =>
+    CONDITION_TYPE_OPTIONS.map(({ value, label }) => ({ value, label })),
+  );
+  protected readonly actionOptions = computed(() =>
+    ACTION_OPTIONS.map(({ value, label }) => ({ value, label })),
+  );
 
   /**
    * Reactive form. Note that dynamic `threshold` / `min_selections` /

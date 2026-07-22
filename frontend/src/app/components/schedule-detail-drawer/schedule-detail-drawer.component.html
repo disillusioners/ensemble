@@ -61,14 +61,12 @@
           @if (isEditing()) {
             <div class="detail-item">
               <span class="label">Schedule Type</span>
-              <mat-form-field appearance="outline" class="full-width">
-                <mat-select [value]="editingConfig()?.type"
-                            (selectionChange)="onTypeChange($event.value)">
-                  <mat-option value="cron">Cron</mat-option>
-                  <mat-option value="interval">Interval</mat-option>
-                  <mat-option value="one-time">One-time</mat-option>
-                </mat-select>
-              </mat-form-field>
+              <app-searchable-select
+                [options]="scheduleTypeOptions()"
+                [ngModel]="editingConfig()?.type"
+                (ngModelChange)="onTypeChange($event)"
+                appearance="outline">
+              </app-searchable-select>
             </div>
 
             <!-- Instance Mode -->

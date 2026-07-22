@@ -23,25 +23,16 @@
     <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
       <!-- Agent Selector -->
       <div class="form-group">
-        <label id="agent-label" class="form-label">
-          Agent <span class="text-accent-rose">*</span>
-        </label>
         @if (agentsLoading()) {
           <div class="loading-placeholder">Loading agents...</div>
         } @else {
-          <select
+          <app-searchable-select
             formControlName="agent_id"
-            class="form-select"
-            aria-labelledby="agent-label"
-            aria-required="true"
-          >
-            <option value="" disabled>Select an agent</option>
-            @for (agent of agents(); track agent.id) {
-              <option [value]="agent.id">
-                {{ getAgentDisplayName(agent) }}
-              </option>
-            }
-          </select>
+            [options]="agentOptions()"
+            [label]="'Agent'"
+            [placeholder]="'Select an agent'"
+            appearance="outline"
+          ></app-searchable-select>
         }
         @if (form.get('agent_id')?.touched && form.get('agent_id')?.errors?.['required']) {
           <p class="form-error">Agent is required</p>
@@ -69,43 +60,38 @@
 
       <!-- Project Selector (optional) -->
       <div class="form-group">
-        <label class="form-label">Project</label>
-        <select
+        <app-searchable-select
           formControlName="project_id"
-          class="form-select"
-        >
-          <option value="">No project</option>
-          @for (project of projectService.projects(); track project.project_id) {
-            <option [value]="project.project_id">
-              {{ project.name }} ({{ project.project_id }})
-            </option>
-          }
-        </select>
+          [options]="projectOptions()"
+          [label]="'Project'"
+          [placeholder]="'No project'"
+          appearance="outline"
+        ></app-searchable-select>
         <p class="form-hint">Optional: Select a project for job serialization</p>
       </div>
 
       <!-- Queue Selector (optional, shown when project is selected) -->
       @if (form.get('project_id')?.value) {
         <div class="form-group">
-          <label class="form-label">Queue</label>
           @if (queuesLoading()) {
             <div class="loading-placeholder">Loading queues...</div>
           } @else if (queues().length === 0) {
-            <select class="form-select" disabled>
-              <option value="">No queues available</option>
-            </select>
-          } @else {
-            <select
+            <app-searchable-select
               formControlName="queue_id"
-              class="form-select"
-            >
-              <option value="">Default queue (defer)</option>
-              @for (queue of queues(); track queue.queue_id) {
-                <option [value]="queue.queue_id">
-                  {{ queue.queue_name }} ({{ getQueueTypeLabel(queue.queue_type) }})
-                </option>
-              }
-            </select>
+              [options]="[]"
+              [label]="'Queue'"
+              [placeholder]="'No queues available'"
+              [disabled]="true"
+              appearance="outline"
+            ></app-searchable-select>
+          } @else {
+            <app-searchable-select
+              formControlName="queue_id"
+              [options]="queueOptions()"
+              [label]="'Queue'"
+              [placeholder]="'Default queue (defer)'"
+              appearance="outline"
+            ></app-searchable-select>
           }
           <p class="form-hint">Optional: Select a specific queue for this job</p>
         </div>
@@ -135,15 +121,13 @@
 
       <!-- Source Dropdown -->
       <div class="form-group">
-        <label class="form-label">Source</label>
-        <select
+        <app-searchable-select
           formControlName="source"
-          class="form-select"
-        >
-          @for (option of sourceOptions; track option.value) {
-            <option [value]="option.value">{{ option.label }}</option>
-          }
-        </select>
+          [options]="sourceOptions"
+          [label]="'Source'"
+          [placeholder]="''"
+          appearance="outline"
+        ></app-searchable-select>
       </div>
 
       <!-- Actions -->

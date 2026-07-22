@@ -45,14 +45,10 @@
         <label class="form-label">
           Schedule Type <span class="text-accent-rose">*</span>
         </label>
-        <select
+        <app-searchable-select
           formControlName="type"
-          class="form-select"
-        >
-          @for (option of scheduleTypes; track option.value) {
-            <option [value]="option.value">{{ option.label }}</option>
-          }
-        </select>
+          [options]="scheduleTypes"
+        />
       </div>
 
       <!-- Session Mode -->
@@ -164,17 +160,11 @@
         @if (agentsLoading()) {
           <div class="loading-placeholder">Loading agents...</div>
         } @else {
-          <select
+          <app-searchable-select
             formControlName="agent"
-            class="form-select"
-          >
-            <option value="" disabled>Select an agent</option>
-            @for (agent of agents(); track agent.agent_id) {
-              <option [value]="agent.agent_id">
-                {{ getAgentDisplayName(agent) }}
-              </option>
-            }
-          </select>
+            [options]="agentOptions()"
+            placeholder="Select an agent"
+          />
         }
         @if (form.get('agent')?.touched && form.get('agent')?.errors?.['required']) {
           <p class="form-error">Agent is required</p>
@@ -203,14 +193,10 @@
       <!-- Timezone -->
       <div class="form-group">
         <label class="form-label">Timezone</label>
-        <select
+        <app-searchable-select
           formControlName="timezone"
-          class="form-select"
-        >
-          @for (tz of timezones; track tz.value) {
-            <option [value]="tz.value">{{ tz.label }}</option>
-          }
-        </select>
+          [options]="timezones"
+        />
       </div>
 
       <!-- Project -->

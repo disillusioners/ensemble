@@ -1,13 +1,13 @@
-import { Component, inject, signal, OnInit } from '@angular/core';
+import { Component, computed, inject, signal, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators, AbstractControl, ValidationErrors } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
-import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 
+import { SearchableSelectComponent } from '../searchable-select/searchable-select.component';
 import { QueueType } from '../../models/job-queue.model';
 
 // Reserved system queue names that cannot be used
@@ -46,8 +46,8 @@ export interface QueueCreateDialogResult {
     MatButtonModule,
     MatFormFieldModule,
     MatInputModule,
-    MatSelectModule,
-    MatSnackBarModule
+    MatSnackBarModule,
+    SearchableSelectComponent
   ],
   templateUrl: './queue-create-dialog.html',
   styleUrl: './queue-create-dialog.scss'
@@ -68,6 +68,9 @@ export class QueueCreateDialogComponent implements OnInit {
     { value: 'defer', label: 'Defer (Background execution)' },
     { value: 'background', label: 'Background (Wait for all projects idle)' }
   ];
+  protected readonly queueTypeOptions = computed(() =>
+    this.queueTypes.map(({ value, label }) => ({ value, label }))
+  );
 
   protected readonly form: FormGroup = this.fb.group({
     queue_name: ['', [

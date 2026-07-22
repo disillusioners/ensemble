@@ -1,4 +1,4 @@
-import { Component, inject, signal, OnInit } from '@angular/core';
+import { Component, inject, signal, computed, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators, AbstractControl, ValidationErrors } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
@@ -6,6 +6,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { ApiService } from '../../services/api.service';
 import { SchedulerService, ValidationResponse } from '../../services/scheduler.service';
 import { Agent } from '../../models';
+import { SearchableSelectComponent } from '../../components';
 
 // Common timezones
 const TIMEZONES = [
@@ -74,7 +75,8 @@ export interface ScheduleCreateDialogResult {
     CommonModule,
     ReactiveFormsModule,
     MatDialogModule,
-    MatSnackBarModule
+    MatSnackBarModule,
+    SearchableSelectComponent
   ],
   templateUrl: './schedule-create-dialog.html',
   styleUrl: './schedule-create-dialog.scss'
@@ -101,6 +103,13 @@ export class ScheduleCreateDialogComponent implements OnInit {
     { value: 'interval', label: 'Interval (seconds)' },
     { value: 'one-time', label: 'One-time' }
   ];
+
+  protected readonly agentOptions = computed(() =>
+    this.agents().map((agent) => ({
+      value: agent.agent_id,
+      label: this.getAgentDisplayName(agent),
+    }))
+  );
 
   protected readonly form: FormGroup = this.fb.group({
     name: ['', [Validators.required, Validators.minLength(2)]],

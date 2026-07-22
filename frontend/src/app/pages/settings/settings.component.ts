@@ -2,11 +2,14 @@ import { Component, OnInit, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatSelectModule } from '@angular/material/select';
 import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { SettingsService } from '../../services/settings.service';
+import {
+  SearchableSelectComponent,
+  SearchableSelectOption,
+} from '../../components/searchable-select/searchable-select.component';
 
 const PREDEFINED_LANGUAGES = [
   'Auto',
@@ -37,9 +40,9 @@ const STORAGE_KEY = 'settings-language-preference';
     CommonModule,
     FormsModule,
     MatFormFieldModule,
-    MatSelectModule,
     MatInputModule,
     MatButtonModule,
+    SearchableSelectComponent,
   ],
   templateUrl: './settings.component.html',
   styleUrl: './settings.component.scss',
@@ -54,6 +57,19 @@ export class SettingsComponent implements OnInit {
   readonly customLanguage = signal<string>('');
   readonly isCustom = signal<boolean>(false);
   readonly saving = signal<boolean>(false);
+
+  /**
+   * Options rendered by the preferred-language
+   * ``app-searchable-select``. Predefined languages are mapped to
+   * ``{value, label}`` pairs and a trailing ``Other (custom)``
+   * sentinel — the latter's value is ``CUSTOM_OPTION_VALUE`` so the
+   * ``onLanguageChange`` handler can detect the custom-entry
+   * intent without needing to know the displayed label.
+   */
+  readonly languageOptions: SearchableSelectOption<string>[] = [
+    ...PREDEFINED_LANGUAGES.map((l) => ({ value: l, label: l })),
+    { value: CUSTOM_OPTION_VALUE, label: 'Other (custom)' },
+  ];
 
   ngOnInit(): void {
     this.loadFromStorage();

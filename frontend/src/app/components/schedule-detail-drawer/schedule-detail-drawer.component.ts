@@ -8,10 +8,11 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
-import { MatSelectModule } from '@angular/material/select';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { SchedulerService } from '../../services/scheduler.service';
+import { SearchableSelectComponent } from '../searchable-select/searchable-select.component';
+import type { SearchableSelectOption } from '../searchable-select/searchable-select.component';
 import type {
   Schedule,
   ScheduleExecution,
@@ -33,8 +34,8 @@ import type {
     MatTooltipModule,
     MatFormFieldModule,
     MatInputModule,
-    MatSelectModule,
     MatProgressSpinnerModule,
+    SearchableSelectComponent,
   ],
   templateUrl: './schedule-detail-drawer.component.html',
   styleUrl: './schedule-detail-drawer.component.scss',
@@ -120,6 +121,26 @@ export class ScheduleDetailDrawerComponent {
     if (!config) return 'Unknown';
     return config.type.charAt(0).toUpperCase() + config.type.slice(1);
   });
+
+  // Static source of truth for the schedule-type dropdown. Mapped to the
+  // canonical {value,label} shape required by app-searchable-select via the
+  // computed signal below so the input reference stays stable per render.
+  private static readonly SCHEDULE_TYPE_OPTIONS: ReadonlyArray<{
+    value: ScheduleType;
+    label: string;
+  }> = [
+    { value: 'cron', label: 'Cron' },
+    { value: 'interval', label: 'Interval' },
+    { value: 'one-time', label: 'One-time' },
+  ];
+
+  readonly scheduleTypeOptions = computed<SearchableSelectOption<ScheduleType>[]>(
+    () =>
+      ScheduleDetailDrawerComponent.SCHEDULE_TYPE_OPTIONS.map((o) => ({
+        value: o.value,
+        label: o.label,
+      })),
+  );
 
   intervalDisplay = computed(() => {
     const config = this.editingConfig();

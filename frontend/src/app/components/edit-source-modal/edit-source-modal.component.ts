@@ -5,6 +5,7 @@ import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/materia
 import { Inject } from '@angular/core';
 import type { Source, SourceType, SourceUpdate, Agent } from '../../models';
 import { ApiService } from '../../services/api.service';
+import { SearchableSelectComponent, type SearchableSelectOption } from '../../components';
 
 type ConfigTab = 'simple' | 'json';
 
@@ -41,7 +42,7 @@ interface SourceTypeConfig {
 @Component({
   selector: 'app-edit-source-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatDialogModule],
+  imports: [CommonModule, FormsModule, MatDialogModule, SearchableSelectComponent],
   templateUrl: './edit-source-modal.html',
   styleUrl: './edit-source-modal.scss'
 })
@@ -168,6 +169,24 @@ export class EditSourceModalComponent implements OnInit {
   protected getFieldValue(key: string): string {
     const value = this.simpleFieldValues()[key];
     return value !== undefined ? String(value) : '';
+  }
+
+  // Map dynamic schema options to SearchableSelectOption[].
+  // field.options may be string[] or {value, label}[] depending on the source type.
+  protected toSelectOptions(options: any[] | undefined): SearchableSelectOption[] {
+    return (options || []).map(o =>
+      typeof o === 'string'
+        ? { value: o, label: o }
+        : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) }
+    );
+  }
+
+  // Handle value changes from <app-searchable-select> (ngModelChange)
+  protected onSelectFieldChange(key: string, value: string): void {
+    this.simpleFieldValues.update(values => ({
+      ...values,
+      [key]: value
+    }));
   }
   
   // Helper method to get placeholder for credential fields (show masked if credentials exist)

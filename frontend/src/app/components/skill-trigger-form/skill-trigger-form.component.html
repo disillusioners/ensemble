@@ -44,13 +44,12 @@
         <label class="form-label">
           Condition Type <span class="text-accent-rose">*</span>
         </label>
-        <mat-form-field appearance="outline" class="full-width">
-          <mat-select formControlName="condition_type">
-            @for (opt of conditionTypeOptions; track opt.value) {
-              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
-            }
-          </mat-select>
-        </mat-form-field>
+        <app-searchable-select
+          class="full-width"
+          formControlName="condition_type"
+          [options]="conditionTypeOptions()"
+          appearance="outline"
+        ></app-searchable-select>
         <p class="form-hint">
           @switch (conditionType) {
             @case ('low_completion_rate') {
@@ -160,13 +159,12 @@
         <label class="form-label">
           Action <span class="text-accent-rose">*</span>
         </label>
-        <mat-form-field appearance="outline" class="full-width">
-          <mat-select formControlName="action">
-            @for (opt of actionOptions; track opt.value) {
-              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
-            }
-          </mat-select>
-        </mat-form-field>
+        <app-searchable-select
+          class="full-width"
+          formControlName="action"
+          [options]="actionOptions()"
+          appearance="outline"
+        ></app-searchable-select>
         <p class="form-hint">
           Analyze inspects the affected skill; Evolve (Fix) attempts an automatic rewrite.
         </p>

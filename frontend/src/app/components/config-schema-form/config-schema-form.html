@@ -61,16 +61,11 @@
               }
 
               @case ('select') {
-                <select
-                  class="form-select"
-                  [class.invalid]="isFieldInvalid(field)"
-                  [value]="getFieldValue(field.key)"
-                  (change)="onTextChange(field.key, $event)"
-                >
-                  @for (option of field.options; track option) {
-                    <option [value]="option">{{ option }}</option>
-                  }
-                </select>
+                <app-searchable-select
+                  [options]="toSelectOptions(field.options)"
+                  [ngModel]="getFieldValue(field.key)"
+                  (ngModelChange)="onFieldChange(field.key, $event)"
+                ></app-searchable-select>
               }
             }
 
@@ -151,16 +146,11 @@
               }
 
               @case ('select') {
-                <select
-                  class="form-select"
-                  [class.invalid]="isFieldInvalid(field)"
-                  [value]="getFieldValue(field.key)"
-                  (change)="onTextChange(field.key, $event)"
-                >
-                  @for (option of field.options; track option) {
-                    <option [value]="option">{{ option }}</option>
-                  }
-                </select>
+                <app-searchable-select
+                  [options]="toSelectOptions(field.options)"
+                  [ngModel]="getFieldValue(field.key)"
+                  (ngModelChange)="onFieldChange(field.key, $event)"
+                ></app-searchable-select>
               }
             }
 

@@ -31,15 +31,13 @@
 
   <!-- Filter Bar -->
   <div class="filter-bar">
-    <mat-form-field appearance="outline" class="filter-field">
-      <mat-label>Category</mat-label>
-      <mat-select [value]="categoryFilter()" (selectionChange)="onCategoryFilterChange($event.value)">
-        <mat-option value="all">All Categories</mat-option>
-        @for (cat of categories; track cat) {
-          <mat-option [value]="cat">{{ cat }}</mat-option>
-        }
-      </mat-select>
-    </mat-form-field>
+    <app-searchable-select
+      class="filter-field"
+      label="Category"
+      [options]="filterCategoryOptions()"
+      [ngModel]="categoryFilter()"
+      (ngModelChange)="onCategoryFilterChange($event)">
+    </app-searchable-select>
 
     @if (hasActiveFilters()) {
       <button mat-button (click)="onClearFilters()" class="clear-filters-btn">
@@ -73,14 +71,13 @@
                  placeholder="Short summary of what this skill does">
         </mat-form-field>
 
-        <mat-form-field appearance="outline" class="form-field">
-          <mat-label>Category</mat-label>
-          <mat-select [value]="formCategory()" (selectionChange)="formCategory.set($event.value)">
-            @for (cat of categories; track cat) {
-              <mat-option [value]="cat">{{ cat }}</mat-option>
-            }
-          </mat-select>
-        </mat-form-field>
+        <app-searchable-select
+          class="form-field"
+          label="Category"
+          [options]="categoryOptions()"
+          [ngModel]="formCategory()"
+          (ngModelChange)="formCategory.set($event)">
+        </app-searchable-select>
 
         <mat-form-field appearance="outline" class="form-field">
           <mat-label>Content (markdown)</mat-label>
@@ -191,14 +188,13 @@
                          (input)="editDescription.set($any($event.target).value)">
                 </mat-form-field>
 
-                <mat-form-field appearance="outline" class="form-field">
-                  <mat-label>Category</mat-label>
-                  <mat-select [value]="editCategory()" (selectionChange)="editCategory.set($event.value)">
-                    @for (cat of categories; track cat) {
-                      <mat-option [value]="cat">{{ cat }}</mat-option>
-                    }
-                  </mat-select>
-                </mat-form-field>
+                <app-searchable-select
+                  class="form-field"
+                  label="Category"
+                  [options]="categoryOptions()"
+                  [ngModel]="editCategory()"
+                  (ngModelChange)="editCategory.set($event)">
+                </app-searchable-select>
 
                 <mat-form-field appearance="outline" class="form-field">
                   <mat-label>Content (markdown)</mat-label>

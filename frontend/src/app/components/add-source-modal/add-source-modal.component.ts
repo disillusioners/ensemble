@@ -5,6 +5,7 @@ import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/materia
 import { Inject } from '@angular/core';
 import type { SourceCreate, SourceType, Agent } from '../../models';
 import { ApiService } from '../../services/api.service';
+import { SearchableSelectComponent, type SearchableSelectOption } from '../../components';
 
 // Setup guide step interface
 interface SetupGuideStep {
@@ -53,7 +54,7 @@ interface SourceTypeConfig {
 @Component({
   selector: 'app-add-source-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatDialogModule],
+  imports: [CommonModule, FormsModule, MatDialogModule, SearchableSelectComponent],
   templateUrl: './add-source-modal.html',
   styleUrl: './add-source-modal.scss'
 })
@@ -220,6 +221,24 @@ export class AddSourceModalComponent implements OnInit {
   protected getFieldValue(key: string): string {
     const value = this.simpleFieldValues()[key];
     return value !== undefined ? String(value) : '';
+  }
+
+  // Map dynamic schema options to SearchableSelectOption[].
+  // field.options may be string[] or {value, label}[] depending on the source type.
+  protected toSelectOptions(options: any[] | undefined): SearchableSelectOption[] {
+    return (options || []).map(o =>
+      typeof o === 'string'
+        ? { value: o, label: o }
+        : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) }
+    );
+  }
+
+  // Handle value changes from <app-searchable-select> (ngModelChange)
+  protected onSelectFieldChange(key: string, value: string): void {
+    this.simpleFieldValues.update(values => ({
+      ...values,
+      [key]: value
+    }));
   }
   
   // Helper method to get field value as boolean (for checkbox fields)

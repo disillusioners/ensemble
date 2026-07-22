@@ -162,16 +162,12 @@
                           <span class="toggle-switch"></span>
                         </label>
                       } @else if (field.type === 'select') {
-                        <select
-                          [value]="getFieldValue(field.key)"
-                          (change)="onSimpleFieldChange(field.key, $event)"
-                          class="form-select"
-                        >
-                          <option value="" disabled>{{ field.placeholder }}</option>
-                          @for (option of field.options; track option.value) {
-                            <option [value]="option.value" [selected]="option.value === getFieldValue(field.key)">{{ option.label }}</option>
-                          }
-                        </select>
+                        <app-searchable-select
+                          [options]="toSelectOptions(field.options)"
+                          [placeholder]="field.placeholder"
+                          [ngModel]="getFieldValue(field.key)"
+                          (ngModelChange)="onSelectFieldChange(field.key, $event)"
+                        ></app-searchable-select>
                       } @else {
                         <input
                           [type]="field.type"
@@ -212,16 +208,12 @@
                           <span class="toggle-switch"></span>
                         </label>
                       } @else if (field.type === 'select') {
-                        <select
-                          [value]="getFieldValue(field.key)"
-                          (change)="onSimpleFieldChange(field.key, $event)"
-                          class="form-select"
-                        >
-                          <option value="" disabled>{{ field.placeholder }}</option>
-                          @for (option of field.options; track option.value) {
-                            <option [value]="option.value" [selected]="option.value === getFieldValue(field.key)">{{ option.label }}</option>
-                          }
-                        </select>
+                        <app-searchable-select
+                          [options]="toSelectOptions(field.options)"
+                          [placeholder]="field.placeholder"
+                          [ngModel]="getFieldValue(field.key)"
+                          (ngModelChange)="onSelectFieldChange(field.key, $event)"
+                        ></app-searchable-select>
                       } @else {
                         <input
                           [type]="field.type"

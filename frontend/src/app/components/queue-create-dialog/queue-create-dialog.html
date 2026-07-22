@@ -50,15 +50,12 @@
         <label class="form-label">
           Queue Type <span class="text-accent-rose">*</span>
         </label>
-        <mat-form-field appearance="outline" class="full-width">
-          <mat-select formControlName="queue_type">
-            @for (type of queueTypes; track type.value) {
-              <mat-option [value]="type.value">
-                {{ type.label }}
-              </mat-option>
-            }
-          </mat-select>
-        </mat-form-field>
+        <app-searchable-select
+          class="full-width"
+          formControlName="queue_type"
+          [options]="queueTypeOptions()"
+          appearance="outline"
+        ></app-searchable-select>
         <p class="form-hint">
           @if (selectedQueueType === 'fifo') {
             FIFO queues process jobs in order, one at a time.

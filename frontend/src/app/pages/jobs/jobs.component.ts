@@ -1,13 +1,12 @@
 import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
 import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
-import { MatSelectModule } from '@angular/material/select';
-import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
@@ -25,6 +24,7 @@ import { JobCardComponent } from '../../components/job-card/job-card.component';
 import { JobDetailDrawerComponent } from '../../components/job-detail-drawer/job-detail-drawer.component';
 import { JobCreateDialogComponent, JobCreateDialogResult } from '../../components/job-create-dialog/job-create-dialog.component';
 import { QueueListComponent } from '../../components/queue-list/queue-list.component';
+import { SearchableSelectComponent } from '../../components';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
 import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
 import { JobQueue } from '../../models/job-queue.model';
@@ -51,13 +51,12 @@ export type JobsViewMode = 'queues' | 'all-work';
   standalone: true,
   imports: [
     CommonModule,
+    FormsModule,
     MatButtonModule,
     MatButtonToggleModule,
     MatIconModule,
     MatProgressSpinnerModule,
     MatChipsModule,
-    MatSelectModule,
-    MatFormFieldModule,
     MatSidenavModule,
     MatSnackBarModule,
     MatDialogModule,
@@ -65,7 +64,8 @@ export type JobsViewMode = 'queues' | 'all-work';
     MatCheckboxModule,
     JobCardComponent,
     JobDetailDrawerComponent,
-    QueueListComponent
+    QueueListComponent,
+    SearchableSelectComponent
   ],
   templateUrl: './jobs.component.html',
   styleUrl: './jobs.component.scss'
@@ -291,6 +291,24 @@ export class JobsComponent implements OnInit, OnDestroy {
     { value: 'scheduler', label: 'Scheduler' },
     { value: 'webhook', label: 'Webhook' }
   ];
+
+  // Project filter options — derive from ProjectService.projects() and
+  // lead with a sentinel empty-string option so the user can deselect
+  // the project. Matches the shape SearchableSelectComponent expects
+  // ({value, label}).
+  readonly projectOptions = computed(() => [
+    { value: '', label: 'Select project' },
+    ...this.projects().map((p) => ({ value: p.project_id, label: p.name })),
+  ]);
+
+  // Agent filter options — derive from agents() and lead with an
+  // "all" sentinel so the filter can clear. Label uses the existing
+  // getAgentDisplayName helper so the dropdown stays consistent with
+  // the legacy mat-option rendering (icon + name).
+  readonly agentOptions = computed(() => [
+    { value: 'all', label: 'All Agents' },
+    ...this.agents().map((a) => ({ value: a.id, label: this.getAgentDisplayName(a.id) })),
+  ]);
 
   constructor() {
     // Effect to handle job status updates from SSE

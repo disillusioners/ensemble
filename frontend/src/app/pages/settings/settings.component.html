@@ -9,18 +9,13 @@
       Choose <strong>Auto</strong> to skip enforcement and let the model respond naturally.
     </p>
 
-    <mat-form-field appearance="outline" class="language-select">
-      <mat-label>Preferred Language</mat-label>
-      <mat-select
-        [value]="selectedLanguage()"
-        (selectionChange)="onLanguageChange($event.value)"
-      >
-        @for (lang of languages; track lang) {
-          <mat-option [value]="lang">{{ lang }}</mat-option>
-        }
-        <mat-option [value]="customOptionValue">Other (custom)</mat-option>
-      </mat-select>
-    </mat-form-field>
+    <app-searchable-select
+      label="Preferred Language"
+      [options]="languageOptions"
+      [ngModel]="selectedLanguage()"
+      [ngModelOptions]="{standalone: true}"
+      (ngModelChange)="onLanguageChange($event)"
+    ></app-searchable-select>
 
     @if (isCustom()) {
       <div class="custom-language-row">

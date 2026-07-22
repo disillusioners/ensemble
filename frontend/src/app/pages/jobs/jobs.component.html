@@ -3,19 +3,13 @@
   <div class="jobs-header">
     <div class="header-left">
       <!-- Project Selection (Required) -->
-      <mat-form-field appearance="outline" class="project-select-field">
-        <mat-label>Project</mat-label>
-        <mat-select
-          [value]="filters().project_id || ''"
-          (selectionChange)="onProjectFilterChange($event.value)">
-          <mat-option value="">Select project</mat-option>
-          @for (project of projects(); track project.project_id) {
-            <mat-option [value]="project.project_id">
-              {{ project.name }}
-            </mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
+      <app-searchable-select
+        class="project-select-field"
+        label="Project"
+        [options]="projectOptions()"
+        [ngModel]="filters().project_id || ''"
+        (ngModelChange)="onProjectFilterChange($event)">
+      </app-searchable-select>
 
       <!-- Phase 4 — view-mode toggle (Queues vs All Work) -->
       <mat-button-toggle-group
@@ -138,30 +132,21 @@
     </div>
 
     <div class="filter-row">
-      <mat-form-field appearance="outline" class="filter-field">
-        <mat-label>Source</mat-label>
-        <mat-select
-          [value]="filters().source || 'all'"
-          (selectionChange)="onSourceFilterChange($event.value)">
-          @for (option of sourceOptions; track option.value) {
-            <mat-option [value]="option.value">{{ option.label }}</mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
+      <app-searchable-select
+        class="filter-field"
+        label="Source"
+        [options]="sourceOptions"
+        [ngModel]="filters().source || 'all'"
+        (ngModelChange)="onSourceFilterChange($event)">
+      </app-searchable-select>
 
-      <mat-form-field appearance="outline" class="filter-field">
-        <mat-label>Agent</mat-label>
-        <mat-select
-          [value]="filters().agent_id || 'all'"
-          (selectionChange)="onAgentFilterChange($event.value)">
-          <mat-option value="all">All Agents</mat-option>
-          @for (agent of agents(); track agent.id) {
-            <mat-option [value]="agent.id">
-              {{ getAgentDisplayName(agent.id) }}
-            </mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
+      <app-searchable-select
+        class="filter-field"
+        label="Agent"
+        [options]="agentOptions()"
+        [ngModel]="filters().agent_id || 'all'"
+        (ngModelChange)="onAgentFilterChange($event)">
+      </app-searchable-select>
 
       <mat-checkbox
         [checked]="showDeleted()"

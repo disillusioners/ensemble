@@ -14,7 +14,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
-import { MatSelectModule } from '@angular/material/select';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatCheckboxModule } from '@angular/material/checkbox';
 import { MatInputModule } from '@angular/material/input';
@@ -25,6 +24,10 @@ import { MatDividerModule } from '@angular/material/divider';
 import { SkillService } from '../../services/skill.service';
 import { ProjectService } from '../../services/project.service';
 import { SkillCardComponent } from '../../components/skill-card/skill-card.component';
+import {
+  SearchableSelectComponent,
+  SearchableSelectOption,
+} from '../../components/searchable-select/searchable-select.component';
 import {
   Skill,
   SkillFilters,
@@ -55,7 +58,6 @@ import {
     MatIconModule,
     MatProgressSpinnerModule,
     MatChipsModule,
-    MatSelectModule,
     MatFormFieldModule,
     MatCheckboxModule,
     MatInputModule,
@@ -64,6 +66,7 @@ import {
     MatCardModule,
     MatDividerModule,
     SkillCardComponent,
+    SearchableSelectComponent,
   ],
   templateUrl: './skills.component.html',
   styleUrl: './skills.component.scss',
@@ -89,7 +92,45 @@ export class SkillsComponent implements OnInit, OnDestroy {
   readonly projectFilter = signal<string>('all');
   readonly searchQuery = signal<string>('');
 
-  readonly categories = SKILL_CATEGORIES;
+  /**
+   * Options for the category filter dropdown — the leading
+   * ``all`` sentinel keeps filter unset-state distinguishable
+   * from the actual ``SkillCategory`` values, the rest map
+   * one-to-one to ``SKILL_CATEGORIES``.
+   */
+  readonly categoryFilterOptions = computed<SearchableSelectOption<SkillCategory | 'all'>[]>(
+    () => [
+      { value: 'all', label: 'All Categories' },
+      ...SKILL_CATEGORIES.map((c) => ({ value: c, label: c })),
+    ],
+  );
+
+  /**
+   * Options for the project filter dropdown. ``all`` is the
+   * default unfiltered state, ``global`` narrows to project-
+   * less skills, and the rest are the projects currently loaded
+   * by ``ProjectService.listProjects`` — derived reactively so
+   * late-loaded projects surface automatically.
+   */
+  readonly projectFilterOptions = computed<SearchableSelectOption<string>[]>(
+    () => [
+      { value: 'all', label: 'All Projects' },
+      { value: 'global', label: 'Global Only' },
+      ...this.projects().map((p) => ({
+        value: p.project_id,
+        label: p.name,
+      })),
+    ],
+  );
+
+  /**
+   * Options for the inline create-form category dropdown. No
+   * sentinel here — ``formCategory`` is always a real
+   * ``SkillCategory`` (default ``workflow``).
+   */
+  readonly categoryFormOptions = computed<SearchableSelectOption<SkillCategory>[]>(
+    () => SKILL_CATEGORIES.map((c) => ({ value: c, label: c })),
+  );
 
   /** Filter payload sent to ``SkillService.list``. */
   readonly filters = computed<SkillFilters>(() => {

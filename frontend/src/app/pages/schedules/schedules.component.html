@@ -54,16 +54,13 @@
     </div>
 
     <div class="filter-row">
-      <mat-form-field appearance="outline" class="filter-field">
-        <mat-label>Type</mat-label>
-        <mat-select 
-          [value]="typeFilter()"
-          (selectionChange)="onTypeFilterChange($event.value)">
-          @for (option of typeOptions; track option.value) {
-            <mat-option [value]="option.value">{{ option.label }}</mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
+      <app-searchable-select
+        class="filter-field"
+        label="Type"
+        [options]="typeSelectOptions()"
+        [ngModel]="typeFilter()"
+        (ngModelChange)="onTypeFilterChange($event)">
+      </app-searchable-select>
 
       @if (hasActiveFilters()) {
         <button 

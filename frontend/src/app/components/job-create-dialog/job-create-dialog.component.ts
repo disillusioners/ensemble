@@ -1,11 +1,8 @@
-import { Component, inject, signal, OnInit, OnDestroy } from '@angular/core';
+import { Component, computed, inject, signal, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatInputModule } from '@angular/material/input';
-import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { FormsModule } from '@angular/forms';
 import { Subject, takeUntil } from 'rxjs';
@@ -15,6 +12,7 @@ import { QueueService } from '../../services/queue.service';
 import type { Agent } from '../../models';
 import type { Project } from '../../models/project.model';
 import { JobQueue, getQueueTypeLabel } from '../../models/job-queue.model';
+import { SearchableSelectComponent, SearchableSelectOption } from '../searchable-select/searchable-select.component';
 
 export interface JobCreateDialogData {
   editMode?: boolean;
@@ -44,10 +42,8 @@ export interface JobCreateDialogResult {
     FormsModule,
     MatDialogModule,
     MatButtonModule,
-    MatFormFieldModule,
-    MatInputModule,
-    MatSelectModule,
-    MatSnackBarModule
+    MatSnackBarModule,
+    SearchableSelectComponent
   ],
   templateUrl: './job-create-dialog.html',
   styleUrl: './job-create-dialog.scss'
@@ -78,12 +74,32 @@ export class JobCreateDialogComponent implements OnInit, OnDestroy {
     source: ['api']
   });
 
-  protected readonly sourceOptions = [
+  protected readonly sourceOptions: SearchableSelectOption<string>[] = [
     { value: 'api', label: 'API' },
     { value: 'telegram', label: 'Telegram' },
     { value: 'scheduler', label: 'Scheduler' },
     { value: 'webhook', label: 'Webhook' }
   ];
+
+  protected readonly agentOptions = computed<SearchableSelectOption<string>[]>(() =>
+    this.agents().map((a) => ({ value: a.id, label: this.getAgentDisplayName(a) }))
+  );
+
+  protected readonly projectOptions = computed<SearchableSelectOption<string>[]>(() => [
+    { value: '', label: 'No project' },
+    ...this.projectService.projects().map((p: Project) => ({
+      value: p.project_id,
+      label: `${p.name} (${p.project_id})`
+    }))
+  ]);
+
+  protected readonly queueOptions = computed<SearchableSelectOption<string>[]>(() => [
+    { value: '', label: 'Default queue (defer)' },
+    ...this.queues().map((q) => ({
+      value: q.queue_id,
+      label: `${q.queue_name} (${getQueueTypeLabel(q.queue_type)})`
+    }))
+  ]);
 
   ngOnInit(): void {
     this.loadAgents();

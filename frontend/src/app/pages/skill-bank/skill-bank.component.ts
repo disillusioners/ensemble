@@ -12,7 +12,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
-import { MatSelectModule } from '@angular/material/select';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatTooltipModule } from '@angular/material/tooltip';
@@ -21,6 +20,10 @@ import { MatCardModule } from '@angular/material/card';
 import { MatDividerModule } from '@angular/material/divider';
 import { RouterModule } from '@angular/router';
 import { SkillBankService } from '../../services/skill-bank.service';
+import {
+  SearchableSelectComponent,
+  SearchableSelectOption,
+} from '../../components';
 import {
   SkillBankItem,
   SkillBankItemCreate,
@@ -57,7 +60,6 @@ import {
     MatIconModule,
     MatProgressSpinnerModule,
     MatChipsModule,
-    MatSelectModule,
     MatFormFieldModule,
     MatInputModule,
     MatTooltipModule,
@@ -65,6 +67,7 @@ import {
     MatCardModule,
     MatDividerModule,
     RouterModule,
+    SearchableSelectComponent,
   ],
   templateUrl: './skill-bank.component.html',
   styleUrl: './skill-bank.component.scss',
@@ -85,6 +88,24 @@ export class SkillBankComponent implements OnInit, OnDestroy {
   readonly categories = SKILL_CATEGORIES;
   protected getCategoryIcon = getCategoryIcon;
   protected getCategoryColor = getCategoryColor;
+
+  /**
+   * Filter dropdown options: an "All Categories" sentinel first, then
+   * the static SKILL_CATEGORIES list mapped to {value, label}.
+   */
+  readonly filterCategoryOptions = computed<
+    SearchableSelectOption<SkillCategory | 'all'>[]
+  >(() => [
+    { value: 'all', label: 'All Categories' },
+    ...this.categories.map((cat) => ({ value: cat, label: cat })),
+  ]);
+
+  /**
+   * Form/edit dropdown options: SKILL_CATEGORIES mapped to {value, label}.
+   */
+  readonly categoryOptions = computed<SearchableSelectOption<SkillCategory>[]>(
+    () => this.categories.map((cat) => ({ value: cat, label: cat })),
+  );
 
   /** Filter payload sent to ``SkillBankService.list``. */
   readonly filters = computed<SkillBankFilters>(() => {

@@ -31,26 +31,23 @@
 
   <!-- Filter Bar -->
   <div class="filter-bar">
-    <mat-form-field appearance="outline" class="filter-field">
-      <mat-label>Category</mat-label>
-      <mat-select [value]="categoryFilter()" (selectionChange)="onCategoryFilterChange($event.value)">
-        <mat-option value="all">All Categories</mat-option>
-        @for (cat of categories; track cat) {
-          <mat-option [value]="cat">{{ cat }}</mat-option>
-        }
-      </mat-select>
-    </mat-form-field>
+    <app-searchable-select
+      class="filter-field"
+      label="Category"
+      [options]="categoryFilterOptions()"
+      [ngModel]="categoryFilter()"
+      [ngModelOptions]="{standalone: true}"
+      (ngModelChange)="onCategoryFilterChange($event)"
+    ></app-searchable-select>
 
-    <mat-form-field appearance="outline" class="filter-field">
-      <mat-label>Project</mat-label>
-      <mat-select [value]="projectFilter()" (selectionChange)="onProjectFilterChange($event.value)">
-        <mat-option value="all">All Projects</mat-option>
-        <mat-option value="global">Global Only</mat-option>
-        @for (project of projects(); track project.project_id) {
-          <mat-option [value]="project.project_id">{{ project.name }}</mat-option>
-        }
-      </mat-select>
-    </mat-form-field>
+    <app-searchable-select
+      class="filter-field"
+      label="Project"
+      [options]="projectFilterOptions()"
+      [ngModel]="projectFilter()"
+      [ngModelOptions]="{standalone: true}"
+      (ngModelChange)="onProjectFilterChange($event)"
+    ></app-searchable-select>
 
     <mat-form-field appearance="outline" class="filter-field search-field">
       <mat-label>Search</mat-label>
@@ -98,14 +95,14 @@
                  placeholder="Short summary of what this skill does">
         </mat-form-field>
 
-        <mat-form-field appearance="outline" class="form-field">
-          <mat-label>Category</mat-label>
-          <mat-select [value]="formCategory()" (selectionChange)="formCategory.set($event.value)">
-            @for (cat of categories; track cat) {
-              <mat-option [value]="cat">{{ cat }}</mat-option>
-            }
-          </mat-select>
-        </mat-form-field>
+        <app-searchable-select
+          class="form-field"
+          label="Category"
+          [options]="categoryFormOptions()"
+          [ngModel]="formCategory()"
+          [ngModelOptions]="{standalone: true}"
+          (ngModelChange)="formCategory.set($event)"
+        ></app-searchable-select>
 
         <mat-form-field appearance="outline" class="form-field">
           <mat-label>Content (markdown)</mat-label>

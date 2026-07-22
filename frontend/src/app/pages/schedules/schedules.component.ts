@@ -1,11 +1,10 @@
 import { Component, signal, computed, inject, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
-import { MatSelectModule } from '@angular/material/select';
-import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
@@ -15,6 +14,7 @@ import { ApiService } from '../../services/api.service';
 import { ScheduleCardComponent } from '../../components/schedule-card/schedule-card.component';
 import { ScheduleDetailDrawerComponent } from '../../components/schedule-detail-drawer/schedule-detail-drawer.component';
 import { ScheduleCreateDialogComponent, ScheduleCreateDialogResult } from '../../components/schedule-create-dialog/schedule-create-dialog.component';
+import { SearchableSelectComponent, SearchableSelectOption } from '../../components';
 import { Schedule, ScheduleStatus, ScheduleType } from '../../models/scheduler.model';
 import { Agent } from '../../models';
 
@@ -25,18 +25,18 @@ type ActionType = 'start' | 'stop';
   standalone: true,
   imports: [
     CommonModule,
+    FormsModule,
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
     MatChipsModule,
-    MatSelectModule,
-    MatFormFieldModule,
     MatSidenavModule,
     MatSnackBarModule,
     MatDialogModule,
     MatTooltipModule,
     ScheduleCardComponent,
-    ScheduleDetailDrawerComponent
+    ScheduleDetailDrawerComponent,
+    SearchableSelectComponent
   ],
   templateUrl: './schedules.component.html',
   styleUrl: './schedules.component.scss'
@@ -107,6 +107,16 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     { value: 'interval', label: 'Interval' },
     { value: 'one-time', label: 'One-time' }
   ];
+
+  /**
+   * Type filter options mapped to `SearchableSelectOption` shape.
+   * The static `typeOptions` shape already matches, but we wrap
+   * the mapping in a computed signal so the template can bind
+   * `SearchableSelectOption<ScheduleType | 'all'>[]` directly.
+   */
+  readonly typeSelectOptions = computed<SearchableSelectOption<ScheduleType | 'all'>[]>(
+    () => this.typeOptions.map((opt) => ({ value: opt.value, label: opt.label })),
+  );
 
   ngOnInit(): void {
     this.loadSchedules();

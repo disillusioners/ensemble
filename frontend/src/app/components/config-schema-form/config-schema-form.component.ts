@@ -3,11 +3,12 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { ConfigSchemaField } from '../../models';
+import { SearchableSelectComponent, SearchableSelectOption } from '../';
 
 @Component({
   selector: 'app-config-schema-form',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatSlideToggleModule],
+  imports: [CommonModule, FormsModule, MatSlideToggleModule, SearchableSelectComponent],
   templateUrl: './config-schema-form.html',
   styleUrl: './config-schema-form.scss'
 })
@@ -28,6 +29,10 @@ export class ConfigSchemaFormComponent implements OnInit {
   protected readonly envFields = computed(() =>
     this.schema().filter(f => f.section === 'env')
   );
+
+  toSelectOptions(options: any[] | undefined): SearchableSelectOption[] {
+    return (options || []).map(o => typeof o === 'string' ? { value: o, label: o } : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) });
+  }
 
   ngOnInit(): void {
     this.initializeValues();
