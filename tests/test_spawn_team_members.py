@@ -412,6 +412,7 @@ class TestTeamMembersRegistryParsing:
                          # internal spawn_instance of the "explorer" agent.
             "wanderer",  # Added when wanderer agent was introduced.
             "kb-writer",  # Added when kb-writer agent was introduced.
+            "doc-writer",  # Added when doc-writer agent was introduced.
         ]
         assert set(leader.team_members) == set(expected), (
             f"leader.team_members mismatch: got {leader.team_members}"

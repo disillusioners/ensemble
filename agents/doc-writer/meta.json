@@ -1,0 +1,13 @@
+{
+  "id": "doc-writer",
+  "name": "Doc Writer",
+  "description": "Produces polished documentation (md, csv, docx, pdf, pptx, xlsx-best-effort) with charts/diagrams for critical sections. Writes document files only — rejects code. Uses pandoc/libreoffice for format conversion.",
+  "icon": "📄",
+  "color": "accent-indigo",
+  "version": "1.0.0",
+  "innate_skills": ["chart"],
+  "tools": {
+    "allow": ["filesystem", "bash", "proc", "time", "help", "context", "shared_context"]
+  },
+  "team_members": []
+}
