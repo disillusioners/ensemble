@@ -1,24 +1,27 @@
 """SQLModel table definition for instance UI preferences.
 
-Single table backing the UI-only "pin" + "color tag" preferences
-attached to each instance (see package docstring).
+Single table backing the UI-only "pin" + "color tag" + "icon tag"
+preferences attached to each instance (see package docstring).
 
 * :class:`InstanceUiPrefs` — one row per instance, keyed by
   ``instance_id``. Created lazily on the first ``upsert`` call from
   ``PUT /api/instances/{id}/ui-prefs``, read on every
   ``GET /api/instances`` page-load so the frontend can render the
-  pin / color overlay without a per-instance round trip, and deleted
-  by ``DELETE /api/instances/{id}/ui-prefs`` (or indirectly via the
-  hard-delete cascade in :meth:`SQLModelInstanceRepository.hard_delete_tree`,
-  which wipes ``instance_ui_prefs`` rows as step 9b alongside the
-  other dependent tables).
+  pin / color / icon overlay without a per-instance round trip, and
+  deleted by ``DELETE /api/instances/{id}/ui-prefs`` (or indirectly
+  via the hard-delete cascade in
+  :meth:`SQLModelInstanceRepository.hard_delete_tree`, which wipes
+  ``instance_ui_prefs`` rows as step 9b alongside the other dependent
+  tables).
 
 The table is created on every backend by
 ``SQLModel.metadata.create_all()`` at startup (the model is imported
 from ``daemon/repositories/__init__.py`` so it is registered with
-``SQLModel.metadata`` before ``create_all`` runs). No
-``_ensure_postgres_columns`` entry is needed because this is a
-brand-new table, not an additive column on an existing table.
+``SQLModel.metadata`` before ``create_all`` runs). Additive columns
+on this table for existing databases are handled by
+:meth:`InstanceManager._ensure_postgres_columns` on PostgreSQL (the
+``.sql`` migration runner is SQLite-only); see the ``icon_tag``
+statement there for the nullable ``VARCHAR`` add.
 """
 
 from __future__ import annotations
@@ -86,6 +89,11 @@ class InstanceUiPrefs(SQLModel, table=True):
     color_tag: str | None = Field(
         sa_column=Column(String, nullable=True),
         max_length=32,
+        default=None,
+    )
+    icon_tag: str | None = Field(
+        sa_column=Column(String, nullable=True),
+        max_length=64,
         default=None,
     )
     created_at: str = Field(

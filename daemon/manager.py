@@ -2941,6 +2941,8 @@ class InstanceManager:
             ),
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
+            # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables
+            "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
             # instance_execution_leases: the Execution Gate's per-instance
             # lease table. SQLite gets it via the .sql migration at
             # ``daemon/migrations/versions/20260614_000002_create_instance_execution_leases.sql``;

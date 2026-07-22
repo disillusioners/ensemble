@@ -147,14 +147,15 @@ class AnswerRequest(BaseModel):
 class InstanceUiPrefsUpdateRequest(BaseModel):
     """Request body for ``PUT /api/instances/{id}/ui-prefs``.
 
-    Both fields are optional: pass only the ones you want to change.
-    For ``color_tag``, omission leaves the existing value unchanged,
-    explicit ``null`` clears it, and a string sets or replaces it. The
-    router preserves that distinction at the API edge and translates an
-    explicit ``null`` into the repository's clear operation. For
-    ``pinned``, ``None`` leaves the value unchanged; its corresponding
-    ``pinned_at`` side-effect (set on True, clear on False, leave alone
-    on None) is documented on the repo.
+    All fields are optional: pass only the ones you want to change.
+    For ``color_tag`` and ``icon_tag``, omission leaves the existing
+    value unchanged, explicit ``null`` clears it, and a string sets
+    or replaces it. The router preserves that distinction at the API
+    edge and translates an explicit ``null`` into the repository's
+    clear operation. For ``pinned``, ``None`` leaves the value
+    unchanged; its corresponding ``pinned_at`` side-effect (set on
+    True, clear on False, leave alone on None) is documented on the
+    repo.
     """
 
     pinned: bool | None = Field(
@@ -166,9 +167,20 @@ class InstanceUiPrefsUpdateRequest(BaseModel):
     )
     color_tag: str | None = Field(
         default=None,
+        max_length=32,
         description=(
             "Color tag (e.g., 'red', '#ff0000'). Omit to leave unchanged; "
-            "explicit null clears; a string sets or replaces."
+            "explicit null clears; a string sets or replaces. "
+            "Maximum 32 characters."
+        ),
+    )
+    icon_tag: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Icon tag (e.g., 'star', 'flag'). Omit to leave unchanged; "
+            "explicit null clears; a string sets or replaces. "
+            "Maximum 64 characters."
         ),
     )
 
@@ -178,14 +190,16 @@ class InstanceUiPrefsResponse(BaseModel):
 
     Mirrors the ``instance_ui_prefs`` table. Note ``pinned`` is a
     required field on the response (not nullable) — the row always
-    has a concrete boolean. ``pinned_at`` and ``color_tag`` are
-    nullable to reflect the un-pinned / no-tag state.
+    has a concrete boolean. ``pinned_at``, ``color_tag``, and
+    ``icon_tag`` are nullable to reflect the un-pinned / no-tag /
+    no-icon state.
     """
 
     instance_id: str
     pinned: bool
     pinned_at: datetime | None
     color_tag: str | None
+    icon_tag: str | None
 
 
 # Create router with /instances prefix
@@ -299,13 +313,14 @@ async def list_instances(
         include_descendants=True,
     )
 
-    # Merge UI preferences (pin + color tag) into each InstanceInfo on
-    # this page. The repo stays generic — merging happens here at the
-    # API layer to keep agent tools insulated (``Instance.to_dict()``
-    # is NOT modified). The batch fetch issues a single SELECT against
-    # the ``instance_ui_prefs`` table with an ``IN (?, ?, ...)`` over
-    # the current page's IDs; rows the user has never touched are
-    # simply absent from the dict (the merge falls back to ``None``).
+    # Merge UI preferences (pin + color tag + icon tag) into each
+    # InstanceInfo on this page. The repo stays generic — merging
+    # happens here at the API layer to keep agent tools insulated
+    # (``Instance.to_dict()`` is NOT modified). The batch fetch issues
+    # a single SELECT against the ``instance_ui_prefs`` table with an
+    # ``IN (?, ?, ...)`` over the current page's IDs; rows the user
+    # has never touched are simply absent from the dict (the merge
+    # falls back to ``None``).
     instance_ids = [inst["instance_id"] for inst in instances_data]
     prefs_map = manager._instance_ui_prefs_repo.get_all(instance_ids)
 
@@ -326,6 +341,7 @@ async def list_instances(
             project_id=inst.get("project_id"),
             pinned=prefs.pinned if prefs else None,
             color_tag=prefs.color_tag if prefs else None,
+            icon_tag=prefs.icon_tag if prefs else None,
             pinned_at=(
                 parse_utc_datetime(prefs.pinned_at)
                 if prefs and prefs.pinned_at else None
@@ -380,6 +396,7 @@ async def get_instance(
         pending_count=(await manager.get_queue_stats(instance_id)).get("pending_count"),
         pinned=prefs.pinned if prefs else None,
         color_tag=prefs.color_tag if prefs else None,
+        icon_tag=prefs.icon_tag if prefs else None,
         pinned_at=(
             parse_utc_datetime(prefs.pinned_at)
             if prefs and prefs.pinned_at else None
@@ -1304,9 +1321,10 @@ async def set_instance_ui_prefs(
 ) -> InstanceUiPrefsResponse:
     """Set or replace UI-only preferences for an instance.
 
-    Request body: ``{"pinned": bool|null, "color_tag": str|null}``.
-    Both fields are optional. Omitting ``color_tag`` leaves it unchanged,
-    explicit ``null`` clears it, and a string sets or replaces it.
+    Request body: ``{"pinned": bool|null, "color_tag": str|null,
+    "icon_tag": str|null}``. All fields are optional. Omitting
+    ``color_tag`` / ``icon_tag`` leaves that value unchanged, explicit
+    ``null`` clears it, and a string sets or replaces it.
 
     The ``pinned_at`` timestamp is managed by the repo: setting
     ``pinned=true`` stamps it; setting ``pinned=false`` clears it;
@@ -1327,11 +1345,14 @@ async def set_instance_ui_prefs(
 
     fields_set = body.model_fields_set
     clear_color = "color_tag" in fields_set and body.color_tag is None
+    clear_icon = "icon_tag" in fields_set and body.icon_tag is None
     prefs = manager._instance_ui_prefs_repo.upsert(
         instance_id,
         pinned=body.pinned,
         color_tag=body.color_tag,
         clear_color_tag=clear_color,
+        icon_tag=body.icon_tag,
+        clear_icon_tag=clear_icon,
     )
     return InstanceUiPrefsResponse(
         instance_id=prefs.instance_id,
@@ -1340,6 +1361,7 @@ async def set_instance_ui_prefs(
             parse_utc_datetime(prefs.pinned_at) if prefs.pinned_at else None
         ),
         color_tag=prefs.color_tag,
+        icon_tag=prefs.icon_tag,
     )
 
 

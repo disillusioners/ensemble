@@ -58,6 +58,7 @@ class TestUpsertCreates:
         assert row.pinned is False
         assert row.pinned_at is None
         assert row.color_tag is None
+        assert row.icon_tag is None
         assert row.created_at is not None
         assert row.updated_at is not None
 
@@ -189,6 +190,80 @@ class TestUpsertPartialUpdate:
         cleared = repo.get("inst-1")
         assert cleared is not None
         assert cleared.color_tag is None
+
+    def test_upsert_icon_tag_create(self, repo, engine):
+        """``upsert(id, icon_tag="star")`` on a non-existent instance
+        creates a fresh row with ``icon_tag="star"`` (and all other
+        fields at their not-pinned / no-color defaults).
+
+        Mirrors the existing ``test_upsert_persists_row_in_db`` shape
+        — verifies the lazy-create path stamps the icon_tag on first
+        touch, not just on partial-update.
+        """
+        row = repo.upsert("inst-1", icon_tag="star")
+
+        assert row.instance_id == "inst-1"
+        assert row.icon_tag == "star"
+        assert row.pinned is False  # default
+        assert row.color_tag is None  # default
+
+        # And it was actually written to the DB.
+        fetched = repo.get("inst-1")
+        assert fetched is not None
+        assert fetched.icon_tag == "star"
+
+    def test_upsert_icon_tag_partial_update(self, repo, engine):
+        """``upsert(id, icon_tag="flag")`` on an existing row that
+        already has a color_tag updates ONLY ``icon_tag`` — the
+        existing ``color_tag`` is preserved (partial-update
+        semantics, mirroring ``test_partial_update_only_color_tag_keeps_pinned_and_pinned_at``).
+        """
+        # Seed with both a color tag and an initial icon tag.
+        repo.upsert("inst-1", color_tag="blue", icon_tag="star")
+        seeded = repo.get("inst-1")
+        assert seeded is not None
+        assert seeded.color_tag == "blue"
+        assert seeded.icon_tag == "star"
+
+        # Update only the icon tag.
+        repo.upsert("inst-1", icon_tag="flag")
+
+        row = repo.get("inst-1")
+        assert row is not None
+        assert row.icon_tag == "flag"  # updated
+        assert row.color_tag == "blue"  # preserved (the partial-update guarantee)
+
+    def test_upsert_clear_icon_tag_explicit(self, repo, engine):
+        """``upsert(id, icon_tag=None, clear_icon_tag=True)`` CLEARs the
+        existing icon tag to None — the explicit-clear path the frontend
+        uses when sending ``{"icon_tag": null}``.
+
+        Control assertion: passing ``icon_tag=None`` WITHOUT
+        ``clear_icon_tag=True`` must leave the existing icon tag
+        unchanged (preserves partial-update semantics). This mirrors
+        ``test_upsert_clear_color_tag_explicit`` and is the symmetric
+        tri-state guard for the new field.
+        """
+        # Seed with an icon tag (and a control color tag to prove
+        # clearing icon_tag does NOT touch unrelated fields).
+        repo.upsert("inst-1", icon_tag="star", color_tag="red")
+        seeded = repo.get("inst-1")
+        assert seeded is not None and seeded.icon_tag == "star"
+
+        # Control: icon_tag=None without clear_icon_tag → leave unchanged.
+        repo.upsert("inst-1", icon_tag=None)
+        control = repo.get("inst-1")
+        assert control is not None
+        assert control.icon_tag == "star"  # preserved
+        assert control.color_tag == "red"  # untouched
+
+        # Explicit clear: icon_tag=None WITH clear_icon_tag=True → cleared.
+        repo.upsert("inst-1", icon_tag=None, clear_icon_tag=True)
+        cleared = repo.get("inst-1")
+        assert cleared is not None
+        assert cleared.icon_tag is None
+        # The color_tag must remain untouched during an icon-only clear.
+        assert cleared.color_tag == "red"
 
 
 

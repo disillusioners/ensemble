@@ -137,7 +137,9 @@ class InstanceUiPrefsRepository:
         instance_id: str,
         pinned: bool | None = None,
         color_tag: str | None = None,
+        icon_tag: str | None = None,
         clear_color_tag: bool = False,
+        clear_icon_tag: bool = False,
     ) -> InstanceUiPrefs:
         """Partial-update the prefs row for ``instance_id``.
 
@@ -171,6 +173,19 @@ class InstanceUiPrefsRepository:
         * Both ``color_tag="x"`` and ``clear_color_tag=True`` passed →
           ``clear_color_tag=True`` wins (value is cleared to ``None``).
 
+        ``icon_tag`` follow-up (parallels ``color_tag``):
+
+        * ``icon_tag="star"`` (or another string) was passed →
+          ``icon_tag`` is set to that value. Capped at 64 characters
+          on the column (Pydantic enforces this at the API boundary).
+        * ``icon_tag=None`` without ``clear_icon_tag=True`` was passed
+          → ``icon_tag`` is left unchanged.
+        * ``icon_tag=None`` with ``clear_icon_tag=True`` was passed →
+          ``icon_tag`` is cleared to ``None``.
+        * ``icon_tag`` omitted → ``icon_tag`` is left unchanged.
+        * Both ``icon_tag="x"`` and ``clear_icon_tag=True`` passed →
+          ``clear_icon_tag=True`` wins (value is cleared to ``None``).
+
         Args:
             instance_id: The instance whose prefs to upsert.
             pinned: Optional new pin state. ``True`` pins and sets
@@ -180,12 +195,18 @@ class InstanceUiPrefsRepository:
             color_tag: Optional new color tag. A string sets it;
                 ``None`` leaves it unchanged unless
                 ``clear_color_tag`` is ``True``.
+            icon_tag: Optional new icon tag (e.g., ``"star"``,
+                ``"flag"``). A string sets it; ``None`` leaves it
+                unchanged unless ``clear_icon_tag`` is ``True``.
             clear_color_tag: When True, force ``color_tag`` to ``None`` even if
                 ``color_tag`` is None. Used by the API router to translate an
                 explicit JSON ``"color_tag": null`` into a clear operation,
                 disambiguating it from "field omitted" (no-op). Defaults to
                 False (preserve the partial-update "leave unchanged" semantics
                 when ``color_tag`` is None).
+            clear_icon_tag: When True, force ``icon_tag`` to ``None`` even if
+                ``icon_tag`` is None. Mirrors ``clear_color_tag``'s
+                disambiguation rule for the icon-tag field.
 
         Returns:
             The persisted :class:`InstanceUiPrefs` row (refreshed
@@ -211,6 +232,7 @@ class InstanceUiPrefsRepository:
                     pinned=False,
                     pinned_at=None,
                     color_tag=None,
+                    icon_tag=None,
                     created_at=now_iso,
                 )
                 # Reflect the explicit new-state on the freshly-created
@@ -223,6 +245,11 @@ class InstanceUiPrefsRepository:
                     row.color_tag = None
                 elif color_tag is not None:
                     row.color_tag = color_tag
+                # else: leave unchanged
+                if clear_icon_tag:
+                    row.icon_tag = None
+                elif icon_tag is not None:
+                    row.icon_tag = icon_tag
                 # else: leave unchanged
                 row.updated_at = now_iso
                 session.add(row)
@@ -242,6 +269,11 @@ class InstanceUiPrefsRepository:
             elif color_tag is not None:
                 existing.color_tag = color_tag
             # else: leave unchanged
+            if clear_icon_tag:
+                existing.icon_tag = None
+            elif icon_tag is not None:
+                existing.icon_tag = icon_tag
+            # else: leave unchanged
             existing.updated_at = now_iso
 
             session.add(existing)
@@ -250,7 +282,8 @@ class InstanceUiPrefsRepository:
             logger.info(
                 f"[InstanceUiPrefs] Upserted prefs for instance "
                 f"{instance_id[:8]}... (pinned={existing.pinned}, "
-                f"color_tag={existing.color_tag!r})"
+                f"color_tag={existing.color_tag!r}, "
+                f"icon_tag={existing.icon_tag!r})"
             )
             return existing
 

@@ -117,24 +117,35 @@
               [style.background-color]="getStatusStyle(instance.status).color"
               [title]="instance.status"
             ></span>
-            <!-- Color tag square: opens a mat-menu picker on click.
-                 Shows the user-selected color, or a faint placeholder
-                 outline when no tag is set so the affordance stays
-                 discoverable. Both ``preventDefault`` AND
-                 ``stopPropagation`` are required: the row is an
-                 ``<a [routerLink]>``, so a bare stopPropagation still
-                 triggers navigation on the anchor's default action;
-                 preventDefault suppresses that. -->
-            <span
-              class="color-tag"
-              [class.has-color]="!!instance.color_tag"
-              [style.background-color]="instance.color_tag || 'transparent'"
-              [title]="instance.color_tag ? ('Color tag: ' + instance.color_tag) : 'Set color tag'"
-              [matMenuTriggerFor]="colorMenu"
-              (click)="$event.preventDefault(); $event.stopPropagation()"
-              (contextmenu)="$event.preventDefault(); $event.stopPropagation()"
-              #colorTagTrigger="matMenuTrigger"
-            ></span>
+            <!-- Tag picker trigger: an icon takes display priority over the
+                 color square, while both triggers share the same menu and
+                 prevent the parent <a [routerLink]> from navigating. -->
+            @if (instance.icon_tag) {
+              <span
+                class="icon-tag"
+                [style.color]="instance.color_tag || null"
+                [title]="'Icon tag: ' + instance.icon_tag"
+                [matMenuTriggerFor]="colorMenu"
+                [matMenuTriggerData]="{ colorTagTrigger: colorTagTrigger }"
+                (click)="$event.preventDefault(); $event.stopPropagation()"
+                (contextmenu)="$event.preventDefault(); $event.stopPropagation()"
+                #colorTagTrigger="matMenuTrigger"
+              >
+                <mat-icon>{{ instance.icon_tag }}</mat-icon>
+              </span>
+            } @else {
+              <span
+                class="color-tag"
+                [class.has-color]="!!instance.color_tag"
+                [style.background-color]="instance.color_tag || 'transparent'"
+                [title]="instance.color_tag ? ('Color tag: ' + instance.color_tag) : 'Set color tag'"
+                [matMenuTriggerFor]="colorMenu"
+                [matMenuTriggerData]="{ colorTagTrigger: colorTagTrigger }"
+                (click)="$event.preventDefault(); $event.stopPropagation()"
+                (contextmenu)="$event.preventDefault(); $event.stopPropagation()"
+                #colorTagTrigger="matMenuTrigger"
+              ></span>
+            }
           </p>
           <p class="instance-id">{{ instance.title || getInstanceIdShort(instance.instance_id) }}</p>
         </div>
@@ -195,33 +206,52 @@
     }
   </a>
 
-  <!-- Color picker popup. Triggered by the .color-tag square above.
-       Mirrors the notification-bell pattern: a ``mat-menu`` whose
-       contents are a grid of swatches plus a "Remove" entry that
-       clears the tag. ``stopPropagation`` on menu clicks keeps the
-       parent <a> from also interpreting them as navigation. -->
+  <!-- Tag picker popup. Triggered by either the .icon-tag or .color-tag
+       element above. It keeps colors and icons in separate sections while
+       the Remove action clears both tag fields. -->
   <mat-menu #colorMenu="matMenu" class="color-tag-menu">
-    <ng-template matMenuContent>
+    <ng-template matMenuContent let-colorTagTrigger="colorTagTrigger">
       <div class="color-tag-picker" (click)="$event.stopPropagation()">
-        <div class="color-tag-grid">
-          @for (color of colorOptions; track color.value) {
-            <button
-              type="button"
-              class="color-swatch"
-              [style.background-color]="color.value"
-              [title]="color.name"
-              [attr.aria-label]="'Set color tag to ' + color.name"
-              (click)="onSelectColorTag(instance.instance_id, color.value, $event); colorTagTrigger.closeMenu()"
-            ></button>
-          }
-        </div>
+        <section class="picker-section">
+          <div class="picker-section-label">Colors</div>
+          <div class="color-tag-grid">
+            @for (color of colorOptions; track color.value) {
+              <button
+                type="button"
+                class="color-swatch"
+                [style.background-color]="color.value"
+                [title]="color.name"
+                [attr.aria-label]="'Set color tag to ' + color.name"
+                (click)="onSelectColorTag(instance.instance_id, color.value, $event); colorTagTrigger.closeMenu()"
+              ></button>
+            }
+          </div>
+        </section>
+
+        <section class="picker-section">
+          <div class="picker-section-label">Icons</div>
+          <div class="icon-tag-grid">
+            @for (icon of iconOptions; track icon.icon) {
+              <button
+                type="button"
+                class="icon-swatch"
+                [title]="icon.name"
+                [attr.aria-label]="'Set icon tag to ' + icon.name"
+                (click)="onSelectIconTag(instance.instance_id, icon.icon, $event); colorTagTrigger.closeMenu()"
+              >
+                <mat-icon>{{ icon.icon }}</mat-icon>
+              </button>
+            }
+          </div>
+        </section>
+
         <button
           type="button"
           class="color-clear-btn"
-          (click)="onSelectColorTag(instance.instance_id, null, $event); colorTagTrigger.closeMenu()"
+          (click)="onClearAllTags(instance.instance_id, $event); colorTagTrigger.closeMenu()"
         >
           <mat-icon>close</mat-icon>
-          <span>Remove color</span>
+          <span>Remove tags</span>
         </button>
       </div>
     </ng-template>

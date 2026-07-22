@@ -3,6 +3,8 @@
 End-to-end coverage (through the real HTTP API) for:
 
     * ``PUT    /api/instances/{instance_id}/ui-prefs``  — partial upsert
+      of ``pinned``, ``color_tag``, and ``icon_tag`` (omission leaves
+      unchanged; explicit ``null`` clears; a string sets or replaces).
     * ``DELETE /api/instances/{instance_id}/ui-prefs``  — removes the row
     * ``GET    /api/instances``                          — list (merged prefs)
     * ``GET    /api/instances/{instance_id}``            — single (merged prefs)
@@ -13,7 +15,8 @@ test suite (19/19 passing) including the **C1 fix** — an explicit
 This pack verifies that the C1 fix is reachable through the HTTP API by
 exercising the router's ``clear_color_tag`` translation logic
 (``"color_tag" in body.model_fields_set and body.color_tag is None``) against
-the real repo and a real SQLite engine.
+the real repo and a real SQLite engine. The symmetric ``clear_icon_tag``
+path is covered by the icon-tag tests below.
 
 Strategy (mirrors ``tests/api/test_projects.py`` + ``tests/test_agents_api.py``):
     * Build the FastAPI ``app`` (already wired in ``daemon.api``).
@@ -395,3 +398,96 @@ async def test_partial_upsert_preserves_other_field(client):
         "partial upsert must preserve the previously-set pinned state"
     )
     assert data["color_tag"] == "green"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# icon_tag coverage (mirrors the color_tag block above)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_put_icon_tag_star(client):
+    """PUT {"icon_tag": "star"} → 200, icon_tag == "star" in the response.
+
+    Mirrors :func:`test_put_color_tag_red` for the icon-tag field; proves
+    the router plumbs ``icon_tag`` through to the repo and surfaces it in
+    the response body.
+    """
+    client, instance_id, _ = client
+
+    response = await _put(client, instance_id, {"icon_tag": "star"})
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["icon_tag"] == "star"
+
+
+@pytest.mark.asyncio
+async def test_put_icon_tag_null_CLEARS_tag(client):
+    """Explicit ``icon_tag: null`` CLEARs the icon tag, mirroring the C1 fix.
+
+    Set icon_tag="star", then PUT icon_tag=null → response icon_tag == None.
+    The router must translate the explicit null into ``clear_icon_tag=True``
+    (same ``model_fields_set`` mechanism used by ``clear_color_tag``). If
+    the icon-tag clear path regressed, ``icon_tag`` would still be "star"
+    here because partial-update semantics leave ``None`` as "no-op".
+    """
+    client, instance_id, _ = client
+
+    set_resp = await _put(client, instance_id, {"icon_tag": "star"})
+    assert set_resp.status_code == 200
+    assert set_resp.json()["icon_tag"] == "star"
+
+    clear_resp = await _put(client, instance_id, {"icon_tag": None})
+    assert clear_resp.status_code == 200, clear_resp.text
+    assert clear_resp.json()["icon_tag"] is None, (
+        "explicit icon_tag=null must CLEAR the tag, not preserve it "
+        "(symmetric to the color_tag C1 fix)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_instances_list_includes_icon_tag(client):
+    """After PUT-ing icon_tag, GET /api/instances merges it into the item.
+
+    Mirrors :func:`test_get_instances_list_includes_prefs_fields` for the
+    icon-tag field — confirms the list endpoint's batch merge step
+    (router side) reads ``prefs.icon_tag`` and surfaces it on each
+    ``InstanceInfo``.
+    """
+    client, instance_id, _ = client
+
+    put_resp = await _put(client, instance_id, {"icon_tag": "flag"})
+    assert put_resp.status_code == 200
+
+    list_resp = await client.get("/api/instances")
+    assert list_resp.status_code == 200, list_resp.text
+    payload = list_resp.json()
+    assert "instances" in payload
+    matches = [
+        i for i in payload["instances"] if i["instance_id"] == instance_id
+    ]
+    assert matches, "seeded instance missing from GET /api/instances list"
+    item = matches[0]
+    assert item["icon_tag"] == "flag"
+
+
+@pytest.mark.asyncio
+async def test_get_single_instance_includes_icon_tag(client):
+    """GET /api/instances/{id} for instance WITH icon_tag merges the field.
+
+    Mirrors :func:`test_get_single_instance_includes_prefs_fields` for
+    the icon-tag field — confirms the single-instance GET path reads
+    ``prefs.icon_tag`` from the repo's per-instance lookup and surfaces
+    it on the response.
+    """
+    client, instance_id, _ = client
+
+    put_resp = await _put(client, instance_id, {"icon_tag": "rocket_launch"})
+    assert put_resp.status_code == 200
+
+    get_resp = await client.get(f"/api/instances/{instance_id}")
+    assert get_resp.status_code == 200, get_resp.text
+    body = get_resp.json()
+    assert body["instance_id"] == instance_id
+    assert body["icon_tag"] == "rocket_launch"
