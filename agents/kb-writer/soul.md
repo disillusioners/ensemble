@@ -16,7 +16,7 @@ I am part of **ensemble**, a multi-agent system. My job is to take knowledge tex
 2. Analyze the text to identify distinct domains/categories present in it.
 3. Split the text into segments so each segment belongs to one coherent domain.
 4. Call `rag_insert_text` once per segment with an appropriate descriptive category.
-5. Report how many insertions were made and which categories were used.
+5. Report how many segments were submitted for insertion and which categories were used (and the `track_id` returned for each call).
 
 ## What I Do NOT Do
 
@@ -29,6 +29,6 @@ I am part of **ensemble**, a multi-agent system. My job is to take knowledge tex
 ## Tools Available
 
 - `rag_insert_text` — the only knowledge-base tool I have. Insert text with a category.
-- `help`, `time` — utility tools.
+- `tool_help`, `time` — utility tools.
 
 LightRAG handles entity and relationship extraction automatically from the inserted text — I just feed it well-segmented, well-categorized text. My value is in the **splitting** and **categorization**, not in graph construction.

@@ -44,25 +44,27 @@ class TestKBAgentIdsConstant:
     """Tests for KB_AGENT_IDS constant."""
 
     def test_kb_agent_ids_constant(self):
-        """Verify KB_AGENT_IDS is a frozenset containing experiencer and kb-importer."""
-        assert KB_AGENT_IDS == frozenset(["experiencer", "kb-importer"])
+        """Verify KB_AGENT_IDS is a frozenset containing experiencer, kb-importer, and kb-writer."""
+        assert KB_AGENT_IDS == frozenset(["experiencer", "kb-importer", "kb-writer"])
         assert isinstance(KB_AGENT_IDS, frozenset)
         assert "experiencer" in KB_AGENT_IDS
         assert "kb-importer" in KB_AGENT_IDS
-        assert len(KB_AGENT_IDS) == 2
+        assert "kb-writer" in KB_AGENT_IDS
+        assert len(KB_AGENT_IDS) == 3
 
 
 class TestListExcludesKB:
     """Tests for repository list() with exclude_kb parameter."""
 
     def test_list_excludes_kb_by_default(self, repo):
-        """Insert 3 instances (1 regular, 1 experiencer, 1 kb-importer).
+        """Insert 4 instances (1 regular, 1 experiencer, 1 kb-importer, 1 kb-writer).
         Call repo.list(). Assert only regular returned, total=1.
         """
         # Create instances
         regular = _make_instance(repo, "developer", project_id="proj-1")
         experiencer = _make_instance(repo, "experiencer", project_id="proj-1")
         kb_importer = _make_instance(repo, "kb-importer", project_id="proj-1")
+        kb_writer = _make_instance(repo, "kb-writer", project_id="proj-1")
 
         # List with default exclude_kb=True
         instances, total = repo.list()
@@ -73,21 +75,23 @@ class TestListExcludesKB:
         assert regular.instance_id in [i.instance_id for i in instances]
         assert experiencer.instance_id not in [i.instance_id for i in instances]
         assert kb_importer.instance_id not in [i.instance_id for i in instances]
+        assert kb_writer.instance_id not in [i.instance_id for i in instances]
 
     def test_list_includes_kb_when_excluded_false(self, repo):
-        """Same 3 instances. Call repo.list(exclude_kb=False). Assert all 3 returned."""
+        """Same 4 instances. Call repo.list(exclude_kb=False). Assert all 4 returned."""
         # Create instances
         _make_instance(repo, "developer", project_id="proj-1")
         _make_instance(repo, "experiencer", project_id="proj-1")
         _make_instance(repo, "kb-importer", project_id="proj-1")
+        _make_instance(repo, "kb-writer", project_id="proj-1")
 
         # List with exclude_kb=False
         instances, total = repo.list(exclude_kb=False)
 
-        assert total == 3
-        assert len(instances) == 3
+        assert total == 4
+        assert len(instances) == 4
         agent_ids = {i.agent_id for i in instances}
-        assert agent_ids == {"developer", "experiencer", "kb-importer"}
+        assert agent_ids == {"developer", "experiencer", "kb-importer", "kb-writer"}
 
     def test_list_kb_filter_with_project_id(self, repo):
         """Insert instances across 2 projects. Verify exclude_kb works with project_id filter."""
@@ -95,9 +99,10 @@ class TestListExcludesKB:
         _make_instance(repo, "developer", project_id="proj-1")
         _make_instance(repo, "experiencer", project_id="proj-1")
 
-        # Project 2: developer, kb-importer, and another regular agent
+        # Project 2: developer, kb-importer, kb-writer, and another regular agent
         _make_instance(repo, "developer", project_id="proj-2")
         _make_instance(repo, "kb-importer", project_id="proj-2")
+        _make_instance(repo, "kb-writer", project_id="proj-2")
         _make_instance(repo, "designer", project_id="proj-2")
 
         # Filter by project_id=proj-1, exclude_kb=True -> should return only developer
@@ -114,20 +119,21 @@ class TestListExcludesKB:
         agent_ids = {i.agent_id for i in instances}
         assert agent_ids == {"developer", "designer"}
 
-        # Filter by project_id=proj-2, exclude_kb=False -> should return all 3
+        # Filter by project_id=proj-2, exclude_kb=False -> should return all 4
         instances, total = repo.list(project_id="proj-2", exclude_kb=False)
-        assert total == 3
-        assert len(instances) == 3
+        assert total == 4
+        assert len(instances) == 4
 
     def test_list_kb_filter_pagination(self, repo):
-        """Insert 5 regular + 2 KB instances. Verify limit/offset work with exclude_kb=True."""
+        """Insert 5 regular + 3 KB instances. Verify limit/offset work with exclude_kb=True."""
         # Create 5 regular instances
         for i in range(5):
             _make_instance(repo, "developer", project_id="proj-1")
 
-        # Create 2 KB instances
+        # Create 3 KB instances
         _make_instance(repo, "experiencer", project_id="proj-1")
         _make_instance(repo, "kb-importer", project_id="proj-1")
+        _make_instance(repo, "kb-writer", project_id="proj-1")
 
         # With exclude_kb=True, total should be 5
         instances, total = repo.list(exclude_kb=True)
@@ -149,9 +155,9 @@ class TestListExcludesKB:
         assert total == 5
         assert len(instances) == 1
 
-        # Test with exclude_kb=False, total should be 7
+        # Test with exclude_kb=False, total should be 8
         instances, total = repo.list(exclude_kb=False)
-        assert total == 7
+        assert total == 8
 
     def test_list_kb_filter_status_combined(self, repo):
         """Verify exclude_kb works correctly with status filter combined."""
@@ -162,6 +168,8 @@ class TestListExcludesKB:
         _make_instance(repo, "experiencer", status="completed")
         _make_instance(repo, "kb-importer", status="running")
         _make_instance(repo, "kb-importer", status="completed")
+        _make_instance(repo, "kb-writer", status="running")
+        _make_instance(repo, "kb-writer", status="completed")
 
         # With exclude_kb=True and status=running -> 1 developer running
         instances, total = repo.list(status="running", exclude_kb=True)
@@ -170,10 +178,10 @@ class TestListExcludesKB:
         assert instances[0].agent_id == "developer"
         assert instances[0].status == "running"
 
-        # With exclude_kb=False and status=running -> 3 running instances
+        # With exclude_kb=False and status=running -> 4 running instances
         instances, total = repo.list(status="running", exclude_kb=False)
-        assert total == 3
-        assert len(instances) == 3
+        assert total == 4
+        assert len(instances) == 4
 
 
 # =============================================================================

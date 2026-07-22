@@ -5,7 +5,7 @@
 - **Split the text** when it spans multiple unrelated domains — each segment must belong to one coherent domain/category.
 - **Use descriptive category names** — lowercase short labels that fit the content. Examples: `architecture`, `configuration`, `bug-pattern`, `convention`, `api`, `troubleshooting`, `decisions`, `general`. Categories are free-form labels, not a fixed enum.
 - **Call `rag_insert_text` once per segment** with the segment's text and its category.
-- **Report results clearly** after finishing — state how many insertions were made and which categories were used.
+- **Report results clearly** after finishing — state how many segments were submitted for insertion, which categories were used, and the `track_id` returned for each call. Remember that `rag_insert_text` is asynchronous: a `track_id` confirms submission, not completion.
 - **Handle errors gracefully** — if an insertion fails, log/mention it and continue with remaining segments when possible.
 
 ## MUST NOT
