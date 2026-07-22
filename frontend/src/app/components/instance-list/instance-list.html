@@ -120,15 +120,18 @@
             <!-- Color tag square: opens a mat-menu picker on click.
                  Shows the user-selected color, or a faint placeholder
                  outline when no tag is set so the affordance stays
-                 discoverable. ``stopPropagation`` prevents the row's
-                 routerLink from firing on the same click. -->
+                 discoverable. Both ``preventDefault`` AND
+                 ``stopPropagation`` are required: the row is an
+                 ``<a [routerLink]>``, so a bare stopPropagation still
+                 triggers navigation on the anchor's default action;
+                 preventDefault suppresses that. -->
             <span
               class="color-tag"
               [class.has-color]="!!instance.color_tag"
               [style.background-color]="instance.color_tag || 'transparent'"
               [title]="instance.color_tag ? ('Color tag: ' + instance.color_tag) : 'Set color tag'"
               [matMenuTriggerFor]="colorMenu"
-              (click)="$event.stopPropagation()"
+              (click)="$event.preventDefault(); $event.stopPropagation()"
               (contextmenu)="$event.preventDefault(); $event.stopPropagation()"
               #colorTagTrigger
             ></span>
@@ -144,18 +147,22 @@
       </div>
     </div>
 
-    <!-- Pin toggle (always visible; right:72px in SCSS). Uses the
-         same opacity-on-hover convention as pause/terminate so the
-         cluster stays calm until the user reaches for the row. -->
-    <button
-      class="pin-btn"
-      [class.pinned]="isPinned(instance)"
-      (click)="onTogglePin(instance.instance_id, instance.pinned, $event)"
-      [title]="isPinned(instance) ? 'Unpin instance' : 'Pin instance to top'"
-      [attr.aria-pressed]="isPinned(instance)"
-    >
-      <mat-icon>push_pin</mat-icon>
-    </button>
+    <!-- Pin toggle. Hidden until row hover (opacity 0 in SCSS),
+         stays visible when this row is pinned so the pinned state
+         reads without hover. Only shown for root-level instances —
+         child instances inherit their parent's organization and
+         shouldn't float to the top of the list. -->
+    @if (!instance.parent_id) {
+      <button
+        class="pin-btn"
+        [class.pinned]="isPinned(instance)"
+        (click)="onTogglePin(instance.instance_id, instance.pinned, $event)"
+        [title]="isPinned(instance) ? 'Unpin instance' : 'Pin instance to top'"
+        [attr.aria-pressed]="isPinned(instance)"
+      >
+        <mat-icon>push_pin</mat-icon>
+      </button>
+    }
 
     <!-- Pause/Resume button -->
     @if (instance.status === 'running' || instance.status === 'waiting_children' || instance.status === 'queued') {

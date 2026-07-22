@@ -448,10 +448,14 @@
   }
 }
 
-// Pin toggle. Same shape/size as pause/terminate but kept at a fixed
-// opacity (not hover-faded) so the current pinned state is always
-// visible — the user shouldn't need to hover the row to see whether
-// it's pinned.
+// Pin toggle. Same shape/size as pause/terminate. Hidden by default
+// and revealed on row hover so the cluster stays calm until the user
+// reaches for a row — same convention as pause/terminate. EXCEPTION:
+// when the row is pinned the button stays visible at full opacity so
+// the user can see the pinned state without hovering. ``opacity`` uses
+// its own short transition (0.15s) while background/color keep their
+// 0.2s easing; the pinned rule below uses equal-or-higher specificity
+// than the row-hover rule so pinned always wins.
 .pin-btn {
   position: absolute;
   bottom: 8px;
@@ -466,8 +470,8 @@
   background-color: rgba(15, 23, 42, 0.6);
   color: #64748b;
   cursor: pointer;
-  opacity: 0.6;
-  transition: all 0.2s ease;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.2s ease, color 0.2s ease;
 
   &:hover {
     background-color: rgba(245, 158, 11, 0.18);
