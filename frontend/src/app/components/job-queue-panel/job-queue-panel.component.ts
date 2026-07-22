@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus } from '../../models/job.model';
+import { getStatusColor as modelGetStatusColor, Job, JobStatus } from '../../models/job.model';
 
 const MAX_RECENT_JOBS = 10;
 
@@ -42,9 +42,6 @@ export class JobQueuePanelComponent {
   /** project_id → display name. Keys may be null for unassigned jobs. */
   projectNameMap = input<Map<string | null, string>>(new Map());
 
-  /** instance_id → display title. Optional; falls back to job metadata. */
-  instanceTitleMap = input<Map<string, string> | undefined>(undefined);
-
   /** Emitted when the user clicks any job row. */
   jobClick = output<Job>();
 
@@ -61,17 +58,11 @@ export class JobQueuePanelComponent {
 
   /**
    * Resolves the best available title for a job. Priority chain:
-   * 1. instanceTitleMap lookup (when provided)
-   * 2. job_metadata.instance_name
-   * 3. agent_id
-   * 4. shortenId of instance_id (or job_id) as a last resort
+   * 1. job_metadata.instance_name (if truthy)
+   * 2. agent_id (if truthy)
+   * 3. shortenId of instance_id (or job_id) as a last resort
    */
   resolveTitle(job: Job): string {
-    const map = this.instanceTitleMap();
-    if (map && job.instance_id && map.has(job.instance_id)) {
-      return map.get(job.instance_id)!;
-    }
-
     const meta = job.job_metadata;
     if (meta && typeof meta === 'object' && meta['instance_name']) {
       return String(meta['instance_name']);
@@ -141,21 +132,8 @@ export class JobQueuePanelComponent {
     }
   }
 
-  /** Accent color for a terminal job status (matches notification-bell). */
-  getStatusColor(status: JobStatus): string {
-    switch (status) {
-      case 'completed':
-        return '#10b981';
-      case 'failed':
-        return '#f43f5e';
-      case 'cancelled':
-        return '#f59e0b';
-      case 'dead_letter':
-        return '#7c3aed';
-      default:
-        return '#94a3b8';
-    }
-  }
+  /** Delegate to the shared util so the template binding stays the same. */
+  readonly getStatusColor = modelGetStatusColor;
 
   /** Emits the clicked job up to the parent for navigation. */
   onRowClick(job: Job): void {

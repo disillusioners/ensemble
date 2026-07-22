@@ -69,29 +69,29 @@ export class JobService {
    * we map from the public ``pending`` / ``processing`` enum
    * here so the rest of the UI keeps using the
    * ``JobStatus`` model.
+   *
+   * Note: errors intentionally propagate so the caller (the
+   * JobQueueIndicator's ``forkJoin``) can react uniformly via
+   * its single error handler.
    */
   listActiveJobs(): Observable<Job[]> {
     const params = new HttpParams().set('status', 'queued,active');
     return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
-      map((response) => response.jobs),
-      catchError((err) => {
-        this.error.set(err.message || 'Failed to fetch active jobs');
-        return of([]);
-      })
+      map((response) => response.jobs)
     );
   }
 
-  /** Fetch recently completed/failed/cancelled jobs (terminal states). */
+  /**
+   * Fetch recently completed/failed/cancelled jobs (terminal states).
+   * Errors intentionally propagate so the caller can react via its
+   * own error handler.
+   */
   listRecentJobs(limit = 10): Observable<Job[]> {
     const params = new HttpParams()
       .set('status', 'completed,failed,cancelled,dead_letter')
       .set('limit', limit.toString());
     return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
-      map((response) => response.jobs),
-      catchError((err) => {
-        this.error.set(err.message || 'Failed to fetch recent jobs');
-        return of([]);
-      })
+      map((response) => response.jobs)
     );
   }
 

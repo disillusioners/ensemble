@@ -1,5 +1,5 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus } from '../../models/job.model';
+import { getStatusColor as modelGetStatusColor, Job, JobStatus } from '../../models/job.model';
 import { createMockJob } from '../../testing/job-test-helpers';
 
 /**
@@ -24,14 +24,15 @@ class MockJobQueuePanelComponent {
   private readonly _runningJobs = signal<Job[]>([]);
   private readonly _recentJobs = signal<Job[]>([]);
   private readonly _projectNameMap = signal<Map<string | null, string>>(new Map());
-  private readonly _instanceTitleMap = signal<Map<string, string> | undefined>(undefined);
 
   readonly MAX_RECENT = 10;
 
   runningJobs = this._runningJobs.asReadonly();
   recentJobs = this._recentJobs.asReadonly();
   projectNameMap = this._projectNameMap.asReadonly();
-  instanceTitleMap = this._instanceTitleMap.asReadonly();
+
+  /** Mock output — mirrors the real component's `output<Job>()`. */
+  readonly jobClick = { emit: jest.fn() };
 
   recentCapped = computed(() => this._recentJobs().slice(0, this.MAX_RECENT));
   isEmpty = computed(
@@ -39,12 +40,13 @@ class MockJobQueuePanelComponent {
   );
   runningCount = computed(() => this._runningJobs().length);
 
+  /**
+   * Resolves the best available title for a job. Priority chain:
+   * 1. job_metadata.instance_name (if truthy)
+   * 2. agent_id (if truthy)
+   * 3. shortenId of instance_id (or job_id) as a last resort
+   */
   resolveTitle(job: Job): string {
-    const map = this._instanceTitleMap();
-    if (map && job.instance_id && map.has(job.instance_id)) {
-      return map.get(job.instance_id)!;
-    }
-
     const meta = job.job_metadata;
     if (meta && typeof meta === 'object' && meta['instance_name']) {
       return String(meta['instance_name']);
@@ -100,19 +102,12 @@ class MockJobQueuePanelComponent {
     }
   }
 
-  getStatusColor(status: JobStatus): string {
-    switch (status) {
-      case 'completed':
-        return '#10b981';
-      case 'failed':
-        return '#f43f5e';
-      case 'cancelled':
-        return '#f59e0b';
-      case 'dead_letter':
-        return '#7c3aed';
-      default:
-        return '#94a3b8';
-    }
+  /** Delegate to the shared util — same identity as the real component. */
+  readonly getStatusColor = modelGetStatusColor;
+
+  /** Emits the clicked job up to the parent for navigation. */
+  onRowClick(job: Job): void {
+    this.jobClick.emit(job);
   }
 
   /** Test helpers — mirror the writable inputs of the real component. */
@@ -126,10 +121,6 @@ class MockJobQueuePanelComponent {
 
   setProjectNameMap(map: Map<string | null, string>): void {
     this._projectNameMap.set(map);
-  }
-
-  setInstanceTitleMap(map: Map<string, string> | undefined): void {
-    this._instanceTitleMap.set(map);
   }
 }
 
@@ -153,17 +144,7 @@ describe('JobQueuePanelComponent Logic', () => {
   });
 
   describe('resolveTitle priority chain', () => {
-    it('should return instanceTitleMap value when key exists', () => {
-      component.setInstanceTitleMap(new Map([['inst-1', 'My Instance']]));
-      const job = createMockJob({
-        instance_id: 'inst-1',
-        agent_id: 'developer',
-        job_metadata: { instance_name: 'Metadata Name' },
-      });
-      expect(component.resolveTitle(job)).toBe('My Instance');
-    });
-
-    it('should fall back to job_metadata.instance_name when not in map', () => {
+    it('should prefer job_metadata.instance_name over agent_id', () => {
       const job = createMockJob({
         instance_id: 'inst-1',
         agent_id: 'developer',
@@ -172,7 +153,7 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(component.resolveTitle(job)).toBe('Metadata Name');
     });
 
-    it('should fall back to agent_id when no map and no metadata', () => {
+    it('should fall back to agent_id when no metadata', () => {
       const job = createMockJob({
         instance_id: 'inst-1',
         agent_id: 'developer',
@@ -205,32 +186,6 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(component.resolveTitle(fallen)).toBe('instance...');
     });
 
-    it('should skip the map when instance_id is null', () => {
-      component.setInstanceTitleMap(new Map([['inst-1', 'My Instance']]));
-      const job = createMockJob({
-        instance_id: null,
-        agent_id: 'developer',
-      });
-      expect(component.resolveTitle(job)).toBe('developer');
-    });
-
-    it('should skip the map when instance_id is missing from the map', () => {
-      component.setInstanceTitleMap(new Map([['other-inst', 'Other']]));
-      const job = createMockJob({
-        instance_id: 'inst-1',
-        agent_id: 'developer',
-      });
-      expect(component.resolveTitle(job)).toBe('developer');
-    });
-
-    it('should handle undefined instanceTitleMap without throwing', () => {
-      const job = createMockJob({
-        instance_id: 'inst-1',
-        agent_id: 'developer',
-      });
-      expect(component.resolveTitle(job)).toBe('developer');
-    });
-
     it('should skip empty instance_name in metadata', () => {
       const job = createMockJob({
         instance_id: 'inst-1',
@@ -238,19 +193,6 @@ describe('JobQueuePanelComponent Logic', () => {
         job_metadata: { instance_name: '' },
       });
       expect(component.resolveTitle(job)).toBe('developer');
-    });
-
-    it('should return the map value when the key exists', () => {
-      // The spec says "only if map has the key"; an empty-string value
-      // is still returned as-is. The empty-string skip is not part of
-      // the contract — that's why notification-bell uses `||` chains
-      // and we use `has()` + `get()` here.
-      component.setInstanceTitleMap(new Map([['inst-1', '']]));
-      const job = createMockJob({
-        instance_id: 'inst-1',
-        agent_id: 'developer',
-      });
-      expect(component.resolveTitle(job)).toBe('');
     });
 
     it('should fall back to job_id when instance_id is null and agent_id is empty', () => {
@@ -453,69 +395,104 @@ describe('JobQueuePanelComponent Logic', () => {
   describe('status helpers', () => {
     it('should map completed to check_circle and green', () => {
       expect(component.getStatusIcon('completed')).toBe('check_circle');
-      expect(component.getStatusColor('completed')).toBe('#10b981');
+      expect(component.getStatusColor('completed')).toBe('#22C55E');
     });
 
     it('should map failed to error and red', () => {
       expect(component.getStatusIcon('failed')).toBe('error');
-      expect(component.getStatusColor('failed')).toBe('#f43f5e');
+      expect(component.getStatusColor('failed')).toBe('#EF4444');
     });
 
     it('should map cancelled to cancel and amber', () => {
       expect(component.getStatusIcon('cancelled')).toBe('cancel');
-      expect(component.getStatusColor('cancelled')).toBe('#f59e0b');
+      expect(component.getStatusColor('cancelled')).toBe('#F59E0B');
     });
 
     it('should map dead_letter to inventory_2 and purple', () => {
       expect(component.getStatusIcon('dead_letter')).toBe('inventory_2');
-      expect(component.getStatusColor('dead_letter')).toBe('#7c3aed');
+      expect(component.getStatusColor('dead_letter')).toBe('#7C3AED');
     });
 
     it('should fall back to info/grey for non-terminal statuses', () => {
       // pending, processing, paused all fall through the switch to
       // the default branch — that's the "unknown" fallback path.
       expect(component.getStatusIcon('pending')).toBe('info');
-      expect(component.getStatusColor('pending')).toBe('#94a3b8');
+      expect(component.getStatusColor('pending')).toBe('#9CA3AF');
+      expect(component.getStatusIcon('processing')).toBe('info');
+      expect(component.getStatusColor('processing')).toBe('#3B82F6');
       expect(component.getStatusIcon('paused')).toBe('info');
-      expect(component.getStatusColor('paused')).toBe('#94a3b8');
+      expect(component.getStatusColor('paused')).toBe('#F59E0B');
+    });
+
+    it('should delegate getStatusColor to the shared model util', () => {
+      // Reference identity locks in the delegation; the component
+      // must NOT define its own color table.
+      expect(component.getStatusColor).toBe(modelGetStatusColor);
     });
   });
 
   describe('integration — priority chain with mixed data', () => {
     it('should resolve different titles for a mixed list', () => {
-      component.setInstanceTitleMap(
-        new Map([
-          ['inst-A', 'Resolved via Map'],
-          ['inst-C', 'Resolved via Map C'],
-        ]),
-      );
       component.setRunningJobs([
         createMockJob({
           job_id: 'job-1',
           instance_id: 'inst-A',
           agent_id: 'developer',
+          job_metadata: { instance_name: 'From Metadata A' },
           status: 'processing',
         }),
         createMockJob({
           job_id: 'job-2',
           instance_id: 'inst-B',
           agent_id: 'developer',
-          job_metadata: { instance_name: 'From Metadata' },
+          job_metadata: null,
           status: 'processing',
         }),
         createMockJob({
           job_id: 'job-3',
           instance_id: null,
           agent_id: 'developer',
+          job_metadata: null,
           status: 'processing',
         }),
       ]);
       const titles = component.runningJobs().map((j) => component.resolveTitle(j));
       expect(titles).toEqual([
-        'Resolved via Map',
-        'From Metadata',
+        'From Metadata A',
+        'developer',
         'developer',
       ]);
+    });
+  });
+
+  describe('jobClick emit', () => {
+    beforeEach(() => {
+      // Each test starts with a fresh emit spy. The component is
+      // re-created in the outer beforeEach, but jest.fn() state on
+      // the class field persists across the same instance, so reset
+      // explicitly.
+      (component.jobClick.emit as jest.Mock).mockClear();
+    });
+
+    it('should expose jobClick.emit as a function', () => {
+      expect(typeof component.jobClick.emit).toBe('function');
+    });
+
+    it('should emit the clicked job once on a single onRowClick', () => {
+      const job = createMockJob({ status: 'processing' });
+      component.onRowClick(job);
+      expect(component.jobClick.emit).toHaveBeenCalledTimes(1);
+      expect(component.jobClick.emit).toHaveBeenCalledWith(job);
+    });
+
+    it('should emit both jobs in order across successive onRowClick calls', () => {
+      const jobA = createMockJob({ job_id: 'job-A', status: 'processing' });
+      const jobB = createMockJob({ job_id: 'job-B', status: 'completed' });
+      component.onRowClick(jobA);
+      component.onRowClick(jobB);
+      expect(component.jobClick.emit).toHaveBeenCalledTimes(2);
+      expect(component.jobClick.emit).toHaveBeenNthCalledWith(1, jobA);
+      expect(component.jobClick.emit).toHaveBeenNthCalledWith(2, jobB);
     });
   });
 });

@@ -4,6 +4,7 @@
     class="queue-button"
     [class.idle]="isIdle()"
     [matMenuTriggerFor]="jobQueueMenu"
+    [matTooltip]="tooltipText()"
     aria-label="View job queue">
     <span class="queue-count">{{ displayText() }}</span>
   </button>

@@ -10,17 +10,23 @@ import { createMockJob, JobStatus as HelperJobStatus } from '../../testing/job-t
  * test it directly — same pattern as job-detail-drawer.component.spec.ts.
  *
  * The mirror exposes the private helpers (isRunningStatus, isPendingStatus,
- * isTerminalStatus, shortenId) that the real component keeps module-private
- * (or class-private) so the assertions below can exercise them directly. We
- * also expose the ``runningJobs`` computed and a synthetic ``recentFiltered``
- * computed that mirrors the sort/filter/cap behaviour of ``fetchJobs``.
+ * isTerminalStatus) that the real component keeps module-private so the
+ * assertions below can exercise them directly. We also expose the
+ * ``runningJobs`` computed, the public ``recentJobs`` computed (now
+ * defensive via ``isTerminalStatus``), the ``tooltipText`` computed, and
+ * captured ``onJobClick`` side-effects so tests can assert navigation +
+ * tab-action decisions without instantiating Angular.
  */
 class MockJobQueueIndicatorComponent {
-  /** Raw active jobs (running + pending) — mirrors ``activeJobs``. */
+  /** Raw active jobs (running + paused + pending) — mirrors ``activeJobs``. */
   private readonly activeJobs = signal<Job[]>([]);
 
-  /** Raw recent jobs (terminal) — mirrors ``recentJobs``. */
-  private readonly recentJobs = signal<Job[]>([]);
+  /**
+   * Raw recent jobs — mirrors the private ``allRecentJobs`` signal.
+   * The public ``recentJobs`` computed derives its filtered/sorted/capped
+   * view from this raw value.
+   */
+  private readonly allRecentJobs = signal<Job[]>([]);
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
@@ -30,7 +36,7 @@ class MockJobQueueIndicatorComponent {
   // ---------------------------------------------------------------------------
 
   isRunningStatus(s: JobStatus): boolean {
-    return s === 'processing' || (s as string) === 'active';
+    return s === 'processing' || s === 'paused' || (s as string) === 'active';
   }
 
   isPendingStatus(s: JobStatus): boolean {
@@ -39,10 +45,6 @@ class MockJobQueueIndicatorComponent {
 
   isTerminalStatus(s: JobStatus): boolean {
     return ['completed', 'failed', 'cancelled', 'dead_letter'].includes(s);
-  }
-
-  shortenId(id: string): string {
-    return id.length > 8 ? id.substring(0, 8) + '...' : id;
   }
 
   // ---------------------------------------------------------------------------
@@ -65,55 +67,73 @@ class MockJobQueueIndicatorComponent {
     () => `${this.runningCount()}/${this.totalNonTerminal()}`
   );
 
+  /**
+   * Mirror of the real component's tooltip text computed.
+   * Format: ``Running: X / Pending: Y``.
+   */
+  tooltipText = computed(
+    () => `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`
+  );
+
   runningJobs = computed(() =>
     this.activeJobs().filter((j) => this.isRunningStatus(j.status))
   );
 
   /**
-   * Synthetic computed: terminal-only subset of ``recentJobs``, sorted by
-   * ``completed_at`` desc (falling back to ``created_at``) and capped at 10.
-   * Mirrors the slice/sort logic in the real component's ``fetchJobs``.
+   * Public recent jobs — defensive terminal-only subset of
+   * ``allRecentJobs``, sorted by ``completed_at`` desc (falling back to
+   * ``created_at``) and capped at 10. Mirrors the public ``recentJobs``
+   * computed on the real component.
    */
-  recentFiltered = computed<Job[]>(() => {
-    return this.recentJobs()
-      .filter((j) => !this.isPendingStatus(j.status) && !this.isRunningStatus(j.status))
+  recentJobs = computed<Job[]>(() =>
+    this.allRecentJobs()
+      .filter((j) => this.isTerminalStatus(j.status))
       .sort((a, b) => {
         const aT = a.completed_at ?? a.created_at;
         const bT = b.completed_at ?? b.created_at;
         return bT.localeCompare(aT);
       })
-      .slice(0, 10);
-  });
+      .slice(0, 10)
+  );
 
   // ---------------------------------------------------------------------------
-  // onJobClick navigation helper — mirrors the real component's routing
-  // decisions so tests can assert what the parent would have done.
+  // onJobClick side-effect capture — mirrors the real component's routing
+  // and tab-decisions so tests can assert what the parent would have done.
   // ---------------------------------------------------------------------------
+
+  /** Captures whether the menu would have been closed (true after onJobClick). */
+  menuClosedAfterClick = false;
 
   /**
-   * Capture of the latest onJobClick inputs (for assertions in tests).
+   * Last tab action decided by ``onJobClick``. Either an ``add`` (with the
+   * resolved name) or ``setActive`` (with the target tab id).
    */
-  onJobClickArgs: { project_id: string | null; instance_id: string | null } | null = null;
+  lastTabAction:
+    | { kind: 'add'; project_id: string; name: string }
+    | { kind: 'setActive'; tabId: string }
+    | null = null;
 
-  onJobClick(job: Job): {
-    addTabProjectId: string;
-    addTabName: string;
-    navigateTo: (string | null)[];
-  } {
+  /** Last navigation path decided by ``onJobClick``. */
+  lastNavigated: (string | null)[] | null = null;
+
+  onJobClick(job: Job): void {
+    // 1. Close the menu first — mirrors the real component's ordering.
+    this.menuClosedAfterClick = true;
+
     const projectKey = job.project_id || 'all';
-    const addTabProjectId = job.project_id ?? 'all';
-    const addTabName = (job.project_id ?? 'all').slice(0, 8);
-    const navigateTo: (string | null)[] = [
-      '/projects',
-      projectKey,
-      'instances',
-      job.instance_id,
-    ];
-    this.onJobClickArgs = {
-      project_id: job.project_id,
-      instance_id: job.instance_id,
-    };
-    return { addTabProjectId, addTabName, navigateTo };
+    if (job.project_id) {
+      const name =
+        this.projectNameMap().get(job.project_id) ?? job.project_id.slice(0, 8);
+      this.lastTabAction = { kind: 'add', project_id: job.project_id, name };
+    } else {
+      this.lastTabAction = { kind: 'setActive', tabId: 'all' };
+    }
+
+    // 3. Navigate to specific instance when truthy, otherwise to the
+    //    project/all instances list (no null trailing segment).
+    this.lastNavigated = job.instance_id
+      ? ['/projects', projectKey, 'instances', job.instance_id]
+      : ['/projects', projectKey, 'instances'];
   }
 
   // ---------------------------------------------------------------------------
@@ -125,7 +145,7 @@ class MockJobQueueIndicatorComponent {
   }
 
   setRecentJobs(j: Job[]): void {
-    this.recentJobs.set(j);
+    this.allRecentJobs.set(j);
   }
 
   setProjectNameMap(m: Map<string | null, string>): void {
@@ -172,6 +192,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.runningCount()).toBe(2);
     });
 
+    it('should treat "paused" as running', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      expect(component.runningCount()).toBe(2);
+    });
+
     it('should not count pending or terminal jobs', () => {
       component.setActiveJobs([
         createMockJob({ status: 'pending' }),
@@ -202,9 +231,10 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.pendingCount()).toBe(2);
     });
 
-    it('should not count processing or terminal jobs', () => {
+    it('should not count processing, paused, or terminal jobs', () => {
       component.setActiveJobs([
         createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
         createMockJob({ status: 'completed' }),
         createMockJob({ status: 'failed' }),
         createMockJob({ status: 'cancelled' }),
@@ -247,6 +277,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // Only the processing job contributes; terminal jobs do NOT inflate Y.
       expect(component.displayText()).toBe('1/1');
     });
+
+    it('should count paused toward the running numerator', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      // paused → running (X), pending → pending (Y) → "1/2".
+      expect(component.displayText()).toBe('1/2');
+    });
   });
 
   describe('isIdle', () => {
@@ -269,6 +308,13 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.setActiveJobs([createMockJob({ status: 'pending' })]);
       expect(component.isIdle()).toBe(false);
     });
+
+    it('should be false when there is at least one paused job', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+      ]);
+      expect(component.isIdle()).toBe(false);
+    });
   });
 
   describe('runningJobs (computed subset for panel)', () => {
@@ -282,19 +328,51 @@ describe('JobQueueIndicatorComponent Logic', () => {
       const ids = component.runningJobs().map((j) => j.job_id);
       expect(ids).toEqual(['r1', 'r2']);
     });
+
+    it('should include paused jobs in the running subset', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'pa', status: 'paused' as unknown as HelperJobStatus }),
+        createMockJob({ job_id: 'pr', status: 'processing' }),
+        createMockJob({ job_id: 'pe', status: 'pending' }),
+        createMockJob({ job_id: 'co', status: 'completed' }),
+      ]);
+      const ids = component.runningJobs().map((j) => j.job_id);
+      expect(ids).toEqual(['pa', 'pr']);
+    });
   });
 
-  describe('recentFiltered', () => {
-    it('should filter out pending and processing jobs (terminal only)', () => {
+  describe('tooltipText', () => {
+    it('should produce "Running: X / Pending: Y" formatted tooltip', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      // 3 running (2 processing + 1 paused) and 3 pending → "Running: 3 / Pending: 3".
+      expect(component.tooltipText()).toBe('Running: 3 / Pending: 3');
+    });
+
+    it('should produce "Running: 0 / Pending: 0" when idle', () => {
+      component.setActiveJobs([]);
+      expect(component.tooltipText()).toBe('Running: 0 / Pending: 0');
+    });
+  });
+
+  describe('recentJobs (public computed)', () => {
+    it('should filter out pending, processing, and paused jobs (terminal only via isTerminalStatus)', () => {
       component.setRecentJobs([
         createMockJob({ job_id: 'c1', status: 'completed' }),
         createMockJob({ job_id: 'p1', status: 'pending' }),
         createMockJob({ job_id: 'f1', status: 'failed' }),
         createMockJob({ job_id: 'r1', status: 'processing' }),
+        createMockJob({ job_id: 'pa', status: 'paused' as unknown as HelperJobStatus }),
         createMockJob({ job_id: 'd1', status: 'dead_letter' }),
         createMockJob({ job_id: 'x1', status: 'cancelled' }),
       ]);
-      const ids = component.recentFiltered().map((j) => j.job_id);
+      const ids = component.recentJobs().map((j) => j.job_id);
       expect(ids).toEqual(['c1', 'f1', 'd1', 'x1']);
     });
 
@@ -319,7 +397,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
           completed_at: null,
         }),
       ]);
-      const ids = component.recentFiltered().map((j) => j.job_id);
+      const ids = component.recentJobs().map((j) => j.job_id);
       // b (newest completed_at), a, c (oldest created_at fallback).
       expect(ids).toEqual(['b', 'a', 'c']);
     });
@@ -334,52 +412,89 @@ describe('JobQueueIndicatorComponent Logic', () => {
         })
       );
       component.setRecentJobs(many);
-      expect(component.recentFiltered().length).toBe(10);
+      expect(component.recentJobs().length).toBe(10);
     });
 
     it('should return an empty list when there are no terminal jobs', () => {
       component.setRecentJobs([
         createMockJob({ status: 'pending' }),
         createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
       ]);
-      expect(component.recentFiltered()).toEqual([]);
+      expect(component.recentJobs()).toEqual([]);
     });
   });
 
   describe('onJobClick', () => {
-    it('should open project tab and navigate to instance with project_id', () => {
+    beforeEach(() => {
+      // Seed a known project-name map so resolution is deterministic.
+      const map = new Map<string | null, string>();
+      map.set('project-abcdef', 'My Project');
+      map.set('project-123', 'Project One Two Three');
+      component.setProjectNameMap(map);
+    });
+
+    it('should close the menu before deciding tab/navigation', () => {
+      const job = createMockJob({
+        job_id: 'job-menu',
+        project_id: 'project-abcdef',
+        instance_id: 'inst-xyz',
+        status: 'processing',
+      });
+      expect(component.menuClosedAfterClick).toBe(false);
+      component.onJobClick(job);
+      expect(component.menuClosedAfterClick).toBe(true);
+    });
+
+    it('should open project tab (resolved from projectNameMap) and navigate to instance with project_id + instance_id', () => {
       const job = createMockJob({
         job_id: 'job-1',
         project_id: 'project-abcdef',
         instance_id: 'inst-xyz',
         status: 'processing',
       });
-      const result = component.onJobClick(job);
-      expect(result.addTabProjectId).toBe('project-abcdef');
-      expect(result.addTabName).toBe('project-'); // first 8 chars
-      expect(result.navigateTo).toEqual([
+      component.onJobClick(job);
+      expect(component.lastTabAction).toEqual({
+        kind: 'add',
+        project_id: 'project-abcdef',
+        name: 'My Project',
+      });
+      expect(component.lastNavigated).toEqual([
         '/projects',
         'project-abcdef',
         'instances',
         'inst-xyz',
       ]);
-      expect(component.onJobClickArgs).toEqual({
-        project_id: 'project-abcdef',
+    });
+
+    it('should fall back to first-8-chars of project_id when name is missing from projectNameMap', () => {
+      const job = createMockJob({
+        job_id: 'job-1b',
+        project_id: 'project-unknown',
         instance_id: 'inst-xyz',
+        status: 'processing',
+      });
+      component.onJobClick(job);
+      expect(component.lastTabAction).toEqual({
+        kind: 'add',
+        project_id: 'project-unknown',
+        name: 'project-',
       });
     });
 
-    it('should fall back to "all" tab when project_id is null', () => {
+    it('should setActiveTab("all") when project_id is null and navigate to specific instance', () => {
       const job = createMockJob({
         job_id: 'job-2',
         project_id: null,
         instance_id: 'inst-zzz',
         status: 'failed',
       });
-      const result = component.onJobClick(job);
-      expect(result.addTabProjectId).toBe('all');
-      expect(result.addTabName).toBe('all');
-      expect(result.navigateTo).toEqual([
+      component.onJobClick(job);
+      expect(component.lastTabAction).toEqual({
+        kind: 'setActive',
+        tabId: 'all',
+      });
+      expect(component.lastNavigated).toEqual([
         '/projects',
         'all',
         'instances',
@@ -387,25 +502,58 @@ describe('JobQueueIndicatorComponent Logic', () => {
       ]);
     });
 
-    it('should pass null through as the final path segment when instance_id is null', () => {
+    it('should navigate to the instances list (no null segment) when instance_id is null and project_id is set', () => {
       const job = createMockJob({
         job_id: 'job-3',
         project_id: 'project-123',
         instance_id: null,
         status: 'completed',
       });
-      const result = component.onJobClick(job);
-      expect(result.navigateTo.length).toBe(4);
-      expect(result.navigateTo[0]).toBe('/projects');
-      expect(result.navigateTo[1]).toBe('project-123');
-      expect(result.navigateTo[2]).toBe('instances');
-      expect(result.navigateTo[3]).toBeNull();
+      component.onJobClick(job);
+      expect(component.lastNavigated).toEqual([
+        '/projects',
+        'project-123',
+        'instances',
+      ]);
+      // No trailing null segment.
+      expect(component.lastNavigated!.length).toBe(3);
+      expect(component.lastNavigated!.every((s) => s !== null)).toBe(true);
+      expect(component.lastTabAction).toEqual({
+        kind: 'add',
+        project_id: 'project-123',
+        name: 'Project One Two Three',
+      });
+    });
+
+    it('should navigate to /projects/all/instances (no null segment) when both project_id and instance_id are null', () => {
+      const job = createMockJob({
+        job_id: 'job-4',
+        project_id: null,
+        instance_id: null,
+        status: 'completed',
+      });
+      component.onJobClick(job);
+      expect(component.lastTabAction).toEqual({
+        kind: 'setActive',
+        tabId: 'all',
+      });
+      expect(component.lastNavigated).toEqual([
+        '/projects',
+        'all',
+        'instances',
+      ]);
+      expect(component.lastNavigated!.length).toBe(3);
+      expect(component.lastNavigated!.every((s) => s !== null)).toBe(true);
     });
   });
 
   describe('isRunningStatus', () => {
     it('should return true for "processing"', () => {
       expect(component.isRunningStatus('processing')).toBe(true);
+    });
+
+    it('should return true for "paused"', () => {
+      expect(component.isRunningStatus('paused' as JobStatus)).toBe(true);
     });
 
     it('should return true for "active" (defensive fallback)', () => {
@@ -434,6 +582,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
     it('should return false for non-pending statuses', () => {
       expect(component.isPendingStatus('processing')).toBe(false);
       expect(component.isPendingStatus('active' as JobStatus)).toBe(false);
+      expect(component.isPendingStatus('paused' as JobStatus)).toBe(false);
       expect(component.isPendingStatus('completed')).toBe(false);
       expect(component.isPendingStatus('failed')).toBe(false);
       expect(component.isPendingStatus('cancelled')).toBe(false);
@@ -452,22 +601,9 @@ describe('JobQueueIndicatorComponent Logic', () => {
     it('should return false for active states', () => {
       expect(component.isTerminalStatus('pending')).toBe(false);
       expect(component.isTerminalStatus('processing')).toBe(false);
+      expect(component.isTerminalStatus('paused' as JobStatus)).toBe(false);
       expect(component.isTerminalStatus('active' as JobStatus)).toBe(false);
       expect(component.isTerminalStatus('queued' as JobStatus)).toBe(false);
-    });
-  });
-
-  describe('shortenId', () => {
-    it('should truncate ids longer than 8 chars with "..."', () => {
-      expect(component.shortenId('0123456789abcdef')).toBe('01234567...');
-    });
-
-    it('should not truncate ids that are exactly 8 chars', () => {
-      expect(component.shortenId('12345678')).toBe('12345678');
-    });
-
-    it('should not truncate ids shorter than 8 chars', () => {
-      expect(component.shortenId('proj-A')).toBe('proj-A');
     });
   });
 });
