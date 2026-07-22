@@ -160,6 +160,9 @@ class TestTeamMembersAuthorization:
             "planner", "developer", "reviewer", "tidier",
             "approver", "tester", "giter", "devops",
             "explorer",
+            "wanderer",  # Added when wanderer agent was introduced.
+            "kb-writer",  # Added when kb-writer agent was introduced.
+            "doc-writer",  # Added when doc-writer agent was introduced.
         ]
         for agent_id in expected_team:
             manager = _make_manager(spawn_result=(f"id-{agent_id}", None))
