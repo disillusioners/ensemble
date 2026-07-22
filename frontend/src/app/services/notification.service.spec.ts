@@ -871,7 +871,7 @@ describe('NotificationService Signal Behavior', () => {
 
 describe('NotificationService Sound Exclusion', () => {
   // Sound exclusion set matching the real service logic
-  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer']);
+  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer', 'kb-writer']);
 
   class MockAudio {
     playCallCount = 0;

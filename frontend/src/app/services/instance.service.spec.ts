@@ -27,7 +27,7 @@ class MockApiService {
 }
 
 // KB agent IDs to filter when showKb is false
-const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
+const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer', 'kb-writer']);
 
 // Module-level sort function (mirrors actual service)
 function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {

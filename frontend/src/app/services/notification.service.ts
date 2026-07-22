@@ -21,10 +21,10 @@ export interface Notification extends InstanceNotification {
 // Agents that should NOT trigger notification sounds. KB agents are fully
 // suppressed at the backend; experiencer notifications are shown visually
 // but without sound.
-const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer']);
+const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer', 'kb-writer']);
 
 // KB agent IDs - keep in sync with daemon/repositories/instance/repository.py (KB_AGENT_IDS)
-const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
+const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer', 'kb-writer']);
 
 @Injectable({ providedIn: 'root' })
 export class NotificationService implements OnDestroy {
