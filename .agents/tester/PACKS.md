@@ -2,7 +2,7 @@
 
 ## Summary
 - Total: 177 packs
-- Unit: 149 | Integration: 3 | Mock: 6 | E2E: 11 | Postgres: 2 | Manual: 1 | SharedContext: 5
+- Unit: 149 | Integration: 3 | Mock: 7 | E2E: 11 | Postgres: 2 | Manual: 1 | SharedContext: 5
 
 ## Unit Test Packs
 
@@ -190,6 +190,7 @@
 | mock_project_delete_test | tests/mock_project_delete.py | Project delete cascade cleanup: 404, happy path (no instances), 409 protection, force delete, cascade verification, in-memory cleanup | 2 min | 2026-05-25 | ✅ PASS (25/25 assertions, 813e097 + 1ce9a04) |
 | mock_pause_resume_test | tests/mock_pause_resume.py | Pause/resume API: create instance, pause, verify PAUSED, message queued (PENDING), resume, verify NOT paused, job processes, idempotency | 2 min | 2026-05-26 | ✅ PASS (12/12 assertions, feature/fix-pause-button) |
 | mock_terminate_job_cleanup_test | tests/mock_terminate_job_cleanup.py | Instance termination job cleanup: terminate happy path, re-entrancy guard, job CRUD, terminate with jobs, parent-child cascade, sequential terminations | 2 min | 2026-05-26 | ✅ PASS (6/6 scenarios, feature/fix-terminate-instance) |
+| notification_mock_sse_test | test/packs/notification_mock_sse_test.py | SSE notification flow validation for feature/notification-ui-improvements: mock SSE server (port 10080) emits instance_created events with project_id + instance_name; pure-logic simulation of frontend mapping (notification.service.ts instance_created handler, getNotificationTitle priority chain, onNotificationClick route construction, project_label conditional); navigation path resolution (project_id present → /projects/{pid}/instances/{iid}, absent → /projects/all/instances/{iid}); edge cases (None/empty fields, malformed JSON, missing data wrapper, KB agent filtering); live SSE server e2e. 37 assertions, 4 scenario groups | 4 min | 2026-07-22 | ✅ PASS (37/37 in 3.7s, feature/notification-ui-improvements, commit 9b003ad3, 0 failures) |
 
 ## E2E Test Packs
 
