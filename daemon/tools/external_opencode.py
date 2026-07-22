@@ -765,7 +765,7 @@ Special prompts (bypass BUSY check):
                     cached is not None
                     and cached[0] == last_activity
                 ):
-                    substantive, idx = cached[1], cached[2]
+                    _, substantive, idx = cached
                 else:
                     mgr = await registry.get_manager(session_id)
                     recent = await _fetch_recent_messages(mgr, session_id)
