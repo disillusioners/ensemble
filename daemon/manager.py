@@ -4348,35 +4348,6 @@ class InstanceManager:
             session, instance_id, completed_message_id
         )
 
-    async def _create_completion_report(
-        self,
-        session,
-        instance,
-        last_content: str,
-        completed_message_id: str,
-    ) -> tuple[MessageQueue, Task, str]:
-        """Create the completion report message and task for the parent.
-        
-        Updates the child instance status to COMPLETED and creates:
-        - COMPLETION_REPORT message for parent
-        - PROCESS_MESSAGE task
-        
-        The report source includes the message_id so each completion is unique,
-        allowing multiple reports from the same child for different messages.
-        
-        Args:
-            session: Database session.
-            instance: The child Instance object.
-            last_content: The content to include in the report (fetched before transaction).
-            completed_message_id: The message ID that completed (for unique report source).
-            
-        Returns:
-            Tuple of (report_message, report_task, report_message_id).
-        """
-        return await self._child_reports_service._create_completion_report(
-            session, instance, last_content, completed_message_id
-        )
-
     async def _update_parent_on_child_complete(self, session, instance) -> tuple[bool, str | None, str | None]:
         """Update parent state when child completes.
 

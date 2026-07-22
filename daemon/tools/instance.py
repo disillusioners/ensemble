@@ -56,6 +56,7 @@ INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
     "todo": ["todo"],
     "dynamic-skill": ["dynamic-skill"],
     "skill-evolution": ["skill-evolution"],
+    "question": ["question"],
 }
 
 
