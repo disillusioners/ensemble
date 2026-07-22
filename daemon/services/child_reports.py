@@ -18,7 +18,7 @@ from ..repositories.job_queue.models import JobItem
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
-from ..repositories.report_injection.models import ReportInjection
+from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
 from .job_queue_service import TERMINAL_STATUSES
@@ -1106,6 +1106,47 @@ Provide a concise summary:"""
             result, last_content, completed_message_id
         )
 
+    def _count_actionable_pending_tasks(self, session: Session, instance_id: str) -> int:
+        """Count PENDING tasks for an instance that will actually run a turn.
+
+        Used by both completion guards (root + non-root) to decide whether
+        to defer completion. A PENDING ``process_report`` task whose report
+        was ALREADY delivered via the report-injection hot path
+        (``state = INJECTED``) is EXCLUDED: the task processor skips such
+        tasks (no graph turn runs), so they are no-ops that must NOT defer
+        completion — otherwise the parent stalls in ``waiting_children``
+        forever, because the skipped task never produces a turn to
+        re-evaluate completion. Reports still awaiting delivery
+        (``PENDING`` / ``TASK_DELIVERED``) ARE counted, since their
+        ``process_report`` turn will run and may spawn more children.
+
+        Correlation: ``Task.message_id`` of a ``process_report`` task IS
+        the ``completion_report`` message id, which is also
+        ``ReportInjection.report_message_id``. For non-report tasks
+        (``process_message``) there is no matching ``report_injections``
+        row, so the EXISTS is false and the task is counted.
+
+        Args:
+            session: An open (WriteGuard)Session.
+            instance_id: The instance whose pending tasks to count.
+
+        Returns:
+            Count of PENDING tasks that will run a real graph turn.
+        """
+        injected_report_exists = (
+            select(ReportInjection.injection_id)
+            .where(ReportInjection.report_message_id == Task.message_id)
+            .where(ReportInjection.state == ReportInjectionState.INJECTED.value)
+            .exists()
+        )
+        return session.exec(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.instance_id == instance_id)
+            .where(Task.status == TaskStatus.PENDING.value)
+            .where(~injected_report_exists)
+        ).scalar_one()
+
     def _process_child_completion_db_sync(
         self,
         instance_id: str,
@@ -1241,12 +1282,7 @@ Provide a concise summary:"""
                 # would be premature and the idempotency guard would later
                 # drop the real final completion. Defer until the queued
                 # turn drains. See the non-root guard for the full rationale.
-                pending_tasks = session.exec(
-                    select(func.count())
-                    .select_from(Task)
-                    .where(Task.instance_id == instance_id)
-                    .where(Task.status == TaskStatus.PENDING.value)
-                ).scalar_one()
+                pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
                 if pending_tasks > 0:
                     logger.info(
                         f"Instance {instance_id[:8]}... completed message "
@@ -1748,12 +1784,14 @@ Provide a concise summary:"""
             # The per-instance serialization guard (one RUNNING task per
             # instance) guarantees no second RUNNING task exists, so every
             # non-current queued task is PENDING and is counted here.
-            pending_tasks = session.exec(
-                select(func.count())
-                .select_from(Task)
-                .where(Task.instance_id == instance_id)
-                .where(Task.status == TaskStatus.PENDING.value)
-            ).scalar_one()
+            #
+            # CRITICAL: a pending ``process_report`` whose report was
+            # already delivered via the report-injection hot path
+            # (INJECTED) is a NO-OP (the task processor skips it) and is
+            # EXCLUDED by ``_count_actionable_pending_tasks`` — counting
+            # it would defer completion forever because the skipped task
+            # never produces a turn to re-evaluate completion.
+            pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
             if active_children > 0 or pending_tasks > 0:
                 # The just-completed instance (e.g., Wanderer / a tester)
                 # still has non-terminal children OR queued turns of its

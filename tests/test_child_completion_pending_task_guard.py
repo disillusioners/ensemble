@@ -36,6 +36,10 @@ import daemon.repositories.report_injection.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 from daemon.repositories.dependency_bus import DependencyWatcherRepository
 from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.report_injection.models import (
+    ReportInjection,
+    ReportInjectionState,
+)
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.services.child_reports import ChildReportsService
 from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
@@ -195,3 +199,80 @@ class TestPendingTaskGuard:
         )
 
         assert result.outcome == "child_still_running_defer"
+
+    async def test_pending_report_task_already_injected_does_not_defer(
+        self, service, engine, bus
+    ):
+        """Regression (2026-07-22, 284fb4b5): a PENDING ``process_report``
+        task whose report was ALREADY delivered via the report-injection
+        hot path (INJECTED) is a NO-OP — the task processor will skip it,
+        so it must NOT count toward the pending-task guard. Counting it
+        deferred the tester's completion forever (the skipped task never
+        produced a turn to re-evaluate), leaving it stuck in
+        ``waiting_children`` with no report to the leader.
+
+        With the fix: 0 active children + 1 pending task whose report is
+        INJECTED => the task is excluded => 0 actionable pending => COMPLETE.
+        """
+        parent_id = _seed_instance(engine)
+        tester_id = _seed_instance(engine, parent_id=parent_id)
+        # All children terminal => active_children == 0.
+        _seed_instance(engine, parent_id=tester_id, status=InstanceStatus.COMPLETED.value)
+        # A pending process_report task whose report is ALREADY INJECTED
+        # (delivered mid-turn via the hot path) — a no-op the processor
+        # will skip. Must NOT defer completion.
+        report_msg_id = "rmsg-already-injected"
+        _seed_task(engine, instance_id=tester_id, message_id=report_msg_id)
+        with Session(engine) as s:
+            s.add(ReportInjection(
+                parent_instance_id=tester_id,
+                child_instance_id="child-x",
+                child_message_id="child-msg-x",
+                report_message_id=report_msg_id,
+                content="report",
+                state=ReportInjectionState.INJECTED.value,
+            ))
+            s.commit()
+
+        result = service._process_child_completion_db_sync(
+            tester_id, completed_message_id="msg-current", last_content="final"
+        )
+
+        # Must complete (not defer) — the only pending task is a no-op.
+        assert result.outcome == "regular_child_completed", (
+            f"INJECTED report's pending task must not defer; got {result.outcome}"
+        )
+
+    async def test_pending_report_task_not_yet_delivered_defers(
+        self, service, engine, bus
+    ):
+        """The original TOCTOU fix must still hold: a PENDING
+        ``process_report`` task whose report has NOT been delivered yet
+        (still PENDING in the queue) WILL run a turn, so it MUST defer
+        completion (the turn may spawn more children). This guards
+        against re-introducing the 777eff96 premature-completion bug."""
+        parent_id = _seed_instance(engine)
+        tester_id = _seed_instance(engine, parent_id=parent_id)
+        _seed_instance(engine, parent_id=tester_id, status=InstanceStatus.COMPLETED.value)
+        # A pending process_report whose report is still PENDING (not
+        # INJECTED) — it will run a real turn.
+        report_msg_id = "rmsg-pending-delivery"
+        _seed_task(engine, instance_id=tester_id, message_id=report_msg_id)
+        with Session(engine) as s:
+            s.add(ReportInjection(
+                parent_instance_id=tester_id,
+                child_instance_id="child-y",
+                child_message_id="child-msg-y",
+                report_message_id=report_msg_id,
+                content="report",
+                state=ReportInjectionState.PENDING.value,
+            ))
+            s.commit()
+
+        result = service._process_child_completion_db_sync(
+            tester_id, completed_message_id="msg-current", last_content="..."
+        )
+
+        assert result.outcome == "child_still_running_defer", (
+            f"not-yet-delivered report's pending task must defer; got {result.outcome}"
+        )
