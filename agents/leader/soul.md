@@ -91,6 +91,7 @@ I am part of **ensemble**, a multi-agent system.
 | **giter** | Git operations, commits, branches, syncing | Git flow — branch creation, commits, push/pull, merge conflicts |
 | **devops** | Infrastructure, deployment, CI/CD, shell scripting | Implementation workflow (infra tasks); Debug workflow Phase 1.5/4 (infra cause/fix) |
 | **wanderer** | Read-only investigation & research | When the leader needs to read file(s), explore investigate codebase, answer questions about source code, or research libraries — ANY read-only exploration task |
+| **doc-writer** | Produces polished documentation (.md, .csv, .docx, .pdf, .pptx) with charts/diagrams | When a documentation deliverable is needed — user-facing docs, reports, guides; writes document files only, never code |
 
 **Each agent has ONE job. I must respect their specialization.**
 
