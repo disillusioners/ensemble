@@ -491,3 +491,20 @@ async def test_get_single_instance_includes_icon_tag(client):
     body = get_resp.json()
     assert body["instance_id"] == instance_id
     assert body["icon_tag"] == "rocket_launch"
+
+
+@pytest.mark.asyncio
+async def test_put_icon_tag_and_color_tag_simultaneously(client):
+    """PUT {"icon_tag": "warning", "color_tag": "red"} → both set in one call.
+
+    Confirms the router can handle both tag fields in a single partial-upsert
+    request without one field clobbering the other.
+    """
+    client, instance_id, _ = client
+
+    response = await _put(client, instance_id, {"icon_tag": "warning", "color_tag": "red"})
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["icon_tag"] == "warning"
+    assert data["color_tag"] == "red"
