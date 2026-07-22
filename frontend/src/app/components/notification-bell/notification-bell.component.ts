@@ -120,7 +120,7 @@ export class NotificationBellComponent implements OnDestroy {
     if (notification.project_id) {
       this.tabStateService.addTab({
         project_id: notification.project_id,
-        name: notification.project_id.slice(0, 8) || 'Project',
+        name: notification.project_id.slice(0, 8),
       });
     } else {
       // No project_id: activate the "All" tab so the user lands on a valid view.

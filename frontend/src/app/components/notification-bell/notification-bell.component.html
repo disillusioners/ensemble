@@ -57,7 +57,7 @@
                 [class.status-terminated]="notification.status === 'TERMINATED'"
                 (click)="onNotificationClick(notification)"
                 (keydown.enter)="onNotificationClick(notification)"
-                (keydown.space)="onNotificationClick(notification)"
+                (keydown.space)="$event.preventDefault(); onNotificationClick(notification)"
                 role="button"
                 tabindex="0"
                 [matTooltip]="notification.instance_id">
