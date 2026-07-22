@@ -1290,6 +1290,35 @@ Provide a concise summary:"""
                         parent_id=None,
                     )
 
+                # Pending-task guard (TOCTOU fix, 2026-07-22) — symmetric to
+                # the non-root guard below. ``pending_children == 0`` is
+                # necessary but not sufficient: a root instance can end a
+                # turn with zero pending children while it still has a
+                # PENDING task queued (e.g. a ``PROCESS_REPORT`` turn from
+                # a child that just reported). Marking it COMPLETED now
+                # would be premature and the idempotency guard would later
+                # drop the real final completion. Defer until the queued
+                # turn drains. See the non-root guard for the full rationale.
+                pending_tasks = session.exec(
+                    select(func.count())
+                    .select_from(Task)
+                    .where(Task.instance_id == instance_id)
+                    .where(Task.status == TaskStatus.PENDING.value)
+                ).scalar_one()
+                if pending_tasks > 0:
+                    logger.info(
+                        f"Instance {instance_id[:8]}... completed message "
+                        f"with 0 pending children but {pending_tasks} "
+                        f"pending task(s), deferring completion "
+                        f"(pending-tasks guard)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
                 # Phase 5 (Cascade Unification — Fix A2): root completion
                 # is NOT a child response, so we MUST NOT call any
                 # ``resolve_response`` hook here (a self-referential
@@ -1667,19 +1696,47 @@ Provide a concise summary:"""
                     Instance.status.not_in(TERMINAL_STATUSES)
                 )
             ).scalar_one()
-            if active_children > 0:
-                # The just-completed instance (e.g., Wanderer) still has
-                # non-terminal children of its own. Mirror the root
-                # branch's defer outcome — no status transition, no
-                # report, no events. The child's status stays in its
-                # pre-call value (typically RUNNING) until the parent
+            # ─── Pending-task guard (TOCTOU fix, 2026-07-22) ──────────────
+            # ``active_children == 0`` is necessary but NOT sufficient for
+            # true completion: a non-root parent can end a turn with zero
+            # active children while it STILL has queued work — a PENDING
+            # task (e.g. a ``PROCESS_REPORT`` turn from a child that just
+            # reported) that will run next and spawn more children. Without
+            # this check, the parent is prematurely marked COMPLETED and
+            # reports to its own parent; when the queued task then runs and
+            # the parent truly finishes, the idempotency guard
+            # ("already in terminal state") silently drops the real final
+            # report. Reproduced with the tester (777eff96): turn 9287 ended
+            # at 07:28:50 with 0 children while task 9288 was still PENDING
+            # (it later spawned worker 78b04db6); the premature completion
+            # at 07:28:50 then suppressed the real completion at 07:32:58.
+            #
+            # Count PENDING tasks for this instance only. The CURRENT turn's
+            # task is RUNNING (the task processor claims pending→running
+            # before driving the graph, and only marks it COMPLETED after
+            # this helper returns), so it is excluded by the status filter.
+            # The per-instance serialization guard (one RUNNING task per
+            # instance) guarantees no second RUNNING task exists, so every
+            # non-current queued task is PENDING and is counted here.
+            pending_tasks = session.exec(
+                select(func.count())
+                .select_from(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.PENDING.value)
+            ).scalar_one()
+            if active_children > 0 or pending_tasks > 0:
+                # The just-completed instance (e.g., Wanderer / a tester)
+                # still has non-terminal children OR queued turns of its
+                # own. Mirror the root branch's defer outcome — no status
+                # transition, no report, no events. The child's status stays
+                # in its pre-call value (typically RUNNING) until the parent
                 # actually finalizes the subtree.
                 logger.info(
                     f"Non-root instance {instance_id[:8]}... has "
-                    f"{active_children} active children, deferring "
-                    f"completion_report to parent "
-                    f"(parent={instance.parent_id[:8]}..., "
-                    f"active-children guard)"
+                    f"{active_children} active children / {pending_tasks} "
+                    f"pending task(s), deferring completion_report to "
+                    f"parent (parent={instance.parent_id[:8]}..., "
+                    f"active-children/pending-tasks guard)"
                 )
                 return _ChildCompletionDbResult(
                     outcome="child_still_running_defer",
