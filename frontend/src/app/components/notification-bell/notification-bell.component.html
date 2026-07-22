@@ -68,7 +68,7 @@
                   <div class="notification-title">
                     <span class="notification-name">{{ getNotificationTitle(notification) }}</span>
                     @if (notification.project_id) {
-                      <span class="project-label">{{ notification.project_id }}</span>
+                      <span class="project-label" [matTooltip]="notification.project_id">{{ truncateId(notification.project_id) }}</span>
                     }
                   </div>
                   <div class="notification-meta">
