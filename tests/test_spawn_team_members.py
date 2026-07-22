@@ -252,7 +252,7 @@ class TestTeamMembersAuthorization:
     async def test_restricted_team_members_rejects_non_team_spawns(self):
         """Restricted team_members list → reject spawns outside the team.
 
-        After W1, tester.team_members = ["explorer"] (a NON-empty
+        After W1, tester.team_members = ["explorer", "worker"] (a NON-empty
         restricted list). This test verifies that targets OUTSIDE that
         restricted team are rejected. Note: this is NOT the
         deny-by-default empty-list case — see
@@ -267,7 +267,7 @@ class TestTeamMembersAuthorization:
         assert isinstance(result, str)
         assert result.startswith("ERROR")
         assert "not allowed to spawn" in result
-        assert "Allowed team members: ['explorer']" in result
+        assert "Allowed team members: ['explorer', 'worker']" in result
         manager.spawn_instance.assert_not_called()
 
     async def test_unknown_caller_agent_is_denied(self):
@@ -411,6 +411,7 @@ class TestTeamMembersRegistryParsing:
             "explorer",  # Added in W1 so leader can authorize explore()'s
                          # internal spawn_instance of the "explorer" agent.
             "wanderer",  # Added when wanderer agent was introduced.
+            "kb-writer",  # Added when kb-writer agent was introduced.
         ]
         assert set(leader.team_members) == set(expected), (
             f"leader.team_members mismatch: got {leader.team_members}"
