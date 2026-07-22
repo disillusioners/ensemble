@@ -1,4 +1,5 @@
-import { Component, OnInit, ViewChild, inject, signal } from '@angular/core';
+import { Component, DestroyRef, OnInit, ViewChild, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute } from '@angular/router';
 import { MatSidenavModule } from '@angular/material/sidenav';
@@ -50,6 +51,12 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
           </mat-toolbar>
 
           <div class="viewer-content">
+            @if (workspace.error(); as errorMessage) {
+              <div class="error-banner" role="alert">
+                <mat-icon>error_outline</mat-icon>
+                <span>{{ errorMessage }}</span>
+              </div>
+            }
             @if (viewMode() === 'code') {
               <app-code-viewer></app-code-viewer>
             } @else {
@@ -64,7 +71,8 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
 })
 export class WorkspaceComponent implements OnInit {
   private readonly route = inject(ActivatedRoute);
-  private readonly workspace = inject(WorkspaceService);
+  readonly workspace = inject(WorkspaceService);
+  private readonly destroyRef = inject(DestroyRef);
 
   @ViewChild(FileTreeComponent, { static: true }) private fileTree!: FileTreeComponent;
 
@@ -75,13 +83,19 @@ export class WorkspaceComponent implements OnInit {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     if (this.projectId) {
-      this.workspace.getFileTree(this.projectId).subscribe(res => this.fileTree.setTree(res.tree));
+      this.workspace.getFileTree(this.projectId).pipe(
+        takeUntilDestroyed(this.destroyRef)
+      ).subscribe(res => this.fileTree.setTree(res.tree));
     }
   }
 
   onFileSelected(path: string): void {
     this.viewMode.set('code');
-    this.workspace.getFileContent(this.projectId, path).subscribe();
+    this.workspace.getFileContent(this.projectId, path).pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe({
+      error: () => undefined,
+    });
   }
 
   onSelectCode(): void {
@@ -91,7 +105,9 @@ export class WorkspaceComponent implements OnInit {
   onSelectDiff(): void {
     const path = this.selectedPath();
     if (path) {
-      this.workspace.getFileDiff(this.projectId, path).subscribe({
+      this.workspace.getFileDiff(this.projectId, path).pipe(
+        takeUntilDestroyed(this.destroyRef)
+      ).subscribe({
         next: () => this.viewMode.set('diff'),
         error: () => this.viewMode.set('diff'),
       });

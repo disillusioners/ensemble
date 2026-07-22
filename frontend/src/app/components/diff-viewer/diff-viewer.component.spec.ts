@@ -1,158 +1,208 @@
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
+import { DiffViewerComponent } from './diff-viewer.component';
+import { WorkspaceService } from '../../services/workspace.service';
 import type { GitDiffResponse } from '../../models/workspace.model';
 
-type Badge = {
-  key: 'not_a_git_repo' | 'no_changes' | 'modified';
-  text: string;
-  className: string;
-};
-
-function getBadge(diff: GitDiffResponse): Badge {
-  if (diff.error === 'not_a_git_repo') {
-    return { key: 'not_a_git_repo', text: 'Not a Git Repo', className: 'badge' };
-  }
-  if (!diff.has_changes) {
-    return { key: 'no_changes', text: 'No Changes', className: 'badge clean' };
-  }
-  return { key: 'modified', text: 'Modified', className: 'badge modified' };
-}
-
-function shouldRenderMerge(
-  diff: GitDiffResponse | null,
-  containerExists: boolean
-): boolean {
-  return Boolean(diff?.has_changes && !diff.error && containerExists);
-}
-
-class MockWorkspaceService {
-  readonly currentDiff = signal<GitDiffResponse | null>(null);
-}
-
-type DestroyableMergeView = { destroy: jest.Mock<void, []> };
-
-class TestableDiffViewerComponent {
-  public readonly diff;
-  public containerExists = false;
-  public mergeView: DestroyableMergeView | null = null;
-  public readonly createMergeView = jest.fn<DestroyableMergeView, []>(() => ({
-    destroy: jest.fn<void, []>(),
-  }));
-
-  constructor(workspace: MockWorkspaceService) {
-    this.diff = workspace.currentDiff.asReadonly();
-  }
-
-  renderDiff(): void {
-    if (!shouldRenderMerge(this.diff(), this.containerExists)) return;
-
-    this.mergeView?.destroy();
-    this.mergeView = this.createMergeView();
-  }
-
-  ngOnDestroy(): void {
-    this.mergeView?.destroy();
-  }
-}
-
-function makeDiff(overrides: Partial<GitDiffResponse> = {}): GitDiffResponse {
-  return {
-    project_id: 'project-1',
-    path: 'src/main.ts',
-    has_changes: true,
-    diff: '-old\n+new',
-    head_content: 'old',
-    working_content: 'new',
-    error: null,
-    ...overrides,
+/**
+ * Tests for `DiffViewerComponent`.
+ *
+ * Pattern: Angular `TestBed` with a stubbed `WorkspaceService`. The
+ * component renders a status header (badge) above an optional
+ * CodeMirror `MergeView`. jsdom can't measure the MergeView gutter
+ * properly, so we focus the assertions on the badge / body states
+ * that render BEFORE the MergeView is mounted.
+ *
+ *   - `not_a_git_repo`  → "Not a Git Repo" badge + `.no-git` body
+ *   - no changes        → "No Changes" badge + `.no-changes` body
+ *   - modified          → "Modified" badge + `.merge-container` slot
+ */
+describe('DiffViewerComponent', () => {
+  let fixture: ComponentFixture<DiffViewerComponent>;
+  let component: DiffViewerComponent;
+  let mockWorkspace: {
+    currentDiff: ReturnType<typeof signal<GitDiffResponse | null>>;
   };
-}
 
-describe('DiffViewerComponent logic', () => {
-  let workspace: MockWorkspaceService;
-  let component: TestableDiffViewerComponent;
+  function makeDiff(overrides: Partial<GitDiffResponse> = {}): GitDiffResponse {
+    return {
+      project_id: 'project-1',
+      path: 'src/main.ts',
+      has_changes: true,
+      diff: '-old\n+new',
+      head_content: 'old',
+      working_content: 'new',
+      error: null,
+      ...overrides,
+    };
+  }
 
-  beforeEach(() => {
-    workspace = new MockWorkspaceService();
-    component = new TestableDiffViewerComponent(workspace);
+  beforeEach(async () => {
+    mockWorkspace = {
+      currentDiff: signal<GitDiffResponse | null>(null),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [DiffViewerComponent],
+      providers: [{ provide: WorkspaceService, useValue: mockWorkspace }],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(DiffViewerComponent);
+    component = fixture.componentInstance;
   });
 
-  it('should mirror workspace.currentDiff', () => {
-    const diff = makeDiff();
+  // ── 1) Component creation ─────────────────────────────────────
 
-    workspace.currentDiff.set(diff);
-    expect(component.diff()).toEqual(diff);
-
-    workspace.currentDiff.set(null);
-    expect(component.diff()).toBeNull();
+  it('creates successfully', () => {
+    expect(component).toBeTruthy();
   });
 
-  it("should return the 'not_a_git_repo' badge for that error", () => {
-    expect(getBadge(makeDiff({ error: 'not_a_git_repo' }))).toEqual({
-      key: 'not_a_git_repo',
-      text: 'Not a Git Repo',
-      className: 'badge',
+  // ── 2) Signal mirror ──────────────────────────────────────────
+
+  describe('diff signal', () => {
+    it('should be null when the workspace signal is null', () => {
+      expect(component.diff()).toBeNull();
+    });
+
+    it('should reflect changes to workspace.currentDiff', () => {
+      const diff = makeDiff();
+      mockWorkspace.currentDiff.set(diff);
+      expect(component.diff()).toEqual(diff);
+
+      mockWorkspace.currentDiff.set(null);
+      expect(component.diff()).toBeNull();
     });
   });
 
-  it("should return the 'no_changes' badge when there are no changes or errors", () => {
-    expect(getBadge(makeDiff({ has_changes: false, error: null }))).toEqual({
-      key: 'no_changes',
-      text: 'No Changes',
-      className: 'badge clean',
+  // ── 3) DOM rendering: not a git repo ──────────────────────────
+
+  describe('not-a-git-repo state', () => {
+    beforeEach(() => {
+      mockWorkspace.currentDiff.set(makeDiff({
+        error: 'not_a_git_repo',
+        has_changes: false,
+        diff: null,
+        head_content: null,
+        working_content: null,
+      }));
+      fixture.detectChanges();
+    });
+
+    it('should render the "Not a Git Repo" badge', () => {
+      const badge = fixture.nativeElement.querySelector('.badge') as HTMLElement | null;
+      expect(badge?.textContent).toContain('Not a Git Repo');
+    });
+
+    it('should NOT render the "No Changes" or "Modified" badges', () => {
+      expect(fixture.nativeElement.querySelector('.badge.clean')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.badge.modified')).toBeNull();
+    });
+
+    it('should render the .no-git body explaining the state', () => {
+      const body = fixture.nativeElement.querySelector('.no-git') as HTMLElement | null;
+      expect(body?.textContent).toContain('not a git repository');
+    });
+
+    it('should NOT render the merge container when there is an error', () => {
+      expect(fixture.nativeElement.querySelector('.merge-container')).toBeNull();
     });
   });
 
-  it("should return the 'modified' badge when changes exist without an error", () => {
-    expect(getBadge(makeDiff({ has_changes: true, error: null }))).toEqual({
-      key: 'modified',
-      text: 'Modified',
-      className: 'badge modified',
+  // ── 4) DOM rendering: no changes ──────────────────────────────
+
+  describe('no-changes state', () => {
+    beforeEach(() => {
+      mockWorkspace.currentDiff.set(makeDiff({
+        has_changes: false,
+        diff: null,
+        head_content: null,
+        working_content: null,
+        error: null,
+      }));
+      fixture.detectChanges();
+    });
+
+    it('should render the "No Changes" badge with the clean class', () => {
+      const badge = fixture.nativeElement.querySelector('.badge.clean') as HTMLElement | null;
+      expect(badge?.textContent).toContain('No Changes');
+    });
+
+    it('should NOT render the merge container', () => {
+      expect(fixture.nativeElement.querySelector('.merge-container')).toBeNull();
+    });
+
+    it('should render the .no-changes body', () => {
+      const body = fixture.nativeElement.querySelector('.no-changes') as HTMLElement | null;
+      expect(body?.textContent).toContain('matches HEAD');
+    });
+
+    it('should NOT render the .no-git body', () => {
+      expect(fixture.nativeElement.querySelector('.no-git')).toBeNull();
     });
   });
 
-  it('should prioritize the git error badge over has_changes', () => {
-    const badge = getBadge(makeDiff({ has_changes: true, error: 'not_a_git_repo' }));
+  // ── 5) DOM rendering: modified ────────────────────────────────
 
-    expect(badge.key).toBe('not_a_git_repo');
+  describe('modified state', () => {
+    beforeEach(() => {
+      mockWorkspace.currentDiff.set(makeDiff({
+        has_changes: true,
+        diff: '-old\n+new',
+        head_content: 'old',
+        working_content: 'new',
+        error: null,
+      }));
+      fixture.detectChanges();
+    });
+
+    it('should render the "Modified" badge', () => {
+      const badge = fixture.nativeElement.querySelector('.badge.modified') as HTMLElement | null;
+      expect(badge?.textContent).toContain('Modified');
+    });
+
+    it('should render the merge container slot for the CodeMirror MergeView', () => {
+      expect(fixture.nativeElement.querySelector('.merge-container')).toBeTruthy();
+    });
+
+    it('should NOT render the .no-changes or .no-git bodies', () => {
+      expect(fixture.nativeElement.querySelector('.no-changes')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.no-git')).toBeNull();
+    });
   });
 
-  it('should not create MergeView when there are no changes', () => {
-    workspace.currentDiff.set(makeDiff({ has_changes: false }));
-    component.containerExists = true;
+  // ── 6) Error priority over has_changes ────────────────────────
 
-    component.renderDiff();
+  describe('error priority', () => {
+    it('should render the "Not a Git Repo" badge when error is set even if has_changes is true', () => {
+      mockWorkspace.currentDiff.set(makeDiff({
+        has_changes: true,
+        error: 'not_a_git_repo',
+      }));
+      fixture.detectChanges();
 
-    expect(component.createMergeView).not.toHaveBeenCalled();
+      const badge = fixture.nativeElement.querySelector('.badge') as HTMLElement | null;
+      expect(badge?.textContent).toContain('Not a Git Repo');
+      expect(fixture.nativeElement.querySelector('.badge.modified')).toBeNull();
+    });
   });
 
-  it('should not create MergeView when an error is set', () => {
-    workspace.currentDiff.set(makeDiff({ error: 'not_a_git_repo' }));
-    component.containerExists = true;
+  // ── 7) DOM rendering: empty state ─────────────────────────────
 
-    component.renderDiff();
-
-    expect(component.createMergeView).not.toHaveBeenCalled();
+  describe('empty state', () => {
+    it('should render nothing when diff() is null', () => {
+      expect(fixture.nativeElement.querySelector('.diff-viewer')).toBeNull();
+    });
   });
 
-  it('should create MergeView only with changes, no error, and a container', () => {
-    workspace.currentDiff.set(makeDiff());
+  // ── 8) Filepath header ────────────────────────────────────────
 
-    component.renderDiff();
-    expect(component.createMergeView).not.toHaveBeenCalled();
+  describe('header', () => {
+    it('should render the file path in the header', () => {
+      mockWorkspace.currentDiff.set(makeDiff({ path: 'src/foo.py' }));
+      fixture.detectChanges();
 
-    component.containerExists = true;
-    component.renderDiff();
-
-    expect(shouldRenderMerge(component.diff(), component.containerExists)).toBe(true);
-    expect(component.createMergeView).toHaveBeenCalledTimes(1);
-  });
-
-  it('should destroy the existing MergeView on destroy', () => {
-    const mergeView: DestroyableMergeView = { destroy: jest.fn<void, []>() };
-    component.mergeView = mergeView;
-
-    component.ngOnDestroy();
-
-    expect(mergeView.destroy).toHaveBeenCalledTimes(1);
+      const header = fixture.nativeElement.querySelector('.filepath') as HTMLElement | null;
+      expect(header?.textContent).toContain('src/foo.py');
+    });
   });
 });

@@ -1,101 +1,90 @@
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { FileTreeComponent } from './file-tree.component';
+import { WorkspaceService } from '../../services/workspace.service';
 import type { FileTreeNode } from '../../models/workspace.model';
 
-type FlatNode = {
-  expandable: boolean;
-  name: string;
-  path: string;
-  type: string;
-  level: number;
-  loaded: boolean;
-};
+/**
+ * Tests for `FileTreeComponent`.
+ *
+ * Pattern: Angular `TestBed` with the real `WorkspaceService` (HTTP
+ * tests via `provideHttpClientTesting` keep the unused HTTP plumbing
+ * quiet). Tests focus on:
+ *   - `getFileIcon()` (pure method on the REAL component)
+ *   - `selectFile()` emits on the real `fileSelected` EventEmitter
+ *   - `setTree()` populates the real `dataSource`
+ *   - `hasChild()` correctly distinguishes file vs directory nodes
+ */
+describe('FileTreeComponent', () => {
+  let fixture: ComponentFixture<FileTreeComponent>;
+  let component: FileTreeComponent;
 
-function getFileIcon(type: string, name: string): string {
-  if (type !== 'file') return 'folder';
-  const ext = name.split('.').pop()?.toLowerCase();
-  const iconMap: Record<string, string> = {
-    py: 'description',
-    ts: 'code',
-    js: 'code',
-    html: 'html',
-    css: 'style',
-    json: 'data_object',
-    md: 'article',
-    sql: 'storage',
-    sh: 'terminal',
-    yaml: 'settings',
-  };
-  return iconMap[ext || ''] || 'insert_drive_file';
-}
+  function makeNode(overrides: Partial<FileTreeNode> = {}): FileTreeNode {
+    return {
+      name: 'src',
+      path: 'src',
+      type: 'directory',
+      size: null,
+      children: null,
+      ...overrides,
+    };
+  }
 
-function selectFile(node: FlatNode, emitter: { emit(path: string): void }): void {
-  emitter.emit(node.path);
-}
+  // Mirror the FlatNode shape produced by the component's
+  // MatTreeFlattener so we can drive selectFile / hasChild directly.
+  function makeFlatNode(overrides: Partial<{
+    expandable: boolean;
+    name: string;
+    path: string;
+    type: string;
+    level: number;
+    loaded: boolean;
+  }> = {}) {
+    return {
+      expandable: true,
+      name: 'src',
+      path: 'src',
+      type: 'directory',
+      level: 0,
+      loaded: true,
+      ...overrides,
+    };
+  }
 
-type TreeControl = {
-  dataNodes: FlatNode[];
-  expand(node: FlatNode): void;
-};
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [FileTreeComponent],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        provideNoopAnimations(),
+        WorkspaceService,
+      ],
+    }).compileComponents();
 
-type UpdateResult = {
-  tree: FileTreeNode[];
-};
-
-function updateNodeChildren(
-  nestedTree: FileTreeNode[],
-  path: string,
-  children: FileTreeNode[],
-  expandedPaths: Set<string>,
-  treeControl: TreeControl
-): UpdateResult {
-  const patch = (nodes: FileTreeNode[]): FileTreeNode[] =>
-    nodes.map((currentNode) => {
-      if (currentNode.path === path) {
-        return { ...currentNode, children };
-      }
-      if (currentNode.children) {
-        return { ...currentNode, children: patch(currentNode.children) };
-      }
-      return currentNode;
-    });
-
-  const tree = patch(nestedTree);
-  treeControl.dataNodes.forEach((currentNode) => {
-    if (currentNode.expandable && expandedPaths.has(currentNode.path)) {
-      treeControl.expand(currentNode);
-    }
+    fixture = TestBed.createComponent(FileTreeComponent);
+    component = fixture.componentInstance;
   });
-  return { tree };
-}
 
-function makeNode(overrides: Partial<FileTreeNode> = {}): FileTreeNode {
-  return {
-    name: 'src',
-    path: 'src',
-    type: 'directory',
-    size: null,
-    children: null,
-    ...overrides,
-  };
-}
+  // ── 1) Component creation ─────────────────────────────────────
 
-function makeFlatNode(overrides: Partial<FlatNode> = {}): FlatNode {
-  return {
-    expandable: true,
-    name: 'src',
-    path: 'src',
-    type: 'directory',
-    level: 0,
-    loaded: true,
-    ...overrides,
-  };
-}
+  it('creates successfully', () => {
+    expect(component).toBeTruthy();
+  });
 
-describe('FileTreeComponent logic', () => {
+  it('exposes an Output<string> named fileSelected', () => {
+    expect(component.fileSelected).toBeTruthy();
+  });
+
+  // ── 2) getFileIcon (pure method on real component) ────────────
+
   describe('getFileIcon', () => {
     it.each([
       ['directory', 'src', 'folder'],
       ['file', 'main.py', 'description'],
-      ['file', 'component.TS', 'code'],
+      ['file', 'component.TS', 'code'],          // case-insensitive extension
       ['file', 'component.tsx', 'insert_drive_file'],
       ['file', 'LICENSE', 'insert_drive_file'],
       ['file', 'foo.test.ts', 'code'],
@@ -104,128 +93,94 @@ describe('FileTreeComponent logic', () => {
       ['file', 'config.yaml', 'settings'],
       ['file', 'run.sh', 'terminal'],
       ['file', 'schema.sql', 'storage'],
+      ['file', 'main.js', 'code'],
+      ['file', 'index.html', 'html'],
+      ['file', 'styles.css', 'style'],
     ])('should map %s %s to %s', (type, name, expected) => {
-      expect(getFileIcon(type, name)).toBe(expected);
+      expect(component.getFileIcon(type, name)).toBe(expected);
     });
   });
 
-  it('should emit the selected file path', () => {
-    const emitter = { emit: jest.fn<void, [string]>() };
-    const node = makeFlatNode({
-      expandable: false,
-      name: 'main.ts',
-      path: 'src/main.ts',
-      type: 'file',
-    });
+  // ── 3) selectFile (real EventEmitter on real component) ───────
 
-    selectFile(node, emitter);
+  describe('selectFile', () => {
+    it('should emit the file path on fileSelected', () => {
+      let emitted: string | null = null;
+      component.fileSelected.subscribe((path) => (emitted = path));
 
-    expect(emitter.emit).toHaveBeenCalledWith('src/main.ts');
-  });
-
-  describe('updateNodeChildren', () => {
-    function makeTreeControl(dataNodes: FlatNode[] = []): TreeControl & {
-      expand: jest.Mock<void, [FlatNode]>;
-    } {
-      return {
-        dataNodes,
-        expand: jest.fn<void, [FlatNode]>(),
-      };
-    }
-
-    it('should patch top-level node children', () => {
-      const tree = [makeNode()];
-      const children = [makeNode({ name: 'main.ts', path: 'src/main.ts', type: 'file' })];
-      const treeControl = makeTreeControl();
-
-      const result = updateNodeChildren(tree, 'src', children, new Set(), treeControl);
-
-      expect(result.tree[0].children).toEqual(children);
-    });
-
-    it('should patch deeply nested node children', () => {
-      const tree = [
-        makeNode({
-          children: [
-            makeNode({
-              name: 'app',
-              path: 'src/app',
-              children: [makeNode({ name: 'components', path: 'src/app/components' })],
-            }),
-          ],
-        }),
-      ];
-      const children = [
-        makeNode({
-          name: 'viewer.ts',
-          path: 'src/app/components/viewer.ts',
-          type: 'file',
-        }),
-      ];
-
-      const result = updateNodeChildren(
-        tree,
-        'src/app/components',
-        children,
-        new Set(),
-        makeTreeControl()
-      );
-
-      expect(result.tree[0].children?.[0].children?.[0].children).toEqual(children);
-    });
-
-    it('should preserve sibling nodes', () => {
-      const sibling = makeNode({ name: 'README.md', path: 'README.md', type: 'file' });
-      const tree = [makeNode(), sibling];
-
-      const result = updateNodeChildren(
-        tree,
-        'src',
-        [makeNode({ name: 'main.ts', path: 'src/main.ts', type: 'file' })],
-        new Set(),
-        makeTreeControl()
-      );
-
-      expect(result.tree[1]).toBe(sibling);
-    });
-
-    it('should leave the tree unchanged when the path is missing', () => {
-      const tree = [makeNode({ children: [makeNode({ name: 'app', path: 'src/app' })] })];
-
-      const result = updateNodeChildren(
-        tree,
-        'missing',
-        [makeNode({ name: 'new.ts', path: 'new.ts', type: 'file' })],
-        new Set(),
-        makeTreeControl()
-      );
-
-      expect(result.tree).toEqual(tree);
-    });
-
-    it('should re-expand expanded paths after patching', () => {
-      const src = makeFlatNode({ path: 'src' });
-      const app = makeFlatNode({ name: 'app', path: 'src/app', level: 1 });
-      const file = makeFlatNode({
+      component.selectFile(makeFlatNode({
         expandable: false,
         name: 'main.ts',
         path: 'src/main.ts',
         type: 'file',
-        level: 1,
-      });
-      const treeControl = makeTreeControl([src, app, file]);
+      }));
 
-      updateNodeChildren(
-        [makeNode()],
-        'src',
-        [],
-        new Set(['src', 'src/app', 'src/main.ts']),
-        treeControl
-      );
+      expect(emitted).toBe('src/main.ts');
+    });
 
-      expect(treeControl.expand).toHaveBeenCalledTimes(2);
-      expect(treeControl.expand).toHaveBeenNthCalledWith(1, src);
-      expect(treeControl.expand).toHaveBeenNthCalledWith(2, app);
+    it('should emit the path for nested files too', () => {
+      let emitted: string | null = null;
+      component.fileSelected.subscribe((path) => (emitted = path));
+
+      component.selectFile(makeFlatNode({
+        expandable: false,
+        name: 'viewer.ts',
+        path: 'src/app/components/viewer.ts',
+        type: 'file',
+        level: 2,
+      }));
+
+      expect(emitted).toBe('src/app/components/viewer.ts');
+    });
+  });
+
+  // ── 4) setTree populates the real dataSource ──────────────────
+
+  describe('setTree', () => {
+    it('should populate dataSource.data from the nested tree', () => {
+      component.setTree([
+        makeNode({ name: 'README.md', path: 'README.md', type: 'file' }),
+      ]);
+
+      expect(component.dataSource.data.length).toBe(1);
+      expect(component.dataSource.data[0].name).toBe('README.md');
+    });
+
+    it('should preserve the nested shape (children=null means not expanded)', () => {
+      component.setTree([
+        makeNode({ name: 'src', path: 'src', type: 'directory', children: null }),
+        makeNode({ name: 'README.md', path: 'README.md', type: 'file' }),
+      ]);
+
+      const data = component.dataSource.data;
+      expect(data.length).toBe(2);
+      expect(data[0].name).toBe('src');
+      expect(data[0].children).toBeNull();
+      expect(data[1].name).toBe('README.md');
+      expect(data[1].type).toBe('file');
+    });
+  });
+
+  // ── 5) hasChild (tree predicate) ──────────────────────────────
+
+  describe('hasChild', () => {
+    it('should return true for directories (expandable=true)', () => {
+      const node = makeFlatNode({ expandable: true });
+      expect(component.hasChild(0, node as never)).toBe(true);
+    });
+
+    it('should return false for files (expandable=false)', () => {
+      const node = makeFlatNode({ expandable: false });
+      expect(component.hasChild(0, node as never)).toBe(false);
+    });
+  });
+
+  // ── 6) projectId input ────────────────────────────────────────
+
+  describe('projectId input', () => {
+    it('should accept a projectId input via setInput', () => {
+      fixture.componentRef.setInput('projectId', 'project-42');
+      expect(component.projectId).toBe('project-42');
     });
   });
 });

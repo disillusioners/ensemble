@@ -5,6 +5,7 @@ import { FlatTreeControl } from '@angular/cdk/tree';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { finalize } from 'rxjs';
 
 import { WorkspaceService } from '../../services/workspace.service';
 import { FileTreeNode } from '../../models/workspace.model';
@@ -72,18 +73,30 @@ export class FileTreeComponent {
   public readonly hasChild = (_: number, node: FlatNode): boolean => node.expandable;
 
   setTree(tree: FileTreeNode[]): void {
-    this._nestedTree = tree;
+    this._nestedTree = [...tree];
     this.dataSource.data = tree;
   }
 
   toggleNode(node: FlatNode): void {
     if (!node.loaded) {
-      this._expandedPaths.add(node.path);
+      if (this._inFlightPaths.has(node.path)) return;
+
+      this._inFlightPaths.add(node.path);
       this.workspace.expandDirectory(this.projectId, {
         name: node.name, path: node.path, type: 'directory', size: null, children: null
-      }).subscribe(res => {
-        node.loaded = true;
-        this.updateNodeChildren(node.path, res.tree);
+      }).pipe(
+        finalize(() => this._inFlightPaths.delete(node.path))
+      ).subscribe({
+        next: res => {
+          node.loaded = true;
+          this.updateNodeChildren(node.path, res.tree);
+          if (this.treeControl.isExpanded(node)) {
+            this._expandedPaths.add(node.path);
+          }
+        },
+        error: () => {
+          this._expandedPaths.delete(node.path);
+        },
       });
       return;
     }
@@ -120,7 +133,7 @@ export class FileTreeComponent {
      store the original nested tree and patch it before reassigning.
     */
     if (!this._nestedTree) {
-      this._nestedTree = [...this.dataSource.data as unknown as FileTreeNode[]];
+      this._nestedTree = [];
     }
 
     const patch = (nodes: FileTreeNode[]): FileTreeNode[] =>
@@ -145,4 +158,5 @@ export class FileTreeComponent {
 
   private _nestedTree: FileTreeNode[] | null = null;
   private readonly _expandedPaths = new Set<string>();
+  private readonly _inFlightPaths = new Set<string>();
 }

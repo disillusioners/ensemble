@@ -68,6 +68,26 @@ mat-button-toggle mat-icon {
   overflow: hidden;
 }
 
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #f8d7da;
+  background: #4a1f24;
+  border-bottom: 1px solid rgba(248, 215, 218, 0.25);
+}
+
+.error-banner mat-icon {
+  flex-shrink: 0;
+  color: #f8d7da;
+}
+
+.error-banner span {
+  word-break: break-word;
+}
+
 .viewer-content > * {
   display: block;
   height: 100%;

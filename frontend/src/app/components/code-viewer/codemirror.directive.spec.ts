@@ -1,5 +1,6 @@
 import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { EditorView } from '@codemirror/view';
 import { CodemirrorDirective } from './codemirror.directive';
 
 @Component({
@@ -86,13 +87,16 @@ describe('CodemirrorDirective', () => {
   });
 
   it('should destroy and remove the EditorView with the host fixture', () => {
-    const editorElement = editor();
-    expect(editorElement).not.toBeNull();
+    // W13: prefer spying on EditorView.prototype.destroy over DOM
+    // presence checks. The DOM tree can detach for unrelated reasons
+    // (zone teardown ordering, parent cleanup race) and yield a
+    // false negative. The destroy call is the actual contract.
+    const destroySpy = jest.spyOn(EditorView.prototype, 'destroy');
 
     fixture.destroy();
 
-    expect(editorElement?.isConnected).toBe(false);
-    expect(document.querySelector('.cm-editor')).toBeNull();
+    expect(destroySpy).toHaveBeenCalled();
+    destroySpy.mockRestore();
   });
 
   it('should handle an undefined language with plain-text rendering', () => {

@@ -1,243 +1,388 @@
-import { signal } from '@angular/core';
-import { Observable, Subject, of, throwError } from 'rxjs';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import {
+  HttpTestingController,
+  provideHttpClientTesting,
+} from '@angular/common/http/testing';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { ActivatedRoute } from '@angular/router';
+import { By } from '@angular/platform-browser';
+import { Subject } from 'rxjs';
+import { WorkspaceComponent } from './workspace.component';
+import { WorkspaceService } from '../../services/workspace.service';
+import { FileTreeComponent } from '../../components/file-tree/file-tree.component';
 import type {
   FileContentResponse,
   FileTreeResponse,
   GitDiffResponse,
 } from '../../models/workspace.model';
 
-class MockWorkspaceService {
-  readonly selectedPath = signal<string | null>(null);
-  readonly getFileTree = jest.fn<Observable<FileTreeResponse>, [string]>(() =>
-    of(makeTreeResponse())
-  );
-  readonly getFileContent = jest.fn<
-    Observable<FileContentResponse>,
-    [string, string]
-  >(() => of(makeFileContent()));
-  readonly getFileDiff = jest.fn<Observable<GitDiffResponse>, [string, string]>(() =>
-    of(makeDiff())
-  );
-}
+/**
+ * Tests for `WorkspaceComponent`.
+ *
+ * Pattern: Angular `TestBed` with the REAL `WorkspaceComponent` plus a
+ * stubbed `ActivatedRoute` and `HttpTestingController`. Driving the
+ * component through TestBed lets us verify the integrated behaviours:
+ *
+ *   - ngOnInit reads `projectId` from the route and triggers the
+ *     `getFileTree` HTTP request against the real service.
+ *   - `onFileSelected` switches to code view and fires
+ *     `getFileContent`.
+ *   - `onSelectDiff` with a selected path triggers `getFileDiff` and
+ *     ONLY switches the view mode to `diff` once the HTTP response
+ *     lands. This is the critical diff-before-switch invariant.
+ *   - `onSelectDiff` falls back to `diff` view even when the HTTP
+ *     request errors.
+ */
+describe('WorkspaceComponent', () => {
+  let fixture: ComponentFixture<WorkspaceComponent>;
+  let component: WorkspaceComponent;
+  let httpMock: HttpTestingController;
+  let workspaceService: WorkspaceService;
 
-type RouteLike = {
-  snapshot: {
-    paramMap: {
-      get(name: string): string | null;
+  // ── Factory helpers ────────────────────────────────────────────
+
+  function makeTreeResponse(overrides: Partial<FileTreeResponse> = {}): FileTreeResponse {
+    return {
+      project_id: 'project-1',
+      path: '.',
+      tree: [],
+      truncated: false,
+      ...overrides,
     };
-  };
-};
-
-class TestableWorkspaceComponent {
-  public projectId = '';
-  public readonly selectedPath;
-  public readonly viewMode = signal<'code' | 'diff'>('code');
-  public readonly fileTree = { setTree: jest.fn<void, [FileTreeResponse['tree']]>() };
-
-  constructor(
-    private readonly route: RouteLike,
-    private readonly workspace: MockWorkspaceService
-  ) {
-    this.selectedPath = workspace.selectedPath.asReadonly();
   }
 
-  ngOnInit(): void {
-    this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
-    if (this.projectId) {
-      this.workspace
-        .getFileTree(this.projectId)
-        .subscribe((response) => this.fileTree.setTree(response.tree));
-    }
+  function makeFileContent(
+    overrides: Partial<FileContentResponse> = {}
+  ): FileContentResponse {
+    return {
+      project_id: 'project-1',
+      path: 'src/main.ts',
+      content: 'const value = 1;',
+      language: 'typescript',
+      total_lines: 1,
+      offset: 0,
+      limit: 1000,
+      truncated: false,
+      binary: false,
+      size_bytes: 16,
+      ...overrides,
+    };
   }
 
-  onFileSelected(path: string): void {
-    this.viewMode.set('code');
-    this.workspace.getFileContent(this.projectId, path).subscribe();
+  function makeDiff(overrides: Partial<GitDiffResponse> = {}): GitDiffResponse {
+    return {
+      project_id: 'project-1',
+      path: 'src/main.ts',
+      has_changes: true,
+      diff: '-old\n+new',
+      head_content: 'old',
+      working_content: 'new',
+      error: null,
+      ...overrides,
+    };
   }
 
-  onSelectCode(): void {
-    this.viewMode.set('code');
+  /**
+   * Flush the initial `getFileTree` request that ngOnInit fires.
+   * Tests that need a non-empty tree can override the response before
+   * calling this helper.
+   */
+  function flushInitialTree(): void {
+    const req = httpMock.expectOne(
+      (r) => r.url === '/api/workspace/test-project-id/tree' && r.params.get('path') === '.'
+    );
+    req.flush(makeTreeResponse());
   }
 
-  onSelectDiff(): void {
-    const path = this.selectedPath();
-    if (path) {
-      this.workspace.getFileDiff(this.projectId, path).subscribe({
-        next: () => this.viewMode.set('diff'),
-        error: () => this.viewMode.set('diff'),
-      });
-    } else {
-      this.viewMode.set('diff');
-    }
-  }
-}
+  // ── TestBed setup ──────────────────────────────────────────────
 
-function makeTreeResponse(overrides: Partial<FileTreeResponse> = {}): FileTreeResponse {
-  return {
-    project_id: 'project-1',
-    path: '.',
-    tree: [],
-    truncated: false,
-    ...overrides,
-  };
-}
-
-function makeFileContent(
-  overrides: Partial<FileContentResponse> = {}
-): FileContentResponse {
-  return {
-    project_id: 'project-1',
-    path: 'src/main.ts',
-    content: 'const value = 1;',
-    language: 'typescript',
-    total_lines: 1,
-    offset: 0,
-    limit: 1000,
-    truncated: false,
-    binary: false,
-    size_bytes: 16,
-    ...overrides,
-  };
-}
-
-function makeDiff(overrides: Partial<GitDiffResponse> = {}): GitDiffResponse {
-  return {
-    project_id: 'project-1',
-    path: 'src/main.ts',
-    has_changes: true,
-    diff: '-old\n+new',
-    head_content: 'old',
-    working_content: 'new',
-    error: null,
-    ...overrides,
-  };
-}
-
-function makeRoute(projectId: string | null): RouteLike {
-  return {
-    snapshot: {
-      paramMap: {
-        get: jest.fn<string | null, [string]>(() => projectId),
-      },
-    },
-  };
-}
-
-describe('WorkspaceComponent logic', () => {
-  let workspace: MockWorkspaceService;
-
-  beforeEach(() => {
-    workspace = new MockWorkspaceService();
-  });
-
-  it('should extract projectId from route.snapshot.paramMap on init', () => {
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
-
-    component.ngOnInit();
-
-    expect(component.projectId).toBe('project-42');
-  });
-
-  it('should load and set the file tree for a non-empty projectId', () => {
-    const response = makeTreeResponse({
-      tree: [
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [WorkspaceComponent],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        provideNoopAnimations(),
+        WorkspaceService,
         {
-          name: 'src',
-          path: 'src',
-          type: 'directory',
-          size: null,
-          children: null,
+          provide: ActivatedRoute,
+          useValue: {
+            snapshot: { paramMap: { get: () => 'test-project-id' } },
+          },
         },
       ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(WorkspaceComponent);
+    component = fixture.componentInstance;
+    httpMock = TestBed.inject(HttpTestingController);
+    workspaceService = TestBed.inject(WorkspaceService);
+  });
+
+  afterEach(() => {
+    httpMock.verify();
+  });
+
+  // ── 1) Component creation ─────────────────────────────────────
+
+  it('creates successfully', () => {
+    expect(component).toBeTruthy();
+  });
+
+  // ── 2) ngOnInit extracts projectId and loads tree ─────────────
+
+  describe('ngOnInit', () => {
+    it('should extract projectId from the route snapshot', () => {
+      fixture.detectChanges();
+      expect(component.projectId).toBe('test-project-id');
+      flushInitialTree();
     });
-    workspace.getFileTree.mockReturnValue(of(response));
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
 
-    component.ngOnInit();
+    it('should load the file tree for the project', () => {
+      fixture.detectChanges();
+      const req = httpMock.expectOne(
+        (r) =>
+          r.url === '/api/workspace/test-project-id/tree' &&
+          r.params.get('path') === '.'
+      );
+      expect(req.request.method).toBe('GET');
+      req.flush(makeTreeResponse());
+    });
 
-    expect(workspace.getFileTree).toHaveBeenCalledWith('project-42');
-    expect(component.fileTree.setTree).toHaveBeenCalledWith(response.tree);
+    it('should populate the embedded FileTreeComponent via setTree', () => {
+      fixture.detectChanges();
+      const req = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      req.flush(
+        makeTreeResponse({
+          tree: [
+            {
+              name: 'src',
+              path: 'src',
+              type: 'directory',
+              size: null,
+              children: null,
+            },
+          ],
+        })
+      );
+
+      // Reach the embedded FileTreeComponent via the DOM to verify the
+      // component really did setTree() — its `fileTree` viewchild is
+      // private, so we can't access it through componentInstance.
+      const fileTreeDebug = fixture.debugElement.query(
+        By.directive(FileTreeComponent)
+      );
+      const fileTree = fileTreeDebug.componentInstance as FileTreeComponent;
+      expect(fileTree.dataSource.data.length).toBe(1);
+      expect(fileTree.dataSource.data[0].name).toBe('src');
+    });
   });
 
-  it('should not load the file tree for an empty projectId', () => {
-    const component = new TestableWorkspaceComponent(makeRoute(''), workspace);
+  describe('ngOnInit with empty projectId', () => {
+    beforeEach(async () => {
+      TestBed.resetTestingModule();
+      await TestBed.configureTestingModule({
+        imports: [WorkspaceComponent],
+        providers: [
+          provideHttpClient(),
+          provideHttpClientTesting(),
+          provideNoopAnimations(),
+          WorkspaceService,
+          {
+            provide: ActivatedRoute,
+            useValue: {
+              snapshot: { paramMap: { get: () => '' } },
+            },
+          },
+        ],
+      }).compileComponents();
+      fixture = TestBed.createComponent(WorkspaceComponent);
+      component = fixture.componentInstance;
+      httpMock = TestBed.inject(HttpTestingController);
+      workspaceService = TestBed.inject(WorkspaceService);
+    });
 
-    component.ngOnInit();
-
-    expect(component.projectId).toBe('');
-    expect(workspace.getFileTree).not.toHaveBeenCalled();
+    it('should set projectId to empty and skip the tree load', () => {
+      fixture.detectChanges();
+      expect(component.projectId).toBe('');
+      // No HTTP request should have been issued.
+      httpMock.expectNone(() => true);
+    });
   });
 
-  it('should select code view and load the selected file', () => {
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
-    component.projectId = 'project-42';
-    component.viewMode.set('diff');
+  // ── 3) onFileSelected switches to code and loads file ─────────
 
-    component.onFileSelected('src/main.ts');
+  describe('onFileSelected', () => {
+    beforeEach(() => {
+      fixture.detectChanges();
+      flushInitialTree();
+    });
 
-    expect(component.viewMode()).toBe('code');
-    expect(workspace.getFileContent).toHaveBeenCalledWith('project-42', 'src/main.ts');
+    it('should switch to code view mode', () => {
+      component.viewMode.set('diff');
+      component.onFileSelected('src/main.ts');
+      expect(component.viewMode()).toBe('code');
+      // Drain the pending file-content request so httpMock.verify() passes.
+      const req = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/file'
+      );
+      req.flush(makeFileContent({ path: 'src/main.ts' }));
+    });
+
+    it('should fire getFileContent via the real WorkspaceService', () => {
+      component.onFileSelected('src/main.ts');
+
+      const req = httpMock.expectOne(
+        (r) =>
+          r.url === '/api/workspace/test-project-id/file' &&
+          r.params.get('path') === 'src/main.ts'
+      );
+      expect(req.request.method).toBe('GET');
+      req.flush(makeFileContent({ path: 'src/main.ts' }));
+    });
+
+    it('should swallow HTTP errors silently (no rethrow)', () => {
+      component.onFileSelected('src/main.ts');
+
+      const req = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/file'
+      );
+      // Flush an error — the component's error handler should catch it.
+      expect(() =>
+        req.flush('boom', { status: 500, statusText: 'Server Error' })
+      ).not.toThrow();
+    });
   });
 
-  it('should select code view without making API calls', () => {
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
-    component.viewMode.set('diff');
+  // ── 4) onSelectCode — view toggle, no HTTP ────────────────────
 
-    component.onSelectCode();
+  describe('onSelectCode', () => {
+    beforeEach(() => {
+      fixture.detectChanges();
+      flushInitialTree();
+    });
 
-    expect(component.viewMode()).toBe('code');
-    expect(workspace.getFileTree).not.toHaveBeenCalled();
-    expect(workspace.getFileContent).not.toHaveBeenCalled();
-    expect(workspace.getFileDiff).not.toHaveBeenCalled();
+    it('should switch viewMode to code without HTTP calls', () => {
+      component.viewMode.set('diff');
+
+      component.onSelectCode();
+
+      expect(component.viewMode()).toBe('code');
+      httpMock.expectNone(
+        (r) => r.url.includes('/api/workspace/test-project-id')
+      );
+    });
   });
 
-  it('should select diff view without an API call when no path is selected', () => {
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
+  // ── 5) onSelectDiff — diff-before-switch invariant ────────────
 
-    component.onSelectDiff();
+  describe('onSelectDiff', () => {
+    beforeEach(() => {
+      fixture.detectChanges();
+      flushInitialTree();
+    });
 
-    expect(component.viewMode()).toBe('diff');
-    expect(workspace.getFileDiff).not.toHaveBeenCalled();
+    it('should switch to diff view WITHOUT HTTP when no path is selected', () => {
+      expect(component.viewMode()).toBe('code');
+
+      component.onSelectDiff();
+
+      expect(component.viewMode()).toBe('diff');
+      httpMock.expectNone(
+        (r) => r.url.includes('/api/workspace/test-project-id/diff')
+      );
+    });
+
+    it('should fire getFileDiff via the real WorkspaceService when a path is selected', () => {
+      workspaceService.selectedPath.set('src/main.ts');
+
+      component.onSelectDiff();
+
+      const req = httpMock.expectOne(
+        (r) =>
+          r.url === '/api/workspace/test-project-id/diff' &&
+          r.params.get('path') === 'src/main.ts'
+      );
+      expect(req.request.method).toBe('GET');
+      req.flush(makeDiff({ path: 'src/main.ts' }));
+    });
+
+    it('should fetch diff BEFORE switching view mode (diff-before-switch)', () => {
+      // Use a Subject so we can observe the in-between state.
+      const pending = new Subject<GitDiffResponse>();
+      jest
+        .spyOn(workspaceService, 'getFileDiff')
+        .mockReturnValue(pending.asObservable());
+
+      workspaceService.selectedPath.set('src/main.ts');
+      expect(component.viewMode()).toBe('code');
+
+      component.onSelectDiff();
+
+      // View mode MUST still be 'code' until the diff response lands.
+      expect(component.viewMode()).toBe('code');
+      expect(workspaceService.getFileDiff).toHaveBeenCalledWith(
+        'test-project-id',
+        'src/main.ts'
+      );
+
+      // Once the response arrives, the view flips to 'diff'.
+      pending.next(makeDiff());
+      pending.complete();
+      expect(component.viewMode()).toBe('diff');
+    });
+
+    it('should fall back to diff view when the diff request errors', () => {
+      const pending = new Subject<GitDiffResponse>();
+      jest
+        .spyOn(workspaceService, 'getFileDiff')
+        .mockReturnValue(pending.asObservable());
+
+      workspaceService.selectedPath.set('src/main.ts');
+
+      component.onSelectDiff();
+
+      expect(component.viewMode()).toBe('code');
+
+      pending.error(new Error('boom'));
+
+      expect(component.viewMode()).toBe('diff');
+    });
+
+    it('should still call the real HTTP service when no Subject spy is installed', () => {
+      workspaceService.selectedPath.set('src/main.ts');
+
+      component.onSelectDiff();
+
+      // viewMode must not flip until we flush the HTTP response.
+      expect(component.viewMode()).toBe('code');
+
+      const req = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/diff'
+      );
+      req.flush(makeDiff({ path: 'src/main.ts' }));
+
+      expect(component.viewMode()).toBe('diff');
+    });
   });
 
-  it('should fetch the selected path diff before switching to diff view', () => {
-    const pendingDiff = new Subject<GitDiffResponse>();
-    workspace.selectedPath.set('src/main.ts');
-    workspace.getFileDiff.mockReturnValue(pendingDiff.asObservable());
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
-    component.projectId = 'project-42';
+  // ── 6) selectedPath signal mirror ─────────────────────────────
 
-    component.onSelectDiff();
+  describe('selectedPath signal', () => {
+    it('should mirror WorkspaceService.selectedPath', () => {
+      fixture.detectChanges();
+      flushInitialTree();
 
-    expect(workspace.getFileDiff).toHaveBeenCalledWith('project-42', 'src/main.ts');
-    // The mode remains unchanged until the subscription's next callback runs.
-    expect(component.viewMode()).toBe('code');
+      expect(component.selectedPath()).toBeNull();
 
-    pendingDiff.next(makeDiff());
-    expect(component.viewMode()).toBe('diff');
-  });
+      workspaceService.selectedPath.set('src/foo.py');
+      expect(component.selectedPath()).toBe('src/foo.py');
 
-  it('should fall back to diff view when loading the diff errors', () => {
-    workspace.selectedPath.set('src/main.ts');
-    workspace.getFileDiff.mockReturnValue(
-      throwError(() => new Error('Failed to load diff'))
-    );
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
-    component.projectId = 'project-42';
-
-    component.onSelectDiff();
-
-    expect(workspace.getFileDiff).toHaveBeenCalledWith('project-42', 'src/main.ts');
-    expect(component.viewMode()).toBe('diff');
-  });
-
-  it('should expose a readonly selectedPath that reflects the workspace signal', () => {
-    const component = new TestableWorkspaceComponent(makeRoute('project-42'), workspace);
-
-    expect(component.selectedPath()).toBeNull();
-
-    workspace.selectedPath.set('src/main.ts');
-    expect(component.selectedPath()).toBe('src/main.ts');
-    expect('set' in component.selectedPath).toBe(false);
+      workspaceService.selectedPath.set(null);
+      expect(component.selectedPath()).toBeNull();
+    });
   });
 });
