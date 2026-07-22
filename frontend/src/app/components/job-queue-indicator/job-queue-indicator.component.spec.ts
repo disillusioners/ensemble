@@ -151,6 +151,34 @@ class MockJobQueueIndicatorComponent {
   setProjectNameMap(m: Map<string | null, string>): void {
     this.projectNameMap.set(m);
   }
+
+  // ---------------------------------------------------------------------------
+  // Error-path mirror — replicates ``fetchJobs()``'s forkJoin error handler.
+  //
+  // C3 fix: ``JobService.listActiveJobs()`` and ``listRecentJobs()`` no longer
+  // swallow failures, so errors propagate to a single ``forkJoin`` error
+  // callback here that resets both ``activeJobs`` and ``allRecentJobs`` to
+  // ``[]`` and logs via ``console.error``. The mirror records the last error
+  // so tests can assert it was received without a real ``console.error``.
+  // ---------------------------------------------------------------------------
+
+  /** Last error passed to ``onFetchError`` — mirrors the ``console.error`` side-effect. */
+  lastFetchError: unknown = null;
+
+  /** Count of times ``onFetchError`` has been invoked — for idempotency assertions. */
+  fetchErrorCount = 0;
+
+  /**
+   * Mirror of the real component's ``fetchJobs()`` error handler:
+   * clears both raw signals to ``[]`` so the indicator surfaces "0/0"
+   * (not a stale snapshot) until the next successful poll tick.
+   */
+  onFetchError(err: unknown): void {
+    this.fetchErrorCount += 1;
+    this.lastFetchError = err;
+    this.activeJobs.set([]);
+    this.allRecentJobs.set([]);
+  }
 }
 
 describe('JobQueueIndicatorComponent Logic', () => {
@@ -604,6 +632,96 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.isTerminalStatus('paused' as JobStatus)).toBe(false);
       expect(component.isTerminalStatus('active' as JobStatus)).toBe(false);
       expect(component.isTerminalStatus('queued' as JobStatus)).toBe(false);
+    });
+  });
+
+  describe('error handling (C3 propagation)', () => {
+    it('should reset activeJobs and allRecentJobs to empty on fetch error', () => {
+      // 1. Seed the mirror with non-empty data so the error path has
+      //    something to clear (otherwise an empty starting state makes
+      //    the assertion vacuous).
+      component.setActiveJobs([
+        createMockJob({ job_id: 'a1', status: 'processing' }),
+        createMockJob({ job_id: 'a2', status: 'pending' }),
+      ]);
+      component.setRecentJobs([createMockJob({ job_id: 'r1', status: 'completed' })]);
+
+      // 2. Pre-condition: data is present and the indicator reflects it.
+      expect(component.runningCount()).toBe(1);
+      expect(component.pendingCount()).toBe(1);
+      expect(component.displayText()).toBe('1/2');
+      expect(component.recentJobs().length).toBe(1);
+
+      // 3. Simulate the forkJoin error handler firing on the mirror.
+      component.onFetchError(new Error('backend down'));
+
+      // 4. Both raw signals must be reset so the next poll starts clean.
+      //    Display text must collapse to "0/0" and the panel subsets must
+      //    be empty — this is the user-visible contract of the C3 fix.
+      expect(component.displayText()).toBe('0/0');
+      expect(component.runningJobs().length).toBe(0);
+      expect(component.recentJobs().length).toBe(0);
+      expect(component.isIdle()).toBe(true);
+
+      // 5. The error is captured for logging parity with
+      //    ``console.error('[JobQueueIndicator] Failed to fetch jobs:', err)``.
+      expect(component.fetchErrorCount).toBe(1);
+      expect(component.lastFetchError).toBeInstanceOf(Error);
+      expect((component.lastFetchError as Error).message).toBe('backend down');
+    });
+
+    it('should stay empty when onFetchError fires on an already-empty mirror', () => {
+      // Defensive: an empty starting state must remain empty — no throw,
+      // no spurious data, and displayText stays "0/0".
+      expect(component.displayText()).toBe('0/0');
+      expect(component.isIdle()).toBe(true);
+
+      component.onFetchError(new Error('network reset'));
+
+      expect(component.displayText()).toBe('0/0');
+      expect(component.runningJobs().length).toBe(0);
+      expect(component.recentJobs().length).toBe(0);
+      expect(component.fetchErrorCount).toBe(1);
+    });
+
+    it('should record each error and stay reset across repeated fetch failures', () => {
+      // Repeated failures must not leave partial state behind and must
+      // overwrite the recorded error so the next log line reflects the
+      // current failure, not a stale one.
+      component.setActiveJobs([
+        createMockJob({ job_id: 'a1', status: 'processing' }),
+      ]);
+      component.setRecentJobs([createMockJob({ job_id: 'r1', status: 'failed' })]);
+
+      component.onFetchError(new Error('first failure'));
+      expect(component.displayText()).toBe('0/0');
+      expect(component.fetchErrorCount).toBe(1);
+      expect((component.lastFetchError as Error).message).toBe('first failure');
+
+      // Re-seed and fail again — error counter advances, recorded error updates.
+      component.setActiveJobs([
+        createMockJob({ job_id: 'a1', status: 'processing' }),
+      ]);
+      component.onFetchError(new Error('second failure'));
+
+      expect(component.displayText()).toBe('0/0');
+      expect(component.fetchErrorCount).toBe(2);
+      expect((component.lastFetchError as Error).message).toBe('second failure');
+    });
+
+    it('should accept non-Error throwables (strings, objects) the way console.error does', () => {
+      // ``forkJoin`` can deliver any thrown value; the error handler must
+      // not assume the error is an ``Error`` instance.
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
+
+      component.onFetchError('string error');
+      expect(component.displayText()).toBe('0/0');
+      expect(component.lastFetchError).toBe('string error');
+
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
+      component.onFetchError({ code: 500, reason: 'server' });
+      expect(component.displayText()).toBe('0/0');
+      expect(component.lastFetchError).toEqual({ code: 500, reason: 'server' });
     });
   });
 });
