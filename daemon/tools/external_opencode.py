@@ -39,6 +39,193 @@ _OPENCODE_CONTROL_MESSAGES = frozenset({"continue", "retry", "abort", "start-wor
 # long-running opencode sessions.
 WAIT_TIMEOUT_S = 610
 
+# How many recent messages to fetch from the OpenCode API when walking
+# back to find a substantive response. The orchestrator sometimes emits
+# a trivial tail message (e.g. "Oracle session reusable for future
+# calls.") as its last assistant turn, hiding the real findings one or
+# more messages earlier. This window covers the typical council → oracle
+# round-trip (orchestrator synthesis + 1-2 stubs).
+_SUBSTANTIVE_WALKBACK_LIMIT = 10
+
+# Minimum text length (in characters) for a message to be considered
+# "substantive". Messages shorter than this are treated as stubs /
+# meta-commentary and skipped during walk-back.
+_SUBSTANTIVE_MIN_CHARS = 100
+
+# Per-session walk-back cache for ``get_status``. Keyed on session_id,
+# the value is ``(last_activity, substantive_text, idx)``. When the
+# session's ``last_activity`` hasn't changed since the last walk-back,
+# the cached substantive text is reused — no HTTP call to the OpenCode
+# API. An IDLE session's message history is immutable until a new prompt
+# is sent, so caching by ``last_activity`` is a safe freshness signal.
+# The cache is bounded by the number of distinct sessions an agent
+# polls; entries are replaced when ``last_activity`` changes.
+_status_walkback_cache: dict[str, tuple[str, str, int]] = {}
+
+# Known stub phrases that indicate a trivial/meta message even when it
+# exceeds the length threshold. Matched case-insensitively as substrings.
+# Each phrase must be specific enough to avoid false-positives on
+# legitimate review content — generic words like "oracle session" are
+# intentionally omitted because substantive analysis may reference them.
+_STUB_PHRASES = (
+    "reusable for future calls",
+    "session resumed",
+    "session reconciled",
+    "background job board",
+)
+
+
+def _extract_message_text(msg: Any) -> str | None:
+    """Extract the first text-part content from an OpenCode message.
+
+    Handles three message shapes encountered in practice:
+
+    1. **Raw API message** — ``{"role": "assistant", "parts": [{"type":
+       "text", "text": "..."}, ...]}``. Returned by ``GET
+       /session/{id}/message``.
+    2. **Stripped latest_response** — ``{"result": {"info": ..., "parts":
+       [{"type": "text", "text": "..."}]}}``. Produced by
+       ``strip_message_bloat`` and stored in ``_latest_response``.
+    3. **Simplified test mock** — ``{"result": "plain text"}`` or just
+       ``"plain text"``.
+
+    Args:
+        msg: A message dict, string, or ``None``.
+
+    Returns:
+        The extracted text, or ``None`` if no text part is found.
+    """
+    if msg is None:
+        return None
+    if isinstance(msg, str):
+        return msg.strip() or None
+
+    # Unwrap {"result": ...} envelope (shapes 2 and 3).
+    inner = msg.get("result", msg) if isinstance(msg, dict) else msg
+    if isinstance(inner, str):
+        return inner.strip() or None
+    if not isinstance(inner, dict):
+        return None
+
+    # Shape 1 / 2: walk parts[] for the first text part.
+    parts = inner.get("parts")
+    if isinstance(parts, list):
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+    return None
+
+
+def _matches_stub_phrase(text: str | None) -> bool:
+    """Return ``True`` if *text* contains any known stub phrase.
+
+    Phrase-based detection is independent of the length threshold. Used
+    by ``get_status`` where a short legitimate final answer on an IDLE
+    session should NOT trigger walk-back, but a known stub phrase
+    should.
+
+    Args:
+        text: The extracted message text (or ``None``).
+
+    Returns:
+        ``True`` if a known stub phrase is found (case-insensitive).
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _STUB_PHRASES)
+
+
+def _is_stub_text(text: str | None) -> bool:
+    """Return ``True`` if *text* is a trivial/meta stub message.
+
+    A message is considered a stub when:
+
+    - It is ``None`` or empty.
+    - Its length is below ``_SUBSTANTIVE_MIN_CHARS``.
+    - It contains any of the ``_STUB_PHRASES`` substrings
+      (case-insensitive), even if it exceeds the length threshold —
+      these are known orchestrator meta-comments that carry no
+      actionable content.
+
+    Args:
+        text: The extracted message text (or ``None``).
+
+    Returns:
+        ``True`` if the message should be skipped during walk-back.
+    """
+    if not text:
+        return True
+    if len(text) < _SUBSTANTIVE_MIN_CHARS:
+        return True
+    return _matches_stub_phrase(text)
+
+
+def _select_substantive_message(
+    messages: list[Any],
+    fallback_text: str | None = None,
+) -> tuple[str | None, int | None]:
+    """Walk *messages* newest→oldest and return the first substantive text.
+
+    The OpenCode orchestrator sometimes emits a trivial tail message as
+    its last assistant turn (e.g. *"Oracle session reusable for future
+    calls."*), with the real analysis one or more turns earlier. This
+    helper skips stubs and returns the first substantive text found.
+
+    Args:
+        messages: List of message dicts, **newest-first** (as returned
+            by ``GET /session/{id}/message?limit=N``).
+        fallback_text: Text to return if no substantive message is
+            found in *messages*. Typically the ``latest_response``
+            from the last GET_STATUS poll.
+
+    Returns:
+        Tuple of ``(text, index_in_messages)``. ``index`` is ``None``
+        when the fallback was used (no substantive message found).
+    """
+    for i, msg in enumerate(messages):
+        text = _extract_message_text(msg)
+        if text and not _is_stub_text(text):
+            return text, i
+    return fallback_text, None
+
+
+async def _fetch_recent_messages(
+    manager: Any,
+    session_id: str,
+    limit: int = _SUBSTANTIVE_WALKBACK_LIMIT,
+) -> list[Any]:
+    """Fetch the last *limit* messages from the OpenCode API.
+
+    A thin best-effort wrapper around
+    ``manager._client.get_session_messages``. Returns an empty list on
+    any failure (missing manager, network error, etc.) so callers can
+    degrade gracefully to ``latest_response``.
+
+    Args:
+        manager: The ``OpenCodeSessionManager`` for the session.
+        session_id: The OpenCode session ID.
+        limit: Maximum number of messages to fetch (newest-first).
+
+    Returns:
+        List of message dicts (newest-first), or ``[]`` on failure.
+    """
+    if manager is None:
+        return []
+    try:
+        return await manager._client.get_session_messages(session_id, limit=limit)
+    except Exception as e:
+        logger.debug(
+            "[OpenCode] _fetch_recent_messages failed for %s: %s",
+            session_id, e,
+        )
+        return []
+
+
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
     from daemon.opencode.server import OpenCodeRequest, OpenCodeResponse
@@ -558,6 +745,44 @@ Special prompts (bypass BUSY check):
                 "Latest Response:",
                 str(response) if response else "(none)",
             ]
+
+            # Walk-back: when the latest response is a stub (trivial meta
+            # message OR short non-substantive text), fetch the last N
+            # messages and surface the first substantive one so the agent
+            # doesn't repeatedly see a stale stub on every get_status
+            # poll. Uses the full _is_stub_text check (length threshold +
+            # phrase match) for aggressive walk-back triggering.
+            #
+            # Cached per session_id + last_activity: the message history
+            # of an IDLE session is immutable until a new prompt is sent,
+            # so repeat polls with the same last_activity reuse the
+            # cached substantive text without an HTTP round-trip.
+            latest_text = _extract_message_text(response)
+            last_activity = record.get("last_activity", "")
+            if _is_stub_text(latest_text):
+                cached = _status_walkback_cache.get(session_id)
+                if (
+                    cached is not None
+                    and cached[0] == last_activity
+                ):
+                    substantive, idx = cached[1], cached[2]
+                else:
+                    mgr = await registry.get_manager(session_id)
+                    recent = await _fetch_recent_messages(mgr, session_id)
+                    substantive, idx = _select_substantive_message(
+                        recent, fallback_text=latest_text,
+                    )
+                    if idx is not None:
+                        _status_walkback_cache[session_id] = (
+                            last_activity, substantive, idx,
+                        )
+                if substantive is not None and idx is not None:
+                    output.extend([
+                        "",
+                        f"Substantive Response ({idx + 1} message(s) back):",
+                        substantive,
+                    ])
+
             if questions:
                 output.append(_format_questions_block(questions))
             return "\n".join(output)
@@ -641,7 +866,37 @@ Returns:
                     ):
                         err_text = response_inner.get("error") or "unknown error"
                         return f"[ERROR] Worker request failed: {err_text}"
-                    return f"[COMPLETED] Session completed.\n{_format_response(resp)}"
+
+                    # Walk-back: the orchestrator may have emitted a
+                    # trivial tail message (e.g. "Oracle session reusable
+                    # for future calls.") as its last assistant turn,
+                    # hiding the real analysis one or more turns earlier.
+                    # Fetch the last N messages and surface the first
+                    # substantive one. Falls back to latest_response when
+                    # the fetch fails or no substantive text is found.
+                    latest_text = _extract_message_text(response_inner)
+                    if not _is_stub_text(latest_text):
+                        # Latest message is already substantive — no
+                        # walk-back needed.
+                        return f"[COMPLETED] Session completed.\n{latest_text}"
+
+                    recent = await _fetch_recent_messages(manager, session_id)
+                    # Use the legacy _format_response as the fallback so
+                    # agents that expected the raw data dict format still
+                    # see it when no substantive message is found.
+                    fallback = _format_response(resp)
+                    substantive, idx = _select_substantive_message(
+                        recent, fallback_text=fallback,
+                    )
+                    if substantive is not None and idx is not None:
+                        return (
+                            f"[COMPLETED] Session completed.\n"
+                            f"[NOTE] Latest message was a stub; "
+                            f"surfacing substantive response "
+                            f"({idx + 1} message(s) back):\n"
+                            f"{substantive}"
+                        )
+                    return f"[COMPLETED] Session completed.\n{fallback}"
                 if state == "WAITING_FOR_INPUT":
                     response_inner = data.get("latest_response")
                     if (

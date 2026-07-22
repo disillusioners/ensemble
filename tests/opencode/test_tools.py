@@ -94,6 +94,22 @@ def _stub_preload_context() -> Any:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _clear_walkback_cache() -> Any:
+    """Clear the module-level ``_status_walkback_cache`` between tests.
+
+    The cache is keyed by ``session_id`` and persists across tests in the
+    same process. Without clearing, a test that populates the cache for
+    ``session-stub`` would cause a later test with the same session_id to
+    see stale results.
+    """
+    from daemon.tools.external_opencode import _status_walkback_cache
+
+    _status_walkback_cache.clear()
+    yield
+    _status_walkback_cache.clear()
+
+
 @pytest.fixture
 def tools(mock_manager: MagicMock) -> list:
     """Return the list of 8 tools produced by the factory."""
@@ -1609,6 +1625,576 @@ class TestWaitForResultExecution:
         assert result.startswith("[ERROR]")
         assert "[WAITING_FOR_INPUT]" not in result
         assert "API Error 500" in result
+
+
+# =============================================================================
+# walk-back tests: stub detection + substantive message recovery
+# =============================================================================
+
+
+class TestStubDetection:
+    """Unit tests for ``_is_stub_text`` and ``_extract_message_text``."""
+
+    def test_short_text_is_stub(self) -> None:
+        from daemon.tools.external_opencode import _is_stub_text
+
+        assert _is_stub_text("done!")
+        assert _is_stub_text("OK")
+        assert _is_stub_text("")
+
+    def test_substantive_text_is_not_stub(self) -> None:
+        from daemon.tools.external_opencode import _is_stub_text
+
+        long_text = "x" * 200
+        assert not _is_stub_text(long_text)
+
+    def test_known_stub_phrase_detected_even_when_long(self) -> None:
+        from daemon.tools.external_opencode import _is_stub_text
+
+        # Pad with whitespace to exceed the length threshold — the
+        # phrase match should still flag it as a stub.
+        stub = (
+            "The session `ora-1 / ses_abc` is reusable for "
+            "future calls. " + " " * 100
+        )
+        assert _is_stub_text(stub)
+
+    def test_oracle_session_alone_is_not_stub(self) -> None:
+        """The phrase 'oracle session' was removed from _STUB_PHRASES
+        because it's too generic — legitimate review content may
+        reference oracle sessions. Only specific phrases remain.
+        """
+        from daemon.tools.external_opencode import _is_stub_text, _matches_stub_phrase
+
+        # A long message mentioning "oracle session" in a substantive
+        # context should NOT be flagged as a stub.
+        text = (
+            "The oracle session timed out during retry; here is the "
+            "recovered state and the findings from the analysis. "
+            + "x" * 200
+        )
+        assert not _is_stub_text(text)
+        assert not _matches_stub_phrase(text)
+
+    def test_matches_stub_phrase_true(self) -> None:
+        from daemon.tools.external_opencode import _matches_stub_phrase
+
+        assert _matches_stub_phrase("Oracle session reusable for future calls.")
+        assert _matches_stub_phrase("session resumed successfully")
+        assert _matches_stub_phrase("Background Job Board: reconciled")
+
+    def test_matches_stub_phrase_false_on_none(self) -> None:
+        from daemon.tools.external_opencode import _matches_stub_phrase
+
+        assert not _matches_stub_phrase(None)
+        assert not _matches_stub_phrase("")
+        assert not _matches_stub_phrase("a substantive review conclusion")
+
+    def test_none_is_stub(self) -> None:
+        from daemon.tools.external_opencode import _is_stub_text
+
+        assert _is_stub_text(None)
+
+    def test_extract_text_from_raw_api_message(self) -> None:
+        from daemon.tools.external_opencode import _extract_message_text
+
+        msg = {
+            "role": "assistant",
+            "parts": [
+                {"type": "step-start"},
+                {"type": "text", "text": "Real findings here."},
+                {"type": "step-finish"},
+            ],
+        }
+        assert _extract_message_text(msg) == "Real findings here."
+
+    def test_extract_text_from_stripped_latest_response(self) -> None:
+        from daemon.tools.external_opencode import _extract_message_text
+
+        msg = {
+            "result": {
+                "info": {"id": "msg_1", "finish": "stop"},
+                "parts": [
+                    {"type": "text", "text": "Stripped response."},
+                ],
+            },
+        }
+        assert _extract_message_text(msg) == "Stripped response."
+
+    def test_extract_text_from_simplified_mock(self) -> None:
+        from daemon.tools.external_opencode import _extract_message_text
+
+        assert _extract_message_text({"result": "plain text"}) == "plain text"
+        assert _extract_message_text("just a string") == "just a string"
+        assert _extract_message_text(None) is None
+
+    def test_select_substantive_walks_back(self) -> None:
+        from daemon.tools.external_opencode import _select_substantive_message
+
+        # newest-first: [stub, substantive, older]
+        messages = [
+            {"result": "Oracle session reusable for future calls."},
+            {"result": "x" * 200},
+            {"result": "older stuff"},
+        ]
+        text, idx = _select_substantive_message(messages)
+        assert idx == 1
+        assert text == "x" * 200
+
+    def test_select_substantive_falls_back_when_all_stubs(self) -> None:
+        from daemon.tools.external_opencode import _select_substantive_message
+
+        messages = [
+            {"result": "short"},
+            {"result": "also short"},
+        ]
+        text, idx = _select_substantive_message(messages, fallback_text="fallback")
+        assert idx is None
+        assert text == "fallback"
+
+    def test_select_substantive_falls_back_when_empty(self) -> None:
+        from daemon.tools.external_opencode import _select_substantive_message
+
+        text, idx = _select_substantive_message([], fallback_text="fb")
+        assert idx is None
+        assert text == "fb"
+
+
+class TestWaitForResultWalkBack:
+    """Tests for the walk-back behavior in ``external_opencode_wait_for_result``."""
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_walks_back_to_substantive_on_idle(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the latest IDLE response is a stub but an earlier message
+        has substantive text, ``wait_for_result`` surfaces the substantive
+        text with a ``[NOTE]`` marker.
+
+        This is the core walk-back scenario: the orchestrator emitted
+        *\"Oracle session reusable for future calls.\"* as its last turn,
+        hiding the real review one message back.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-stub"}
+        )
+        # Manager + client so _fetch_recent_messages returns data.
+        substantive = "# Code Review\n\n" + "x" * 200
+        client = AsyncMock()
+        client.get_session_messages = AsyncMock(return_value=[
+            # newest-first: stub, then substantive
+            {"result": "Oracle session reusable for future calls."},
+            {"result": substantive},
+        ])
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=None)
+        mock_mgr.session_id = "session-stub"
+        mock_mgr._client = client
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        idle_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {
+                    "result": "Oracle session reusable for future calls.",
+                },
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=idle_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+        assert "[NOTE]" in result
+        assert substantive in result
+        # The stub should NOT be the surfaced body.
+        assert "Oracle session reusable" not in result.split(substantive)[0]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_uses_latest_when_substantive(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the latest IDLE response is already substantive (no walk-back
+        needed), the result is returned without a ``[NOTE]`` marker.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-good"}
+        )
+        substantive = "x" * 200  # exceeds _SUBSTANTIVE_MIN_CHARS
+        idle_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"result": substantive},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=idle_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+        assert substantive in result
+        # No walk-back note when latest is substantive.
+        assert "[NOTE]" not in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_falls_back_when_all_messages_are_stubs(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When both latest_response and all recent messages are stubs,
+        the fallback text (latest_response) is surfaced without a
+        ``[NOTE]`` marker.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-all-stubs"}
+        )
+        client = AsyncMock()
+        client.get_session_messages = AsyncMock(return_value=[
+            {"result": "short stub 1"},
+            {"result": "short stub 2"},
+        ])
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=None)
+        mock_mgr.session_id = "session-all-stubs"
+        mock_mgr._client = client
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        idle_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"result": "short stub latest"},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=idle_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+        assert "short stub latest" in result
+        assert "[NOTE]" not in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_falls_back_when_fetch_fails(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When ``get_session_messages`` raises, walk-back degrades
+        gracefully to the latest_response text.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-fetch-fail"}
+        )
+        client = AsyncMock()
+        client.get_session_messages = AsyncMock(
+            side_effect=RuntimeError("connection refused"),
+        )
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=None)
+        mock_mgr.session_id = "session-fetch-fail"
+        mock_mgr._client = client
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        idle_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"result": "short but only message"},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=idle_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+        assert "short but only message" in result
+        assert "[NOTE]" not in result
+
+
+class TestGetStatusWalkBack:
+    """Tests for the walk-back behavior in ``external_opencode_get_status``."""
+
+    @pytest.mark.asyncio
+    async def test_get_status_surfaces_substantive_when_latest_is_stub(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the latest response is a stub, ``get_status`` fetches
+        recent messages and appends a ``Substantive Response`` section.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-stub",
+                "last_activity": "2026-07-22T00:37:18Z",
+            }
+        )
+        substantive = "# Code Review: feature branch\n\n" + "x" * 200
+        client = AsyncMock()
+        client.get_session_messages = AsyncMock(return_value=[
+            {"result": "Oracle session reusable for future calls."},
+            {"result": substantive},
+        ])
+        mock_mgr = MagicMock()
+        mock_mgr.session_id = "session-stub"
+        mock_mgr._client = client
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        stub_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {
+                    "result": "Oracle session reusable for future calls.",
+                },
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=stub_response,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(
+                t for t in tools if t.name == "external_opencode_get_status"
+            )
+
+            result = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert "State: IDLE" in result
+        assert "Substantive Response" in result
+        assert substantive in result
+
+    @pytest.mark.asyncio
+    async def test_get_status_no_walk_back_when_latest_is_substantive(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the latest response is already substantive, no
+        ``Substantive Response`` section is appended.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-good",
+                "last_activity": "2026-07-22T00:37:18Z",
+            }
+        )
+        substantive = "x" * 200
+        ok_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"result": substantive},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(
+                t for t in tools if t.name == "external_opencode_get_status"
+            )
+
+            result = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert "Substantive Response" not in result
+        assert substantive in result
+
+    @pytest.mark.asyncio
+    async def test_get_status_walks_back_on_short_answer(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """A short answer on IDLE SHOULD trigger walk-back — aggressive
+        triggering is intentional. The cache prevents repeat HTTP calls,
+        so there is no performance cost to the aggressive trigger.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-short",
+                "last_activity": "2026-07-22T00:37:18Z",
+            }
+        )
+        substantive = "# Full analysis\n\n" + "x" * 200
+        client = AsyncMock()
+        client.get_session_messages = AsyncMock(return_value=[
+            {"result": "Done. No issues found."},
+            {"result": substantive},
+        ])
+        mock_mgr = MagicMock()
+        mock_mgr.session_id = "session-short"
+        mock_mgr._client = client
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        short_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {"result": "Done. No issues found."},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=short_response,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(
+                t for t in tools if t.name == "external_opencode_get_status"
+            )
+
+            result = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert "Substantive Response" in result
+        assert substantive in result
+
+    @pytest.mark.asyncio
+    async def test_get_status_caches_walkback_on_repeat_poll(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """On the second ``get_status`` poll with the same
+        ``last_activity``, the walk-back result is served from cache —
+        no second HTTP call to ``get_session_messages``.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={
+                "id": "session-cached",
+                "last_activity": "2026-07-22T00:37:18Z",
+            }
+        )
+        substantive = "# Full review\n\n" + "x" * 200
+        client = AsyncMock()
+        client.get_session_messages = AsyncMock(return_value=[
+            {"result": "Oracle session reusable for future calls."},
+            {"result": substantive},
+        ])
+        mock_mgr = MagicMock()
+        mock_mgr.session_id = "session-cached"
+        mock_mgr._client = client
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        stub_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "IDLE",
+                "latest_response": {
+                    "result": "Oracle session reusable for future calls.",
+                },
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=stub_response,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            status_tool = next(
+                t for t in tools if t.name == "external_opencode_get_status"
+            )
+
+            # First poll — fetches from API.
+            result1 = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+            # Second poll — same last_activity, should hit cache.
+            result2 = await status_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert "Substantive Response" in result1
+        assert substantive in result1
+        assert "Substantive Response" in result2
+        assert substantive in result2
+        # Only ONE API call across two polls.
+        assert client.get_session_messages.await_count == 1
 
 
 # =============================================================================
