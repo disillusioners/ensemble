@@ -11,14 +11,6 @@ const PAGE_SIZE = 10;
 // KB agent IDs to filter when showKb is false
 const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer', 'kb-writer']);
 
-// Terminal statuses are final states that should not be overwritten by polling
-const TERMINAL_STATUSES: Set<InstanceStatus> = new Set([
-  'completed',
-  'error',
-  'terminated',
-  'failed',
-]);
-
 export function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
   return [...instances].sort((a, b) => {
     const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
@@ -235,14 +227,36 @@ export class InstanceService {
 
     for (const apiInstance of apiInstances) {
       const localInstance = localById.get(apiInstance.instance_id);
-      if (localInstance && TERMINAL_STATUSES.has(localInstance.status)) {
-        // Preserve local terminal status - SSE already updated it to a final state
-        result.push({ ...apiInstance, status: localInstance.status });
-        localById.delete(apiInstance.instance_id);
+      if (localInstance) {
+        // Higher updated_at wins (authoritative freshness). The backend
+        // auto-bumps updated_at on every status change, so the entry with
+        // the newer timestamp reflects the most recent committed state.
+        //
+        // This correctly handles revivals (completed -> running on reuse):
+        // the API's updated_at is bumped on revive, so it beats the stale
+        // local terminal status — the reused instance flips to running
+        // (previously the merge froze it at stale `completed` because it
+        // blindly preserved local terminal status).
+        //
+        // On a tie (same timestamp — e.g. an SSE optimistic update of a row
+        // not yet re-polled), preserve the local status to avoid
+        // overwriting a fresher SSE-delivered state with a same-row poll.
+        const apiTs = Date.parse(apiInstance.updated_at ?? '');
+        const localTs = Date.parse(localInstance.updated_at ?? '');
+        const apiNewer = !Number.isNaN(apiTs) && (Number.isNaN(localTs) || apiTs > localTs);
+        if (apiNewer) {
+          result.push(apiInstance);
+        } else {
+          result.push({
+            ...apiInstance,
+            status: localInstance.status,
+            updated_at: localInstance.updated_at,
+          });
+        }
       } else {
         result.push(apiInstance);
-        localById.delete(apiInstance.instance_id);
       }
+      localById.delete(apiInstance.instance_id);
     }
 
     // Prepend any local-only instances that weren't in the API response.

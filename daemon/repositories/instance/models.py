@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, String
+from sqlalchemy import Column, String, event
 from sqlmodel import SQLModel, Field
 
 from daemon.repositories.infra.types import JSONBType
@@ -93,3 +93,28 @@ class Instance(SQLModel, table=True):
             "updated_at": self.updated_at,
             "paused_at": self.paused_at,
         }
+
+
+# ─── updated_at consistency ─────────────────────────────────────────────────
+# ``updated_at`` has no DB-level ``onupdate``, and several code paths set
+# ``status`` (or other fields) via direct ORM writes WITHOUT bumping
+# ``updated_at`` — notably the revive block in
+# ``instance_messaging._prepare_enqueued_message`` (completed -> running on
+# reuse), plus direct ORM status writes in ``child_reports`` and
+# ``error_reporting``. This left ``updated_at`` stale relative to
+# ``status``, which broke the frontend's "higher-updated_at-wins" merge:
+# a reused instance showed stale ``completed`` until a full page reload
+# (the API's stale ``updated_at`` tied with the FE's stale local value,
+# so the merge preserved the stale terminal status).
+#
+# This ORM ``before_update`` listener makes ``updated_at`` reliable for
+# EVERY ORM update so the frontend merge can trust it as the
+# authoritative freshness signal. Core ``UPDATE`` statements in the
+# instance repository already set ``updated_at`` explicitly and are
+# unaffected — ORM events do not fire for Core updates, so there is no
+# double-write or conflict. The listener is idempotent and simply
+# reflects the semantic meaning of ``updated_at`` ("last update").
+@event.listens_for(Instance, "before_update")
+def _bump_instance_updated_at(mapper, connection, target) -> None:
+    """Auto-stamp ``updated_at`` on every ORM UPDATE of an Instance row."""
+    target.updated_at = datetime.now(timezone.utc).isoformat()
