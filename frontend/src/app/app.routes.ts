@@ -7,6 +7,7 @@ export const routes: Routes = [
   { path: 'instances/:instanceId', redirectTo: 'projects/all/instances/:instanceId', pathMatch: 'full' },
   // New project-aware route
   { path: 'projects/:projectId/instances/:instanceId', loadComponent: () => import('./pages/chat/chat.component').then(m => m.ChatComponent) },
+  { path: 'projects/:projectId/workspace', loadComponent: () => import('./pages/workspace/workspace.component').then(m => m.WorkspaceComponent), title: 'Workspace Viewer' },
   { path: 'sources', loadComponent: () => import('./components/source-list/source-list.component').then(m => m.SourceListComponent) },
   { path: 'jobs', loadComponent: () => import('./pages/jobs/jobs.component').then(m => m.JobsComponent) },
   { path: 'settings', loadComponent: () => import('./pages/settings/settings.component').then(m => m.SettingsComponent) },

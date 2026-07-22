@@ -1,0 +1,56 @@
+:host {
+  display: block;
+  height: 100%;
+  overflow: auto;
+}
+
+mat-tree {
+  min-width: max-content;
+  padding: 4px 0;
+  background: transparent;
+}
+
+mat-tree-node {
+  min-height: 36px;
+  color: #d7dae0;
+  font-size: 13px;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+button[mat-icon-button] {
+  width: 36px;
+  height: 36px;
+  padding: 6px;
+  color: #9da5b4;
+}
+
+.file-icon,
+.dir-icon {
+  width: 20px;
+  height: 20px;
+  margin-right: 6px;
+  font-size: 20px;
+}
+
+.file-icon {
+  color: #9da5b4;
+}
+
+.dir-icon {
+  color: #e5c07b;
+}
+
+.filename,
+.dirname {
+  padding-right: 16px;
+  cursor: pointer;
+  line-height: 36px;
+  white-space: nowrap;
+}
+
+.dirname {
+  font-weight: 500;
+}

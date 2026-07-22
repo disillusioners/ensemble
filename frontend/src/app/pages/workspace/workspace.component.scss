@@ -1,0 +1,80 @@
+:host {
+  display: block;
+  height: 100%;
+}
+
+.workspace-container,
+.sidenav-container {
+  height: 100%;
+  min-height: 0;
+}
+
+.file-tree-sidenav {
+  width: 280px;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  color: #d7dae0;
+  background: #21252b;
+}
+
+.tree-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.content-area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #282c34;
+}
+
+.content-toolbar {
+  min-height: 56px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #d7dae0;
+  background: #21252b;
+}
+
+.toolbar-title {
+  min-width: 0;
+  overflow: hidden;
+  font-family: monospace;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+mat-button-toggle-group {
+  flex-shrink: 0;
+}
+
+mat-button-toggle mat-icon {
+  margin-right: 4px;
+}
+
+.viewer-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viewer-content > * {
+  display: block;
+  height: 100%;
+}
+
+@media (max-width: 800px) {
+  .file-tree-sidenav {
+    width: 220px;
+  }
+}
