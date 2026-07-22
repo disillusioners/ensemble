@@ -15,12 +15,20 @@ export interface SubTask {
  * instance (Phase 2 / Task 3) and clears it on consumption / pause. The SSE
  * ``injection_pending`` event carries the same shape inside the ``message``
  * field; the GET fallback endpoint returns it as a flat object.
+ *
+ * Append-list semantics (Phase 2 / Task 3+): the backend now accumulates
+ * multiple queued injections on a single instance and emits one
+ * ``injection_pending`` event per appended message, each carrying the
+ * running ``pending_count``. ``injection_consumed`` is emitted exactly once
+ * when the agent drains the queue, and clears the slot wholesale.
  */
 export interface InjectionEvent {
   instance_id: string;
   event_type: string;
   content: string | null;
   timestamp: string;
+  /** Total queued injections on this instance after the latest append. */
+  pending_count: number;
 }
 
 export interface TodoNode {
@@ -396,21 +404,38 @@ export class SseService {
       });
     });
 
-    // Injection lifecycle events. ``injection_pending`` carries the full
-    // content + timestamp inside the ``message`` field (the SSE envelope
-    // wraps it). ``injection_consumed`` and ``injection_cleared`` clear the
-    // slot — both are no-ops on the signal side, so we share the same
-    // handler shape. See daemon/routers/messages.py:_emit_injection_sse.
+    // Injection lifecycle events. ``injection_pending`` is emitted on EVERY
+    // append under append-list semantics — the payload carries a running
+    // ``pending_count`` so the UI can render "N pending" without us having
+    // to track the count locally. We still keep the latest content /
+    // timestamp so the existing pending-injection card can show what the
+    // most recent queued message is.
+    //
+    // ``injection_consumed`` fires once when the agent drains the queue
+    // and clears the slot. ``injection_cleared`` is retained for backward
+    // compatibility with older backends (the route no longer emits it,
+    // but keeping the handler is harmless and the no-op set(null) matches
+    // the steady-state signal value). See
+    // daemon/routers/messages.py:_emit_injection_sse.
     eventSource.addEventListener('injection_pending', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
           const message = data.message ?? {};
+          // ``pending_count`` is the authoritative running total from the
+          // backend. Older backends that don't ship the field fall back to
+          // ``1`` so the existing UI keeps working (single-slot semantics).
+          const rawCount = message.pending_count;
+          const pending_count =
+            typeof rawCount === 'number' && Number.isFinite(rawCount) && rawCount > 0
+              ? Math.floor(rawCount)
+              : 1;
           this.pendingInjection.set({
             instance_id: data.instance_id as string,
             event_type: data.event_type as string,
             content: (message.content as string | null) ?? null,
             timestamp: (message.timestamp as string) ?? '',
+            pending_count,
           });
         } catch (err) {
           console.error('[SSE] Failed to parse injection_pending:', err);
@@ -516,6 +541,12 @@ export class SseService {
             event_type: 'injection_pending',
             content: resp.content,
             timestamp: resp.timestamp ?? '',
+            // REST fallback returns a flat view of the slot — under
+            // append-list semantics we don't get an authoritative count
+            // here, so seed it as ``1``. The next ``injection_pending``
+            // SSE event (if any) will reconcile the count from the
+            // backend's running total.
+            pending_count: 1,
           });
         } else {
           this.pendingInjection.set(null);

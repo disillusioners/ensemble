@@ -1,14 +1,21 @@
-"""Unit tests for the injection SSE event contract (Phase 2 / Task 1, W5).
+"""Unit tests for the injection SSE event contract (Phase 3 / Task 1, W5).
 
 The SSE event contract is shared between three call sites:
 
-    1. ``daemon/routers/messages.py`` — emits ``injection_pending`` (and
-       ``injection_cleared`` on replacement) when ``send_message`` accepts
-       a message targeting a RUNNING / WAITING_CHILDREN instance.
-    2. ``daemon/graph.py`` — emits ``injection_consumed`` when the
-       agent_node pulls and clears a pending slot from the LLM turn.
+    1. ``daemon/routers/messages.py`` — emits ``injection_pending`` (with
+       ``pending_count``) when ``send_message`` accepts a message
+       targeting a RUNNING / WAITING_CHILDREN instance. Phase 3: no
+       longer emits ``injection_cleared`` on replacement (we APPEND, not
+       REPLACE).
+    2. ``daemon/graph.py`` — emits one ``user_message`` per consumed
+       pending entry AND one ``injection_consumed`` event (with
+       ``pending_count``) when the agent_node pulls and clears the
+       queue on its LLM turn.
     3. ``daemon/services/instance_lifecycle.py`` — emits
-       ``injection_cleared`` after a pause cascade clears a pending slot.
+       ``injection_consumed`` after a pause/terminate cascade clears the
+       queue. Phase 3 lifecycle: the new contract is
+       ``injection_pending`` (per message) → ``injection_consumed``
+       (once, for all). No ``injection_cleared`` events.
 
 All three call sites reuse ``LiveEventHub.stream_message`` with a custom
 ``event_type`` (W5 contract — no new method on the hub). The tests in
@@ -17,10 +24,10 @@ this file verify:
     * ``stream_message(instance_id, message, event_type=...)`` accepts
       the custom event_type and serializes the payload correctly.
     * The agent_node consumption site calls stream_message with
-      ``event_type="injection_consumed"`` after clearing the slot.
+      ``event_type="user_message"`` for each consumed entry and one
+      ``event_type="injection_consumed"`` for the closure.
     * The pause cascade site calls stream_message with
-      ``event_type="injection_cleared"`` after clearing a pending slot.
-    * The replacement path emits cleared-then-pending in order.
+      ``event_type="injection_consumed"`` after clearing the queue.
     * W5 enforcement: ``LiveEventHub`` does NOT have a
       ``stream_injection`` or similar bespoke method — only the existing
       ``stream_message`` is reused.
@@ -103,7 +110,11 @@ class TestStreamMessageShape:
 
     @pytest.mark.asyncio
     async def test_injection_pending_event_shape(self):
-        """stream_message(..., event_type='injection_pending') emits the correct payload."""
+        """stream_message(..., event_type='injection_pending') emits the correct payload.
+
+        Phase 3: ``injection_pending`` payloads include the ``pending_count``
+        so the frontend can show a "N messages queued" indicator.
+        """
         from daemon.services.live_event_hub import LiveEventHub
 
         hub = LiveEventHub()
@@ -115,6 +126,7 @@ class TestStreamMessageShape:
             "event_type": "injection_pending",
             "content": "user msg",
             "timestamp": "2026-07-13T00:00:00+00:00",
+            "pending_count": 2,
         }
         await hub.stream_message("inst-1", message=payload, event_type="injection_pending")
 
@@ -127,10 +139,15 @@ class TestStreamMessageShape:
         assert event["message"] == payload
         assert event["message"]["content"] == "user msg"
         assert event["message"]["timestamp"] == "2026-07-13T00:00:00+00:00"
+        assert event["message"]["pending_count"] == 2
 
     @pytest.mark.asyncio
     async def test_injection_consumed_event_shape(self):
-        """stream_message(..., event_type='injection_consumed') emits the right shape."""
+        """stream_message(..., event_type='injection_consumed') emits the right shape.
+
+        Phase 3: includes the ``pending_count`` for the queue that was
+        just consumed (so the FE can drop the pending indicator).
+        """
         from daemon.services.live_event_hub import LiveEventHub
 
         hub = LiveEventHub()
@@ -142,33 +159,14 @@ class TestStreamMessageShape:
             "event_type": "injection_consumed",
             "content": "consumed msg",
             "timestamp": "2026-07-13T00:00:01+00:00",
+            "pending_count": 3,
         }
         await hub.stream_message("inst-2", message=payload, event_type="injection_consumed")
 
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert event["event_type"] == "injection_consumed"
         assert event["message"]["content"] == "consumed msg"
-
-    @pytest.mark.asyncio
-    async def test_injection_cleared_event_shape(self):
-        """stream_message(..., event_type='injection_cleared') emits the right shape."""
-        from daemon.services.live_event_hub import LiveEventHub
-
-        hub = LiveEventHub()
-        queue: asyncio.Queue = asyncio.Queue()
-        await hub.add_connection("inst-3", queue)
-
-        payload = {
-            "instance_id": "inst-3",
-            "event_type": "injection_cleared",
-            "content": "old msg",
-            "timestamp": "2026-07-13T00:00:02+00:00",
-        }
-        await hub.stream_message("inst-3", message=payload, event_type="injection_cleared")
-
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert event["event_type"] == "injection_cleared"
-        assert event["message"]["content"] == "old msg"
+        assert event["message"]["pending_count"] == 3
 
     @pytest.mark.asyncio
     async def test_no_connections_drops_event_silently(self):
@@ -189,17 +187,17 @@ class TestStreamMessageShape:
 
 
 # ---------------------------------------------------------------------------
-# Agent node consumption site — Task 7
+# Agent node consumption site — Task 7 (Phase 3: per-message + closure)
 # ---------------------------------------------------------------------------
 
 
 class TestAgentNodeConsumptionSSE:
-    """The agent_node emits ``injection_consumed`` after clearing the slot.
+    """The agent_node emits one ``user_message`` per consumed entry PLUS
+    one ``injection_consumed`` for the whole queue.
 
     Wires up ``create_agent_node`` with a stub LLM and a stub injection_slot
     + live_hub, runs one agent turn, and asserts that ``stream_message``
-    was called exactly once with ``event_type='injection_consumed'`` and
-    the cleared content + timestamp in the payload.
+    fires the expected SSE sequence.
     """
 
     def _make_agent(self, *, injection_slot: Any, live_hub: Any):
@@ -231,39 +229,31 @@ class TestAgentNodeConsumptionSSE:
 
     @pytest.mark.asyncio
     async def test_agent_node_emits_injection_consumed_after_clear(self):
-        """Agent turn with a pending injection emits SSE after clearing the slot.
+        """Agent turn with a single-entry queue emits user_message + injection_consumed.
 
-        Bug fix (injection-sse-echo-fix): the injection path now emits two
-        SSE events at the consumption point, mirroring the normal
-        ``send_message`` path so the frontend renders a user-bubble update
-        even for injected messages:
-
-            1. ``user_message`` (serialized HumanMessage carrying the
-               injected ``content`` so the FE echoes it like a normal
-               user turn).
-            2. ``injection_consumed`` (W5 envelope — content + timestamp
-               of the slot entry that was just cleared).
-
-        Order matters: ``user_message`` MUST arrive before
-        ``injection_consumed`` so the FE paints the user bubble before
-        it removes the "pending" indicator.
+        Phase 3: each pending entry emits its own ``user_message`` echo so
+        the FE renders a user bubble for each. Closing the lifecycle is
+        ONE ``injection_consumed`` event (with ``pending_count``).
         """
         from langchain_core.messages import AIMessage
 
         class _StubInjectionSlot:
+            """Phase 3: get returns a LIST of pending entries."""
+
             def __init__(self):
-                self.cleared_entry = {
-                    "content": "user pending msg",
-                    "timestamp": "2026-07-13T00:00:00+00:00",
-                }
+                self.cleared_entries = [
+                    {"content": "user pending msg", "timestamp": "2026-07-13T00:00:00+00:00"},
+                ]
                 self.clear_called = False
 
             def get(self, instance_id):
-                return self.cleared_entry
+                return list(self.cleared_entries)  # defensive copy
 
             def clear(self, instance_id):
                 self.clear_called = True
-                return self.cleared_entry
+                result = self.cleared_entries
+                self.cleared_entries = []
+                return result
 
         slot = _StubInjectionSlot()
         hub = MagicMock()
@@ -293,7 +283,7 @@ class TestAgentNodeConsumptionSSE:
         assert user_payload["role"] == "user"
         assert user_payload["content"] == "user pending msg"
 
-        # ---- Call 2: injection_consumed — slot entry echoed ----
+        # ---- Call 2: injection_consumed — queue entry echoed ----
         second = calls[1]
         assert second.kwargs["event_type"] == "injection_consumed"
         assert second.args[0] == "inst-1"
@@ -302,13 +292,65 @@ class TestAgentNodeConsumptionSSE:
         assert consumed_payload["content"] == "user pending msg"
         assert consumed_payload["timestamp"] == "2026-07-13T00:00:00+00:00"
         assert consumed_payload["instance_id"] == "inst-1"
+        # Phase 3: pending_count is in the consumed payload
+        assert consumed_payload["pending_count"] == 1
 
         # The return value still persists both messages (Phase 1 C2 contract)
         assert len(result["messages"]) == 2
 
     @pytest.mark.asyncio
+    async def test_agent_node_emits_one_user_message_per_pending_entry(self):
+        """Phase 3: a multi-entry queue emits one user_message per entry,
+        FIFO order, then ONE closing injection_consumed.
+        """
+        from langchain_core.messages import AIMessage
+
+        class _StubInjectionSlot:
+            def __init__(self):
+                self.cleared_entries = [
+                    {"content": "first", "timestamp": "2026-07-13T00:00:00+00:00"},
+                    {"content": "second", "timestamp": "2026-07-13T00:00:01+00:00"},
+                    {"content": "third", "timestamp": "2026-07-13T00:00:02+00:00"},
+                ]
+                self.clear_called = False
+
+            def get(self, instance_id):
+                return list(self.cleared_entries)
+
+            def clear(self, instance_id):
+                self.clear_called = True
+                result = self.cleared_entries
+                self.cleared_entries = []
+                return result
+
+        slot = _StubInjectionSlot()
+        hub = MagicMock()
+        hub.stream_message = AsyncMock()
+
+        agent_node, llm = self._make_agent(injection_slot=slot, live_hub=hub)
+
+        state = {"messages": []}
+        await agent_node(state, config={"configurable": {"thread_id": "inst-1"}})
+
+        # 3 user_message + 1 injection_consumed = 4 SSE events
+        assert hub.stream_message.await_count == 4
+        calls = hub.stream_message.await_args_list
+
+        # First three are user_message in FIFO order
+        for i, expected_content in enumerate(["first", "second", "third"]):
+            assert calls[i].kwargs["event_type"] == "user_message"
+            assert calls[i].kwargs["message"]["content"] == expected_content
+
+        # Last call is injection_consumed with pending_count = 3
+        last = calls[3]
+        assert last.kwargs["event_type"] == "injection_consumed"
+        assert last.kwargs["message"]["pending_count"] == 3
+        # Content is the head entry (oldest)
+        assert last.kwargs["message"]["content"] == "first"
+
+    @pytest.mark.asyncio
     async def test_agent_node_does_not_emit_when_no_pending_injection(self):
-        """Empty slot → no SSE event (the W5 contract is "emit only when meaningful")."""
+        """Empty queue → no SSE event (the W5 contract is "emit only when meaningful")."""
         class _StubInjectionSlot:
             def get(self, instance_id):
                 return None
@@ -325,7 +367,7 @@ class TestAgentNodeConsumptionSSE:
         state = {"messages": []}
         result = await agent_node(state, config={"configurable": {"thread_id": "inst-1"}})
 
-        # No SSE event — the slot was empty.
+        # No SSE event — the queue was empty.
         hub.stream_message.assert_not_called()
         # Return value is single message (Phase 1 C2 fallback).
         assert len(result["messages"]) == 1
@@ -340,13 +382,17 @@ class TestAgentNodeConsumptionSSE:
         """
         class _StubInjectionSlot:
             def __init__(self):
-                self.cleared = {"content": "x", "timestamp": "t"}
+                self.cleared = [
+                    {"content": "x", "timestamp": "t"},
+                ]
 
             def get(self, instance_id):
-                return self.cleared
+                return list(self.cleared)
 
             def clear(self, instance_id):
-                return self.cleared
+                result = self.cleared
+                self.cleared = []
+                return result
 
         slot = _StubInjectionSlot()
         hub = MagicMock()
@@ -363,12 +409,18 @@ class TestAgentNodeConsumptionSSE:
 
 
 # ---------------------------------------------------------------------------
-# Pause cascade clearing site — Task 8
+# Pause cascade clearing site — Phase 3 emits injection_consumed
 # ---------------------------------------------------------------------------
 
 
 class TestPauseCascadeClearedSSE:
-    """The pause cascade emits ``injection_cleared`` for each cleared slot.
+    """The pause cascade emits ``injection_consumed`` for each cleared queue.
+
+    Phase 3 lifecycle: the new contract is
+    ``injection_pending`` (per message) → ``injection_consumed``
+    (once, for all). There is no longer an ``injection_cleared`` event
+    anywhere — the pause cascade emits ``injection_consumed`` to close
+    the pending state.
 
     Tests ``InstanceLifecycleService.pause_instance_cascade`` with a
     heavily-mocked manager: the DB write helper (``_pause_cascade_db_sync``)
@@ -381,7 +433,7 @@ class TestPauseCascadeClearedSSE:
         *,
         tree_ids: list[str],
         per_node_meta: dict[str, dict[str, Any]],
-        cleared_per_node: dict[str, dict[str, str] | None],
+        cleared_per_node: dict[str, list[dict[str, str]] | None],
     ) -> tuple[MagicMock, Any, MagicMock]:
         """Build a mock manager that drives pause_instance_cascade through the SSE loop.
 
@@ -392,7 +444,7 @@ class TestPauseCascadeClearedSSE:
             * ``_graph_tasks.pop`` — returns None (no live tasks).
             * ``release_context_usage_cache`` — no-op.
             * ``clear_injection`` — returns the configured
-              ``cleared_per_node[node_id]``.
+              ``cleared_per_node[node_id]`` (a list under Phase 3).
             * ``_pause_cascade_db_sync`` — returns a fake
               ``_CascadeUpdateResult`` so the post-DB SSE loop fires.
         """
@@ -422,7 +474,7 @@ class TestPauseCascadeClearedSSE:
         manager._graph_tasks = {}
         manager.release_context_usage_cache = MagicMock()
 
-        # clear_injection — per-node mapping.
+        # clear_injection — per-node mapping. Phase 3 returns a list.
         manager.clear_injection = MagicMock(side_effect=lambda nid: cleared_per_node.get(nid))
 
         # Live hub — capture every SSE call for assertion.
@@ -448,16 +500,15 @@ class TestPauseCascadeClearedSSE:
         return manager, _fake_pause_db_sync, hub
 
     @pytest.mark.asyncio
-    async def test_pause_emits_injection_cleared_when_slot_was_populated(self):
-        """pause_instance_cascade emits ``injection_cleared`` for each cleared slot."""
+    async def test_pause_emits_injection_consumed_when_queue_was_populated(self):
+        """pause_instance_cascade emits ``injection_consumed`` for each cleared queue."""
         manager, _fake_db_sync, hub = self._build_manager_for_pause_test(
             tree_ids=["inst-1"],
             per_node_meta={"inst-1": {"status": "running", "agent_id": "leader"}},
             cleared_per_node={
-                "inst-1": {
-                    "content": "old pending msg",
-                    "timestamp": "2026-07-13T00:00:00+00:00",
-                }
+                "inst-1": [
+                    {"content": "old pending msg", "timestamp": "2026-07-13T00:00:00+00:00"},
+                ]
             },
         )
         # Bind the fake DB sync helper onto the service instance.
@@ -479,26 +530,27 @@ class TestPauseCascadeClearedSSE:
 
         # The status_change SSE fired (existing path)
         assert hub.stream_status_change.await_count == 1
-        # The injection_cleared SSE fired (Phase 2 / Task 8)
+        # The injection_consumed SSE fired (Phase 3 lifecycle)
         assert hub.stream_message.await_count == 1
         call = hub.stream_message.await_args
-        assert call.kwargs["event_type"] == "injection_cleared"
+        assert call.kwargs["event_type"] == "injection_consumed"
         assert call.args[0] == "inst-1"
         payload = call.kwargs["message"]
-        assert payload["event_type"] == "injection_cleared"
+        assert payload["event_type"] == "injection_consumed"
         assert payload["instance_id"] == "inst-1"
         assert payload["content"] == "old pending msg"
         assert payload["timestamp"] == "2026-07-13T00:00:00+00:00"
+        assert payload["pending_count"] == 1
 
         assert "inst-1" in result["paused_ids"]
 
     @pytest.mark.asyncio
-    async def test_pause_does_not_emit_cleared_when_slot_was_empty(self):
-        """No pending injection → no ``injection_cleared`` SSE event."""
+    async def test_pause_does_not_emit_when_queue_was_empty(self):
+        """No pending injection → no ``injection_consumed`` SSE event."""
         manager, _fake_db_sync, hub = self._build_manager_for_pause_test(
             tree_ids=["inst-1"],
             per_node_meta={"inst-1": {"status": "running", "agent_id": "leader"}},
-            cleared_per_node={"inst-1": None},  # Empty slot — nothing to emit
+            cleared_per_node={"inst-1": None},  # Empty queue — nothing to emit
         )
         manager._pause_cascade_db_sync = _fake_db_sync
 
@@ -515,12 +567,12 @@ class TestPauseCascadeClearedSSE:
 
         # status_change fired (existing path)
         assert hub.stream_status_change.await_count == 1
-        # No injection_cleared event because the slot was empty
+        # No injection_consumed event because the queue was empty
         hub.stream_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_pause_cascade_emits_cleared_per_node(self):
-        """Multi-node cascade → one ``injection_cleared`` per node with a cleared slot."""
+    async def test_pause_cascade_emits_consumed_per_node(self):
+        """Multi-node cascade → one ``injection_consumed`` per node with a cleared queue."""
         manager, _fake_db_sync, hub = self._build_manager_for_pause_test(
             tree_ids=["inst-1", "inst-2", "inst-3"],
             per_node_meta={
@@ -529,9 +581,14 @@ class TestPauseCascadeClearedSSE:
                 "inst-3": {"status": "running", "agent_id": "tester"},
             },
             cleared_per_node={
-                "inst-1": {"content": "m1", "timestamp": "t1"},
+                "inst-1": [
+                    {"content": "m1", "timestamp": "t1"},
+                    {"content": "m1b", "timestamp": "t1b"},
+                ],
                 "inst-2": None,  # Empty — should NOT emit
-                "inst-3": {"content": "m3", "timestamp": "t3"},
+                "inst-3": [
+                    {"content": "m3", "timestamp": "t3"},
+                ],
             },
         )
         manager._pause_cascade_db_sync = _fake_db_sync
@@ -547,70 +604,19 @@ class TestPauseCascadeClearedSSE:
 
         await svc.pause_instance_cascade("inst-1")
 
-        # Two injection_cleared events — inst-1 and inst-3. inst-2 was empty.
-        cleared_calls = [
-            c for c in hub.stream_message.await_args_list
-            if c.kwargs["event_type"] == "injection_cleared"
+        # 2 injection_consumed events (inst-1, inst-3) — inst-2 was empty
+        consumed_calls = [
+            call for call in hub.stream_message.await_args_list
+            if call.kwargs["event_type"] == "injection_consumed"
         ]
-        assert len(cleared_calls) == 2
-        cleared_instance_ids = {c.args[0] for c in cleared_calls}
-        assert cleared_instance_ids == {"inst-1", "inst-3"}
+        assert len(consumed_calls) == 2
 
+        # inst-1 emitted with pending_count=2
+        inst1_calls = [c for c in consumed_calls if c.args[0] == "inst-1"]
+        assert len(inst1_calls) == 1
+        assert inst1_calls[0].kwargs["message"]["pending_count"] == 2
 
-# ---------------------------------------------------------------------------
-# Replacement — already covered in tests/test_injection_api.py. Here we
-# verify the same contract holds when called directly on LiveEventHub
-# (i.e., the hub itself does not enforce any ordering — the call site
-# must call cleared BEFORE pending).
-# ---------------------------------------------------------------------------
-
-
-class TestReplacementOrdering:
-    """Replacement call site emits cleared BEFORE pending (in order)."""
-
-    @pytest.mark.asyncio
-    async def test_cleared_then_pending_reaches_queue_in_order(self):
-        """The SSE queue receives cleared first, then pending — order matters for FE.
-
-        This test verifies that the W5 contract (call sites own the
-        ordering) is honored when both events are emitted from the same
-        hub. Listeners that subscribe mid-stream should never see
-        pending-before-cleared, which would leave them with a stale
-        pending state.
-        """
-        from daemon.services.live_event_hub import LiveEventHub
-
-        hub = LiveEventHub()
-        queue: asyncio.Queue = asyncio.Queue()
-        await hub.add_connection("inst-1", queue)
-
-        # Emit cleared first
-        await hub.stream_message(
-            "inst-1",
-            message={
-                "instance_id": "inst-1",
-                "event_type": "injection_cleared",
-                "content": "old",
-                "timestamp": "t-old",
-            },
-            event_type="injection_cleared",
-        )
-        # Then pending
-        await hub.stream_message(
-            "inst-1",
-            message={
-                "instance_id": "inst-1",
-                "event_type": "injection_pending",
-                "content": "new",
-                "timestamp": "t-new",
-            },
-            event_type="injection_pending",
-        )
-
-        first = await asyncio.wait_for(queue.get(), timeout=1.0)
-        second = await asyncio.wait_for(queue.get(), timeout=1.0)
-
-        assert first["event_type"] == "injection_cleared"
-        assert first["message"]["content"] == "old"
-        assert second["event_type"] == "injection_pending"
-        assert second["message"]["content"] == "new"
+        # inst-3 emitted with pending_count=1
+        inst3_calls = [c for c in consumed_calls if c.args[0] == "inst-3"]
+        assert len(inst3_calls) == 1
+        assert inst3_calls[0].kwargs["message"]["pending_count"] == 1

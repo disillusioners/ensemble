@@ -113,12 +113,17 @@ from .config import LoopBreakerConfig
 # code path needs to write.
 
 class InjectionSlot:
-    """Lightweight, mock-friendly handle around InstanceManager injection slot.
+    """Lightweight, mock-friendly handle around InstanceManager injection queue.
 
     Threaded into :func:`build_instance_graph` and :func:`create_agent_node`
     via factory closure (C1), mirroring the existing ``compactor`` /
     ``graph_ref`` closure parameters. Backed by ``InstanceManager`` so the
     underlying dict is the single source of truth across all paths.
+
+    Phase 3 (append-list semantics): ``get`` returns a list (the full
+    FIFO queue, oldest first) and ``clear`` pops the entire list. The
+    agent_node iterates over the returned list to inject each message
+    as a separate ``HumanMessage`` before the LLM call.
 
     Args:
         manager: The owning :class:`InstanceManager`. Tests may pass any
@@ -130,20 +135,22 @@ class InjectionSlot:
     def __init__(self, manager: Any) -> None:
         self._manager = manager
 
-    def get(self, instance_id: str) -> dict | None:
-        """Peek the pending injection without clearing it.
+    def get(self, instance_id: str) -> list[dict] | None:
+        """Peek the pending injection queue without clearing it.
 
-        Returns ``None`` when no injection exists for this instance.
+        Returns ``None`` when no injection is queued for this instance.
+        Otherwise returns the full FIFO list (oldest first) so the
+        agent_node can consume entries in order.
         """
         getter = getattr(self._manager, "get_injection", None)
         if getter is None:
             return None
         return getter(instance_id)
 
-    def clear(self, instance_id: str) -> dict | None:
-        """Pop and return the pending injection (or ``None``).
+    def clear(self, instance_id: str) -> list[dict] | None:
+        """Pop and return the entire pending injection queue, or ``None``.
 
-        Idempotent: calling when no injection exists is a no-op.
+        Idempotent: calling when no injection is queued is a no-op.
         """
         clearer = getattr(self._manager, "clear_injection", None)
         if clearer is None:
@@ -601,12 +608,14 @@ class RepairContext:
             parity with reactive compaction; not consumed by the current
             repair logic but kept so future call sites can match the same
             shape as ``create_agent_node``.
-        injected_msg: Optional ``HumanMessage`` that was pending in the
-            injection slot when the loop was detected. Re-appended to
-            ``repaired_messages`` after the state re-read (C3 pattern, see
-            ``daemon.graph.create_agent_node`` lines 1204-1217) so the LLM
-            retry sees the user's injection exactly as the first attempt
-            did. ``None`` when no injection was consumed.
+        injected_msg: Optional list of ``HumanMessage``s that were pending
+            in the injection queue when the loop was detected. Re-appended
+            to ``repaired_messages`` after the state re-read (C3 pattern,
+            see ``daemon.graph.create_agent_node`` lines 1204-1217) so the
+            LLM retry sees the user's injections exactly as the first
+            attempt did. ``None`` when no injection was consumed; empty
+            list when nothing was pending. Phase 3: the queue can hold
+            multiple messages — each is appended individually.
         summarization_timeout_seconds: Override for the LLM summarization
             ``asyncio.wait_for`` timeout. ``0`` / unset defers to the
             repairer's own ``self._timeout_seconds`` and finally 30s.
@@ -618,7 +627,7 @@ class RepairContext:
     graph: Any  # compiled LangGraph graph (or AsyncMock stand-in)
     llm_config: dict
     system_prompt: str
-    injected_msg: BaseMessage | None = None
+    injected_msg: list[BaseMessage] | None = None
     summarization_timeout_seconds: int = 30
 
 
@@ -747,12 +756,13 @@ class LoopRepairer:
             updated_state = await context.graph.aget_state(context.thread_config)
             repaired_messages = list(updated_state.values.get('messages', []))
 
-            # Step 6: C3 re-append — the injected user message lives only
+            # Step 6: C3 re-append — the injected user messages live only
             # in the closure, NOT in the checkpoint, so the re-read above
-            # loses it. Re-append to ``repaired_messages`` so the LLM
-            # retry sees the user's intent.
-            if context.injected_msg is not None:
-                repaired_messages = list(repaired_messages) + [context.injected_msg]
+            # loses them. Re-append to ``repaired_messages`` so the LLM
+            # retry sees every user's intent (Phase 3: there can be more
+            # than one pending message).
+            if context.injected_msg:
+                repaired_messages = list(repaired_messages) + list(context.injected_msg)
 
             return RepairResult(
                 success=True,
@@ -986,7 +996,7 @@ async def _maybe_repair_loop(
     instance_short: str,
     config: dict | None,
     graph_ref: list | None,
-    injected_msg: BaseMessage | None,
+    injected_msg: list[BaseMessage] | None,
     system_prompt: str,
     llm_config: dict | None,
     loop_breaker_slot: LoopBreakerSlot | None,
@@ -1010,7 +1020,7 @@ async def _maybe_repair_loop(
 
     ``full_messages`` MUST be the same list the caller intends to send to
     the LLM at the call site — typically already including
-    ``injected_msg`` (C2) — so that the no-repair paths preserve it
+    ``injected_msgs`` (C2) — so that the no-repair paths preserve it
     unchanged. The helper only knows how to rebuild ``full_messages`` from
     a clean ``[SystemMessage(system_prompt), *messages]`` skeleton; it does
     NOT know whether the caller appended extra items, so the caller must
@@ -1020,16 +1030,17 @@ async def _maybe_repair_loop(
     Args:
         messages: Current conversation messages (oldest-first).
         full_messages: The ``messages`` list the caller intends to feed to
-            the LLM (already includes ``injected_msg`` if any). Returned
+            the LLM (already includes ``injected_msgs`` if any). Returned
             unchanged on no-repair paths; rebuilt on success.
         instance_id: Graph thread id — used for slot lookups.
         instance_short: Short id for log readability.
         config: LangGraph thread config (used to build ``RepairContext``).
         graph_ref: Late-bound list ``[compiled_graph_or_None]``. ``None`` or
             ``[None]`` disables the repair path.
-        injected_msg: Optional ``HumanMessage`` that was consumed from the
-            injection slot this turn; re-appended after a successful repair
-            (C3) when the repairer forgot it.
+        injected_msg: Optional list of ``HumanMessage``s consumed from the
+            injection queue this turn; re-appended after a successful repair
+            (C3) when the repairer forgot them. Phase 3: the queue can hold
+            multiple messages — each is re-appended individually.
         system_prompt: Session system prompt — prepended to ``full_messages``.
         llm_config: Session LLM config — passed to ``RepairContext``.
         loop_breaker_slot: Slot handle; ``None`` disables the block.
@@ -1042,7 +1053,7 @@ async def _maybe_repair_loop(
         Tuple of ``(messages, full_messages)``. When the loop breaker is
         no-op or the repair fails, the ORIGINAL pair is returned unchanged.
         When the repair succeeds, ``messages`` is the post-repair list
-        (with ``injected_msg`` re-appended when missing) and ``full_messages``
+        (with ``injected_msgs`` re-appended when missing) and ``full_messages``
         is the freshly-rebuilt ``[SystemMessage(system_prompt), *messages]``.
     """
     if not (
@@ -1147,17 +1158,21 @@ async def _maybe_repair_loop(
 
     loop_breaker_slot.record_repair(instance_id, result.summary)
     messages = result.repaired_messages
-    # C3 defensive re-append: the injection lives only in the local
-    # closure (the real ``LoopRepairer`` already re-appends it on its own,
-    # but a mock repairer — or a future repairer that forgets — could
-    # drop it). If the repaired tail does NOT end with the injected
-    # message, re-append it so the LLM retry still receives the user's
-    # intent. The id-match guard prevents double-appending when a
-    # well-behaved repairer already preserved the injection.
-    if injected_msg is not None and (
-        not messages or messages[-1].id != injected_msg.id
-    ):
-        messages = list(messages) + [injected_msg]
+    # C3 defensive re-append: the injections live only in the local
+    # closure (the real ``LoopRepairer`` already re-appends them on its
+    # own, but a mock repairer — or a future repairer that forgets —
+    # could drop them). For each pending message, if the repaired tail
+    # does NOT end with that message, re-append it so the LLM retry
+    # still receives the user's intent. The id-match guard prevents
+    # double-appending when a well-behaved repairer already preserved
+    # the injection. Phase 3: there can be MORE THAN ONE pending
+    # message — we re-append every one that's missing.
+    if injected_msg:
+        existing_ids = {m.id for m in messages if getattr(m, "id", None) is not None}
+        for msg in injected_msg:
+            if msg.id is None or msg.id not in existing_ids:
+                messages = list(messages) + [msg]
+                existing_ids.add(msg.id)
     full_messages = [SystemMessage(content=system_prompt)] + list(messages)
     logger.info(
         f"[LOOP BREAKER] Repair complete, re-invoking "
@@ -1805,53 +1820,60 @@ def create_agent_node(
         instance_id = (config or {}).get('configurable', {}).get('thread_id', 'unknown')
         instance_short = instance_id.split('-')[0] if '-' in instance_id else instance_id
 
-        # ── Phase 1 / C2: pull + clear the pending user-injection ─────────
-        # Pull happens BEFORE the LLM call so the injected HumanMessage is
+        # ── Phase 3 / C2: pull + clear ALL pending user-injections ─────────
+        # Pull happens BEFORE the LLM call so the injected HumanMessages are
         # part of the request. Clear happens BEFORE the LLM call too —
-        # not after — so a transient LLM failure cannot leave the slot
-        # stale: either the LLM sees the injection, or the slot survives
+        # not after — so a transient LLM failure cannot leave the queue
+        # stale: either the LLM sees the injection, or the queue survives
         # to be retried on the next agent turn.
         #
-        # Reference is captured in ``injected_msg`` so the reactive
-        # compaction handler (C3) can re-append it after a checkpoint
-        # re-read, and so the return value (C2) persists BOTH messages.
-        injected_msg: HumanMessage | None = None
+        # Phase 3 append-list semantics: multiple pending messages can
+        # accumulate for the same instance. The agent_node consumes ALL
+        # of them on this turn, in FIFO order (oldest first), as separate
+        # HumanMessages. Each gets its own ``user_message`` SSE echo so the
+        # frontend renders a user bubble for each; then ONE
+        # ``injection_consumed`` SSE event fires once for the whole queue
+        # to close the lifecycle.
+        #
+        # ``injected_msgs`` (list) is captured so the reactive compaction
+        # handler (C3) can re-append ALL of them after a checkpoint
+        # re-read, and so the return value (C2) persists the full inbox.
+        injected_msgs: list[HumanMessage] = []
         if injection_slot is not None:
-            pending = injection_slot.get(instance_id)
-            if pending is not None:
-                content = pending.get("content", "")
-                injected_msg = HumanMessage(
-                    content=content,
-                    additional_kwargs={"injected_message": True},
-                )
-                full_messages.append(injected_msg)
-                cleared = injection_slot.clear(instance_id)
-                # Defensive: if the slot was empty on clear (extremely
-                # unlikely race — another consumer popped it between our
-                # get and clear), log and continue. ``injected_msg`` is
-                # already in full_messages and will be returned.
-                if cleared is None:
+            pending_list = injection_slot.get(instance_id)
+            if pending_list:
+                # Build a HumanMessage for each pending entry — FIFO order.
+                for entry in pending_list:
+                    content = entry.get("content", "")
+                    injected_msgs.append(
+                        HumanMessage(
+                            content=content,
+                            additional_kwargs={"injected_message": True},
+                        )
+                    )
+                # Append ALL injected messages to the LLM-bound list.
+                full_messages.extend(injected_msgs)
+
+                # Clear the queue AT ONCE — returns the entire list (or
+                # None on the race where another consumer drained it
+                # between our get and clear, which is extremely unlikely
+                # in the single-event-loop design).
+                cleared_list = injection_slot.clear(instance_id)
+                if cleared_list is None:
                     logger.warning(
-                        f"[Injection] Slot disappeared between get+clear "
+                        f"[Injection] Queue disappeared between get+clear "
                         f"for instance {instance_short} — continuing"
                     )
+
                 logger.info(
-                    f"[Injection] Pulled pending message for "
-                    f"{instance_short} (len={len(content)})"
+                    f"[Injection] Pulled {len(injected_msgs)} pending "
+                    f"message(s) for {instance_short}"
                 )
 
-                # Phase 2 / Task 7 (W5): finalize the SSE emission at the
-                # consumption point. The Phase 1 placeholder exercised the
-                # call site so the structural wiring is already proven; this
-                # is the real ``stream_message(..., event_type=...)`` call.
-                # W5 contract: NO new method on ``LiveEventHub`` — we reuse
-                # the existing ``stream_message`` with a custom ``event_type``
-                # so the frontend (Phase 3) sees ``event_type="injection_consumed"``
-                # under the same payload shape the API uses.
-                #
-                # The clear returned the entry that was just consumed; we
-                # re-emit content + timestamp so the SSE listener sees the
-                # exact text the LLM was about to see.
+                # Phase 3 / Task 7 (W5): finalize the SSE emissions at the
+                # consumption point. The agent_node reuses
+                # ``stream_message(..., event_type=...)`` (no new method on
+                # LiveEventHub) — same wire shape the API uses.
                 #
                 # BUG FIX (injection-sse-echo-fix): the normal ``send_message``
                 # path in ``instance_messaging.py`` pre-emits a ``user_message``
@@ -1864,10 +1886,18 @@ def create_agent_node(
                 # stamp ``instance_id``, and emit ``user_message`` with
                 # ``checkpoint_id="user"`` so the frontend treats it the same
                 # way as a regular user turn.
-                if live_hub is not None:
+                #
+                # Phase 3: emit one ``user_message`` per consumed entry
+                # (preserving order) so the FE renders a user bubble for
+                # each; then ONE ``injection_consumed`` closing the
+                # lifecycle for the whole queue.
+                for entry in pending_list:
+                    if live_hub is None:
+                        continue
+                    content_echo = entry.get("content", "")
                     try:
-                        injected_user_msg = HumanMessage(content=content)
-                        user_serialized = serialize_message(injected_user_msg)
+                        echoed_user_msg = HumanMessage(content=content_echo)
+                        user_serialized = serialize_message(echoed_user_msg)
                         user_serialized["instance_id"] = instance_id
                         await live_hub.stream_message(
                             instance_id=instance_id,
@@ -1878,30 +1908,45 @@ def create_agent_node(
                     except Exception as e:  # pragma: no cover - defensive
                         # LLM call must not be blocked by an SSE outage —
                         # log and continue. The injection is already
-                        # consumed locally (checkpoint persist + injected_msg
-                        # in full_messages); the SSE event is best-effort.
+                        # consumed locally (checkpoint persist + injected
+                        # msgs in full_messages); the SSE event is best-effort.
                         logger.warning(
                             f"[Injection] user_message SSE emit failed for "
                             f"{instance_short}: {type(e).__name__}: {e}"
                         )
 
+                # ONE injection_consumed event for the whole queue.
+                # Cleared list carries every entry that was just consumed;
+                # we use the FIRST entry's content + timestamp as the
+                # SSE payload so the listener sees the earliest (oldest)
+                # message — match the FIFO ordering the LLM was given.
                 if live_hub is not None:
                     try:
+                        # Prefer the cleared list (returned by clear) —
+                        # it's the authoritative post-clear snapshot. Fall
+                        # back to the pending list if the race lost the
+                        # cleared return value.
+                        consumed_snapshot = cleared_list or pending_list
+                        head_entry = consumed_snapshot[0] if consumed_snapshot else None
+                        # ``pending_count`` is the number of messages that
+                        # were just consumed — the recipient can use this
+                        # to update its local "pending" counter in one go.
                         await live_hub.stream_message(
                             instance_id,
                             message={
                                 "instance_id": instance_id,
                                 "event_type": "injection_consumed",
-                                "content": cleared.get("content") if cleared else content,
-                                "timestamp": cleared.get("timestamp") if cleared else None,
+                                "content": head_entry.get("content") if head_entry else None,
+                                "timestamp": head_entry.get("timestamp") if head_entry else None,
+                                "pending_count": len(consumed_snapshot) if consumed_snapshot else 0,
                             },
                             event_type="injection_consumed",
                         )
                     except Exception as e:  # pragma: no cover - defensive
                         # LLM call must not be blocked by an SSE outage —
                         # log and continue. The injection is already
-                        # consumed locally (checkpoint persist + injected_msg
-                        # in full_messages); the SSE event is best-effort.
+                        # consumed locally (checkpoint persist + injected
+                        # msgs in full_messages); the SSE event is best-effort.
                         logger.warning(
                             f"[Injection] injection_consumed SSE emit "
                             f"failed for {instance_short}: "
@@ -2045,7 +2090,7 @@ def create_agent_node(
             instance_short,
             config,
             graph_ref,
-            injected_msg,
+            injected_msgs,
             system_prompt,
             llm_config,
             loop_breaker_slot,
@@ -2120,19 +2165,22 @@ def create_agent_node(
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
 
-            # C3: Reactive compaction re-append — the injected message
-            # lives only in the local ``full_messages`` list above (it
-            # has NOT been persisted to the checkpoint via
+            # C3: Reactive compaction re-append — the injected messages
+            # live only in the local ``full_messages`` list above (they
+            # have NOT been persisted to the checkpoint via
             # ``add_messages`` yet). ``graph.aget_state`` reads from
             # checkpoint, so without this re-append the LLM retry would
-            # lose the user's injected message. We re-append in-place
-            # so the retry sees it exactly as the first attempt did.
-            if injected_msg is not None:
-                compact_messages.append(injected_msg)
+            # lose the user's injected messages. We re-append in-place
+            # so the retry sees them exactly as the first attempt did.
+            # Phase 3: there can be MORE THAN ONE pending message — we
+            # re-append every one, in FIFO order.
+            if injected_msgs:
+                for inj in injected_msgs:
+                    compact_messages.append(inj)
                 logger.debug(
-                    f'[LLM] Reactive compaction: re-appended injected '
-                    f'message for {instance_short} '
-                    f'(len={len(injected_msg.content or "")})'
+                    f'[LLM] Reactive compaction: re-appended '
+                    f'{len(injected_msgs)} injected message(s) for '
+                    f'{instance_short}'
                 )
             # C3 for report-injection messages: same reason as the
             # user-injection re-append above — they live only in the
@@ -2172,20 +2220,23 @@ def create_agent_node(
         else:
             logger.info('[LLM] Response: empty')
 
-        # C2: Persist BOTH the injected HumanMessage and the LLM response
+        # C2: Persist the injected HumanMessages AND the LLM response
         # so the ``add_messages`` reducer writes them to the checkpoint
         # together. When no injection was consumed, fall back to the
         # existing single-message return so the surface is identical to
         # the pre-Phase-1 behavior.
         #
+        # Phase 3: there can be MORE THAN ONE pending message — all are
+        # persisted in FIFO order before the response so the conversation
+        # history mirrors the LLM input.
+        #
         # Report-injection messages are persisted here too (after the
         # user-injection, before the response) so child reports drained
         # into a live parent turn survive crash recovery and show up in
         # GET /messages history — same C2 rationale as the user-injection.
-        if injected_msg is not None or injected_report_msgs:
+        if injected_msgs or injected_report_msgs:
             persisted: list[BaseMessage] = []
-            if injected_msg is not None:
-                persisted.append(injected_msg)
+            persisted.extend(injected_msgs)
             persisted.extend(injected_report_msgs)
             persisted.append(response)
             return {'messages': persisted}

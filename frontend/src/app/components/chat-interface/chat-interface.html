@@ -140,14 +140,24 @@
       <!-- Auto-scroll anchor -->
       <div #messagesEnd></div>
 
-      <!-- Pending injection card - shown when an injected message is queued -->
+      <!-- Pending injection card - shown when one or more injected messages
+           are queued on the connected instance. ``pendingInjection()`` is
+           null when the queue is empty and an ``InjectionEvent`` (with a
+           running ``pending_count``) when at least one is queued. -->
       @if (pendingInjection()) {
+        @let pending = pendingInjection()!;
         <div class="pending-injection-card" role="status" aria-live="polite">
           <div class="pending-injection-badge">
             <span class="pending-injection-icon">⚡</span>
-            <span class="pending-injection-label">Pending injection</span>
+            <span class="pending-injection-label">
+              @if (pending.pending_count > 1) {
+                Pending injections ({{ pending.pending_count }})
+              } @else {
+                Pending injection
+              }
+            </span>
           </div>
-          <div class="pending-injection-content">{{ pendingInjection()?.content }}</div>
+          <div class="pending-injection-content">{{ pending.content }}</div>
         </div>
       }
       </div>

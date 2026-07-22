@@ -985,7 +985,11 @@ class TestFallbackOnLLMError:
 
 
 class _StubInjectionSlot:
-    """Tiny injection-slot stub mirroring ``InjectionSlot`` contract."""
+    """Tiny injection-slot stub mirroring ``InjectionSlot`` contract.
+
+    Phase 3: ``get`` returns a list of pending entries (or None);
+    ``clear`` returns the full list (or None).
+    """
 
     def __init__(self, content: str | None = None):
         self._content = content
@@ -996,7 +1000,7 @@ class _StubInjectionSlot:
         self.get_calls.append(instance_id)
         if self._content is None:
             return None
-        return {"content": self._content, "timestamp": "ts"}
+        return [{"content": self._content, "timestamp": "ts"}]
 
     def clear(self, instance_id: str):
         self.clear_calls.append(instance_id)
@@ -1004,7 +1008,7 @@ class _StubInjectionSlot:
         self._content = None
         if prev is None:
             return None
-        return {"content": prev, "timestamp": "ts"}
+        return [{"content": prev, "timestamp": "ts"}]
 
 
 class TestInjectedMessageReAppend:

@@ -33,29 +33,38 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 class _StubInjectionSlot:
     """In-memory mock of the InjectionSlot handle.
 
-    Mirrors the real handle's get/clear contract:
-        get(instance_id)  -> dict | None
-        clear(instance_id) -> dict | None
+    Phase 3: mirrors the real handle's list-shaped get/clear contract:
+        get(instance_id)    -> list[dict] | None
+        clear(instance_id)  -> list[dict] | None
 
     Records every call so tests can assert against the call sequence.
     """
 
-    def __init__(self, initial: dict[str, dict[str, str]] | None = None):
-        self._store: dict[str, dict[str, str]] = dict(initial or {})
+    def __init__(self, initial: dict[str, list[dict[str, str]]] | None = None):
+        self._store: dict[str, list[dict[str, str]]] = dict(initial or {})
         self.get_calls: list[str] = []
         self.clear_calls: list[str] = []
 
-    def get(self, instance_id: str) -> dict | None:
+    def get(self, instance_id: str) -> list[dict[str, str]] | None:
         self.get_calls.append(instance_id)
-        return self._store.get(instance_id)
+        queue = self._store.get(instance_id)
+        if not queue:
+            return None
+        return list(queue)  # defensive copy
 
-    def clear(self, instance_id: str) -> dict | None:
+    def clear(self, instance_id: str) -> list[dict[str, str]] | None:
         self.clear_calls.append(instance_id)
         return self._store.pop(instance_id, None)
 
     # Convenience helpers for tests
     def set(self, instance_id: str, content: str) -> None:
-        self._store[instance_id] = {"content": content, "timestamp": "2026-01-01T00:00:00+00:00"}
+        queue = self._store.setdefault(instance_id, [])
+        queue.append({"content": content, "timestamp": "2026-01-01T00:00:00+00:00"})
+
+    def set_many(self, instance_id: str, contents: list[str]) -> None:
+        queue = self._store.setdefault(instance_id, [])
+        for c in contents:
+            queue.append({"content": c, "timestamp": "2026-01-01T00:00:00+00:00"})
 
 
 class _StubLLM:
@@ -145,7 +154,7 @@ class TestAgentNodeInjectionConsumption:
     @pytest.mark.asyncio
     async def test_injection_present_appends_human_message_to_llm(self):
         """Injection must be appended to LLM input with the injected_message flag."""
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "INTERRUPT", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "INTERRUPT", "timestamp": "ts"}]})
         agent_node, llm = _make_agent(injection_slot=slot)
 
         result = await agent_node(
@@ -166,7 +175,7 @@ class TestAgentNodeInjectionConsumption:
     @pytest.mark.asyncio
     async def test_injection_present_returns_both_messages(self):
         """C2: return {'messages': [injected, response]} for checkpoint persistence."""
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "USER-INJECT", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "USER-INJECT", "timestamp": "ts"}]})
         agent_node, llm = _make_agent(injection_slot=slot)
 
         result = await agent_node(
@@ -187,7 +196,7 @@ class TestAgentNodeInjectionConsumption:
     @pytest.mark.asyncio
     async def test_injection_cleared_after_consumption(self):
         """Slot is cleared synchronously after the LLM call (peek-then-clear)."""
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "X", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "X", "timestamp": "ts"}]})
         agent_node, _ = _make_agent(injection_slot=slot)
 
         await agent_node(
@@ -207,7 +216,7 @@ class TestAgentNodeInjectionConsumption:
         timeline (rather than checking per-method call indices, which is
         brittle when each list has a single entry).
         """
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "X", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "X", "timestamp": "ts"}]})
 
         # Wrap the methods so we record a single ordered log of which call
         # happened first.
@@ -237,6 +246,47 @@ class TestAgentNodeInjectionConsumption:
         # And the timeline records the order unambiguously.
         assert timeline == ["get", "clear"]
         assert timeline.index("get") < timeline.index("clear")
+
+    @pytest.mark.asyncio
+    async def test_multi_entry_queue_consumed_in_fifo_order(self):
+        """Phase 3: a multi-entry queue is consumed in FIFO order —
+        oldest first, all messages appended to the LLM input, all
+        returned in the result.
+        """
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [
+                {"content": "first", "timestamp": "ts1"},
+                {"content": "second", "timestamp": "ts2"},
+                {"content": "third", "timestamp": "ts3"},
+            ],
+        })
+        agent_node, llm = _make_agent(injection_slot=slot)
+
+        result = await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # LLM saw [System, first, second, third] in FIFO order
+        sent_to_llm = llm.calls[0]
+        assert isinstance(sent_to_llm[0], SystemMessage)
+        assert sent_to_llm[1].content == "first"
+        assert sent_to_llm[2].content == "second"
+        assert sent_to_llm[3].content == "third"
+        # All carry the injected_message flag
+        for i in range(1, 4):
+            assert (sent_to_llm[i].additional_kwargs or {}).get("injected_message") is True
+
+        # Result: [first, second, third, response] — C2 persists all
+        msgs = result["messages"]
+        assert len(msgs) == 4
+        assert msgs[0].content == "first"
+        assert msgs[1].content == "second"
+        assert msgs[2].content == "third"
+        assert isinstance(msgs[3], AIMessage)
+
+        # Queue is fully cleared
+        assert slot.get("iid-1") is None
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +392,7 @@ class TestReactiveCompactionReAppendsInjection:
                 self.original_error = None
                 self.model = "test-model"
 
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "MUST-SURVIVE", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "MUST-SURVIVE", "timestamp": "ts"}]})
 
         # Two-shot LLM: first invoke raises, second returns success.
         class _TwoShotLLM:
@@ -422,7 +472,7 @@ class TestSSEPlaceholder:
     async def test_live_hub_does_not_break_agent_node(self):
         """live_hub=non-None must not raise — Phase 1 stub logs only."""
         live_hub = MagicMock()
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "X", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "X", "timestamp": "ts"}]})
         agent_node, _ = _make_agent(injection_slot=slot, live_hub=live_hub)
 
         # Must not raise
@@ -436,7 +486,7 @@ class TestSSEPlaceholder:
     @pytest.mark.asyncio
     async def test_live_hub_none_is_safe(self):
         """live_hub=None is the default — must not raise."""
-        slot = _StubInjectionSlot(initial={"iid-1": {"content": "X", "timestamp": "ts"}})
+        slot = _StubInjectionSlot(initial={"iid-1": [{"content": "X", "timestamp": "ts"}]})
         agent_node, _ = _make_agent(injection_slot=slot, live_hub=None)
 
         result = await agent_node(

@@ -1392,22 +1392,24 @@ class InstanceLifecycleService:
         # 1. Cancel active requests for this instance.
         self._manager._request_registry.cancel_by_instance(instance_id)
 
-        # W1: Clear any pending user message injection. The injected
-        # HumanMessage itself is checkpoint-persisted (C2) so a terminated
-        # instance can still resume with the user turn intact; only the
-        # RAM slot needs to be dropped here. ``clear_injection`` is a
-        # no-op when no injection exists.
+        # W1: Clear any pending user message injection queue. The injected
+        # HumanMessages themselves are checkpoint-persisted (C2) so a
+        # terminated instance can still resume with the user turns intact;
+        # only the RAM queue needs to be dropped here. ``clear_injection``
+        # is a no-op when nothing is queued.
         #
-        # Capture the return value so the post-commit Phase 2 ``injection_cleared``
-        # SSE emit (mirrors the pause path) can fire without re-querying the
-        # manager. Emit POST-COMMIT so a listener that races the transition
-        # observes the cleared slot alongside the terminated status, not before
-        # it (race-safe ordering with the ``status_change`` SSE below).
+        # Phase 3: ``clear_injection`` returns the full FIFO list (or
+        # None). We capture the list so the post-commit Phase 3
+        # ``injection_consumed`` SSE emit can fire without re-querying
+        # the manager. Emit POST-COMMIT so a listener that races the
+        # transition observes the cleared queue alongside the terminated
+        # status, not before it (race-safe ordering with the
+        # ``status_change`` SSE below).
         cleared_injection = self._manager.clear_injection(instance_id)
         if cleared_injection is not None:
             logger.info(
-                f"Cleared pending injection for terminated instance "
-                f"{instance_id[:8]}... (len={len(cleared_injection.get('content', ''))})"
+                f"Cleared pending injection queue for terminated instance "
+                f"{instance_id[:8]}... (depth={len(cleared_injection)})"
             )
 
         # 1.5. Cancel any running graph task for this instance, bounded-await
@@ -1566,29 +1568,36 @@ class InstanceLifecycleService:
                 f"{instance_id[:8]}...: {e}"
             )
 
-        # W1: emit ``injection_cleared`` POST-COMMIT alongside the
-        # status_change for any instance whose RAM slot was cleared in
-        # the pre-DB step. Reuses ``stream_message`` with a custom
-        # ``event_type`` (no new method on the hub) — mirrors the pause
-        # path (Phase 2 / Task 8, W5). ``None`` content means the slot
-        # was empty for this instance — no emit.
-        if cleared_injection is not None:
+        # Phase 3: emit ``injection_consumed`` POST-COMMIT alongside the
+        # status_change for any instance whose RAM queue was cleared in
+        # the pre-DB step. The new lifecycle is
+        # ``injection_pending`` (per message) → ``injection_consumed``
+        # (once, for all messages) — there is no longer an
+        # ``injection_cleared`` event. The lifecycle path emits
+        # ``injection_consumed`` (one closure event for the whole queue)
+        # so the FE can drop the pending indicator. ``None`` queue means
+        # the slot was empty — no emit.
+        if cleared_injection:
             try:
+                # Use the OLDEST entry for content + timestamp — it
+                # matches the FIFO order the agent would have seen.
+                head_entry = cleared_injection[0]
                 await self._manager._live_hub.stream_message(
                     instance_id,
                     message={
                         "instance_id": instance_id,
-                        "event_type": "injection_cleared",
-                        "content": cleared_injection.get("content"),
-                        "timestamp": cleared_injection.get("timestamp"),
+                        "event_type": "injection_consumed",
+                        "content": head_entry.get("content"),
+                        "timestamp": head_entry.get("timestamp"),
+                        "pending_count": len(cleared_injection),
                     },
-                    event_type="injection_cleared",
+                    event_type="injection_consumed",
                 )
             except Exception as e:
                 # Log + swallow — terminate must not fail on SSE outage.
                 logger.warning(
-                    f"terminate_instance: injection_cleared SSE emit failed "
-                    f"for {instance_id[:8]}...: "
+                    f"terminate_instance: injection_consumed SSE emit "
+                    f"failed for {instance_id[:8]}...: "
                     f"{type(e).__name__}: {e}"
                 )
 
@@ -1980,13 +1989,13 @@ class InstanceLifecycleService:
         paused_instances_data: list[tuple[str, str | None, int]] = []
         skipped_ids: list[str] = []
         # Phase 2 / Task 8: capture cleared-injection entries per node so the
-        # ``injection_cleared`` SSE event can fire POST-DB-COMMIT alongside
+        # ``injection_consumed`` SSE event can fire POST-DB-COMMIT alongside
         # the existing ``status_change`` SSE (line ~1549). Pre-commit emit
         # would race with the DB status transition; post-commit matches the
-        # status_change ordering. ``node_id → {"content", "timestamp"}`` is
-        # the same dict shape ``set_injection`` returns; the SSE payload
-        # builds a uniform envelope at emit time.
-        cleared_injections_by_node: dict[str, dict[str, str]] = {}
+        # status_change ordering. ``node_id → list[dict]`` is the FIFO
+        # queue shape ``set_injection`` writes to; the SSE payload builds
+        # a uniform envelope at emit time.
+        cleared_injections_by_node: dict[str, list[dict[str, str]]] = {}
 
         for node_id in tree_ids:
             try:
@@ -2037,26 +2046,27 @@ class InstanceLifecycleService:
                     graph_task.cancel()
                     logger.info(f"Cancelled graph task for instance {node_id[:8]}...")
 
-                # 2.5. W1: Drop the per-instance user message injection slot.
-                # The injected HumanMessage itself is checkpoint-persisted
-                # (C2) so an injected user turn survives the pause/resume
-                # cycle and is re-rendered on resume. We only drop the RAM
-                # slot here because the agent that was about to consume it
-                # is being torn down.
+                # 2.5. W1: Drop the per-instance user message injection queue.
+                # The injected HumanMessages themselves are checkpoint-persisted
+                # (C2) so injected user turns survive the pause/resume cycle
+                # and are re-rendered on resume. We only drop the RAM queue
+                # here because the agent that was about to consume it is
+                # being torn down.
                 #
-                # ``clear_injection`` returns the cleared entry (or None)
-                # — captured into ``cleared_injections_by_node`` so the
-                # Phase 2 SSE emit can fire POST-COMMIT (consistent with
-                # the status_change SSE below) without re-querying the
-                # manager. We emit the cleared event AFTER the DB commit
-                # so a listener that races the transition observes the
-                # cleared slot alongside the paused status, not before
-                # it (race-safe ordering with ``stream_status_change``).
+                # Phase 3: ``clear_injection`` returns the full FIFO list
+                # (or None). We capture the list into
+                # ``cleared_injections_by_node`` so the Phase 3 SSE emit
+                # can fire POST-COMMIT (consistent with the status_change
+                # SSE below) without re-querying the manager. We emit
+                # the closure event AFTER the DB commit so a listener
+                # that races the transition observes the cleared queue
+                # alongside the paused status, not before it (race-safe
+                # ordering with ``stream_status_change``).
                 cleared_injection = self._manager.clear_injection(node_id)
-                if cleared_injection is not None:
+                if cleared_injection:
                     logger.info(
-                        f"Cleared pending injection for paused instance "
-                        f"{node_id[:8]}... (len={len(cleared_injection.get('content', ''))})"
+                        f"Cleared pending injection queue for paused instance "
+                        f"{node_id[:8]}... (depth={len(cleared_injection)})"
                     )
                     cleared_injections_by_node[node_id] = cleared_injection
 
@@ -2106,30 +2116,33 @@ class InstanceLifecycleService:
                     f"for {node_id[:8]}...: {e}"
                 )
 
-            # Phase 2 / Task 8 (W5): emit ``injection_cleared`` POST-COMMIT
-            # alongside the status_change for any node whose RAM slot was
-            # cleared in the pre-DB loop. Reuses ``stream_message`` with a
-            # custom ``event_type`` (no new method on the hub). The
-            # ``content`` is the OLD pending user message so listeners can
-            # close the pending→cleared lifecycle pair. ``None`` content
-            # means the slot was empty for this node — no emit.
+            # Phase 3: emit ``injection_consumed`` POST-COMMIT alongside
+            # the status_change for any node whose RAM queue was cleared
+            # in the pre-DB loop. The new lifecycle is
+            # ``injection_pending`` (per message) →
+            # ``injection_consumed`` (once, for all) — no
+            # ``injection_cleared`` event. The lifecycle path emits
+            # ``injection_consumed`` so the FE can drop the pending
+            # indicator. Empty queue (or missing entry) means no emit.
             cleared_entry = cleared_injections_by_node.get(node_id)
-            if cleared_entry is not None:
+            if cleared_entry:
                 try:
+                    head_entry = cleared_entry[0]
                     await self._manager._live_hub.stream_message(
                         node_id,
                         message={
                             "instance_id": node_id,
-                            "event_type": "injection_cleared",
-                            "content": cleared_entry.get("content"),
-                            "timestamp": cleared_entry.get("timestamp"),
+                            "event_type": "injection_consumed",
+                            "content": head_entry.get("content"),
+                            "timestamp": head_entry.get("timestamp"),
+                            "pending_count": len(cleared_entry),
                         },
-                        event_type="injection_cleared",
+                        event_type="injection_consumed",
                     )
                 except Exception as e:
                     # Log + swallow — pause must not fail on SSE outage.
                     logger.warning(
-                        f"pause_instance_cascade: injection_cleared SSE "
+                        f"pause_instance_cascade: injection_consumed SSE "
                         f"emit failed for {node_id[:8]}...: "
                         f"{type(e).__name__}: {e}"
                     )

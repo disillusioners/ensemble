@@ -64,29 +64,39 @@ def _build_injection_payload(
     event_type: str,
     content: str | None,
     timestamp: str | None,
+    pending_count: int | None = None,
 ) -> dict[str, Any]:
     """Build the SSE payload for an injection event.
 
-    The shape mirrors the Phase 2 contract documented in
-    ``.agents/shared/planning/user-msg-injection/phase2-plan.md``:
+    The shape mirrors the Phase 3 contract documented in
+    ``.agents/shared/planning/user-msg-injection/phase3-plan.md``::
 
         {
             "instance_id": str,
             "event_type": str,
             "content": str | None,
             "timestamp": str | None,
+            "pending_count": int | None,  # only set on injection_pending
         }
 
     ``stream_message`` wraps this dict under ``event["message"]`` when
     it serializes the SSE frame, so Phase 3 frontend reads the same
-    shape via ``event.message.{instance_id,event_type,content,timestamp}``.
+    shape via ``event.message.{instance_id,event_type,content,timestamp,pending_count}``.
+
+    ``pending_count`` is included on ``injection_pending`` events so the
+    frontend can show a "N messages queued" indicator without an extra
+    round-trip. It is omitted (or ``None``) on lifecycle events that
+    don't carry queue depth.
     """
-    return {
+    payload: dict[str, Any] = {
         "instance_id": instance_id,
         "event_type": event_type,
         "content": content,
         "timestamp": timestamp,
     }
+    if pending_count is not None:
+        payload["pending_count"] = pending_count
+    return payload
 
 
 async def _emit_injection_sse(
@@ -95,6 +105,7 @@ async def _emit_injection_sse(
     event_type: str,
     content: str | None,
     timestamp: str | None,
+    pending_count: int | None = None,
 ) -> None:
     """Fire-and-forget SSE emit for an injection lifecycle event.
 
@@ -109,7 +120,9 @@ async def _emit_injection_sse(
     """
     if live_hub is None:
         return
-    payload = _build_injection_payload(instance_id, event_type, content, timestamp)
+    payload = _build_injection_payload(
+        instance_id, event_type, content, timestamp, pending_count
+    )
     try:
         await live_hub.stream_message(
             instance_id,
@@ -248,38 +261,25 @@ async def send_message(
             },
         }
 
-    # --- INJECTION PATH (Phase 2 / Tasks 3, 5): RUNNING / WAITING_CHILDREN ---
+    # --- INJECTION PATH (Phase 3 / Tasks 3, 5): RUNNING / WAITING_CHILDREN ---
     # The agent is in an active turn (RUNNING) or parked waiting for child
-    # completion reports (WAITING_CHILDREN). The injection slot is RAM-only
-    # (Phase 1 W1) — the agent_node pulls + clears the slot on its next
-    # invocation and threads the resulting HumanMessage into the LLM call.
+    # completion reports (WAITING_CHILDREN). The injection queue is
+    # RAM-only (Phase 1 W1) — the agent_node pulls + clears the queue on
+    # its next invocation and threads each resulting HumanMessage into
+    # the LLM call.
     #
-    # Replacement semantics (Task 5): if the slot already holds content,
-    # we emit ``injection_cleared`` for the OLD content BEFORE overwriting
-    # so the SSE stream reflects a consistent cleared→pending sequence.
-    # Skipping the cleared emit would lose the old content from any
-    # listener that joined mid-stream.
+    # Phase 3 append-list semantics (Task 5): ``set_injection`` appends
+    # to the queue. The single-message ``injection_cleared`` event is
+    # GONE — no replacement ever happens. The new lifecycle is
+    # ``injection_pending`` (one per message) → ``injection_consumed``
+    # (one, for all messages) when the agent picks up the queue.
     if current_status in _INJECTION_ELIGIBLE_STATUSES:
         live_hub = _get_live_hub(request)
-
-        existing = manager.get_injection(instance_id)
-        if existing is not None:
-            logger.info(
-                f"[Injection] Replacing pending message for "
-                f"{instance_id[:8]}... (old_len="
-                f"{len(existing.get('content', ''))})"
-            )
-            await _emit_injection_sse(
-                live_hub,
-                instance_id,
-                event_type="injection_cleared",
-                content=existing.get("content"),
-                timestamp=existing.get("timestamp"),
-            )
 
         # W5: stream_message with custom event_type — no new method
         # added to LiveEventHub.
         entry = manager.set_injection(instance_id, message.content)
+        pending_count = manager.get_injection_count(instance_id)
 
         await _emit_injection_sse(
             live_hub,
@@ -287,18 +287,22 @@ async def send_message(
             event_type="injection_pending",
             content=entry.get("content"),
             timestamp=entry.get("timestamp"),
+            pending_count=pending_count,
         )
 
         # 202 Accepted (NEW) signals to the frontend that the request is
         # acknowledged but the user turn will be absorbed asynchronously
         # by the agent_node on its next pull, NOT through the job queue.
         # 200 is reserved for PAUSED auto-resume and IDLE/terminal enqueue.
+        # ``pending_count`` is included so the FE can show a "N messages
+        # queued" indicator without a separate GET round-trip.
         response.status_code = 202
         return {
             "status": "injected",
             "instance_id": instance_id,
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
+            "pending_count": pending_count,
         }
 
     # --- NORMAL PATH: IDLE / terminal → existing enqueue_message ---
@@ -352,28 +356,42 @@ async def send_message(
 
 
 # 1b. GET /instances/{instance_id}/injection - Pending injection status
-# Phase 2 / Task 6: Fallback query endpoint for the frontend to reconcile
+# Phase 3 / Task 6: Fallback query endpoint for the frontend to reconcile
 # pending injection state when SSE events were missed (e.g. mid-stream
 # reconnect, dropped events during a long-lived connection). Reads the
-# same RAM slot that ``send_message`` writes to and that the agent_node
-# pulls+clears from. Returns ``pending=False`` when the slot is empty —
+# same RAM queue that ``send_message`` writes to and that the agent_node
+# pulls+clears from. Returns ``pending=False`` when the queue is empty —
 # the absence of an injection is a valid steady state, not an error.
+#
+# Phase 3: append-list semantics — the queue can hold multiple messages.
+# The response includes ``pending_count`` (queue depth) and the
+# OLDEST pending entry's content + timestamp under
+# ``content`` / ``timestamp`` for backward compatibility with the
+# Phase 2 single-slot response shape. Clients that need the full queue
+# contents can call this endpoint repeatedly and correlate via the
+# SSE ``injection_pending`` stream (which surfaces the queue depth on
+# every message).
 @router.get("/{instance_id}/injection")
 async def get_pending_injection(instance_id: str, request: Request) -> dict:
-    """Return the pending injection for ``instance_id``, if any.
+    """Return the pending injection queue for ``instance_id``, if any.
 
     Response shape::
 
         {
             "instance_id": str,
             "pending": bool,
+            "pending_count": int,
             "content": str | None,
             "timestamp": str | None,
         }
 
-    ``pending=False`` is returned when no injection is stored (the common
-    case for IDLE/terminal instances and for RUNNING instances whose
-    agent_node has already consumed the previous injection).
+    ``pending_count`` is the depth of the queue (0 when empty). ``content``
+    and ``timestamp`` reflect the OLDEST pending entry — the entry that
+    will be injected first — for backward compatibility with the
+    Phase 2 single-slot shape. ``pending=False`` is returned when the
+    queue is empty, the common case for IDLE/terminal instances and
+    for RUNNING instances whose agent_node has already consumed the
+    previous queue.
     """
     manager = _get_manager(request)
 
@@ -390,12 +408,15 @@ async def get_pending_injection(instance_id: str, request: Request) -> dict:
             ).model_dump(),
         )
 
-    entry = manager.get_injection(instance_id)
+    queue = manager.get_injection(instance_id)
+    pending_count = manager.get_injection_count(instance_id)
+    head = queue[0] if queue else None
     return {
         "instance_id": instance_id,
-        "pending": entry is not None,
-        "content": entry.get("content") if entry is not None else None,
-        "timestamp": entry.get("timestamp") if entry is not None else None,
+        "pending": head is not None,
+        "pending_count": pending_count,
+        "content": head.get("content") if head is not None else None,
+        "timestamp": head.get("timestamp") if head is not None else None,
     }
 
 

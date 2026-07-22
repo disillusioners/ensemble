@@ -1,11 +1,11 @@
-"""Unit tests for the user message injection API (Phase 2 / Tasks 3-6).
+"""Unit tests for the user message injection API (Phase 3).
 
 Covers the state-aware ``POST /api/instances/{id}/messages`` routing
-introduced in Phase 2:
+introduced in Phase 3:
 
-    * RUNNING → set RAM injection slot, emit ``injection_pending`` SSE,
-      return 202 Accepted.
-    * WAITING_CHILDREN → same as RUNNING (slot survives the parent
+    * RUNNING → set RAM injection queue, emit ``injection_pending`` SSE
+      with ``pending_count``, return 202 Accepted.
+    * WAITING_CHILDREN → same as RUNNING (the queue survives the parent
       pause; consumed on the next agent turn).
     * PAUSED → existing auto-resume behavior (**NO CHANGE — C4**).
       The test asserts the existing ``resume_instance_cascade`` +
@@ -13,13 +13,14 @@ introduced in Phase 2:
     * IDLE / terminal → existing ``enqueue_message_job`` path
       (**NO CHANGE**).
     * Empty / whitespace-only content → 400 (S4) BEFORE any routing.
-    * Replacement semantics: a 2nd injection on a slot that already
-      holds content emits ``injection_cleared`` for the OLD content
-      BEFORE ``injection_pending`` for the new one (Task 5).
+    * Append-list semantics (Phase 3): a 2nd injection on a populated
+      queue APPENDS — no ``injection_cleared`` event is emitted. The
+      pending_count grows by 1 each time.
 
 Also covers the fallback query endpoint (Task 6):
 
-    * GET /api/instances/{id}/injection → ``{pending, content, timestamp}``.
+    * GET /api/instances/{id}/injection → ``{pending, pending_count,
+      content, timestamp}``.
 
 The tests use ``fastapi.testclient.TestClient`` against a minimal app
 that only mounts the ``messages`` router — no DB, no MCP pool, no
@@ -45,7 +46,8 @@ def _make_manager(
     *,
     status: str,
     instance_id: str = "inst-abc",
-    pending: dict | None = None,
+    pending_list: list[dict] | None = None,
+    pending_count: int = 0,
     set_return: dict | None = None,
 ):
     """Build a mock InstanceManager with the surface used by the messages router.
@@ -57,7 +59,8 @@ def _make_manager(
     Args:
         status: The status string returned by ``get_instance_info``.
         instance_id: The instance ID used in the response payload.
-        pending: Pre-existing pending injection (for replacement tests).
+        pending_list: Pre-existing queue (for append tests).
+        pending_count: The count returned by ``get_injection_count``.
         set_return: Return value of ``set_injection`` (timestamp + content).
     """
     manager = MagicMock()
@@ -78,7 +81,8 @@ def _make_manager(
     manager.get_instance = _get_instance
 
     # Injection slot helpers — all sync.
-    manager.get_injection = MagicMock(return_value=pending)
+    manager.get_injection = MagicMock(return_value=pending_list)
+    manager.get_injection_count = MagicMock(return_value=pending_count)
     if set_return is None:
         # Default returns a static content/timestamp. Individual tests
         # can pass a custom ``set_return`` for exact payload assertions.
@@ -92,7 +96,7 @@ def _make_manager(
         return {"content": content, "timestamp": "2026-07-13T00:00:00+00:00"}
 
     manager.set_injection = MagicMock(side_effect=_set_injection)
-    manager.clear_injection = MagicMock(return_value=pending)
+    manager.clear_injection = MagicMock(return_value=pending_list)
 
     # enqueue_message_job (async) — used by the IDLE/terminal path.
     # Wrapped in AsyncMock so tests can use ``assert_awaited_once`` etc.
@@ -117,8 +121,7 @@ def _make_manager(
 def _make_live_hub():
     """Build a mock LiveEventHub with stream_message as an AsyncMock.
 
-    Records every call so tests can assert on the call sequence
-    (e.g., cleared-before-pending on replacement).
+    Records every call so tests can assert on the call sequence.
     """
     hub = MagicMock()
     hub.stream_message = AsyncMock()
@@ -160,12 +163,12 @@ def client_and_state():
 
 
 class TestInjectionPath:
-    """RUNNING and WAITING_CHILDREN route through the RAM injection slot."""
+    """RUNNING and WAITING_CHILDREN route through the RAM injection queue."""
 
     def test_running_routes_to_injection_with_202(self, client_and_state):
-        """RUNNING → set_injection + emit injection_pending + return 202."""
+        """RUNNING → set_injection + inject pending_count + emit injection_pending + return 202."""
         client, state = client_and_state
-        state["manager"] = _make_manager(status="running")
+        state["manager"] = _make_manager(status="running", pending_count=1)
         state["live_hub"] = _make_live_hub()
 
         resp = client.post(
@@ -179,6 +182,8 @@ class TestInjectionPath:
         assert body["instance_id"] == "inst-abc"
         assert body["content"] == "hello agent"
         assert "timestamp" in body
+        # Phase 3: pending_count is in the response body
+        assert body["pending_count"] == 1
 
         # set_injection was called with the content
         state["manager"].set_injection.assert_called_once_with("inst-abc", "hello agent")
@@ -195,11 +200,13 @@ class TestInjectionPath:
         assert payload["event_type"] == "injection_pending"
         assert payload["content"] == "hello agent"
         assert payload["instance_id"] == "inst-abc"
+        # Phase 3: pending_count is in the SSE payload
+        assert payload["pending_count"] == 1
 
     def test_waiting_children_routes_to_injection_with_202(self, client_and_state):
-        """WAITING_CHILDREN → injection path (slot survives the parent wait)."""
+        """WAITING_CHILDREN → injection path (queue survives the parent wait)."""
         client, state = client_and_state
-        state["manager"] = _make_manager(status="waiting_children")
+        state["manager"] = _make_manager(status="waiting_children", pending_count=1)
         state["live_hub"] = _make_live_hub()
 
         resp = client.post(
@@ -222,6 +229,31 @@ class TestInjectionPath:
 
         manager.enqueue_message_job.assert_not_called()
         manager.resume_instance_cascade.assert_not_called()
+
+    def test_pending_count_reflects_post_set_state(self, client_and_state):
+        """Phase 3: pending_count returned to the client reflects the queue depth
+        AFTER this set_injection call. The mock simulates the post-append depth.
+        """
+        client, state = client_and_state
+        # Manager starts with 1 pending, appends one more → reports 2.
+        state["manager"] = _make_manager(
+            status="running",
+            pending_list=[{"content": "old", "timestamp": "t-old"}],
+            pending_count=2,
+        )
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post(
+            "/instances/inst-abc/messages",
+            json={"content": "new"},
+        )
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["pending_count"] == 2
+        # SSE payload also carries the pending_count
+        call = state["live_hub"].stream_message.await_args
+        assert call.kwargs["message"]["pending_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +295,7 @@ class TestPausedBranchUnchanged:
         manager.resume_processing_job.assert_awaited_once()
 
     def test_paused_does_not_set_injection(self, client_and_state):
-        """PAUSED → must NOT touch the RAM injection slot."""
+        """PAUSED → must NOT touch the RAM injection queue."""
         client, state = client_and_state
         manager = _make_manager(status="paused")
         state["manager"] = manager
@@ -318,7 +350,7 @@ class TestEnqueuePath:
         manager.enqueue_message_job.assert_awaited_once()
 
     def test_idle_does_not_set_injection(self, client_and_state):
-        """IDLE → must NOT touch the injection slot."""
+        """IDLE → must NOT touch the injection queue."""
         client, state = client_and_state
         manager = _make_manager(status="idle")
         state["manager"] = manager
@@ -339,7 +371,7 @@ class TestEmptyContentValidation:
 
     @pytest.mark.parametrize("content", ["", "   ", "\n", "\t\n  "])
     def test_empty_or_whitespace_returns_400(self, client_and_state, content):
-        """Empty / whitespace-only content → 400, no slot set, no enqueue."""
+        """Empty / whitespace-only content → 400, no queue set, no enqueue."""
         client, state = client_and_state
         manager = _make_manager(status="running")
         state["manager"] = manager
@@ -365,33 +397,31 @@ class TestEmptyContentValidation:
 
 
 # ---------------------------------------------------------------------------
-# Replacement semantics (Task 5)
+# Append-list semantics (Phase 3): no more injection_cleared
 # ---------------------------------------------------------------------------
 
 
-class TestReplacementClearedThenPending:
-    """A 2nd injection on a populated slot emits cleared-then-pending."""
+class TestAppendListSemantics:
+    """Phase 3: a 2nd injection APPENDS — no injection_cleared is emitted."""
 
-    def test_replacement_emits_cleared_then_pending(self, client_and_state):
-        """When the slot already holds content, cleared (OLD) fires BEFORE pending (NEW).
+    def test_second_injection_appends_no_cleared(self, client_and_state):
+        """When a queue is non-empty, the new message APPENDS — no cleared event.
 
-        Call order matters: the cleared event must reach the listener
-        BEFORE the pending event so a frontend consumer can collapse the
-        old "pending" state and render the new content without flicker.
+        The old single-slot replace semantics emitted ``injection_cleared``
+        BEFORE ``injection_pending``. Under Phase 3 append-list semantics
+        the cleared event is GONE: the new pending_count simply reflects
+        the appended queue depth.
         """
         client, state = client_and_state
-        existing = {
-            "content": "first message",
-            "timestamp": "2026-07-13T00:00:00+00:00",
-        }
-        new_entry = {
-            "content": "second message",
-            "timestamp": "2026-07-13T00:00:01+00:00",
-        }
+        # Simulate a queue with one pre-existing entry; the new pending
+        # count after the append is 2.
+        existing = [
+            {"content": "first message", "timestamp": "2026-07-13T00:00:00+00:00"},
+        ]
         manager = _make_manager(
             status="running",
-            pending=existing,
-            set_return=new_entry,
+            pending_list=existing,
+            pending_count=2,
         )
         state["manager"] = manager
         state["live_hub"] = _make_live_hub()
@@ -400,23 +430,18 @@ class TestReplacementClearedThenPending:
 
         assert resp.status_code == 202, resp.text
 
-        # Two SSE calls in order: cleared (OLD content) → pending (NEW content)
-        assert state["live_hub"].stream_message.await_count == 2
+        # Only ONE SSE call — the pending event. NO ``injection_cleared``.
+        state["live_hub"].stream_message.assert_called_once()
+        call = state["live_hub"].stream_message.await_args
+        assert call.kwargs["event_type"] == "injection_pending"
+        payload = call.kwargs["message"]
+        assert payload["content"] == "second message"
+        assert payload["pending_count"] == 2
 
-        first = state["live_hub"].stream_message.await_args_list[0]
-        assert first.kwargs["event_type"] == "injection_cleared"
-        first_payload = first.kwargs["message"]
-        assert first_payload["content"] == "first message"
-        assert first_payload["event_type"] == "injection_cleared"
-
-        second = state["live_hub"].stream_message.await_args_list[1]
-        assert second.kwargs["event_type"] == "injection_pending"
-        assert second.kwargs["message"]["content"] == "second message"
-
-    def test_first_injection_does_not_emit_cleared(self, client_and_state):
-        """First injection (empty slot) → only pending, no spurious cleared event."""
+    def test_first_injection_emits_only_pending(self, client_and_state):
+        """First injection (empty queue) → only pending, no spurious cleared event."""
         client, state = client_and_state
-        state["manager"] = _make_manager(status="running", pending=None)
+        state["manager"] = _make_manager(status="running", pending_count=1)
         state["live_hub"] = _make_live_hub()
 
         client.post("/instances/inst-abc/messages", json={"content": "first"})
@@ -425,6 +450,20 @@ class TestReplacementClearedThenPending:
         state["live_hub"].stream_message.assert_called_once()
         call = state["live_hub"].stream_message.await_args
         assert call.kwargs["event_type"] == "injection_pending"
+        # pending_count is in the payload
+        assert call.kwargs["message"]["pending_count"] == 1
+
+    def test_response_body_includes_pending_count(self, client_and_state):
+        """Phase 3: the 202 response body carries pending_count."""
+        client, state = client_and_state
+        state["manager"] = _make_manager(status="running", pending_count=3)
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "x"})
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["pending_count"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -436,14 +475,12 @@ class TestPendingInjectionQuery:
     """GET /api/instances/{id}/injection — fallback sync endpoint."""
 
     def test_query_returns_pending_true_with_content(self, client_and_state):
-        """Slot populated → ``pending=True`` + content + timestamp."""
+        """Queue populated → ``pending=True`` + content + timestamp + pending_count."""
         client, state = client_and_state
         state["manager"] = _make_manager(
             status="running",
-            pending={
-                "content": "still queued",
-                "timestamp": "2026-07-13T00:00:00+00:00",
-            },
+            pending_list=[{"content": "still queued", "timestamp": "2026-07-13T00:00:00+00:00"}],
+            pending_count=1,
         )
         state["live_hub"] = _make_live_hub()
 
@@ -455,11 +492,12 @@ class TestPendingInjectionQuery:
         assert body["pending"] is True
         assert body["content"] == "still queued"
         assert body["timestamp"] == "2026-07-13T00:00:00+00:00"
+        assert body["pending_count"] == 1
 
-    def test_query_returns_pending_false_when_slot_empty(self, client_and_state):
-        """Empty slot → ``pending=False`` + null content/timestamp."""
+    def test_query_returns_pending_false_when_queue_empty(self, client_and_state):
+        """Empty queue → ``pending=False`` + null content/timestamp + pending_count=0."""
         client, state = client_and_state
-        state["manager"] = _make_manager(status="running", pending=None)
+        state["manager"] = _make_manager(status="running", pending_count=0)
         state["live_hub"] = _make_live_hub()
 
         resp = client.get("/instances/inst-abc/injection")
@@ -470,6 +508,34 @@ class TestPendingInjectionQuery:
         assert body["pending"] is False
         assert body["content"] is None
         assert body["timestamp"] is None
+        assert body["pending_count"] == 0
+
+    def test_query_returns_oldest_entry_for_multi_message_queue(self, client_and_state):
+        """Phase 3: GET response surfaces the OLDEST pending entry under
+        ``content`` / ``timestamp`` for backward compatibility. The
+        ``pending_count`` field exposes the full queue depth.
+        """
+        client, state = client_and_state
+        state["manager"] = _make_manager(
+            status="running",
+            pending_list=[
+                {"content": "oldest", "timestamp": "2026-07-13T00:00:00+00:00"},
+                {"content": "middle", "timestamp": "2026-07-13T00:00:01+00:00"},
+                {"content": "newest", "timestamp": "2026-07-13T00:00:02+00:00"},
+            ],
+            pending_count=3,
+        )
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.get("/instances/inst-abc/injection")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["pending"] is True
+        assert body["pending_count"] == 3
+        # The OLDEST entry is echoed for backward compatibility
+        assert body["content"] == "oldest"
+        assert body["timestamp"] == "2026-07-13T00:00:00+00:00"
 
     def test_query_returns_404_for_unknown_instance(self, client_and_state):
         """Unknown instance → 404 (typo'd ID surfaces clearly)."""
@@ -483,6 +549,7 @@ class TestPendingInjectionQuery:
             raise KeyError(iid)
         manager.get_instance = _raise_keyerror
         manager.get_injection = MagicMock(return_value=None)
+        manager.get_injection_count = MagicMock(return_value=0)
         state["manager"] = manager
         state["live_hub"] = _make_live_hub()
 
@@ -500,7 +567,7 @@ class TestInstanceNotFound:
     """Unknown instance on POST /messages surfaces as 404 BEFORE routing."""
 
     def test_unknown_instance_returns_404(self, client_and_state):
-        """POST /messages on a missing instance → 404, no slot set."""
+        """POST /messages on a missing instance → 404, no queue set."""
         client, state = client_and_state
         manager = MagicMock()
         manager.is_write_paused = False
@@ -525,7 +592,7 @@ class TestInstanceNotFound:
 
 
 class TestPlanConstraints:
-    """Explicit guardrails from the Phase 2 plan (W5, S4, C4)."""
+    """Explicit guardrails from the Phase 3 plan (W5, S4, C4)."""
 
     def test_no_409_for_paused(self, client_and_state):
         """C4: PAUSED must NEVER return 409 — the existing auto-resume flow is preserved."""

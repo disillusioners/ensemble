@@ -748,13 +748,21 @@ class InstanceManager:
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
 
-        # NEW: RAM injection slot for user message injection feature
-        # (Phase 1). Maps instance_id → {"content": str, "timestamp": str}.
-        # Single-slot replace semantics — a second set() overwrites the first.
+        # NEW: RAM injection queue for user message injection feature.
+        # Maps instance_id → list of {"content": str, "timestamp": str}
+        # entries (FIFO queue). Multiple pending messages can accumulate for
+        # the same instance; the agent_node consumes ALL of them on its next
+        # LLM call, in oldest-first order.
         # RAM-only: no DB persistence. The injected HumanMessage IS persisted
-        # to checkpoint via C2 (agent_node returns both [injected, response]).
+        # to checkpoint via C2 (agent_node returns both [injected..., response]).
         # Threaded into the LangGraph agent node via factory closure (C1).
-        self._pending_injections: dict[str, dict[str, str]] = {}
+        # NOTE: This queue is mutated only by synchronous helpers in this class.
+        # All callers (HTTP router and agent_node) run on the asyncio event loop.
+        # The mutation methods contain no internal ``await``, so cooperative
+        # single-thread asyncio gives them atomicity. Do NOT call these from a
+        # thread pool (e.g. a sync FastAPI ``def`` endpoint) without first
+        # adding an asyncio.Lock.
+        self._pending_injections: dict[str, list[dict[str, str]]] = {}
 
         # Per-instance consecutive-call counter for ``get_instance_info`` throttling.
         # Reset on any non-gii tool/message — see ``ToolThrottleSlot`` in graph.py.
@@ -1895,75 +1903,110 @@ class InstanceManager:
                 logger.warning(f"Stale completion cleanup failed: {e}")
 
     # =========================================================================
-    # Phase 1 / User Message Injection: RAM slot helpers (W1, S1)
+    # Phase 3 / User Message Injection: RAM queue helpers (W1, S1)
     # =========================================================================
-    # The injection slot is a RAM-only single-slot per instance used to hold a
-    # pending user message that the LangGraph agent_node will pull + clear on
-    # its next LLM invocation. See:
-    #   * .agents/shared/planning/user-msg-injection/phase1-plan.md
+    # The injection queue is a RAM-only FIFO per instance used to hold
+    # pending user messages that the LangGraph agent_node will pull + clear
+    # on its next LLM invocation. See:
+    #   * .agents/shared/planning/user-msg-injection/phase3-plan.md
     #
-    # Threading contract (Phase 2 depends on this surface):
-    #   * set_injection(iid, content)  — store; single-slot replace
-    #   * get_injection(iid)            — peek; does NOT clear
-    #   * clear_injection(iid)          — pop; returns cleared dict (for SSE)
-    #   * _cleanup_instance_state(iid)  — centralized cleanup used by all
-    #                                     lifecycle paths (W1).
+    # Threading contract (Phase 3 depends on this surface):
+    #   * set_injection(iid, content)      — APPEND; multi-entry queue
+    #   * get_injection(iid)                — peek; returns LIST (or None)
+    #   * get_injection_count(iid)          — count; returns int (0 if none)
+    #   * clear_injection(iid)              — pop; returns LIST (or None)
+    #   * _cleanup_instance_state(iid)      — centralized cleanup used by all
+    #                                         lifecycle paths (W1).
     #
-    # The slot is RAM-only; the injected HumanMessage itself IS persisted to
-    # the LangGraph checkpoint via the agent_node returning BOTH messages
-    # (C2) so crash recovery still preserves the user turn.
+    # The queue is RAM-only; the injected HumanMessages themselves ARE
+    # persisted to the LangGraph checkpoint via the agent_node returning
+    # ALL of them (C2) so crash recovery still preserves every user turn.
 
     _INJECTION_TTL_SECONDS = 3600  # 1h — orphaned sweep window (S1)
 
     def set_injection(self, instance_id: str, content: str) -> dict[str, str]:
-        """Store a pending user message in the RAM injection slot.
+        """Append a pending user message to the RAM injection queue.
 
-        Single-slot replace semantics: a second ``set_injection`` for the
-        same ``instance_id`` overwrites the first. There is no queue.
+        Append-list semantics: a second ``set_injection`` for the same
+        ``instance_id`` appends to the queue rather than replacing the
+        existing entry. The agent_node consumes ALL queued messages on
+        its next LLM call, in FIFO order (oldest first).
 
         Args:
             instance_id: Target instance.
             content: The user message text to inject on the next LLM call.
 
         Returns:
-            The stored entry as ``{"content": str, "timestamp": str}``.
+            The newly appended entry as ``{"content": str, "timestamp": str}``.
         """
         entry = {
             "content": content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        self._pending_injections[instance_id] = entry
+        queue = self._pending_injections.get(instance_id)
+        if queue is None:
+            queue = []
+            self._pending_injections[instance_id] = queue
+        queue.append(entry)
         logger.info(
-            f"[Injection] Stored pending message for instance "
-            f"{instance_id[:8]}... (len={len(content)})"
+            f"[Injection] Appended pending message for instance "
+            f"{instance_id[:8]}... (len={len(content)}, queue_depth={len(queue)})"
         )
         return entry
 
-    def get_injection(self, instance_id: str) -> dict[str, str] | None:
-        """Return the currently pending injection for ``instance_id``, or None.
+    def get_injection(self, instance_id: str) -> list[dict[str, str]] | None:
+        """Return the pending injection queue for ``instance_id``, or None.
 
-        Does NOT clear the slot — consumption is a separate step so the
-        caller can decide when to clear (typically right before the LLM call
-        completes, after capturing the message for the return value).
+        Returns the entire list of pending entries (oldest first) so the
+        agent_node can consume them in FIFO order. Returns ``None`` when
+        no injection is queued.
+
+        Does NOT clear the queue — consumption is a separate step so the
+        caller can decide when to clear (typically right before the LLM
+        call completes, after capturing the messages for the return value).
 
         Args:
             instance_id: Target instance.
 
         Returns:
-            The stored ``{"content", "timestamp"}`` dict, or ``None`` when no
-            pending injection exists.
+            A list of ``{"content", "timestamp"}`` dicts, or ``None`` when
+            no pending injection exists.
         """
-        return self._pending_injections.get(instance_id)
+        queue = self._pending_injections.get(instance_id)
+        if not queue:
+            return None
+        return list(queue)  # defensive copy so callers can't mutate internal state
 
-    def clear_injection(self, instance_id: str) -> dict[str, str] | None:
-        """Pop and return the pending injection for ``instance_id``, or None.
+    def get_injection_count(self, instance_id: str) -> int:
+        """Return the number of pending injections for ``instance_id``.
 
-        Safe to call when no injection exists (returns ``None``). Used by
-        lifecycle pause/terminate/clear paths (W1) and by the agent_node's
-        consume step in :func:`daemon.graph.create_agent_node`.
+        Returns ``0`` when no injection is queued. Used by the API and
+        SSE code paths to surface the queue depth to the frontend (e.g.
+        for a "N messages queued" indicator) without paying for the full
+        list copy.
+
+        Args:
+            instance_id: Target instance.
 
         Returns:
-            The cleared ``{"content", "timestamp"}`` dict, or ``None``.
+            Count of pending injections (0 if none).
+        """
+        queue = self._pending_injections.get(instance_id)
+        return len(queue) if queue else 0
+
+    def clear_injection(self, instance_id: str) -> list[dict[str, str]] | None:
+        """Pop and return the full pending injection queue, or None.
+
+        Returns the entire list of pending entries (oldest first) so the
+        caller can forward them to SSE / cleanup paths. Returns ``None``
+        when no injection is queued (safe to call when nothing pending).
+
+        Used by lifecycle pause/terminate/clear paths (W1) and by the
+        agent_node's consume step in :func:`daemon.graph.create_agent_node`.
+
+        Returns:
+            The cleared list of ``{"content", "timestamp"}`` dicts, or
+            ``None`` when nothing was queued.
         """
         return self._pending_injections.pop(instance_id, None)
 
@@ -2146,9 +2189,13 @@ class InstanceManager:
 
             {
                 "graph_task": asyncio.Task | None,
-                "cleared_injection": dict | None,
+                "cleared_injection": list[dict] | None,
                 "context_usage_cleared": bool,
             }
+
+        ``cleared_injection`` is the full FIFO queue (oldest first) — multiple
+        pending messages can be queued for the same instance under
+        Phase 3 append-list semantics (was a single dict in Phase 1).
 
         Note: ``_request_registry`` cancellation is intentionally NOT handled
         here — the cancellation reason differs per call site
@@ -2204,7 +2251,7 @@ class InstanceManager:
         }
 
     def _cleanup_stale_injections(self, ttl_seconds: int | None = None) -> int:
-        """Drop injection slots older than ``ttl_seconds`` (S1).
+        """Drop injection queues older than ``ttl_seconds`` (S1).
 
         Runs once per :meth:`_cleanup_cached_instances` cycle (every ~10
         minutes). Sweeps injections that escaped per-instance cleanup —
@@ -2214,20 +2261,32 @@ class InstanceManager:
         out from under the agent_node, but short enough that stranded
         entries don't accumulate across the daemon lifetime.
 
+        For the FIFO queue, an instance is considered stale when the
+        OLDEST entry (the head of the queue) is older than the TTL — all
+        younger entries are swept together. That matches the original
+        single-slot semantics: the age is defined by the most-stale
+        pending message.
+
         Args:
             ttl_seconds: Override for tests; defaults to
                 :data:`_INJECTION_TTL_SECONDS` (1h).
 
         Returns:
-            Number of stale entries removed.
+            Number of stale queues removed.
         """
         ttl = ttl_seconds if ttl_seconds is not None else self._INJECTION_TTL_SECONDS
         if ttl <= 0:
             return 0
         now = datetime.now(timezone.utc)
         stale: list[str] = []
-        for iid, entry in self._pending_injections.items():
-            ts_raw = entry.get("timestamp")
+        for iid, queue in self._pending_injections.items():
+            # Empty queue should not be tracked — drop it.
+            if not queue:
+                stale.append(iid)
+                continue
+            # Use the oldest entry (head of queue) to decide staleness.
+            head = queue[0]
+            ts_raw = head.get("timestamp")
             if not ts_raw:
                 stale.append(iid)
                 continue
@@ -2252,7 +2311,7 @@ class InstanceManager:
 
         if stale:
             logger.info(
-                f"Injection TTL sweep: dropped {len(stale)} stale slot(s) "
+                f"Injection TTL sweep: dropped {len(stale)} stale queue(s) "
                 f"(>{ttl}s old)"
             )
         return len(stale)
@@ -2625,7 +2684,7 @@ class InstanceManager:
                     except Exception as e:
                         logger.warning(f"Failed to evict idle opencode sessions: {e}")
 
-                # S1: TTL sweep orphaned injection slots. Runs in the same
+                # S1: TTL sweep orphaned injection queues. Runs in the same
                 # 10-minute cadence as the cached-instance cleanup so
                 # stranded ``_pending_injections`` entries (typical cause:
                 # WAITING_CHILDREN instance that never advanced) can't
