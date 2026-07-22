@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { Observable, of } from 'rxjs';
+import { catchError, map } from 'rxjs/operators';
 import type { TodoItem, TodoNode, SubTask } from './sse.service';
 import type { QuestionPack } from '../models/question.model';
 import type {
@@ -261,6 +262,25 @@ export class ApiService {
       content: string | null;
       timestamp: string | null;
     }>(`${this.API_BASE}/instances/${instanceId}/injection`);
+  }
+
+  // Question pack fallback (Phase 4 / Question Tool). GET /api/instances/{id}/question
+  // returns the backend's current view of the per-instance question slot so the chat
+  // UI can reconcile on initial load and instance switches. ``null`` is a valid steady
+  // state (no question pending) — not an error. The Observable always emits a value
+  // (pack or null) so callers don't need an error handler.
+  fetchPendingQuestion(instanceId: string): Observable<QuestionPack | null> {
+    return this.http
+      .get<{ instance_id: string; question_pack: QuestionPack | null }>(
+        `${this.API_BASE}/instances/${instanceId}/question`,
+      )
+      .pipe(
+        map((res) => res.question_pack ?? null),
+        catchError((err) => {
+          console.error('[SSE] Failed to fetch pending question:', err);
+          return of(null);
+        }),
+      );
   }
 
   /**

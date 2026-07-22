@@ -315,15 +315,11 @@ export class ChatComponent implements OnInit, OnDestroy {
       complete: () => {
         // Connect SSE after API messages are loaded
         this.sseService.connect(instanceId);
-        // Explicit pending-injection sync on instance load/switch. The
-        // SseService.connect() call above also calls fetchPendingInjection
-        // internally on its non-early-return path, but that path skips the
-        // sync when SSE is already connected to the same instance (rare,
-        // but possible on a duplicate route change). Calling it here makes
-        // the chat component's intent explicit and covers that edge case.
-        // The REST endpoint is idempotent — a second call is harmless and
-        // the signal overwrites converge to the same value either way.
+        // Reconcile both transient pending states on every instance load.
+        // Keeping these REST fallbacks here avoids duplicate requests from
+        // SseService.connect() while preserving symmetric handling.
         this.sseService.fetchPendingInjection(instanceId);
+        this.sseService.fetchPendingQuestion(instanceId);
       }
     });
 
