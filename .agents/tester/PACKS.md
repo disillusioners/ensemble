@@ -429,3 +429,13 @@ ensure.md Release Gate — 4 critical E2E workflow tests against live daemon (lo
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | ensure.md Release Gate: 4 E2E workflow tests (happy path, pause+resume, terminate+revive, 3-level cascade). Requires daemon on :8079 + SSL cleanup + PYTEST_TIMEOUT=280. Pack runs all 4 at once; per ensure.md, run individually via `-k` filter for one-by-one execution. | 5 min | 2026-07-22 | ✅ PASS (4/4 individually — happy_path 74s, pause+resume 70s, terminate+revive 80s, 3-level cascade 154s; total ~6m18s wall-clock sequential) |
+
+## Searchable Dropdowns Packs (2026-07-22)
+
+Frontend `SearchableSelectComponent` feature — reusable Angular standalone component with ControlValueAccessor, Enter-to-select-first UX. Applied across 26 dropdown instances in ~10 components/pages.
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| searchable_select_unit_test | frontend/ (`npx jest --testPathPatterns="searchable-select"`) | SearchableSelectComponent spec: CVA label display, filteredOptions, onInput, Enter-to-select via autoActiveFirstOption (Material native), onOptionSelected, onPanelClosed restoration (case-insensitive), disabled state, defaults, onTouched | 2 min | 2026-07-22 | ✅ PASS (20/20, feature/searchable-dropdowns @ b832c62, 1.2s runtime, 0 failures, spec updated commit c4e9e8f2) |
+| searchable_dropdowns_jest_test | frontend/ (`npx jest --ci`) | Full frontend Jest regression suite for searchable-dropdowns migration: all 43 suites (settings, jobs, schedules, skills, skill-bank, dialogs, etc.) | 2 min | 2026-07-22 | ✅ PASS (1416/1416, feature/searchable-dropdowns @ b832c62, 3.7s runtime, 0 regressions) |
+| searchable_dropdowns_build_test | frontend/ (`npm run build`) | Frontend production build for searchable-dropdowns: ng build succeeds, no compilation errors | 5 min | 2026-07-22 | ✅ PASS (exit 0 in 10.5s, only pre-existing bundle budget warnings, feature/searchable-dropdowns) |
