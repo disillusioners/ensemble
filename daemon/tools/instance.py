@@ -990,13 +990,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                             )
 
         return (
-            f"Message queued and sent to {instance_id}. Do NOT poll or "
-            f"sleep waiting for the result — END YOUR TURN now (stop "
-            f"calling tools, produce your final response). The system "
-            f"will deliver the completion report to you automatically "
-            f"the moment the child finishes, as a new message that "
-            f"resumes your turn. Polling or holding your turn open will "
-            f"NOT make the report arrive faster."
+            f"Message queued and sent to {instance_id}. The completion report "
+            f"will be delivered to you automatically as a new message that "
+            f"resumes your turn the moment the child finishes — do not poll or "
+            f"sleep waiting for it. You may continue other work (spawn more "
+            f"children, send more messages, etc.) in the meantime; when you "
+            f"have nothing left to do, end your turn and the report will arrive "
+            f"on its own."
         )
     
     send_message._full_doc_ = """Send a message to another instance's input queue.
