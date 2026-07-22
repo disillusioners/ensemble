@@ -4,15 +4,15 @@
 
 .bell-button {
   position: relative;
-  
+
   &.animating {
     animation: bellRing 1s ease-in-out;
   }
-  
+
   mat-icon {
     transition: transform 0.2s ease;
   }
-  
+
   &:hover mat-icon {
     transform: scale(1.1);
   }
@@ -33,8 +33,8 @@
 }
 
 .notification-panel {
-  width: 360px;
-  max-height: 480px;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 32px));
   display: flex;
   flex-direction: column;
   background: #1e293b;
@@ -43,48 +43,66 @@
 }
 
 .notification-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  gap: 12px;
+  padding: 14px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   background: #0f172a;
-  
+
   .header-title {
     font-weight: 600;
     font-size: 14px;
     color: #f1f5f9;
+    white-space: nowrap;
   }
-  
-  .mark-all-btn {
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .mark-all-btn,
+  .clear-all-btn {
     font-size: 12px;
-    color: #10a7f7;
     min-width: auto;
     padding: 0 8px;
-    
+    line-height: 32px;
+
     &:hover {
-      background: rgba(16, 167, 247, 0.1);
+      background: rgba(255, 255, 255, 0.06);
     }
+  }
+
+  .mark-all-btn {
+    color: #10a7f7;
+  }
+
+  .clear-all-btn {
+    color: #f43f5e;
   }
 }
 
 .notification-list {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  max-height: 360px;
-  
+
   &::-webkit-scrollbar {
     width: 6px;
   }
-  
+
   &::-webkit-scrollbar-track {
     background: transparent;
   }
-  
+
   &::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.2);
     border-radius: 3px;
-    
+
     &:hover {
       background: rgba(255, 255, 255, 0.3);
     }
@@ -96,68 +114,96 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 40px 20px;
+  padding: 56px 20px;
   color: #64748b;
-  
+  text-align: center;
+
   mat-icon {
     font-size: 48px;
     width: 48px;
     height: 48px;
-    margin-bottom: 8px;
-    opacity: 0.5;
+    margin-bottom: 12px;
+    opacity: 0.55;
   }
-  
-  span {
+
+  .empty-title {
     font-size: 14px;
+    font-weight: 500;
+    color: #94a3b8;
+  }
+
+  .empty-subtitle {
+    font-size: 12px;
+    color: #64748b;
+    margin-top: 4px;
   }
 }
 
 .notification-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
-  padding: 12px 16px;
+  padding: 14px 18px;
   gap: 12px;
   cursor: pointer;
   transition: background 0.15s ease;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  
+  border-left: 3px solid transparent;
+
   &:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.06);
   }
-  
+
   &:last-child {
     border-bottom: none;
   }
-  
+
+  &.status-completed {
+    border-left-color: #10b981;
+  }
+
+  &.status-error {
+    border-left-color: #f43f5e;
+  }
+
+  &.status-terminated {
+    border-left-color: #f59e0b;
+  }
+
   &.unread {
     background: rgba(16, 167, 247, 0.08);
-    
+
     &:hover {
-      background: rgba(16, 167, 247, 0.12);
+      background: rgba(16, 167, 247, 0.14);
+    }
+
+    .notification-name {
+      font-weight: 600;
     }
   }
-  
+
   .notification-icon {
     flex-shrink: 0;
-    
+    padding-top: 2px;
+
     mat-icon {
       font-size: 20px;
       width: 20px;
       height: 20px;
     }
   }
-  
+
   .notification-content {
     flex: 1;
     min-width: 0;
-    
+
     .notification-title {
       display: flex;
       align-items: center;
       gap: 8px;
       margin-bottom: 4px;
-      
-      .agent-name {
+
+      .notification-name {
         font-weight: 500;
         font-size: 13px;
         color: #f1f5f9;
@@ -165,34 +211,50 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      
-      .instance-id {
-        font-size: 11px;
-        color: #64748b;
+
+      .project-label {
+        font-size: 10px;
+        color: #94a3b8;
+        background: rgba(148, 163, 184, 0.15);
+        border-radius: 4px;
+        padding: 2px 6px;
         font-family: monospace;
         flex-shrink: 0;
       }
     }
-    
+
     .notification-meta {
       display: flex;
       align-items: center;
       gap: 8px;
       font-size: 11px;
-      
+      flex-wrap: wrap;
+
+      .agent-badge {
+        font-size: 10px;
+        color: #10a7f7;
+        background: rgba(16, 167, 247, 0.12);
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-weight: 500;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+      }
+
       .status-text {
         color: #94a3b8;
         text-transform: uppercase;
         font-weight: 500;
         letter-spacing: 0.5px;
       }
-      
+
       .time-text {
         color: #64748b;
+        margin-left: auto;
       }
     }
   }
-  
+
   .dismiss-btn {
     flex-shrink: 0;
     width: 24px;
@@ -200,36 +262,20 @@
     margin: -4px -8px -4px 0;
     opacity: 0;
     transition: opacity 0.15s ease;
-    
+
     mat-icon {
       font-size: 16px;
       width: 16px;
       height: 16px;
       color: #64748b;
     }
-    
+
     &:hover mat-icon {
       color: #f1f5f9;
     }
   }
-  
+
   &:hover .dismiss-btn {
     opacity: 1;
-  }
-}
-
-.notification-footer {
-  padding: 8px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  background: #0f172a;
-  
-  .clear-all-btn {
-    width: 100%;
-    color: #f43f5e;
-    font-size: 13px;
-    
-    &:hover {
-      background: rgba(244, 63, 94, 0.1);
-    }
   }
 }

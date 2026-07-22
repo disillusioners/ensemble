@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, MagicMock, patch
 from datetime import datetime
 
+from daemon.repositories.instance.models import Instance
 from daemon.services.event_publisher import EventPublisherService
 from daemon.services.notification_broadcaster import NotificationBroadcaster
 
@@ -83,6 +84,41 @@ class TestRootInstanceNotification:
         call_args = mock_manager._notification_broadcaster.emit_root_completion.call_args
         assert call_args.kwargs["agent_id"] == mock_instance_metadata.agent_id
         assert call_args.kwargs["agent_name"] == mock_instance_metadata.agent_name
+
+    @pytest.mark.asyncio
+    async def test_root_completion_uses_real_instance_notification_fields(self):
+        """Publisher reads only fields that exist on the real Instance model."""
+        instance = Instance(
+            instance_id="real-root-123",
+            project_id="project-123",
+            agent_id="developer",
+            agent_dir="agents/developer",
+            agent_name="Developer Agent",
+            instance_metadata={"instance_name": "Spawned Developer"},
+        )
+        manager = Mock()
+        manager._notification_broadcaster = Mock(spec=NotificationBroadcaster)
+        manager._notification_broadcaster.emit_root_completion = AsyncMock(return_value=1)
+        manager._instance_repository = Mock()
+        manager._instance_repository.get.return_value = instance
+        manager._event_bus = Mock()
+        manager._event_bus.create_event = AsyncMock()
+
+        publisher = EventPublisherService(manager=manager)
+        await publisher._publish_instance_lifecycle_event(
+            instance_id="real-root-123",
+            status="COMPLETED",
+            parent_id=None,
+        )
+
+        manager._notification_broadcaster.emit_root_completion.assert_awaited_once_with(
+            instance_id="real-root-123",
+            agent_id="developer",
+            agent_name="Developer Agent",
+            status="COMPLETED",
+            project_id="project-123",
+            instance_name="Spawned Developer",
+        )
 
     @pytest.mark.asyncio
     async def test_root_error_status_triggers_notification(self, event_publisher, mock_manager):

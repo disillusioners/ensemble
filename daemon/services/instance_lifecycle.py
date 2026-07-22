@@ -1279,6 +1279,7 @@ class InstanceLifecycleService:
             "created_at": spawn_result.created_at,
             "children": [],
             "title": None,
+            "instance_metadata": dict(instance_metadata or {}),
         }
         if parent_id:
             # Emit to parent's SSE stream

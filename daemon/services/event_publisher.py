@@ -100,12 +100,26 @@ class EventPublisherService:
             logger.warning(f"Cannot emit notification: instance {instance_id[:8]}... not found")
             return
 
+        # Derive instance_name from Instance model. The Instance model has no
+        # ``name`` attribute — title is exposed as a property that reads
+        # ``instance_metadata['title']``. The metadata dict is the canonical
+        # source of the optional ``instance_name`` field as well. Precedence:
+        #   title (from instance_metadata['title']) > instance_metadata['instance_name']
+        # ``meta.title`` already returns None when instance_metadata is empty,
+        # so the fallback chain is correct without an extra guard.
+        instance_name = (
+            meta.title
+            or (meta.instance_metadata or {}).get("instance_name")
+        )
+
         try:
             await broadcaster.emit_root_completion(
                 instance_id=instance_id,
                 agent_id=meta.agent_id,
                 agent_name=meta.agent_name,
                 status=status,
+                project_id=meta.project_id,
+                instance_name=instance_name,
             )
             logger.debug(
                 f"Emitted notification for root instance {instance_id[:8]}...: status={status}"

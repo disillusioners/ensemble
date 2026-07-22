@@ -130,6 +130,8 @@ class NotificationBroadcaster:
         agent_id: str,
         agent_name: str | None,
         status: str,
+        project_id: str | None = None,
+        instance_name: str | None = None,
     ) -> int:
         """Emit a notification for root instance completion.
 
@@ -141,6 +143,8 @@ class NotificationBroadcaster:
             agent_id: The agent ID (e.g., "developer").
             agent_name: Optional agent display name.
             status: The terminal status (COMPLETED, ERROR, TERMINATED, FAILED).
+            project_id: Optional project ID the instance belongs to.
+            instance_name: Optional instance display name/title.
 
         Returns:
             Number of clients that received the notification.
@@ -155,6 +159,8 @@ class NotificationBroadcaster:
             "agent_id": agent_id,
             "name": agent_name or agent_id.title(),
             "status": status.upper(),
+            "project_id": project_id,
+            "instance_name": instance_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         return await self.emit(notification)
@@ -182,9 +188,18 @@ class NotificationBroadcaster:
             logger.debug(f"Skipping instance_created broadcast for KB agent: {agent_id}")
             return 0
 
+        # Derive instance_name from explicit fields, then spawn metadata.
+        instance_name = (
+            instance_data.get("title")
+            or instance_data.get("name")
+            or (instance_data.get("instance_metadata") or {}).get("instance_name")
+        )
+
+        data_payload = {**instance_data, "instance_name": instance_name}
+
         notification = {
             "event_type": "instance_created",
-            "data": instance_data,
+            "data": data_payload,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         return await self.emit(notification)

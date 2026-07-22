@@ -137,6 +137,8 @@ class TestNotificationBroadcasting:
             agent_id="developer",
             agent_name="Developer Agent",
             status="COMPLETED",
+            project_id="proj-42",
+            instance_name="My Dev Task",
         )
 
         assert delivered == 1
@@ -146,6 +148,8 @@ class TestNotificationBroadcasting:
         assert received["agent_id"] == "developer"
         assert received["name"] == "Developer Agent"
         assert received["status"] == "COMPLETED"
+        assert received["project_id"] == "proj-42"
+        assert received["instance_name"] == "My Dev Task"
         assert "timestamp" in received
 
     @pytest.mark.asyncio
@@ -183,6 +187,27 @@ class TestNotificationBroadcasting:
 
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert received["status"] == "COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_emit_root_completion_optional_fields_default_none(self):
+        """emit_root_completion defaults project_id and instance_name to None when omitted."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        await broadcaster.emit_root_completion(
+            instance_id="test-123",
+            agent_id="developer",
+            agent_name="Developer",
+            status="COMPLETED",
+        )
+
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        # New fields are present and default to None
+        assert "project_id" in received
+        assert "instance_name" in received
+        assert received["project_id"] is None
+        assert received["instance_name"] is None
 
 
 class TestQueueFullHandling:
@@ -297,6 +322,81 @@ class TestInstanceCreatedKBFiltering:
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert received["event_type"] == "instance_created"
         assert received["data"]["instance_id"] == "test-123"
+        # project_id is propagated from instance_data
+        assert received["data"]["project_id"] == "proj-1"
+        # instance_name is derived from 'title'
+        assert received["data"]["instance_name"] == "Test Instance"
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_uses_name_fallback(self):
+        """emit_instance_created falls back to 'name' field when 'title' is absent."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-456",
+            "agent_id": "developer",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-7",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "name": "Named Instance",
+        }
+
+        await broadcaster.emit_instance_created(instance_data)
+
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert received["data"]["instance_name"] == "Named Instance"
+        assert received["data"]["project_id"] == "proj-7"
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_uses_metadata_instance_name_fallback(self):
+        """emit_instance_created uses the spawn-provided metadata name."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-metadata-name",
+            "agent_id": "developer",
+            "parent_id": None,
+            "status": "idle",
+            "project_id": "proj-8",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": None,
+            "instance_metadata": {"instance_name": "Spawned Task"},
+        }
+
+        await broadcaster.emit_instance_created(instance_data)
+
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert received["data"]["instance_name"] == "Spawned Task"
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_instance_name_none_when_absent(self):
+        """emit_instance_created sets instance_name=None when no title/name provided."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-789",
+            "agent_id": "developer",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-9",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+        }
+
+        await broadcaster.emit_instance_created(instance_data)
+
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert "instance_name" in received["data"]
+        assert received["data"]["instance_name"] is None
 
     @pytest.mark.asyncio
     async def test_emit_instance_created_filters_experiencer(self):
@@ -432,12 +532,16 @@ class TestRootCompletionKBFiltering:
             agent_id="developer",
             agent_name="Developer Agent",
             status="COMPLETED",
+            project_id="proj-42",
+            instance_name="My Dev Task",
         )
 
         assert delivered == 1
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert received["agent_id"] == "developer"
         assert received["status"] == "COMPLETED"
+        assert received["project_id"] == "proj-42"
+        assert received["instance_name"] == "My Dev Task"
         assert "timestamp" in received
 
     @pytest.mark.asyncio

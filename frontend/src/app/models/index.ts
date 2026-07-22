@@ -9,6 +9,11 @@ export interface InstanceInfo {
   parent_id: string | null;
   children: string[];
   title?: string | null;
+  // Optional display name for the instance. Backend derives it from
+  // ``title``/``name``/``instance_metadata.instance_name`` and broadcasts it
+  // on the ``instance_created`` SSE event. Older payloads (and older
+  // GET /api/instances responses) may omit it, hence the optional+nullable.
+  instance_name?: string | null;
   created_at: string;
   updated_at: string | null;
   // UI preferences (pinned + color tag + icon tag). Optional because older

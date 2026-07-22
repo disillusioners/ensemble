@@ -10,6 +10,8 @@ export interface InstanceNotification {
   name: string;
   status: 'COMPLETED' | 'ERROR' | 'TERMINATED' | 'FAILED';
   timestamp: string;
+  project_id?: string | null;
+  instance_name?: string | null;
 }
 
 // Internal notification for UI
@@ -139,6 +141,7 @@ export class NotificationService implements OnDestroy {
             status: data.data.status as InstanceInfo['status'],
             project_id: data.data.project_id as string | null,
             title: data.data.title as string | null,
+            instance_name: (data.data.instance_name as string | null) ?? null,
             children: (data.data.children as string[]) || [],
             created_at: data.data.created_at as string,
             updated_at: data.data.created_at as string,

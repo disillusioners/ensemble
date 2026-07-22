@@ -1,11 +1,13 @@
-import { Component, inject, computed, signal, HostListener, ElementRef, OnDestroy, effect } from '@angular/core';
+import { Component, inject, computed, signal, HostListener, ElementRef, OnDestroy, effect, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { Router } from '@angular/router';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
-import { MatMenuModule } from '@angular/material/menu';
+import { MatMenuModule, MatMenuTrigger } from '@angular/material/menu';
 import { MatBadgeModule } from '@angular/material/badge';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { NotificationService, Notification } from '../../services/notification.service';
+import { TabStateService } from '../../services/tab-state.service';
 
 @Component({
   selector: 'app-notification-bell',
@@ -17,6 +19,8 @@ import { NotificationService, Notification } from '../../services/notification.s
 export class NotificationBellComponent implements OnDestroy {
   private readonly notificationService = inject(NotificationService);
   private readonly elementRef = inject(ElementRef);
+  private readonly router = inject(Router);
+  private readonly tabStateService = inject(TabStateService);
 
   // State
   isOpen = signal(false);
@@ -26,6 +30,10 @@ export class NotificationBellComponent implements OnDestroy {
   notifications = this.notificationService.notifications;
   unreadCount = this.notificationService.unreadCount;
   hasUnread = computed(() => this.unreadCount() > 0);
+  hasItems = computed(() => this.notifications().length > 0);
+
+  // Reference to the mat-menu trigger so we can programmatically close the dropdown
+  @ViewChild(MatMenuTrigger) menuTrigger?: MatMenuTrigger;
 
   // Track previous count to trigger animation on new notification
   private previousUnreadCount = 0;
@@ -50,14 +58,14 @@ export class NotificationBellComponent implements OnDestroy {
       this.animationTimeout = null;
     }
   }
-  
+
   private triggerAnimation(): void {
     this.isAnimating.set(true);
     this.animationTimeout = setTimeout(() => {
       this.isAnimating.set(false);
     }, 1000);
   }
-  
+
   getStatusIcon(status: string): string {
     switch (status) {
       case 'COMPLETED': return 'check_circle';
@@ -67,7 +75,7 @@ export class NotificationBellComponent implements OnDestroy {
       default: return 'info';
     }
   }
-  
+
   getStatusColor(status: string): string {
     switch (status) {
       case 'COMPLETED': return '#10b981';
@@ -77,7 +85,7 @@ export class NotificationBellComponent implements OnDestroy {
       default: return '#94a3b8';
     }
   }
-  
+
   getRelativeTime(timestamp: string): string {
     const now = new Date();
     const date = new Date(timestamp);
@@ -86,39 +94,66 @@ export class NotificationBellComponent implements OnDestroy {
     const diffMin = Math.floor(diffSec / 60);
     const diffHour = Math.floor(diffMin / 60);
     const diffDay = Math.floor(diffHour / 24);
-    
+
     if (diffSec < 60) return 'just now';
     if (diffMin < 60) return `${diffMin}m ago`;
     if (diffHour < 24) return `${diffHour}h ago`;
     if (diffDay < 7) return `${diffDay}d ago`;
     return date.toLocaleDateString();
   }
-  
+
   truncateId(id: string): string {
     return id.length > 8 ? id.substring(0, 8) + '...' : id;
   }
-  
+
+  /** Returns the best available title for the notification (instance_name > name > agent_id). */
+  getNotificationTitle(notification: Notification): string {
+    return notification.instance_name || notification.name || notification.agent_id;
+  }
+
   onBellClick(): void {
     this.isOpen.set(!this.isOpen());
   }
-  
+
   onNotificationClick(notification: Notification): void {
+    // Ensure project tab is open/active when we have a project_id
+    if (notification.project_id) {
+      this.tabStateService.addTab({
+        project_id: notification.project_id,
+        name: notification.project_id.slice(0, 8) || 'Project',
+      });
+    } else {
+      // No project_id: activate the "All" tab so the user lands on a valid view.
+      this.tabStateService.setActiveTab('all');
+    }
+    // Mark as read first so the badge updates immediately
     this.notificationService.markAsRead(notification.id);
+    // Close the dropdown before navigating
+    this.menuTrigger?.closeMenu();
+    // Navigate to the instance view
+    this.router.navigate([
+      '/projects',
+      notification.project_id || 'all',
+      'instances',
+      notification.instance_id,
+    ]);
   }
-  
+
   onClearNotification(event: Event, id: string): void {
     event.stopPropagation();
     this.notificationService.clearNotification(id);
   }
-  
-  onClearAll(): void {
+
+  onClearAll(event: Event): void {
+    event.stopPropagation();
     this.notificationService.clearAll();
   }
-  
-  onMarkAllRead(): void {
+
+  onMarkAllRead(event: Event): void {
+    event.stopPropagation();
     this.notificationService.markAllAsRead();
   }
-  
+
   // Click outside detection
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: Event): void {
