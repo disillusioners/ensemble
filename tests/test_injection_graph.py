@@ -456,6 +456,77 @@ class TestReactiveCompactionReAppendsInjection:
         assert result["messages"][0].content == "MUST-SURVIVE"
         assert isinstance(result["messages"][1], AIMessage)
 
+    @pytest.mark.asyncio
+    async def test_multi_entry_injection_re_appended_after_reactive_compaction(self):
+        """Phase 3: multiple pending injections must ALL survive reactive
+        compaction and be re-appended in FIFO order before the LLM retry."""
+        from daemon.llm_error_classifier import ContextLengthExceededError
+
+        class _StubContextLengthError(ContextLengthExceededError):
+            def __init__(self):
+                Exception.__init__(self, "stub context length error")
+                self.original_error = None
+                self.model = "test-model"
+
+        markers = ["MUST-SURVIVE-1", "MUST-SURVIVE-2", "MUST-SURVIVE-3"]
+        slot = _StubInjectionSlot()
+        slot.set_many("iid-1", markers)
+
+        class _TwoShotLLM:
+            def __init__(self):
+                self.calls: list[list[Any]] = []
+                self.attempt = 0
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                self.attempt += 1
+                if self.attempt == 1:
+                    raise _StubContextLengthError()
+                return AIMessage(content="post-compaction")
+        two_shot = _TwoShotLLM()
+
+        summary_msg = SystemMessage(content="[summary]")
+        compactor = _StubCompactor(replacement_messages=[summary_msg])
+        graph = _StubGraph(state_messages=[HumanMessage(content="history")])
+        graph_ref = [graph]
+
+        from daemon.graph import create_agent_node
+        agent_node = create_agent_node(
+            llm_with_tools=two_shot,
+            system_prompt="sys",
+            compactor=compactor,
+            graph_ref=graph_ref,
+            config={"configurable": {"thread_id": "iid-1"}},
+            llm_config={"model": "test-model", "model_vision": None},
+            retry_config={"transient_attempts": 1, "timeout_attempts": 1},
+            llm_standard=None,
+            injection_slot=slot,  # type: ignore[arg-type]
+            live_hub=None,
+        )
+
+        result = await agent_node(
+            {"messages": [HumanMessage(content="orig")]},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Two LLM calls happened
+        assert len(two_shot.calls) == 2
+
+        # Second call (after compaction): all 3 injected messages at the END,
+        # in FIFO order, each marked as injected_message.
+        second_attempt = two_shot.calls[1]
+        tail = second_attempt[-3:]
+        assert all(isinstance(m, HumanMessage) for m in tail)
+        assert [m.content for m in tail] == markers
+        assert all(
+            (m.additional_kwargs or {}).get("injected_message") is True for m in tail
+        )
+
+        # Result persists all 3 injected + 1 response
+        assert len(result["messages"]) == 4
+        result_contents = [m.content for m in result["messages"][:3]]
+        assert result_contents == markers
+        assert isinstance(result["messages"][3], AIMessage)
+
 
 # ---------------------------------------------------------------------------
 # SSE placeholder (Phase 1)

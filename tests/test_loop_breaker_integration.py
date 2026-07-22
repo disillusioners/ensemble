@@ -1057,6 +1057,70 @@ class TestInjectedMessageReAppend:
         assert isinstance(sent[-1], HumanMessage)
         assert sent[-1].content == "USER-INJECT"
 
+    @pytest.mark.asyncio
+    async def test_multiple_injected_messages_re_appended_after_repair(self):
+        """Phase 3: multiple pending injections must ALL survive loop-breaker
+        repair and be re-appended to the LLM retry context. This exercises the
+        ``msg.id is None`` short-circuit at graph.py ~line 1185 — without it,
+        messages 2+ with None IDs are silently dropped by the dedup check."""
+        from daemon.graph import LoopBreakerConfig
+
+        markers = ["USER-INJECT-1", "USER-INJECT-2", "USER-INJECT-3"]
+
+        class _MultiEntrySlot:
+            """Returns a 3-entry list to mirror a multi-message inbox."""
+            def __init__(self):
+                self._entries = [{"content": m, "timestamp": "ts"} for m in markers]
+                self.get_calls: list[str] = []
+                self.clear_calls: list[str] = []
+
+            def get(self, instance_id: str):
+                self.get_calls.append(instance_id)
+                return list(self._entries) if self._entries else None
+
+            def clear(self, instance_id: str):
+                self.clear_calls.append(instance_id)
+                prev = list(self._entries) if self._entries else None
+                self._entries = None
+                return prev
+
+        slot = _StubLoopBreakerSlot()
+        repairer = MagicMock()
+
+        async def fake_repair(ctx):
+            return RepairResult(
+                success=True,
+                repaired_messages=[HumanMessage(content="post-repair", id="pr-1")],
+                summary="s",
+                repair_message_id="rep-1",
+            )
+        repairer.repair = AsyncMock(side_effect=fake_repair)
+
+        inj = _MultiEntrySlot()
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        agent_node, llm = _make_agent(
+            loop_breaker_slot=slot,
+            loop_repairer=repairer,
+            loop_breaker_config=cfg,
+            injection_slot=inj,  # type: ignore[arg-type]
+        )
+
+        messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
+        result = await agent_node(
+            {"messages": messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # LLM was called once (post-repair, with repaired+injected msgs).
+        assert len(llm.calls) == 1
+        sent = llm.calls[0]
+        # First is SystemMessage
+        assert isinstance(sent[0], SystemMessage)
+        # Last 3 must be the injected HumanMessages in FIFO order.
+        tail = sent[-3:]
+        assert all(isinstance(m, HumanMessage) for m in tail)
+        assert [m.content for m in tail] == markers
+
 
 # ---------------------------------------------------------------------------
 # 10. Fresh UUID
