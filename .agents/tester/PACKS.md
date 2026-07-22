@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 173 packs
-- Unit: 147 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
+- Total: 174 packs
+- Unit: 148 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1 | SharedContext: 5
 
 ## Unit Test Packs
 
@@ -42,6 +42,7 @@
 | child_reports_unit_test | test/packs/child_reports_unit_test.sh | ChildReportsService normal root_waiting_children write path: root instance with pending own-queue messages + active MESSAGE job sets WAITING_CHILDREN. Real in-memory SQLite (StaticPool), minimal manager mocks. Phase 5 legacy guard removal verification | 2 min | 2026-07-20 | ✅ PASS (5/5 in 0.79s, fix/wanderer-completion-reporting commit 8616ff45, 0 failures) |
 | completion_regression_test | test/packs/completion_regression_test.sh | Completion regression sweep: ready_message blocking (10) + finalize_instance (19) + dependency_bus (68) + cascade_unified/cascade_integration/observer_correlation (skipped — pre-existing infra requirement). Verifies wanderer fix doesn't regress completion/cascade/finalize/bus | 5 min | 2026-07-20 | ✅ PASS (97 passed, 37 skipped pre-existing, 0 failures, 3s) |
 | child_parent_lifecycle_regression_test | test/packs/child_parent_lifecycle_regression_test.sh | Broader child/parent regression: child_reports (5) + resume_child_notification (7) + root_instance_completion (3+5skip) + resume_waiting_children (7) + instance_children_junction_c10 (10) + ready_message (10) + instance_lifecycle_terminate (11) + instance_cascade (5) + pipeline_unified (6) + report_lane_phase2 (27) + work_resolver (75). instance_lifecycle_h10_l14 skipped (pre-existing) | 5 min | 2026-07-20 | ✅ PASS (166 passed, 19 skipped pre-existing, 0 failures, 8.87s) |
+| docwriter_validation_test | tests/unit/test_docwriter_agent_validation.py | doc-writer agent: meta.json valid JSON + AgentMetadata model conformance, auto-discovery (not in SKIP_DIRS), innate_skills:["chart"] grants chart tool, tools.allow categories all exist, leader can spawn doc-writer, team_members empty, KB_AGENT_IDS NOT modified (visible in UI), cross-doc code-rejection list identical (20 exts across soul/rule/workflow.md), format conversion table consistent (.csv/.docx/.pptx/.pdf/.xlsx), bash allowlist consistent | 2 min | 2026-07-22 | ✅ PASS (57/57, feature/doc-writer-agent, commit e0e6db13, 0 failures) |
 | wanderer_agent_unit_test | tests/unit/test_wanderer_agent.py | Wanderer agent: auto-discovery, meta.json validation (fields/types/innate_skills/tools config), tool filter (deny=None, no write tools, no db/opencode, instance ALLOWED for coder delegation, todo/chart expansion), soul content (readonly discipline, coder delegation, forbidden-modify, MCP, explore/experience, required sections, prompt loader) | 2 min | 2026-07-10 | ✅ PASS (37/37, feature/coder-alias-removal, 0 failures) |
 | system_tools_unit_test | tests/unit/tools/test_system_tools.py | system_env (prefix filter, secret masking, nomask), system_config (section filter, recursive nested masking, dynamic Config.model_fields sections), system_health (version/db_type/rag/platform/PID), connection string masking, curated env allowlist, factory pattern wiring | 2 min | 2026-07-09 | ✅ PASS (69/69, feature/system-info-tools-gaia, commit 9f90f78e, 0 failures) |
 | coder_agent_unit_test | tests/unit/test_coder_agent.py | Coder agent: auto-discovery, meta.json validity (required fields, types, innate_skills, tools.allow), prompt composition (soul only, no opencode injection), tool configuration (bash/filesystem/time/self present, no instance/opencode/db), no opencode contamination | 2 min | 2026-07-10 | ✅ PASS (39/39, feature/coder-alias-removal, 0 failures) |
