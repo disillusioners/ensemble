@@ -1,7 +1,9 @@
 import { signal, computed, Component, input, output } from '@angular/core';
+import { Observable } from 'rxjs';
 import { Job, JobStatus, JobSource } from '../../models/job.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
+import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
 
 // Storage key matching the component
 const STORAGE_KEY = 'job-page-selected-project';
@@ -90,6 +92,66 @@ const mockProjectService = {
 const mockApiService = {
   listAgents: jest.fn(),
 };
+
+/**
+ * Mock dialog controller — mirrors the slice of ``MatDialog`` that
+ * the JobsComponent exercises.
+ *
+ * Shape mirrors the real API: ``open(component, config)`` returns a
+ * ``MockDialogRef`` whose ``afterClosed()`` returns an Observable that
+ * synchronously emits the value held in ``mockDialog.nextResult``.
+ * Tests push a value into ``nextResult`` BEFORE calling the action
+ * under test so the Observable emits the right value the moment the
+ * component subscribes.
+ *
+ * ``openCalls`` records every call so tests can assert on the
+ * component class / data that was passed to the dialog.
+ */
+const mockDialog = {
+  /** Recorded open() calls — tests can inspect what was opened. */
+  openCalls: [] as Array<{
+    component: unknown;
+    data?: unknown;
+  }>,
+
+  /**
+   * The value the next ``afterClosed()`` Observable will emit.
+   * Set this from the test before triggering the action.
+   * ``undefined`` (the default) means the dialog was dismissed
+   * without a result — same shape as the real MatDialog behavior.
+   */
+  nextResult: undefined as boolean | undefined,
+
+  reset(): void {
+    this.openCalls = [];
+    this.nextResult = undefined;
+  },
+
+  open(component: unknown, config?: { data?: unknown }): MockDialogRef {
+    this.openCalls.push({ component, data: config?.data });
+    return new MockDialogRef(this.nextResult);
+  },
+};
+
+class MockDialogRef<T = boolean | undefined> {
+  private readonly result: T;
+  constructor(result: T) {
+    this.result = result;
+  }
+
+  /**
+   * Returns an Observable that synchronously emits the captured
+   * result. Mirrors the real ``MatDialogRef.afterClosed()`` shape
+   * closely enough that the component's ``subscribe`` callback runs
+   * in the same microtask.
+   */
+  afterClosed(): Observable<T> {
+    return new Observable<T>((observer) => {
+      observer.next(this.result);
+      observer.complete();
+    });
+  }
+}
 
 // Simple mock component to test the logic
 class MockJobsComponent {
@@ -275,7 +337,27 @@ class MockJobsComponent {
   }
 
   onCancelJob(job: Job) {
-    mockJobService.cancelJob(job.job_id);
+    // Mirror of the real component — opens the ConfirmDialog first,
+    // fires jobService.cancelJob ONLY when the dialog resolves to
+    // ``true``. The mock's dialog captures the dialog data + component
+    // class so each test can inspect what was opened, and emits the
+    // value held in ``mockDialog.nextResult`` so the test can control
+    // confirm / dismiss / undefined.
+    const dialogRef = mockDialog.open(ConfirmDialogComponent, {
+      data: {
+        title: 'Cancel Job',
+        message: 'Are you sure you want to cancel this job? This action cannot be undone.',
+        confirmLabel: 'Yes, Cancel Job',
+        cancelLabel: 'Cancel',
+        destructive: true,
+      },
+    });
+    dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      if (!confirmed) {
+        return;
+      }
+      mockJobService.cancelJob(job.job_id);
+    });
   }
 
   onRetryJob(job: Job) {
@@ -371,6 +453,7 @@ describe('JobsComponent Logic', () => {
     component.projects.set(mockProjects);
     component.agents.set(mockAgents);
     jest.clearAllMocks();
+    mockDialog.reset();
   });
 
   describe('filteredJobs computed', () => {
@@ -515,10 +598,62 @@ describe('JobsComponent Logic', () => {
   });
 
   describe('onCancelJob', () => {
-    it('should call jobService.cancelJob', () => {
+    it('should call jobService.cancelJob when the user confirms the dialog', () => {
       const job = mockJobs[0];
+      mockDialog.nextResult = true;
       component.onCancelJob(job);
       expect(mockJobService.cancelJob).toHaveBeenCalledWith(job.job_id);
+    });
+
+    it('should NOT call jobService.cancelJob when the user dismisses the dialog (false)', () => {
+      const job = mockJobs[0];
+      mockDialog.nextResult = false;
+      component.onCancelJob(job);
+      expect(mockJobService.cancelJob).not.toHaveBeenCalled();
+    });
+
+    it('should NOT call jobService.cancelJob when the dialog is dismissed via backdrop (undefined)', () => {
+      const job = mockJobs[0];
+      mockDialog.nextResult = undefined;
+      component.onCancelJob(job);
+      expect(mockJobService.cancelJob).not.toHaveBeenCalled();
+    });
+
+    it('should open the ConfirmDialogComponent with the cancel-job copy', () => {
+      const job = mockJobs[0];
+      mockDialog.nextResult = true;
+      component.onCancelJob(job);
+      expect(mockDialog.openCalls).toHaveLength(1);
+      expect(mockDialog.openCalls[0].component).toBe(ConfirmDialogComponent);
+      expect(mockDialog.openCalls[0].data).toEqual({
+        title: 'Cancel Job',
+        message: 'Are you sure you want to cancel this job? This action cannot be undone.',
+        confirmLabel: 'Yes, Cancel Job',
+        cancelLabel: 'Cancel',
+        destructive: true,
+      });
+    });
+
+    it('should open the dialog exactly once per cancel attempt', () => {
+      const job = mockJobs[0];
+      mockDialog.nextResult = true;
+      component.onCancelJob(job);
+      expect(mockDialog.openCalls).toHaveLength(1);
+    });
+
+    it('should not open the dialog twice when the user confirms', () => {
+      const job = mockJobs[0];
+      mockDialog.nextResult = true;
+      component.onCancelJob(job);
+      // The second call should reset the mock call list but only
+      // open one new dialog — the cancelJob side effect is the
+      // observable subscriber callback firing once, not the dialog
+      // re-opening.
+      mockJobService.cancelJob.mockClear();
+      mockDialog.openCalls = [];
+      component.onCancelJob(job);
+      expect(mockDialog.openCalls).toHaveLength(1);
+      expect(mockJobService.cancelJob).toHaveBeenCalledTimes(1);
     });
   });
 

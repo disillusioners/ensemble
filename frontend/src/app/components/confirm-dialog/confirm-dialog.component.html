@@ -1,0 +1,42 @@
+<div class="confirm-dialog">
+  <h2 mat-dialog-title class="confirm-dialog-title">
+    <mat-icon class="confirm-dialog-title-icon" aria-hidden="true">help_outline</mat-icon>
+    <span>{{ title() }}</span>
+  </h2>
+
+  <mat-dialog-content class="confirm-dialog-content">
+    <p class="confirm-dialog-message">{{ message() }}</p>
+  </mat-dialog-content>
+
+  <mat-dialog-actions align="end" class="confirm-dialog-actions">
+    <button
+      type="button"
+      mat-button
+      class="confirm-dialog-cancel"
+      (click)="onCancel()"
+    >
+      {{ cancelLabel() }}
+    </button>
+    @if (destructive()) {
+      <button
+        type="button"
+        mat-flat-button
+        color="warn"
+        class="confirm-dialog-confirm"
+        (click)="onConfirm()"
+      >
+        {{ confirmLabel() }}
+      </button>
+    } @else {
+      <button
+        type="button"
+        mat-flat-button
+        color="primary"
+        class="confirm-dialog-confirm"
+        (click)="onConfirm()"
+      >
+        {{ confirmLabel() }}
+      </button>
+    }
+  </mat-dialog-actions>
+</div>

@@ -1,0 +1,74 @@
+// ConfirmDialogComponent — scoped dark-theme styling for the
+// reusable confirmation dialog.
+//
+// The dialog container itself is themed via the caller-supplied
+// `panelClass: 'dark-modal-panel'`, which sets
+// `--mdc-dialog-container-color: #1e293b` via the project-wide hook
+// in `jobs.component.scss` / `home.scss`. The rules below only
+// handle the dialog's internal spacing, copy, and button strip so the
+// dialog stays consistent with the rest of the destructive-action
+// flows (ProjectDeleteDialog, SystemCleanupConfirmDialog).
+
+:host {
+  display: block;
+  color: var(--text-color, #e0e0e0);
+}
+
+.confirm-dialog {
+  padding: 0.5rem 0.25rem 0;
+
+  // Title row — keeps the icon and label aligned and visually
+  // emphasised on the dark slate background.
+  .confirm-dialog-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.25rem 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-color, #f1f5f9);
+
+    .confirm-dialog-title-icon {
+      color: var(--accent-color, #fbbf24);
+      font-size: 24px;
+      width: 24px;
+      height: 24px;
+    }
+  }
+
+  // Body — match the project-wide destructive-dialog copy palette
+  // (project-delete-dialog uses #f1f5f9 for the lead, #94a3b8 for the
+  // sub-text). Single-line message here, but the rule keeps the
+  // palette consistent if a caller ever passes a multi-line message.
+  .confirm-dialog-content {
+    padding-top: 0.25rem;
+  }
+
+  .confirm-dialog-message {
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--text-color, #f1f5f9);
+  }
+
+  // Button strip — align with the spacing used by SystemCleanupConfirm
+  // and ProjectDeleteDialog so the dialog feels native to the app.
+  .confirm-dialog-actions {
+    padding: 0.75rem 0 0.25rem 0;
+    margin: 0;
+    gap: 0.5rem;
+
+    button {
+      min-width: 96px;
+    }
+
+    .confirm-dialog-confirm {
+      // The `color="warn"` / `color="primary"` attribute already
+      // drives the background; only override the disabled colour so
+      // the button stays readable on the dark surface.
+      &[disabled] {
+        opacity: 0.5;
+      }
+    }
+  }
+}

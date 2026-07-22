@@ -26,6 +26,7 @@ import { JobCreateDialogComponent, JobCreateDialogResult } from '../../component
 import { QueueListComponent } from '../../components/queue-list/queue-list.component';
 import { SearchableSelectComponent } from '../../components';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
+import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
 import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
@@ -753,24 +754,63 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Cancel a job — single entry point that covers BOTH the
+   * ``JobCardComponent`` (cancel button on the card) and the
+   * ``JobDetailDrawerComponent`` (cancel button in the drawer). The
+   * ``onDrawerCancelJob`` helper also routes through here so the
+   * confirmation dialog is applied uniformly to every cancel entry.
+   *
+   * Behavior:
+   *   * Open the reusable ``ConfirmDialogComponent`` with the
+   *     destructive-action copy ("Cancel Job" / "Yes, Cancel Job").
+   *   * If the dialog resolves to ``true``, fire the actual
+   *     ``jobService.cancelJob`` request and show a success snackbar.
+   *   * If the dialog resolves to ``false`` or ``undefined`` (dismiss
+   *     or Esc), do NOTHING — no service call, no snackbar. The job
+   *     stays in its current state.
+   *   * Errors from the backend surface as an error snackbar — the
+   *     dialog is already closed by this point so the user can read
+   *     the snackbar.
+   */
   protected onCancelJob(job: Job): void {
-    this.jobService.cancelJob(job.job_id).subscribe({
-      next: () => {
-        this.snackBar.open('Job cancelled', 'Close', {
-          duration: 3000
-        });
+    const dialogRef = this.dialog.open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
+      ConfirmDialogComponent,
+      {
+        width: '420px',
+        panelClass: 'dark-modal-panel',
+        data: {
+          title: 'Cancel Job',
+          message: 'Are you sure you want to cancel this job? This action cannot be undone.',
+          confirmLabel: 'Yes, Cancel Job',
+          cancelLabel: 'Cancel',
+          destructive: true,
+        },
       },
-      error: (err) => {
-        console.error('Failed to cancel job:', err);
-        this.snackBar.open(
-          err.message || 'Failed to cancel job',
-          'Dismiss',
-          {
-            duration: 5000,
-            panelClass: 'error-snackbar'
-          }
-        );
+    );
+
+    dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      if (!confirmed) {
+        return;
       }
+      this.jobService.cancelJob(job.job_id).subscribe({
+        next: () => {
+          this.snackBar.open('Job cancelled', 'Close', {
+            duration: 3000
+          });
+        },
+        error: (err) => {
+          console.error('Failed to cancel job:', err);
+          this.snackBar.open(
+            err.message || 'Failed to cancel job',
+            'Dismiss',
+            {
+              duration: 5000,
+              panelClass: 'error-snackbar'
+            }
+          );
+        }
+      });
     });
   }
 
