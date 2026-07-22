@@ -49,5 +49,5 @@ Run ONLY when blast-radius determines the change is big/critical (cross-module, 
   - Validation: same pattern, `-k "test_pause_after_spawn_then_resume"`
 - [ ] E2E: Terminate after spawn, then revive documented
   - Validation: same pattern, `-k "test_terminate_after_spawn_then_revive"`
-- [ ] E2E: Wave spawn (2 children) + defer queue ordering + cross-system
-  - Validation: same pattern, `-k "test_wave_spawn_with_defer_queue"`
+- [ ] E2E: 3-level cascade (leader→tester→staggered workers): reports delivered, no premature completion, no stuck completion, state switching
+  - Validation: `timeout 300 bash test/packs/e2e_workflows_ensure_test.sh` or `PYTEST_TIMEOUT=280 timeout 320 .venv/bin/pytest tests/e2e/test_e2e_workflows.py --override-ini="addopts=" --override-ini="timeout=280" -m integration -k "test_three_level_cascade_reports" --tb=short -q`

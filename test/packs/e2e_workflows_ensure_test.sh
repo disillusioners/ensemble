@@ -39,7 +39,7 @@ cd "$PROJECT_DIR"
 #   1. test_parent_child_workflow_happy_path
 #   2. test_pause_after_spawn_then_resume
 #   3. test_terminate_after_spawn_then_revive
-#   4. test_wave_spawn_with_defer_queue
+#   4. test_three_level_cascade_reports
 #
 # Flag rationale:
 #   .venv/bin/pytest                       — project venv (Python 3.13, pytest 9.0.2).
@@ -65,7 +65,7 @@ PYTEST_TIMEOUT=280 timeout 300 .venv/bin/pytest \
     tests/e2e/test_e2e_workflows.py \
     --override-ini="addopts=" \
     -m integration \
-    -k "test_parent_child_workflow_happy_path or test_pause_after_spawn_then_resume or test_terminate_after_spawn_then_revive or test_wave_spawn_with_defer_queue" \
+    -k "test_parent_child_workflow_happy_path or test_pause_after_spawn_then_resume or test_terminate_after_spawn_then_revive or test_three_level_cascade_reports" \
     --tb=short -q 2>&1
 
 EXIT_CODE=$?

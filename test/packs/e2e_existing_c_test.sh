@@ -23,14 +23,14 @@ if ! curl -s -m 5 http://localhost:8079/api/health >/dev/null 2>&1; then
 fi
 
 # ─── Run tests with timeout ───────────────────────────────────────────────────
-# Tests 4-5: test_wave_spawn_with_defer_queue, test_pause_blocks_defer_queue
+# Tests 4-5: test_three_level_cascade_reports, test_pause_blocks_defer_queue
 # Estimated: ~650s total (each test 200-240s due to LONG_PROMPT LLM latency)
 timeout 1200 .venv/bin/python -m pytest \
     tests/e2e/test_e2e_workflows.py \
     -v --tb=short -s \
     --override-ini="addopts=" \
     -m integration \
-    -k "test_wave_spawn_with_defer_queue or test_pause_blocks_defer_queue" \
+    -k "test_three_level_cascade_reports or test_pause_blocks_defer_queue" \
     2>&1
 
 EXIT_CODE=$?
