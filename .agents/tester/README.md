@@ -18,4 +18,6 @@
 - Agent definitions live in `agents/<agent-id>/meta.json`
 
 ## ensure.md
-- Status: NOT YET CREATED — `.agents/tester/rules/ensure.md` does not exist yet. Ask user to create project-specific quality gates.
+- Status: ✅ ACTIVE — `.agents/tester/rules/ensure.md` exists with Core + Release Gate requirements
+- E2E Release Gate (4 tests): last run 2026-07-22, all PASS
+- Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)

@@ -410,4 +410,11 @@ Feature: User message injection changed from single-slot replace semantics to ap
 | injection_unit_test | tests/test_injection_graph.py + tests/test_injection_sse.py + tests/test_injection_slot.py + tests/test_injection_cleanup.py + tests/test_injection_api.py + tests/test_injection_compaction.py + tests/test_loop_breaker_integration.py (injection tests) | All injection subsystem unit tests: slot mechanics (set/get/clear/count/TTL), graph consumption (FIFO, atomic batch), SSE events (N×user_message → 1×injection_consumed), API routing (202, pending_count, append vs replace), compaction preservation, cleanup on lifecycle events, loop-breaker C3 re-append. **8/8 specified behaviors covered + 2 gap-filling multi-message tests added (commit 85097179).** | 2 min | 2026-07-22 | ✅ PASS (88/88 in ~5s, feature/injection-queue, commit 85097179, 0 failures) |
 | e2e_injection_ab_test | test/packs/e2e_injection_ab_test.sh | E2E injection tests 6-8: consumed_by_running_instance, queue_cleared_on_pause, replacement (⚠️ replacement tests OLD semantics — needs rewrite for append-list). Requires daemon on :8079. | 20 min | 2026-07-22 | ⏭️ SKIP (daemon not running) |
 | e2e_injection_c_test | test/packs/e2e_injection_c_test.sh | E2E injection tests 9-11: into_waiting_children, paused_auto_resume_unchanged, query_endpoint. Requires daemon on :8079. | 20 min | 2026-07-22 | ⏭️ SKIP (daemon not running) |
-️ SKIP (daemon not running) |
+
+## E2E Release Gate Packs (2026-07-22)
+
+ensure.md Release Gate — 4 critical E2E workflow tests against live daemon (localhost:8079). Run **one by one** per ensure.md (each makes real LLM calls). Queue cleanup between each test.
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | ensure.md Release Gate: 4 E2E workflow tests (happy path, pause+resume, terminate+revive, 3-level cascade). Requires daemon on :8079 + SSL cleanup + PYTEST_TIMEOUT=280. Pack runs all 4 at once; per ensure.md, run individually via `-k` filter for one-by-one execution. | 5 min | 2026-07-22 | ✅ PASS (4/4 individually — happy_path 74s, pause+resume 70s, terminate+revive 80s, 3-level cascade 154s; total ~6m18s wall-clock sequential) |
