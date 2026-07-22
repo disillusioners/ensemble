@@ -1,6 +1,6 @@
 [project]
 name = "ensemble"
-version = "0.9.6"
+version = "0.9.7"
 description = "Agents Ensemble - Multi-Agent AI Daemon"
 readme = "README.md"
 requires-python = ">=3.13"
