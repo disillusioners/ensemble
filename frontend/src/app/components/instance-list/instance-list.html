@@ -133,7 +133,7 @@
               [matMenuTriggerFor]="colorMenu"
               (click)="$event.preventDefault(); $event.stopPropagation()"
               (contextmenu)="$event.preventDefault(); $event.stopPropagation()"
-              #colorTagTrigger
+              #colorTagTrigger="matMenuTrigger"
             ></span>
           </p>
           <p class="instance-id">{{ instance.title || getInstanceIdShort(instance.instance_id) }}</p>
@@ -211,14 +211,14 @@
               [style.background-color]="color.value"
               [title]="color.name"
               [attr.aria-label]="'Set color tag to ' + color.name"
-              (click)="onSelectColorTag(instance.instance_id, color.value, $event)"
+              (click)="onSelectColorTag(instance.instance_id, color.value, $event); colorTagTrigger.closeMenu()"
             ></button>
           }
         </div>
         <button
           type="button"
           class="color-clear-btn"
-          (click)="onSelectColorTag(instance.instance_id, null, $event)"
+          (click)="onSelectColorTag(instance.instance_id, null, $event); colorTagTrigger.closeMenu()"
         >
           <mat-icon>close</mat-icon>
           <span>Remove color</span>
