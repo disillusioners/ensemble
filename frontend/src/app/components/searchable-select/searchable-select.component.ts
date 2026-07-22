@@ -82,7 +82,7 @@ export class SearchableSelectComponent<V = any> implements ControlValueAccessor 
   readonly autoTrigger?: MatAutocompleteTrigger;
 
   private onChange: (value: V | null) => void = () => undefined;
-  private onTouched: () => void = () => undefined;
+  onTouched: () => void = () => undefined;
 
   // ── CVA ────────────────────────────────────────────────────────────
   writeValue(value: V | null): void {
@@ -100,18 +100,6 @@ export class SearchableSelectComponent<V = any> implements ControlValueAccessor 
   }
 
   /**
-   * Enter: if there is at least one filtered match, select the
-   * first and `preventDefault()`. Otherwise DO NOTHING — do not
-   * swallow the Enter key (per the explicit requirement).
-   */
-  onEnter(event: Event): void {
-    const matches = this.filteredOptions();
-    if (matches.length === 0) return;
-    event.preventDefault();
-    this.select(matches[0]);
-  }
-
-  /**
    * MatAutocomplete's optionSelected handler — receives the
    * selected option's `value` (a `SearchableSelectOption`) via
    * `$event.option.value`.
@@ -123,7 +111,9 @@ export class SearchableSelectComponent<V = any> implements ControlValueAccessor 
   /** Restore the visible text to the selected label when the panel closes. */
   onPanelClosed(): void {
     const current = this.displayText();
-    const exactMatch = this.options().find((o) => o.label === current);
+    const exactMatch = this.options().find(
+      (o) => o.label.toLowerCase() === current.trim().toLowerCase(),
+    );
     if (exactMatch !== undefined) {
       // User typed an exact label — optionally select it.
       if (exactMatch.value !== this.value()) {

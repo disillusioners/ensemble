@@ -17,16 +17,17 @@
     [value]="displayText()"
     [matAutocomplete]="panel"
     (input)="onInput($event)"
-    (keydown.enter)="onEnter($event)"
+    (blur)="onTouched()"
   />
 
   <mat-autocomplete
     #panel="matAutocomplete"
+    autoActiveFirstOption
     [displayWith]="displayLabel"
     (optionSelected)="onOptionSelected($event.option.value)"
     (closed)="onPanelClosed()"
   >
-    @for (option of filteredOptions(); track option.label) {
+    @for (option of filteredOptions(); track option.value) {
       <mat-option [value]="option" [disabled]="effectiveDisabled()">
         {{ option.label }}
       </mat-option>
