@@ -73,13 +73,18 @@ class GitDiffService:
 
         # File is new (not in HEAD) — git show returns non-zero
         head_content = head_result.stdout if head_result.returncode == 0 else None
+        if head_content is not None and len(head_content) > 1_048_576:
+            head_content = head_content[:1_048_576]  # truncate to 1MB
         has_changes = bool(diff_text.strip()) or head_content is None
 
         # Read working tree content for the "b" side of the merge view.
         working_content = None
         working_file = self.workdir / relative_path
         try:
-            working_content = working_file.read_text(encoding="utf-8")
+            file_stat = working_file.stat()
+            if file_stat.st_size <= 1_048_576:  # 1 MB limit
+                working_content = working_file.read_text(encoding="utf-8")
+            # else: file too large, leave working_content as None
         except (OSError, UnicodeDecodeError):
             working_content = None  # binary or deleted — UI handles gracefully
 

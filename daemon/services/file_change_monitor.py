@@ -104,7 +104,7 @@ class FileChangeMonitor:
             # any subscriber connects. Safe to drop.
             return
 
-        for queue in self._subscribers.values():
+        for queue in list(self._subscribers.values()):
             try:
                 # Thread-safe: schedule put_nowait on the event loop
                 self._loop.call_soon_threadsafe(self._safe_put, queue, event_data)

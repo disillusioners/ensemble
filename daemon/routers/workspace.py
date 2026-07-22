@@ -49,6 +49,17 @@ async def _get_workdir(project_id: str) -> str:
     return project.main_directory
 
 
+def _get_guard(workdir: str) -> WorkspaceGuard:
+    """Create WorkspaceGuard, catching ValueError for missing/deleted dirs."""
+    try:
+        return WorkspaceGuard(workdir)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Workspace directory not found"},
+        )
+
+
 @router.get("/{project_id}/tree", response_model=FileTreeResponse)
 async def get_file_tree(
     project_id: str,
@@ -57,7 +68,7 @@ async def get_file_tree(
 ):
     """Get file tree for a directory within the project workspace."""
     workdir = await _get_workdir(project_id)
-    guard = WorkspaceGuard(workdir)
+    guard = _get_guard(workdir)
     target, err = guard.resolve_strict(path)
     if err:
         raise HTTPException(status_code=403, detail={"error": err})
@@ -74,7 +85,7 @@ async def get_file_content(
 ):
     """Read file content from the project workspace."""
     workdir = await _get_workdir(project_id)
-    guard = WorkspaceGuard(workdir)
+    guard = _get_guard(workdir)
     target, err = guard.resolve_strict(path)
     if err:
         raise HTTPException(status_code=403, detail={"error": err})
@@ -101,7 +112,7 @@ async def get_file_diff(
 ):
     """Get git diff of a file against HEAD."""
     workdir = await _get_workdir(project_id)
-    guard = WorkspaceGuard(workdir)
+    guard = _get_guard(workdir)
     target, err = guard.resolve_strict(path)
     if err:
         raise HTTPException(status_code=403, detail={"error": err})

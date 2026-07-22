@@ -390,6 +390,29 @@ class TestGetFileTree:
         assert data["path"] == "src"
 
     @pytest.mark.asyncio
+    async def test_tree_traversal_rejected(self, client):
+        """``GET /tree?path=../../../etc`` must return 403."""
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/tree",
+            params={"path": "../../../etc"},
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_tree_absolute_path_outside_rejected(self, client):
+        """``GET /tree?path=/etc`` must return 403."""
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/tree", params={"path": "/etc"}
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
     async def test_tree_node_has_metadata_for_files(self, client):
         """File nodes include their ``size`` (None for directories)."""
         ac, _, project_id = client
@@ -621,6 +644,30 @@ class TestGetFileDiff:
         assert data["error"] == "not_a_git_repo"
         assert data["has_changes"] is False
         assert data["diff"] is None
+
+    @pytest.mark.asyncio
+    async def test_diff_traversal_rejected(self, client):
+        """``GET /diff?path=../../../etc/passwd`` must return 403."""
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/diff",
+            params={"path": "../../../etc/passwd"},
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_diff_temp_dir_rejected(self, client):
+        """``GET /diff?path=/tmp/secret`` must return 403."""
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/diff",
+            params={"path": "/tmp/secret.txt"},
+        )
+
+        assert response.status_code == 403
 
 
 # ============================================================================

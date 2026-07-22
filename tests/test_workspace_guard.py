@@ -184,6 +184,24 @@ class TestResolveHappyPath:
         assert resolved is not None
         assert Path(str(resolved)).resolve() == (workdir / "nested" / "deep.txt").resolve()
 
+    def test_resolve_allows_temp_dir(self, workdir):
+        """``resolve()`` (agent tools) should still allow temp dir access."""
+        guard = WorkspaceGuard(str(workdir))
+        tmp_file = os.path.join(
+            tempfile.gettempdir(), "test_workspace_guard_temp.txt"
+        )
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                f.write("test")
+
+            resolved, err = guard.resolve(tmp_file)
+
+            assert resolved is not None
+            assert err is None
+        finally:
+            if os.path.exists(tmp_file):
+                os.unlink(tmp_file)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ``resolve()`` — security / boundary failure paths
@@ -296,6 +314,41 @@ class TestPathTraversal:
             assert Path(str(resolved)).resolve() == sibling.resolve()
         finally:
             sibling.unlink(missing_ok=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ``resolve_strict()`` — HTTP-only boundary behavior
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestResolveStrict:
+    def test_resolve_strict_rejects_absolute_outside_workdir(self, workdir):
+        """``resolve_strict`` must reject absolute paths outside workdir."""
+        guard = WorkspaceGuard(str(workdir))
+
+        resolved, err = guard.resolve_strict("/etc/passwd")
+
+        assert resolved is None
+        assert err is not None
+        assert "escapes workdir" in err
+
+    def test_resolve_strict_rejects_temp_dir(self, workdir):
+        """``resolve_strict`` must not exempt temp dirs (unlike ``resolve``)."""
+        guard = WorkspaceGuard(str(workdir))
+
+        resolved, err = guard.resolve_strict("/tmp/secret.txt")
+
+        assert resolved is None
+        assert err is not None
+
+    def test_resolve_strict_rejects_null_bytes(self, workdir):
+        """``resolve_strict`` handles null bytes gracefully rather than raising."""
+        guard = WorkspaceGuard(str(workdir))
+
+        resolved, err = guard.resolve_strict("foo\x00bar")
+
+        assert resolved is None
+        assert err is not None
 
 
 # ──────────────────────────────────────────────────────────────────────────────

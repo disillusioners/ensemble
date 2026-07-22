@@ -31,7 +31,7 @@ class WorkspaceGuard:
 
     def __init__(self, workdir: str):
         self.workdir: Path = Path(workdir).expanduser().resolve()
-        if not self.workdir.exists():
+        if not self.workdir.is_dir():
             raise ValueError(f"Working directory does not exist: {workdir}")
 
     def resolve(self, relative_path: str) -> tuple[Path | None, str | None]:
@@ -62,7 +62,7 @@ class WorkspaceGuard:
         if err:
             return None, err
         # Always enforce boundary check, regardless of whether path was absolute
-        if target is not None and not self._contains(self.workdir, target):
+        if target is not None and not self._normed_contains(self.workdir, target):
             return None, f"ERROR: Path escapes workdir boundary: {path}"
         return target, None
 
@@ -100,7 +100,7 @@ class WorkspaceGuard:
         if self._is_absolute_path(path):
             try:
                 return Path(path).expanduser(), None, None
-            except (OSError, RuntimeError) as e:
+            except (OSError, RuntimeError, ValueError) as e:
                 return None, None, f"ERROR: Invalid absolute path: {e}"
 
         if not path or not path.strip():
@@ -113,7 +113,7 @@ class WorkspaceGuard:
         base = self.workdir  # already resolved in __init__
         try:
             target = (base / path).expanduser().resolve()
-        except (OSError, RuntimeError) as e:
+        except (OSError, RuntimeError, ValueError) as e:
             return None, None, f"ERROR: Invalid path: {e}"
         return target, base, None
 
