@@ -46,7 +46,7 @@
 | 4 | `test_wave_spawn_with_defer_queue` | Wave spawn + defer queue + cross-system | ~140s |
 | 5 | `test_pause_blocks_defer_queue` | Pause blocks defer queue | ~45s |
 | 6 | `test_injection_consumed_by_running_instance` | Injection into RUNNING → consumed by agent_node, marker in history | ~60s |
-| 7 | `test_injection_cleared_on_pause` | Pause clears injection slot (W6 fix) — content NOT consumed | ~50s |
+| 7 | `test_injection_queue_cleared_on_pause` | Pause clears injection queue (W6 fix) — content NOT consumed | ~50s |
 | 8 | `test_injection_replacement` | Second injection replaces first; only second appears in history | ~60s |
 | 9 | `test_injection_into_waiting_children` | Injection into WAITING_CHILDREN consumed on parent resume (W3) | ~90s |
 | 10 | `test_paused_auto_resume_unchanged` | PAUSED auto-resume returns 200, not 202/409 (C4 guard) | ~50s |
@@ -68,7 +68,7 @@ RAM injection slot and consumed by the agent_node on its next LLM step.
 ### SSE Events
 - `injection_pending` — message injected into slot
 - `injection_consumed` — agent_node consumed the injection
-- `injection_cleared` — injection cleared (pause, replacement, or terminate)
+- Pause/terminate queue clearing closes the pending state via `injection_consumed` (there is no separate cleared event)
 
 ### Test Flow
 1. Spawn instance with a long-running prompt (S9 — generates 500+ word response + tool calls)

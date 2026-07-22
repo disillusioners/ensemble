@@ -1167,6 +1167,18 @@ async def _maybe_repair_loop(
     # double-appending when a well-behaved repairer already preserved
     # the injection. Phase 3: there can be MORE THAN ONE pending
     # message — we re-append every one that's missing.
+    #
+    # LOAD-BEARING: ``msg.id is None`` short-circuit is correctness-
+    # critical. langchain's BaseMessage defaults ``id=None`` (see
+    # libs/core/langchain_core/messages/base.py:134 — ``id: str|None =
+    # Field(default=None)``). Without this short-circuit, the dedup
+    # check ``msg.id not in existing_ids`` would false-match every
+    # None-id HumanMessage (``None in {None}`` is True) and silently
+    # drop messages 2+ from the LLM retry context. This invariant
+    # mirrors the report-path identity check at lines 2117-2120 which
+    # sidesteps the issue entirely by using object identity instead of
+    # ``.id``. DO NOT REMOVE this short-circuit without also migrating
+    # to identity-based matching.
     if injected_msg:
         existing_ids = {m.id for m in messages if getattr(m, "id", None) is not None}
         for msg in injected_msg:
@@ -1854,10 +1866,9 @@ def create_agent_node(
                 # Append ALL injected messages to the LLM-bound list.
                 full_messages.extend(injected_msgs)
 
-                # Clear the queue AT ONCE — returns the entire list (or
-                # None on the race where another consumer drained it
-                # between our get and clear, which is extremely unlikely
-                # in the single-event-loop design).
+                # Clear the full queue. This block MUST remain await-free to
+                # preserve atomicity under asyncio cooperative scheduling — no
+                # coroutine can interleave between get() and clear().
                 cleared_list = injection_slot.clear(instance_id)
                 if cleared_list is None:
                     logger.warning(

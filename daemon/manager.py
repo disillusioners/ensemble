@@ -1995,7 +1995,7 @@ class InstanceManager:
         return len(queue) if queue else 0
 
     def clear_injection(self, instance_id: str) -> list[dict[str, str]] | None:
-        """Pop and return the full pending injection queue, or None.
+        """Pop and return a defensive copy of the pending injection queue, or None.
 
         Returns the entire list of pending entries (oldest first) so the
         caller can forward them to SSE / cleanup paths. Returns ``None``
@@ -2005,10 +2005,14 @@ class InstanceManager:
         agent_node's consume step in :func:`daemon.graph.create_agent_node`.
 
         Returns:
-            The cleared list of ``{"content", "timestamp"}`` dicts, or
-            ``None`` when nothing was queued.
+            A defensive copy of the cleared list of
+            ``{"content", "timestamp"}`` dicts, or ``None`` when nothing
+            was queued.
         """
-        return self._pending_injections.pop(instance_id, None)
+        queue = self._pending_injections.pop(instance_id, None)
+        if queue is None:
+            return None
+        return list(queue)
 
     # ------------------------------------------------------------------
     # Question pause-requested flag (Phase 1 / question tool)
@@ -2266,6 +2270,19 @@ class InstanceManager:
         younger entries are swept together. That matches the original
         single-slot semantics: the age is defined by the most-stale
         pending message.
+
+        SYNCHRONOUSITY INVARIANT: this method MUST remain fully
+        synchronous — no ``await`` may be inserted between the
+        ``stale: list[str] = []`` build loop and the subsequent
+        ``self._pending_injections.pop(iid, None)`` pop loop. The
+        two-loop pattern (build-then-pop) is only safe because the dict
+        is not mutated between iterations; an ``await`` between the loops
+        would allow a concurrent ``set_injection`` to either land a
+        message we then drop (lost message) or land in the to-be-swept
+        set and leak past the pop (drained entry). If this method ever
+        needs async behavior, refactor to a single
+        ``items()`` + ``pop()`` pass under ``copy()`` of the keys.
+        See agents-ensemble deep review 2026-07-22 (oracle HAZARD 3).
 
         Args:
             ttl_seconds: Override for tests; defaults to

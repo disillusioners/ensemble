@@ -2721,7 +2721,7 @@ def test_injection_consumed_by_running_instance():
 
 
 @pytest.mark.integration
-def test_injection_cleared_on_pause():
+def test_injection_queue_cleared_on_pause():
     """TEST 7: Pause clears the injection slot (W6 fix).
 
     Validates the W6 fix: pausing an instance with a pending injection

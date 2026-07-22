@@ -194,7 +194,7 @@ class TestAgentNodeInjectionConsumption:
         assert msgs[1].content == "ok"
 
     @pytest.mark.asyncio
-    async def test_injection_cleared_after_consumption(self):
+    async def test_injection_queue_cleared_after_consumption(self):
         """Slot is cleared synchronously after the LLM call (peek-then-clear)."""
         slot = _StubInjectionSlot(initial={"iid-1": [{"content": "X", "timestamp": "ts"}]})
         agent_node, _ = _make_agent(injection_slot=slot)
