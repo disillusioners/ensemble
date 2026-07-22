@@ -22,7 +22,23 @@ export const COLOR_OPTIONS: ReadonlyArray<{ name: string; value: string }> = [
 ];
 
 /**
- * Frontend owner for instance UI preferences (pin + color tag).
+ * Material icons exposed to the icon-tag picker.
+ */
+export const ICON_OPTIONS: ReadonlyArray<{ name: string; icon: string }> = [
+  { name: 'Heart', icon: 'favorite' },
+  { name: 'Warning', icon: 'warning' },
+  { name: 'Bug', icon: 'bug_report' },
+  { name: 'Error', icon: 'error' },
+  { name: 'Star', icon: 'star' },
+  { name: 'Bolt', icon: 'bolt' },
+  { name: 'Flag', icon: 'flag' },
+  { name: 'Fire', icon: 'local_fire_department' },
+  { name: 'Idea', icon: 'lightbulb' },
+  { name: 'Rocket', icon: 'rocket_launch' },
+];
+
+/**
+ * Frontend owner for instance UI preferences (pin + color tag + icon tag).
  *
  * Writes are optimistic: we mutate the local ``InstanceService.instances``
  * signal immediately so the UI re-orders / recolors without waiting for
@@ -102,7 +118,65 @@ export class InstancePrefsService {
   }
 
   /**
-   * Reset all UI preferences (pin + color tag) for an instance.
+   * Set or clear the Material icon tag for an instance. Pass ``null`` to remove.
+   */
+  setIconTag(instanceId: string, icon: string | null): Observable<void> {
+    const previous = this.snapshotInstance(instanceId);
+    this.applyLocalUpdate(instanceId, { icon_tag: icon });
+
+    return this.api.updateInstanceUiPrefs(instanceId, { icon_tag: icon }).pipe(
+      tap((response) => {
+        this.applyLocalUpdate(instanceId, { icon_tag: response.icon_tag });
+      }),
+      ignoreElements(),
+      catchError((err) => {
+        console.error('[InstancePrefsService] setIconTag failed, reverting', err);
+        if (previous) {
+          this.applyLocalUpdate(instanceId, {
+            icon_tag: previous.icon_tag ?? null,
+          });
+        }
+        return EMPTY;
+      }),
+    );
+  }
+
+  /**
+   * Clear both the color and icon tags for an instance.
+   */
+  clearAllTags(instanceId: string): Observable<void> {
+    const previous = this.snapshotInstance(instanceId);
+    this.applyLocalUpdate(instanceId, {
+      color_tag: null,
+      icon_tag: null,
+    });
+
+    return this.api.updateInstanceUiPrefs(instanceId, {
+      color_tag: null,
+      icon_tag: null,
+    }).pipe(
+      tap((response) => {
+        this.applyLocalUpdate(instanceId, {
+          color_tag: response.color_tag,
+          icon_tag: response.icon_tag,
+        });
+      }),
+      ignoreElements(),
+      catchError((err) => {
+        console.error('[InstancePrefsService] clearAllTags failed, reverting', err);
+        if (previous) {
+          this.applyLocalUpdate(instanceId, {
+            color_tag: previous.color_tag ?? null,
+            icon_tag: previous.icon_tag ?? null,
+          });
+        }
+        return EMPTY;
+      }),
+    );
+  }
+
+  /**
+   * Reset all UI preferences (pin + color tag + icon tag) for an instance.
    * Used by future "clear all" UI affordances; kept here so any
    * mutation goes through the same optimistic path.
    */
@@ -112,6 +186,7 @@ export class InstancePrefsService {
       pinned: null,
       pinned_at: null,
       color_tag: null,
+      icon_tag: null,
     });
 
     return this.api.resetInstanceUiPrefs(instanceId).pipe(
@@ -123,6 +198,7 @@ export class InstancePrefsService {
             pinned: previous.pinned ?? null,
             pinned_at: previous.pinned_at ?? null,
             color_tag: previous.color_tag ?? null,
+            icon_tag: previous.icon_tag ?? null,
           });
         }
         return EMPTY;
@@ -149,7 +225,7 @@ export class InstancePrefsService {
    */
   private applyLocalUpdate(
     instanceId: string,
-    patch: Partial<Pick<InstanceInfo, 'pinned' | 'pinned_at' | 'color_tag'>>,
+    patch: Partial<Pick<InstanceInfo, 'pinned' | 'pinned_at' | 'color_tag' | 'icon_tag'>>,
   ): void {
     this.instanceService.instances.update((instances) =>
       instances.map((instance) =>

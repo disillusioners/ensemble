@@ -10,7 +10,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
 import { InstanceService } from '../../services/instance.service';
-import { InstancePrefsService, COLOR_OPTIONS } from '../../services/instance-prefs.service';
+import { InstancePrefsService, COLOR_OPTIONS, ICON_OPTIONS } from '../../services/instance-prefs.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceDeleteDialogComponent, InstanceDeleteDialogData } from '../instance-delete-dialog/instance-delete-dialog.component';
 
@@ -341,7 +341,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
 
   /**
    * Apply a color picked from the mat-menu swatch grid. ``null``
-   * clears the tag (used by the "Remove" entry in the menu).
+   * clears only the color tag.
    */
   onSelectColorTag(instanceId: string, color: string | null, event: Event): void {
     event.preventDefault();
@@ -353,8 +353,32 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
       .subscribe();
   }
 
+  /**
+   * Apply an icon picked from the mat-menu icon grid. ``null``
+   * clears the icon tag.
+   */
+  onSelectIconTag(instanceId: string, icon: string | null, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.prefsService.setIconTag(instanceId, icon)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe();
+  }
+
+  /** Clear both color and icon tags from an instance. */
+  onClearAllTags(instanceId: string, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.prefsService.clearAllTags(instanceId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe();
+  }
+
   /** Color swatch palette surfaced to the template. */
   protected readonly colorOptions = COLOR_OPTIONS;
+
+  /** Material icon palette surfaced to the template. */
+  protected readonly iconOptions = ICON_OPTIONS;
 
   /** Convenience predicate for the template's pinned styling. */
   isPinned(instance: InstanceInfo): boolean {
