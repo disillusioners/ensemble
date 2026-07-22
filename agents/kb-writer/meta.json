@@ -1,0 +1,14 @@
+{
+  "id": "kb-writer",
+  "name": "KB Writer",
+  "description": "Simple knowledge base writer — takes knowledge text, splits by domain/category, and inserts each segment via rag_insert_text. Does NOT expose RAG graph tools.",
+  "icon": "✍️",
+  "color": "accent-purple",
+  "version": "1.0.0",
+  "llm_model": "quick",
+  "innate_skills": [],
+  "tools": {
+    "allow": ["rag_insert_text", "help", "time"]
+  },
+  "team_members": []
+}
