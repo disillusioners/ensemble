@@ -173,7 +173,7 @@ async def test_experience_passes_invoked_as_tool_true(configured_env, mock_manag
     # Verify enqueue was called (experience tool uses job enqueue, not spawn)
     mock_job_queue_service.enqueue.assert_called_once()
     call_kwargs = mock_job_queue_service.enqueue.call_args.kwargs
-    assert call_kwargs.get("agent_id") == "experiencer"
+    assert call_kwargs.get("agent_id") == "kb-writer"
     assert "Test knowledge" in call_kwargs.get("message", "")
 
 
@@ -344,7 +344,7 @@ async def test_full_experience_flow_with_invoked_as_tool(configured_env, mock_ma
     mock_job_queue_service.enqueue.assert_called_once()
     call_kwargs = mock_job_queue_service.enqueue.call_args.kwargs
 
-    assert call_kwargs.get("agent_id") == "experiencer"
+    assert call_kwargs.get("agent_id") == "kb-writer"
     assert "Important knowledge to record" in call_kwargs.get("message", "")
     assert call_kwargs.get("project_id") == "test-project-123"
     assert call_kwargs.get("source") == "experience:parent-instance-id"

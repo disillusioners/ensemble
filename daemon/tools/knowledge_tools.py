@@ -26,7 +26,7 @@ CATEGORY_NAME = "Knowledge"
 CATEGORY_DOC = """Knowledge management tools for exploring and recording project knowledge.
 
 explore() queries the project knowledge base using the Explorer agent.
-experience() records new knowledge using the Experiencer agent.
+experience() records new knowledge using the kb-writer agent.
 """
 
 # RAG tool names whose invocation indicates the explorer queried the KB.
@@ -266,7 +266,7 @@ def _generate_idempotency_key(query: str, project_id: str) -> str:
 
 
 def _generate_experience_idempotency_key(text: str, project_id: str) -> str:
-    """Generate a deterministic idempotency key for experiencer jobs."""
+    """Generate a deterministic idempotency key for kb-writer jobs."""
     content = f"experience:{project_id}:{text.lower().strip()}"
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
@@ -344,7 +344,7 @@ async def _enqueue_experience_job(
     project_id: str,
     source_instance_id: str,
 ) -> None:
-    """Fire-and-forget: create a job for the experiencer agent to record knowledge.
+    """Fire-and-forget: create a job for the kb-writer agent to record knowledge.
 
     This function is designed to never raise — all errors are logged and swallowed.
     The caller (experience tool) should not be affected by job creation failures.
@@ -352,7 +352,7 @@ async def _enqueue_experience_job(
     try:
         job_service = getattr(manager, "_job_queue_service", None)
         if job_service is None:
-            logger.warning("JobQueueService not available, skipping experiencer job")
+            logger.warning("JobQueueService not available, skipping kb-writer job")
             return
 
         # Resolve system_kb_fifo_queue for experience jobs
@@ -366,14 +366,14 @@ async def _enqueue_experience_job(
             )
             if queue is None:
                 logger.warning(
-                    "No system queue found for project %s, skipping experiencer job",
+                    "No system queue found for project %s, skipping kb-writer job",
                     project_id,
                 )
                 return
             logger.debug("No KB FIFO queue for %s, using system FIFO queue", project_id)
 
-        # Build message for experiencer
-        experiencer_message = (
+        # Build message for kb-writer
+        kb_writer_message = (
             "Process and record the following knowledge:\n\n"
             f"{text}\n\n"
             f"Project: {project_id}"
@@ -381,8 +381,8 @@ async def _enqueue_experience_job(
 
         # Create the job
         await job_service.enqueue(
-            agent_id="experiencer",
-            message=experiencer_message,
+            agent_id="kb-writer",
+            message=kb_writer_message,
             source=f"experience:{source_instance_id}",
             project_id=project_id,
             priority=5,
@@ -394,13 +394,13 @@ async def _enqueue_experience_job(
             },
         )
         logger.debug(
-            "Enqueued experiencer job for project %s on queue %s",
+            "Enqueued kb-writer job for project %s on queue %s",
             project_id, queue.queue_id,
         )
 
     except Exception as e:
         # Fire-and-forget: don't fail the experience response if job creation fails
-        logger.warning("Failed to enqueue experiencer job: %s", e)
+        logger.warning("Failed to enqueue kb-writer job: %s", e)
 
 
 def _extract_concise_section(content: str) -> str | None:
@@ -795,7 +795,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         text: str,
         project_id: str | None = None,
     ) -> str:
-        """Record new knowledge using the Experiencer agent.
+        """Record new knowledge using the kb-writer agent.
 
         Analyzes the text, extracts entities and relationships,
         and inserts them into the RAG knowledge base. Runs in background.
@@ -847,7 +847,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         except Exception as e:
             logger.debug("Failed to schedule experience save: %s", e)
 
-        # Fire-and-forget: enqueue job for experiencer agent
+        # Fire-and-forget: enqueue job for kb-writer agent
         try:
             asyncio.ensure_future(_enqueue_experience_job(
                 manager=manager,
@@ -857,9 +857,9 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             ))
         except RuntimeError as e:
             # No running event loop - log warning but don't fail experience
-            logger.warning("Failed to schedule experiencer job (no event loop): %s", e)
+            logger.warning("Failed to schedule kb-writer job (no event loop): %s", e)
         except Exception as e:
-            logger.warning("Failed to schedule experiencer job: %s", e)
+            logger.warning("Failed to schedule kb-writer job: %s", e)
 
         return "Knowledge recording started."
 

@@ -310,7 +310,7 @@ class TestExperienceTool:
 
     @pytest.mark.asyncio
     async def test_experience_sends_correct_message(self, configured_env, mock_manager):
-        """Verify the message sent to experiencer includes the knowledge text."""
+        """Verify the message sent to kb-writer includes the knowledge text."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
         mock_instance_meta.project_id = "test-project-123"
@@ -356,8 +356,8 @@ class TestExperienceTool:
         assert "Project: test-project-123" in message
 
     @pytest.mark.asyncio
-    async def test_experience_uses_experiencer_agent(self, configured_env, mock_manager):
-        """Verify experiencer agent is targeted by the enqueued job."""
+    async def test_experience_uses_kb_writer_agent(self, configured_env, mock_manager):
+        """Verify kb-writer agent is targeted by the enqueued job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
         mock_instance_meta.project_id = "test-project-123"
@@ -373,7 +373,7 @@ class TestExperienceTool:
 
         mock_manager._job_queue_service.enqueue.assert_called_once()
         call_kwargs = mock_manager._job_queue_service.enqueue.call_args.kwargs
-        assert call_kwargs["agent_id"] == "experiencer"
+        assert call_kwargs["agent_id"] == "kb-writer"
 
     @pytest.mark.asyncio
     async def test_experience_job_enqueue_failure_is_silent(self, configured_env, mock_manager):
@@ -526,7 +526,7 @@ class TestExperienceJobEnqueue:
         job_service.enqueue.assert_called_once()
         call_kwargs = job_service.enqueue.call_args.kwargs
         assert call_kwargs["queue_id"] == "system-fifo-queue-456"
-        assert call_kwargs["agent_id"] == "experiencer"
+        assert call_kwargs["agent_id"] == "kb-writer"
 
     @pytest.mark.asyncio
     async def test_experience_no_job_queue_service(self, configured_env, mock_manager, caplog):

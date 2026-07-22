@@ -357,7 +357,7 @@ def create_kb_mcp_server() -> FastMCP:
             return "Error: Knowledge base (RAG) is not enabled. Configure RAG to use this tool."
 
         try:
-            # Fire-and-forget: enqueue experiencer job via JobQueueService
+            # Fire-and-forget: enqueue kb-writer job via JobQueueService
             # This does NOT use invoke_agent_and_wait() — avoids semaphore consumption
             asyncio.ensure_future(_enqueue_experience_job(
                 manager=_manager,
@@ -369,7 +369,7 @@ def create_kb_mcp_server() -> FastMCP:
 
         except RuntimeError as e:
             # Defensive: ensure_future can raise RuntimeError if event loop is closing
-            logger.warning("Failed to schedule experiencer job (no event loop): %s", e)
+            logger.warning("Failed to schedule kb-writer job (no event loop): %s", e)
             return "Error: Failed to schedule knowledge recording. Please try again."
         except Exception as e:
             logger.error("ensemble_kb_experience failed: %s", e, exc_info=True)
