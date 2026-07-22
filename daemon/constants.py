@@ -33,6 +33,7 @@ TASK_TIMEOUT_S: int = 300  # Default task timeout (5 minutes)
 SHUTDOWN_TIMEOUT_S: int = 300  # Graceful shutdown timeout
 CIRCUIT_BREAKER_RECOVERY_S: int = 60  # Circuit breaker recovery timeout
 SSE_LOCK_RELEASE_TIMEOUT: int = 5  # Timeout for releasing locks from sync context
+GIT_TIMEOUT_S: int = 10  # Git operation timeout (seconds) — used by workspace git diff tracking
 
 # ── Retry & Backoff ─────────────────────────────────────────────────────────────
 DEFAULT_RETRY_COUNT: int = 3  # Default max retry attempts

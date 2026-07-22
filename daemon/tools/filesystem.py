@@ -2,10 +2,10 @@
 
 import os
 import re
-import tempfile
 from pathlib import Path
 from langchain_core.tools import tool
 
+from daemon.services.workspace_guard import WorkspaceGuard
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output
 
@@ -35,40 +35,35 @@ Example read_file (absolute path, workdir not required):
   "path": "/tmp/shared/plan-overview.md"
 }
 ```
+
+
+# Backward-compatible wrappers around WorkspaceGuard.
+#
+# The canonical implementation lives in ``daemon.services.workspace_guard``. These
+# thin wrappers preserve the original signatures/error messages so existing
+# @tool-decorated functions below and the test suite (``tests/unit/test_filesystem_*``)
+# continue to work unchanged.
 """
 
 
-_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
-_WINDOWS_UNC_RE = re.compile(r"^[\\/]{2}")
-
-
 def _is_absolute_path(path: str) -> bool:
-    """Return True if `path` is absolute on the current OS or matches a Windows
+    """Return True if *path* is absolute on the current OS or matches a Windows
     absolute pattern (drive letter or UNC). Cross-platform safe: a Windows-style
     absolute path is still recognized as absolute when the daemon runs on Unix,
     so agents on either OS get consistent behavior.
     """
-    if not path:
-        return False
-    try:
-        if Path(path).is_absolute():
-            return True
-    except (OSError, ValueError):
-        return False
-    if _WINDOWS_DRIVE_RE.match(path) or _WINDOWS_UNC_RE.match(path):
-        return True
-    return False
+    return WorkspaceGuard._is_absolute_path(path)
 
 
 def _resolve_target_path(
     path: str,
     workdir: str | None,
 ) -> tuple[Path | None, Path | None, str | None]:
-    """Resolve `path` against `workdir` (relative) or use it as-is (absolute).
+    """Resolve *path* against *workdir* (relative) or use it as-is (absolute).
 
     Returns:
-        (target_path, base_path, error). `base_path` is the workdir Path when
-        `path` is relative, and None when `path` is absolute (no boundary check
+        (target_path, base_path, error). ``base_path`` is the workdir Path when
+        *path* is relative, and ``None`` when *path* is absolute (no boundary check
         is applied). On error, target_path and base_path are None.
     """
     if _is_absolute_path(path):
@@ -87,93 +82,69 @@ def _resolve_target_path(
         )
 
     try:
-        base = Path(workdir).expanduser().resolve()
-        target = (base / path).expanduser().resolve()
-    except (OSError, RuntimeError) as e:
-        return None, None, f"ERROR: Invalid path: {e}"
-
-    # Verify the resolved workdir actually exists on disk. When the caller
-    # passes a typo'd / hallucinated workdir (e.g. `ngienminhkha` instead of
-    # `nguyenminhkha`), `base` resolves successfully but is not a real
-    # directory. Without this check, every downstream tool would report a
-    # misleading "File does not exist" against the (valid) target path while
-    # the real cause is the missing workdir. Surface the original workdir
-    # string the caller passed in, so the agent can spot its own typo.
-    if not base.exists():
+        guard = WorkspaceGuard(workdir)
+    except ValueError:
         return None, None, (
             f"ERROR: Working directory does not exist: {workdir} "
             "— check the workdir path. Was it typed correctly?"
         )
 
-    return target, base, None
+    return guard._resolve_target(path)
 
 
 def _resolve_within_workdir(
     path: str,
     workdir: str | None,
 ) -> tuple[Path | None, str | None]:
-    """Resolve `path` and verify it stays within `workdir` (when relative).
+    """Resolve *path* and verify it stays within *workdir* (when relative).
 
-    Combines `_resolve_target_path` with the `_is_within_workdir` boundary
-    check, so callers get a single (target, err) tuple and can't forget to
-    apply the boundary check.
+    Combines ``_resolve_target_path`` with the boundary check, so callers get
+    a single (target, err) tuple and can't forget to apply the boundary check.
 
     Returns:
         (target_path, error). On error, target_path is None. For absolute
         paths the boundary check is intentionally skipped.
     """
-    target, base, err = _resolve_target_path(path, workdir)
-    if err:
-        return None, err
-    if base is not None and not _is_within_workdir(base, target):
-        return None, f"ERROR: Path escapes workdir boundary: {path}"
-    return target, None
+    if _is_absolute_path(path):
+        try:
+            return Path(path).expanduser(), None
+        except (OSError, RuntimeError) as e:
+            return None, f"ERROR: Invalid absolute path: {e}"
+
+    if not workdir or not workdir.strip():
+        return (
+            None,
+            "ERROR: workdir is required for relative paths. Agents must always "
+            "specify workdir explicitly — typically the project directory. "
+            "Absolute paths do not need workdir.",
+        )
+
+    try:
+        guard = WorkspaceGuard(workdir)
+    except ValueError:
+        return None, (
+            f"ERROR: Working directory does not exist: {workdir} "
+            "— check the workdir path. Was it typed correctly?"
+        )
+
+    return guard.resolve(path)
 
 
 def _normed_contains(base: Path, target: Path) -> bool:
     """Check if target is within base using OS-appropriate case normalization."""
-    try:
-        normed_target = Path(os.path.normcase(str(target.resolve())))
-        normed_base = Path(os.path.normcase(str(base.resolve())))
-        normed_target.relative_to(normed_base)
-        return True
-    except (ValueError, OSError):
-        return False
+    return WorkspaceGuard._normed_contains(base, target)
 
 
 def _is_within_workdir(workdir: Path, target: Path) -> bool:
     """Check if target path is within workdir boundary or a temp directory.
-    
+
     Paths are allowed if they are:
     1. Within the workdir, OR
     2. Within the system temp directory or common temp directories
     """
-    if _normed_contains(workdir, target):
+    if WorkspaceGuard._normed_contains(workdir, target):
         return True
-    
-    # Allow access to system temp directories
-    # Check multiple common temp locations (handles macOS /tmp -> /private/tmp symlink)
-    temp_dirs = [
-        Path(tempfile.gettempdir()).resolve(),
-        Path("/tmp").resolve(),
-        Path("/private/tmp").resolve(),
-        Path("/var/tmp").resolve(),
-    ]
-    
-    # On Windows, also check common Windows temp locations
-    if os.name == 'nt':
-        system_drive = os.environ.get("SystemDrive", "C:")
-        temp_dirs.extend([
-            Path(os.environ.get("TEMP") or tempfile.gettempdir()).resolve(),
-            Path(os.environ.get("TMP") or tempfile.gettempdir()).resolve(),
-            Path(f"{system_drive}\\tmp").resolve(),
-        ])
-    
-    for temp_dir in temp_dirs:
-        if _normed_contains(temp_dir, target):
-            return True
-    
-    return False
+    return WorkspaceGuard._is_in_temp_dir(target)
 
 
 @register_tool_category("filesystem")

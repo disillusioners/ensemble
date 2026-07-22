@@ -70,6 +70,7 @@ from daemon.routers import (
     settings_router,       # /api/settings (Phase 1: user language preference)
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
 )
+from daemon.routers.workspace import router as workspace_router
 
 from daemon.mcp import (
     create_kb_mcp_server,
@@ -608,6 +609,10 @@ async def lifespan(app: FastAPI):
     # Also set project repository for queues router (has its own dependency injection)
     from daemon.routers.queues import set_project_repository as set_queues_project_repository
     set_queues_project_repository(manager._project_repository)
+
+    # Set project repository for workspace router injection (Phase 1: workspace viewer)
+    from daemon.routers.workspace import set_project_repository as set_workspace_project_repo
+    set_workspace_project_repo(manager._project_repository)
 
     # Set JobQueueMgmtService for projects and queues routers injection
     from daemon.routers.projects import set_job_queue_mgmt_service as set_proj_mgmt_service
@@ -1370,6 +1375,7 @@ def create_app() -> FastAPI:
     api_router.include_router(database_router)        # /api/database
     api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
+    api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
 
     app.include_router(api_router)
 
