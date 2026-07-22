@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 177 packs
-- Unit: 149 | Integration: 3 | Mock: 7 | E2E: 11 | Postgres: 2 | Manual: 1 | SharedContext: 5
+- Total: 180 packs
+- Unit: 151 | Integration: 4 | Mock: 7 | E2E: 11 | Postgres: 2 | Manual: 1 | SharedContext: 5
 
 ## Unit Test Packs
 
@@ -411,6 +411,16 @@ Feature: User message injection changed from single-slot replace semantics to ap
 | injection_unit_test | tests/test_injection_graph.py + tests/test_injection_sse.py + tests/test_injection_slot.py + tests/test_injection_cleanup.py + tests/test_injection_api.py + tests/test_injection_compaction.py + tests/test_loop_breaker_integration.py (injection tests) | All injection subsystem unit tests: slot mechanics (set/get/clear/count/TTL), graph consumption (FIFO, atomic batch), SSE events (N×user_message → 1×injection_consumed), API routing (202, pending_count, append vs replace), compaction preservation, cleanup on lifecycle events, loop-breaker C3 re-append. **8/8 specified behaviors covered + 2 gap-filling multi-message tests added (commit 85097179).** | 2 min | 2026-07-22 | ✅ PASS (88/88 in ~5s, feature/injection-queue, commit 85097179, 0 failures) |
 | e2e_injection_ab_test | test/packs/e2e_injection_ab_test.sh | E2E injection tests 6-8: consumed_by_running_instance, queue_cleared_on_pause, replacement (⚠️ replacement tests OLD semantics — needs rewrite for append-list). Requires daemon on :8079. | 20 min | 2026-07-22 | ⏭️ SKIP (daemon not running) |
 | e2e_injection_c_test | test/packs/e2e_injection_c_test.sh | E2E injection tests 9-11: into_waiting_children, paused_auto_resume_unchanged, query_endpoint. Requires daemon on :8079. | 20 min | 2026-07-22 | ⏭️ SKIP (daemon not running) |
+
+## Workspace Viewer Packs (2026-07-22)
+
+Workspace Viewer feature (feature/workspace-viewer branch) — read-only file browser with git diff, across 3 phases.
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| workspace_guard_unit_test | test/packs/workspace_guard_unit_test.sh | WorkspaceGuard security: path resolution (resolve/resolve_strict), path traversal blocked, symlink handling, null bytes, temp dir bypass, deleted workdir→404, ignore patterns, depth limits | 2 min | 2026-07-22 | ✅ PASS (48/48, feature/workspace-viewer, 0.80s runtime, 0 failures) |
+| workspace_api_integration_test | test/packs/workspace_api_integration_test.sh | Workspace API endpoints: GET /tree (depth limit, ignore patterns), GET /file (content, size limit, binary detection), GET /diff (git diff vs HEAD), GET /events (SSE), error handling (404 for deleted workdirs), security integration | 5 min | 2026-07-22 | ✅ PASS (20/20 incl. regression test for file_not_found fix, feature/workspace-viewer, commit a690aa59, 3.5s runtime, 0 failures) |
+| workspace_frontend_unit_test | test/packs/workspace_frontend_unit_test.sh | Frontend workspace Jest: WorkspacePageComponent, WorkspaceService, CodeViewerComponent, CodemirrorDirective, DiffViewerComponent, FileTreeComponent | 5 min | 2026-07-22 | ✅ PASS (92/92 across 6 suites, feature/workspace-viewer, 1.98s runtime, 0 failures) |
 
 ## E2E Release Gate Packs (2026-07-22)
 

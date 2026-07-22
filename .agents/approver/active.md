@@ -1,5 +1,5 @@
-Current Plan: Auto-Kill Background Processes on Root Instance Completion
-Tracking File: auto-kill-bg-processes-tracking.md
-Iteration: 001
+Current Plan: Workspace Viewer (Read-Only with Git Diff)
+Tracking File: workspace-viewer-read-only-with-git-diff-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-07-18 19:26
+Last Updated: 2026-07-22 19:55
