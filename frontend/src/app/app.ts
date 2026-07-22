@@ -9,6 +9,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { ApiService } from './services/api.service';
 import { SseService } from './services/sse.service';
 import { NotificationBellComponent } from './components/notification-bell/notification-bell.component';
+import { JobQueueIndicatorComponent } from './components/job-queue-indicator/job-queue-indicator.component';
 import type { HealthResponse, MigrationAvailability } from './models';
 
 interface SettingsMenuItem {
@@ -29,7 +30,8 @@ interface SettingsMenuItem {
     MatIconModule,
     MatButtonModule,
     MatMenuModule,
-    NotificationBellComponent
+    NotificationBellComponent,
+    JobQueueIndicatorComponent
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'

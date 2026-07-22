@@ -1,0 +1,17 @@
+<div class="job-queue-indicator-container">
+  <button
+    mat-icon-button
+    class="queue-button"
+    [matTooltip]="tooltipText()"
+    matTooltipClass="job-queue-tooltip"
+    aria-label="View job queue"
+    (click)="onClick()">
+    <mat-icon
+      [matBadge]="jobCount()"
+      [matBadgeHidden]="!hasJobs()"
+      matBadgeColor="accent"
+      matBadgeSize="small">
+      pending_actions
+    </mat-icon>
+  </button>
+</div>

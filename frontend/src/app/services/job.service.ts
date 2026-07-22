@@ -60,6 +60,28 @@ export class JobService {
   }
 
   /**
+   * GET /api/jobs?status=queued,active
+   *
+   * Fetches pending (queued) and active (running) jobs only —
+   * used by the header JobQueueIndicator to render a live count
+   * and per-project breakdown tooltip. The backend treats
+   * ``queued`` and ``active`` as its internal lifecycle names;
+   * we map from the public ``pending`` / ``processing`` enum
+   * here so the rest of the UI keeps using the
+   * ``JobStatus`` model.
+   */
+  listActiveJobs(): Observable<Job[]> {
+    const params = new HttpParams().set('status', 'queued,active');
+    return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
+      map((response) => response.jobs),
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to fetch active jobs');
+        return of([]);
+      })
+    );
+  }
+
+  /**
    * GET /api/jobs/{id}
    */
   getJob(jobId: string): Observable<Job> {

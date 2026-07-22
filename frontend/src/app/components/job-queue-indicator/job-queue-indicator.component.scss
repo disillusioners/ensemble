@@ -1,0 +1,38 @@
+.job-queue-indicator-container {
+  display: inline-block;
+}
+
+.queue-button {
+  position: relative;
+  color: #94a3b8;
+  transition: color 0.15s ease, background-color 0.15s ease;
+
+  &:hover {
+    color: #f1f5f9;
+    background-color: #1e293b;
+  }
+
+  mat-icon {
+    transition: transform 0.2s ease;
+  }
+
+  &:hover mat-icon {
+    transform: scale(1.1);
+  }
+}
+
+/* Tooltip styling: plain monospace-ish block so the newlines form
+   a readable per-project breakdown. The header already uses a dark
+   theme so we match the notification panel palette. */
+::ng-deep .job-queue-tooltip {
+  .mdc-tooltip__surface {
+    background-color: #1e293b;
+    color: #f1f5f9;
+    font-size: 12px;
+    line-height: 1.5;
+    max-width: 320px;
+    white-space: pre-line;
+    padding: 8px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+}
