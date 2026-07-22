@@ -80,6 +80,7 @@ class GitDiffService:
         # Read working tree content for the "b" side of the merge view.
         working_content = None
         working_file = self.workdir / relative_path
+        file_exists = working_file.exists()
         try:
             file_stat = working_file.stat()
             if file_stat.st_size <= 1_048_576:  # 1 MB limit
@@ -87,6 +88,18 @@ class GitDiffService:
             # else: file too large, leave working_content as None
         except (OSError, UnicodeDecodeError):
             working_content = None  # binary or deleted — UI handles gracefully
+
+        # Fix: file not in HEAD AND not on disk → doesn't exist.
+        # Without this, head_content is None inflates has_changes to True
+        # even though the file was never created.
+        if head_content is None and not file_exists:
+            return {
+                "has_changes": False,
+                "diff": None,
+                "head_content": None,
+                "working_content": None,
+                "error": "file_not_found",
+            }
 
         return {
             "has_changes": has_changes,

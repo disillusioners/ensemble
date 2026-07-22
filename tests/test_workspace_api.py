@@ -630,6 +630,47 @@ class TestGetFileDiff:
             _ = git_parent
 
     @pytest.mark.asyncio
+    async def test_diff_nonexistent_file_returns_file_not_found(self, engine, workdir):
+        """A path that doesn't exist on disk or in HEAD → error=``file_not_found``.
+
+        Regression test: previously, a non-existent file returned
+        ``has_changes=True`` with an empty diff because ``head_content is
+        None`` inflated the ``has_changes`` flag. The fix detects that the
+        file is absent from both HEAD and the working tree.
+
+        Uses the same git-repo setup as the modified-file test so the
+        ``is_git_repo`` guard passes before reaching the file-existence
+        check.
+        """
+        _create_temp_git_repo(workdir)
+        repo = SQLModelProjectRepository(engine)
+        workspace_module.set_project_repository(repo)
+        try:
+            project = repo.create(
+                name="workspace-git-test-nonexistent",
+                main_directory=str(workdir),
+            )
+            project_id = project.project_id
+
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=fastapi_app),
+                base_url="http://testserver",
+            ) as ac:
+                response = await ac.get(
+                    f"/api/workspace/{project_id}/diff",
+                    params={"path": "totally/fake/nonexistent.py"},
+                )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["error"] == "file_not_found"
+            assert data["has_changes"] is False
+            assert data["diff"] is None
+        finally:
+            workspace_module._project_repo = None
+            FileChangeMonitor._instances.clear()
+
+    @pytest.mark.asyncio
     async def test_diff_non_git_repo_returns_error_not_a_git_repo(self, client):
         """A non-git workdir → ``error="not_a_git_repo"``, ``has_changes=False``."""
         ac, _, project_id = client
