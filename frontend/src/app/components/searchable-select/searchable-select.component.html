@@ -1,0 +1,38 @@
+<mat-form-field
+  [appearance]="appearance()"
+  class="searchable-select-field"
+  [attr.aria-label]="label() || placeholder() || null"
+>
+  @if (label()) {
+    <mat-label>{{ label() }}</mat-label>
+  }
+
+  <input
+    #auto
+    type="text"
+    matInput
+    autocomplete="off"
+    [disabled]="effectiveDisabled()"
+    [placeholder]="placeholder()"
+    [value]="displayText()"
+    [matAutocomplete]="panel"
+    (input)="onInput($event)"
+    (keydown.enter)="onEnter($event)"
+  />
+
+  <mat-autocomplete
+    #panel="matAutocomplete"
+    [displayWith]="displayLabel"
+    (optionSelected)="onOptionSelected($event.option.value)"
+    (closed)="onPanelClosed()"
+  >
+    @for (option of filteredOptions(); track option.label) {
+      <mat-option [value]="option" [disabled]="effectiveDisabled()">
+        {{ option.label }}
+      </mat-option>
+    }
+    @empty {
+      <mat-option [disabled]="true">No results found</mat-option>
+    }
+  </mat-autocomplete>
+</mat-form-field>
