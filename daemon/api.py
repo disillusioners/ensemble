@@ -1208,6 +1208,11 @@ def create_app() -> FastAPI:
             "/api/instances",
         ]
 
+        # Exact (method, path) pairs to HIDE (exclude from logging)
+        HIDE_METHOD_PATH = [
+            ("GET", "/api/jobs"),
+        ]
+
         # ANSI color codes
         RESET = "\033[0m"
         BOLD = "\033[1m"
@@ -1254,7 +1259,10 @@ def create_app() -> FastAPI:
 
             await self.app(scope, receive, custom_send)
 
-            if path in self.HIDE_PATTERNS:
+            if (
+                path in self.HIDE_PATTERNS
+                or (method, path) in self.HIDE_METHOD_PATH
+            ):
                 return
 
             method_color = self.COLORS.get(method, self.RESET)
