@@ -2847,27 +2847,41 @@ def test_injection_queue_cleared_on_pause():
 
 
 @pytest.mark.integration
-def test_injection_replacement():
-    """TEST 8: Second injection replaces the first.
+def test_injection_multiple_messages_both_consumed():
+    """TEST 8: Multiple injections both accumulate and are consumed (FIFO).
 
-    Validates Task 5 / W5 replacement semantics: posting a NEW
-    injection while a previous one is still in the slot must REPLACE
-    (not append) the content. The first marker must NOT appear in
-    the eventual conversation history; only the second marker must.
+    Validates Task 5 / W5 append-list semantics: posting multiple
+    injections while the instance is RUNNING must APPEND to the
+    queue (not replace). Both markers must be delivered to the
+    agent_node in FIFO order and end up in the conversation history.
+    ``pending_count`` must reflect the queue depth at every step.
+
+    This is the NEW Phase 3 contract — ``test_injection_replacement``
+    asserted the OLD single-slot replacement semantics, which were
+    removed when ``set_injection`` switched from overwrite to append.
     """
     instance_id: str | None = None
     logger.info("=" * 60)
-    logger.info("TEST 8: injection replacement (second replaces first)")
+    logger.info(
+        "TEST 8: injection append-list (both messages consumed in FIFO)"
+    )
     logger.info("=" * 60)
 
     FIRST_MARKER = "FIRST_INJECTION_MARKER"
     SECOND_MARKER = "SECOND_INJECTION_MARKER"
 
     try:
-        # Step 1: spawn + send long-running prompt
+        # Step 1: spawn + send prompt. Use PAUSE_TEST_PROMPT (not
+        # LONG_PROMPT) because LONG_PROMPT's multi-iteration web
+        # summarisation routinely exceeds 8 minutes in local dev —
+        # see the PAUSE_TEST_PROMPT docstring. We need a prompt that
+        # holds the instance RUNNING long enough for the two POSTs
+        # to land (Steps 3-5) but finishes within the completion
+        # budget (Step 8). PAUSE_TEST_PROMPT is the established
+        # project solution.
         instance_id = _spawn_instance("leader")
         assert instance_id, "Failed to spawn leader instance"
-        _send_message(instance_id, LONG_PROMPT)
+        _send_message(instance_id, PAUSE_TEST_PROMPT)
 
         # Step 2: wait for RUNNING
         running_ok = _wait_for_status(instance_id, "running", timeout=30)
@@ -2876,73 +2890,122 @@ def test_injection_replacement():
             logger.warning(
                 f"[STEP2] leader never reached 'running' "
                 f"(status={current.get('status')!r}); TEST 8 cannot "
-                f"verify replacement contract."
+                f"verify append-list contract."
             )
             pytest.skip(
                 "Leader did not enter 'running' within 30s — cannot "
-                "test injection replacement"
+                "test injection append-list semantics"
             )
         logger.info(f"[STEP2] leader is running: {instance_id[:8]}...")
 
-        # Step 3: send first injection
+        # Step 3: send first injection — response must report pending_count=1
         first_resp = _send_injection_raw(instance_id, FIRST_MARKER)
         assert first_resp.status_code == 202, (
             f"Expected 202 for first injection, got "
             f"{first_resp.status_code}"
         )
+        first_body = first_resp.json()
+        assert first_body.get("pending_count") == 1, (
+            f"Expected pending_count=1 after first injection, got "
+            f"{first_body.get('pending_count')!r} (full body={first_body!r})"
+        )
+        assert first_body.get("content") == FIRST_MARKER, (
+            f"Expected first response content={FIRST_MARKER!r}, got "
+            f"{first_body.get('content')!r}"
+        )
+        logger.info(
+            f"[STEP3] ✓ first injection accepted (pending_count=1, "
+            f"content={FIRST_MARKER!r})"
+        )
 
-        # Step 4: GET /injection — pending=True, content=FIRST_MARKER
+        # Step 4: GET /injection confirms queue depth 1, head=FIRST_MARKER
         first_state = _get_injection(instance_id)
         assert first_state.get("pending") is True
+        assert first_state.get("pending_count") == 1, (
+            f"Expected pending_count=1 from GET /injection, got "
+            f"{first_state.get('pending_count')!r}"
+        )
         assert first_state.get("content") == FIRST_MARKER, (
-            f"Expected content={FIRST_MARKER!r}, got "
+            f"Expected head content={FIRST_MARKER!r}, got "
             f"{first_state.get('content')!r}"
         )
-        logger.info(
-            f"[STEP4] ✓ first injection in slot: {FIRST_MARKER!r}"
-        )
+        logger.info("[STEP4] ✓ queue depth 1, head=FIRST_MARKER")
 
-        # Step 5: send second injection (must REPLACE first)
+        # Step 5: send second injection — must APPEND, not replace.
+        # The POST /messages response echoes the JUST-APPENDED entry
+        # (i.e. the newest one), NOT the queue head. So the response
+        # body for the second POST must report SECOND_MARKER as the
+        # echoed content, with pending_count=2 (queue accumulated).
+        # The head (oldest) is exposed only via GET /injection (Step 6).
         second_resp = _send_injection_raw(instance_id, SECOND_MARKER)
         assert second_resp.status_code == 202, (
-            f"Expected 202 for replacement injection, got "
+            f"Expected 202 for second injection, got "
             f"{second_resp.status_code}"
         )
-
-        # Step 6: GET /injection — pending=True, content=SECOND_MARKER
-        second_state = _get_injection(instance_id)
-        assert second_state.get("pending") is True
-        assert second_state.get("content") == SECOND_MARKER, (
-            f"Expected content={SECOND_MARKER!r} after replacement, "
-            f"got {second_state.get('content')!r}. Injection slot did "
-            f"NOT replace the prior content."
+        second_body = second_resp.json()
+        assert second_body.get("pending_count") == 2, (
+            f"Expected pending_count=2 after second injection, got "
+            f"{second_body.get('pending_count')!r}. Append-list "
+            f"semantics broken — second injection did not accumulate "
+            f"alongside the first."
+        )
+        assert second_body.get("content") == SECOND_MARKER, (
+            f"Expected response.content (echoed just-appended entry)="
+            f"{SECOND_MARKER!r}, got {second_body.get('content')!r}. "
+            f"POST should echo the newest appended message."
         )
         logger.info(
-            f"[STEP6] ✓ second injection replaced first: "
-            f"{SECOND_MARKER!r}"
+            f"[STEP5] ✓ second injection accepted (pending_count=2, "
+            f"echoed content={SECOND_MARKER!r})"
         )
 
-        # Step 7: poll for consumption (pending→False, 60s timeout)
+        # Step 6: GET /injection confirms queue depth 2, head=FIRST_MARKER
+        # (the oldest entry — FIFO front of the queue)
+        second_state = _get_injection(instance_id)
+        assert second_state.get("pending") is True
+        assert second_state.get("pending_count") == 2, (
+            f"Expected pending_count=2 from GET /injection, got "
+            f"{second_state.get('pending_count')!r}"
+        )
+        assert second_state.get("content") == FIRST_MARKER, (
+            f"Expected head content={FIRST_MARKER!r} after both "
+            f"injections, got {second_state.get('content')!r}. "
+            f"GET /injection should expose the oldest queued entry "
+            f"(FIFO head)."
+        )
+        logger.info(
+            "[STEP6] ✓ queue depth 2, head=FIRST_MARKER (FIFO oldest)"
+        )
+
+        # Step 7: poll for consumption (pending→False, 60s timeout).
+        # Both messages are drained in a single agent_node call, so the
+        # queue drops directly to empty once the turn begins.
         CONSUME_TIMEOUT = 60
         consume_deadline = time.time() + CONSUME_TIMEOUT
         consumed = False
+        current_inj: dict = {}
         while time.time() < consume_deadline:
             current_inj = _get_injection(instance_id)
-            if current_inj.get("pending") is False:
+            if (
+                current_inj.get("pending") is False
+                and current_inj.get("pending_count") == 0
+            ):
                 consumed = True
                 break
             time.sleep(2)
         assert consumed, (
-            f"Injection not consumed within {CONSUME_TIMEOUT}s — slot "
-            f"never cleared"
+            f"Injection queue not drained within {CONSUME_TIMEOUT}s — "
+            f"slot never cleared (last state={current_inj!r})"
         )
-        logger.info("[STEP7] ✓ injection consumed")
+        logger.info("[STEP7] ✓ injection queue drained (pending_count=0)")
 
         # Step 8: wait for completion FIRST (before checking markers).
-        # The injected HumanMessage is only persisted to the checkpoint
-        # when agent_node RETURNS, so the marker is only visible in the
-        # conversation history after the instance reaches a terminal
-        # state. LONG_PROMPT requires the doubled timeout.
+        # The injected HumanMessages are only persisted to the
+        # checkpoint when agent_node RETURNS, so the markers are only
+        # visible in the conversation history after the instance reaches
+        # a terminal state. PAUSE_TEST_PROMPT was chosen over
+        # LONG_PROMPT (Step 1) so the agent's LLM turn stays bounded
+        # and the standard 2x completion budget is sufficient.
         finished, final_status = _wait_for_completion(
             instance_id, timeout=COMPLETION_TIMEOUT * 2
         )
@@ -2952,29 +3015,38 @@ def test_injection_replacement():
         )
         logger.info(f"[STEP8] ✓ instance reached terminal: {final_status}")
 
-        # Step 9: SECOND_MARKER in history, FIRST_MARKER absent
+        # Step 9: BOTH markers present in history, in FIFO order.
         messages = _get_messages(instance_id)
-        has_second = any(
-            SECOND_MARKER in str(m.get("content", ""))
-            for m in messages
+        first_positions = [
+            idx
+            for idx, m in enumerate(messages)
             if isinstance(m, dict)
-        )
-        has_first = any(
-            FIRST_MARKER in str(m.get("content", ""))
-            for m in messages
+            and FIRST_MARKER in str(m.get("content", ""))
+        ]
+        second_positions = [
+            idx
+            for idx, m in enumerate(messages)
             if isinstance(m, dict)
+            and SECOND_MARKER in str(m.get("content", ""))
+        ]
+        assert first_positions, (
+            f"Expected {FIRST_MARKER!r} in conversation history — "
+            f"first injection was NOT consumed (append-list broken)"
         )
-        assert has_second, (
+        assert second_positions, (
             f"Expected {SECOND_MARKER!r} in conversation history — "
-            f"replacement content not consumed"
+            f"second injection was NOT consumed (append-list broken)"
         )
-        assert not has_first, (
-            f"Did NOT expect {FIRST_MARKER!r} in conversation history "
-            f"— replacement contract is broken: both injections were "
-            f"consumed instead of replacing"
+        first_idx = first_positions[0]
+        second_idx = second_positions[0]
+        assert first_idx < second_idx, (
+            f"FIFO order broken: {FIRST_MARKER!r} (idx={first_idx}) "
+            f"appeared AFTER {SECOND_MARKER!r} (idx={second_idx}). "
+            f"Append-list must preserve enqueue order."
         )
         logger.info(
-            "[STEP9] ✓ only second marker in history (replacement OK)"
+            f"[STEP9] ✓ both markers in history, FIFO preserved "
+            f"(first@{first_idx} < second@{second_idx})"
         )
 
         logger.info("TEST 8 PASSED")

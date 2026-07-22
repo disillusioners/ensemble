@@ -26,14 +26,14 @@ fi
 # ─── Run tests with timeout ───────────────────────────────────────────────────
 # Tests 6-8: test_injection_consumed_by_running_instance,
 #            test_injection_queue_cleared_on_pause,
-#            test_injection_replacement
+#            test_injection_multiple_messages_both_consumed
 # Estimated: ~650s total (each test 200-240s due to LONG_PROMPT LLM latency)
 timeout 1200 .venv/bin/python -m pytest \
     tests/e2e/test_e2e_workflows.py \
     -v --tb=short -s \
     --override-ini="addopts=" \
     -m integration \
-    -k "test_injection_consumed_by_running_instance or test_injection_queue_cleared_on_pause or test_injection_replacement" \
+    -k "test_injection_consumed_by_running_instance or test_injection_queue_cleared_on_pause or test_injection_multiple_messages_both_consumed" \
     2>&1
 
 EXIT_CODE=$?
