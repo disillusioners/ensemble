@@ -354,7 +354,7 @@ class SQLModelInstanceRepository:
                 descendants when ``include_descendants=True``).
             limit: Maximum number of root instances to return.
             offset: Number of root instances to skip.
-            exclude_kb: Exclude KB-related instances (experiencer, kb-importer)
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer, kb-writer)
                 when True (default: True).
             include_descendants: When False (default), return a flat paginated
                 list of all matching instances. When True, paginate by root and
