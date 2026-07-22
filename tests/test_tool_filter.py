@@ -31,6 +31,7 @@ EXPECTED_TOOL_CATEGORIES: dict[str, list[str]] = {
         "project_set_metadata", "project_delete_metadata",
         "project_link", "project_unlink", "project_delete",
     ],
+    "question": ["ask_questions"],
     "help": ["tool_help"],
     "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
 }
