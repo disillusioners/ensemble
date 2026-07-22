@@ -365,6 +365,10 @@ class TestCleanupDropsDeferredMarker:
         manager._graph_tasks = {}
         manager._pending_injections = {}
         manager._gii_throttle = {}
+        # ``_loop_breaker_state`` is popped in ``_cleanup_instance_state``
+        # (memory-leak fix following the same 5-path cleanup pattern); must
+        # be seeded since ``__new__`` skips ``__init__``.
+        manager._loop_breaker_state = {}
         # ``release_context_usage_cache`` is a method on the real manager;
         # stub it so the cleanup call doesn't reach real DB code.
         manager.release_context_usage_cache = MagicMock()

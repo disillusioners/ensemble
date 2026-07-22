@@ -454,7 +454,30 @@ class MessageProcessingPipeline:
             # failure here MUST NOT fail the message — the message
             # itself was processed successfully. Mirrors the
             # behaviour in both source paths.
-            await self._check_child_completion(context.instance_id, context.message_id)
+            #
+            # Defensive PAUSED re-check (question() tool bug, 2026-07-21):
+            # The question() tool's pause cascade may commit PAUSED to the
+            # DB during an ``asyncio.shield`` + ``task.cancel()`` timing
+            # window that overlaps with this pipeline's post-processing.
+            # Without this guard, child completion would overwrite PAUSED
+            # with COMPLETED (the root-cause overwrite in the bug). We
+            # query the fresh DB status right before invoking child
+            # completion — any in-memory cached status is unreliable
+            # because the cascade commits outside the task that owns the
+            # cached state. If the instance is PAUSED, skip child
+            # completion entirely; the next message (resume) will run
+            # child completion with a clean state.
+            if await self._is_instance_paused(context.instance_id):
+                logger.info(
+                    f"MessageProcessingPipeline: skipping child completion "
+                    f"for {context.instance_id[:8]}... — instance is "
+                    f"PAUSED (likely question() tool pause committed "
+                    f"during shielded finally block)"
+                )
+            else:
+                await self._check_child_completion(
+                    context.instance_id, context.message_id
+                )
 
         except OperationCancelledError as e:
             return await self._handle_cancel(e, callbacks)
@@ -680,6 +703,42 @@ class MessageProcessingPipeline:
                 exc_info=True,
             )
             # Don't fail the task — the message was processed successfully.
+
+    async def _is_instance_paused(self, instance_id: str) -> bool:
+        """Defensive PAUSED re-check: query fresh instance status from DB.
+
+        Context: the ``question()`` tool's pause cascade can commit
+        ``PAUSED`` to the DB during an ``asyncio.shield`` + ``task.cancel()``
+        timing window. The pipeline's child-completion step runs on the
+        same event loop and can therefore race the cascade. In-memory
+        instance state is stale in that race because the cascade commits
+        outside the task that owns the cached state — only a fresh DB
+        read can reliably detect ``PAUSED``.
+
+        Best-effort by design: any DB read failure returns ``False``
+        (do not skip) so normal processing continues. The guard is a
+        belt-and-suspenders check for a known bug; a flaky status probe
+        must never wedge the message path.
+
+        Returns:
+            ``True`` if the instance is currently ``PAUSED`` in the DB;
+            ``False`` otherwise — including when the repository is
+            unavailable, the read fails, or the instance row is missing.
+        """
+        repo = getattr(self._manager, "_instance_repository", None)
+        if repo is None:
+            return False
+        try:
+            instance = await asyncio.to_thread(repo.get, instance_id)
+        except Exception as e:
+            logger.warning(
+                f"MessageProcessingPipeline: PAUSED re-check failed for "
+                f"{instance_id[:8]}... (non-fatal, proceeding): {e}"
+            )
+            return False
+        if instance is None:
+            return False
+        return instance.status == InstanceStatus.PAUSED.value
 
     async def _maybe_transition_to_waiting_children(
         self,

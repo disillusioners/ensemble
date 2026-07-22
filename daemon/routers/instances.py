@@ -718,6 +718,57 @@ async def answer_questions(
     }
 
 
+# 6c. GET /instances/{instance_id}/question - Get pending question pack
+#
+# Phase 2 / question-tool fallback query endpoint. Mirrors the
+# ``GET /{instance_id}/injection`` endpoint in
+# ``daemon/routers/messages.py``: lets the frontend reconcile a pending
+# question pack after it missed the ``question_pack`` SSE event (mid-
+# stream reconnect, dropped events during a long-lived connection, or
+# a fresh tab that loaded before the SSE connect landed). Reads the
+# same in-memory ``_packs`` dict that the ``question`` tool writes to
+# and that the answer endpoint reads from. The absence of a pending
+# pack is a valid steady state (IDLE / answered / cleared instances),
+# so the endpoint returns ``question_pack=null`` rather than 404.
+@router.get("/{instance_id}/question")
+async def get_pending_question(instance_id: str, request: Request) -> dict:
+    """Return the pending question pack for ``instance_id``, if any.
+
+    Response shape::
+
+        {
+            "instance_id": str,
+            "question_pack": dict | None,
+        }
+
+    ``question_pack`` is the frozen :func:`pack_to_dict` payload
+    (``status`` / ``created_at`` / ``questions`` / ``answers``) when
+    a pack with ``status="pending"`` exists. It is ``null`` when no
+    pack exists OR when the pack has already transitioned to
+    ``"answered"`` — the frontend uses the null result to hide the
+    question UI for instances that have moved past the pause.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+    """
+    manager = _get_manager(request)
+    await _check_instance_exists(manager, instance_id)
+
+    # Lazy import keeps the service out of every other request that
+    # doesn't need it (matches the answer endpoint convention above).
+    from daemon.services.question_manager import pack_to_dict
+
+    pack = manager._question_manager.get_question_pack(instance_id)
+    return {
+        "instance_id": instance_id,
+        "question_pack": (
+            pack_to_dict(pack)
+            if pack is not None and pack.status == "pending"
+            else None
+        ),
+    }
+
+
 # 7. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
 @router.post("/{instance_id}/stop", deprecated=True)
 async def stop_instance_deprecated(

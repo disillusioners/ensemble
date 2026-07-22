@@ -16,6 +16,7 @@
 #   - tests/test_question_manager.py
 #   - tests/test_question_tools.py
 #   - tests/test_question_untested_paths.py
+#   - tests/unit/services/test_question_pause_completion_guard.py
 #
 # Uses .venv/bin/pytest because the system pytest in /opt/homebrew/bin
 # is broken on this host. The project venv (Python 3.13.3, pytest 9.0.2)
@@ -36,6 +37,7 @@ timeout 300s .venv/bin/pytest \
   tests/test_question_manager.py \
   tests/test_question_tools.py \
   tests/test_question_untested_paths.py \
+  tests/unit/services/test_question_pause_completion_guard.py \
   --tb=short -q 2>&1
 
 EXIT_CODE=$?

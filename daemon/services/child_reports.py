@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, NamedTuple
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update as sa_update
 from sqlmodel import Session
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
@@ -683,73 +683,6 @@ Provide a concise summary:"""
         )
         return True, "all_checks_passed"
 
-    async def _create_completion_report(
-        self,
-        session,
-        instance,
-        last_content: str,
-        completed_message_id: str,
-    ) -> tuple[MessageQueue, Task, str]:
-        """Create the completion report message and task for the parent.
-
-        Updates the child instance status to COMPLETED and creates:
-        - COMPLETION_REPORT message for parent
-        - PROCESS_REPORT task (Phase 1, 2026-06-24, report-lane
-          decoupling)
-
-        Phase 1: the report Task is now typed as ``PROCESS_REPORT``
-        (new ``TaskType`` member) instead of ``PROCESS_MESSAGE``. The
-        two types share the same ``ProcessMessageProcessor`` delivery
-        pipeline — see ``daemon/services/task_processor.py`` — but
-        differ in admission: the cross-system job-coordination guard
-        in ``claim_pending_task`` applies only to ``PROCESS_MESSAGE``,
-        so reports bypass it. Reports have no ``JobItem`` to collide
-        with, so the original guard was the wrong shape for them
-        (and was the root cause of the orphan-Task bug).
-
-        Args:
-            session: Database session.
-            instance: The child Instance object.
-            last_content: The content to include in the report (fetched before transaction).
-            completed_message_id: The message ID that completed (for unique report source).
-
-        Returns:
-            Tuple of (report_message, report_task, report_message_id).
-        """
-        # Update child instance status to COMPLETED
-        instance.status = InstanceStatus.COMPLETED.value
-        instance.updated_at = datetime.now(timezone.utc).isoformat()
-        instance.last_activity_at = datetime.now(timezone.utc)
-        instance.version = (instance.version or 1) + 1
-
-        # Create completion report message for parent
-        # Include message_id in source for per-message idempotency
-        report_message_id = str(uuid.uuid4())
-        report_message = MessageQueue(
-            message_id=report_message_id,
-            instance_id=instance.parent_id,
-            content=last_content,  # Already fetched before transaction
-            source=f"internal_report:{instance.instance_id}:{completed_message_id}",
-            type=MessageType.COMPLETION_REPORT.value,
-            status=MessageStatus.READY.value,
-            priority=0,  # System priority
-            enqueued_at=datetime.now(timezone.utc),
-        )
-        session.add(report_message)
-
-        # Create task for parent to process the report.
-        # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
-        report_task = Task(
-            task_type=TaskType.PROCESS_REPORT.value,
-            instance_id=instance.parent_id,
-            message_id=report_message_id,
-            status=TaskStatus.PENDING.value,
-            created_at=datetime.now(timezone.utc),
-        )
-        session.add(report_task)
-
-        return report_message, report_task, report_message_id
-
     async def _update_parent_on_child_complete(self, session, instance, completed_message_id: str | None = None) -> tuple[bool, str | None, str | None]:
         """Update parent state when child completes.
 
@@ -887,10 +820,15 @@ Provide a concise summary:"""
                 f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
                 f"(Race #3) is disabled by design."
             )
+        # PAUSED excluded too: a paused question() parent must not be
+        # auto-completed by a child's completion (resume() owns its
+        # terminal transition). This is a skip guard, not a legitimate
+        # transition write.
         if (
             is_parent_complete
             and parent.status != InstanceStatus.COMPLETED.value
             and parent.status != InstanceStatus.ERROR.value
+            and parent.status != InstanceStatus.PAUSED.value
         ):
             # Phase 3 (Cascade Unification): when the bus is active,
             # the inline cascade + SELECT COUNT(*) + inline status
@@ -1233,13 +1171,17 @@ Provide a concise summary:"""
             # ``completed_message_id`` (or with None) where the row has
             # already been finalized. The status check is the
             # coarser-grained safety net that supersedes both.
+            # PAUSED is also excluded: a paused question() instance must not
+            # be overwritten by a stale completion report while the user is
+            # editing/inspecting it (resume() owns the terminal transition).
             if instance.status in (
                 InstanceStatus.COMPLETED.value,
                 InstanceStatus.ERROR.value,
+                InstanceStatus.PAUSED.value,
             ):
                 logger.info(
                     f"Instance {instance_id[:8]}... already in terminal "
-                    f"state ({instance.status}), skipping "
+                    f"or paused state ({instance.status}), skipping "
                     f"_process_child_completion_db_sync (idempotency)"
                 )
                 return _ChildCompletionDbResult(
@@ -1534,17 +1476,69 @@ Provide a concise summary:"""
 
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... no parent, skipping notification")
-                
+
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
 
-                # Update instance status to COMPLETED in DB
-                instance.status = InstanceStatus.COMPLETED.value
-                instance.updated_at = datetime.now(timezone.utc).isoformat()
-                instance.last_activity_at = datetime.now(timezone.utc)
-                instance.version = (instance.version or 1) + 1
+                # Defense-in-depth: if this instance became PAUSED during processing
+                # (e.g. question() tool), do NOT overwrite with COMPLETED.
+                # The primary cross-session race protection is the pipeline's
+                # _is_instance_paused() fresh-DB check before _check_child_completion.
+                if instance.status == InstanceStatus.PAUSED.value:
+                    logger.info(
+                        f"Instance {instance_id[:8]}... is PAUSED at root-completion "
+                        f"write, skipping COMPLETED transition (idempotency)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
 
+                # Defense-in-depth atomic guard: use SQLAlchemy Core
+                # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
+                # cascade that commits PAUSED between the ``session.get``
+                # above and this write cannot be silently overwritten.
+                # The where-not-in set is the canonical {PAUSED, COMPLETED,
+                # ERROR} terminal-and-paused set; rowcount == 0 means
+                # another writer (e.g. question() pause cascade) already
+                # finalized the row and we must skip the rest of the
+                # completion logic for this path.
+                now_iso = datetime.now(timezone.utc).isoformat()
+                now_dt = datetime.now(timezone.utc)
+                update_result = session.execute(
+                    sa_update(Instance)
+                    .where(Instance.instance_id == instance_id)
+                    .where(
+                        Instance.status.notin_([
+                            InstanceStatus.PAUSED.value,
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.ERROR.value,
+                        ])
+                    )
+                    .values(
+                        status=InstanceStatus.COMPLETED.value,
+                        updated_at=now_iso,
+                        last_activity_at=now_dt,
+                        version=Instance.version + 1,
+                    )
+                )
                 session.commit()
+                if update_result.rowcount == 0:
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... root-completion "
+                        f"UPDATE matched 0 rows (status already in "
+                        f"{{paused,completed,error}}); skipping "
+                        f"completion side effects (TOCTOU defense)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
                 # Post-commit side effects (SSE, CompletionRegistry, lifecycle, title)
                 # are dispatched by the async caller.
                 return _ChildCompletionDbResult(
@@ -1625,16 +1619,52 @@ Provide a concise summary:"""
                 )
                 logger.info(f"Instance {instance_id[:8]}... is tool invocation, skipping parent notification")
 
-                # Update child status to COMPLETED
-                instance.status = InstanceStatus.COMPLETED.value
-                instance.updated_at = datetime.now(timezone.utc).isoformat()
-                instance.last_activity_at = datetime.now(timezone.utc)
-                instance.version = (instance.version or 1) + 1
-
-                # Capture parent_id before session closes
+                # Capture parent_id before any further writes; the ORM
+                # ``Instance`` reference stays valid through commit
+                # because the WriteGuardSession owns this session.
                 parent_id = instance.parent_id
 
+                # Defense-in-depth atomic guard: use SQLAlchemy Core
+                # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
+                # cascade that commits PAUSED between the ``session.get``
+                # above and this write cannot be silently overwritten.
+                # rowcount == 0 means another writer already finalized
+                # the row and we must skip the rest of the completion
+                # logic for this path.
+                now_iso = datetime.now(timezone.utc).isoformat()
+                now_dt = datetime.now(timezone.utc)
+                update_result = session.execute(
+                    sa_update(Instance)
+                    .where(Instance.instance_id == instance_id)
+                    .where(
+                        Instance.status.notin_([
+                            InstanceStatus.PAUSED.value,
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.ERROR.value,
+                        ])
+                    )
+                    .values(
+                        status=InstanceStatus.COMPLETED.value,
+                        updated_at=now_iso,
+                        last_activity_at=now_dt,
+                        version=Instance.version + 1,
+                    )
+                )
                 session.commit()
+                if update_result.rowcount == 0:
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... tool-invocation "
+                        f"UPDATE matched 0 rows (status already in "
+                        f"{{paused,completed,error}}); skipping "
+                        f"completion side effects (TOCTOU defense)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=parent_id,
+                    )
+
                 # Post-commit side effects are dispatched by the async caller.
                 return _ChildCompletionDbResult(
                     outcome="tool_invocation_completed",
@@ -1747,14 +1777,56 @@ Provide a concise summary:"""
 
             # ATOMIC: Instance completed — create completion report for parent
             logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
-            
+
             # --- Inline: _create_completion_report (no await needed) ---
-            # Update child instance status to COMPLETED
-            instance.status = InstanceStatus.COMPLETED.value
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            instance.last_activity_at = datetime.now(timezone.utc)
-            instance.version = (instance.version or 1) + 1
-            
+            # Defense-in-depth atomic guard: use SQLAlchemy Core
+            # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
+            # cascade that commits PAUSED between the ``session.get``
+            # above and this write cannot be silently overwritten by
+            # a child completion. rowcount == 0 means another writer
+            # (e.g. question() pause cascade) already finalized the
+            # row and we must skip the entire completion_report
+            # emission (message + task + report_injection + parent
+            # cascade) for this path.
+            now_iso = datetime.now(timezone.utc).isoformat()
+            now_dt = datetime.now(timezone.utc)
+            update_result = session.execute(
+                sa_update(Instance)
+                .where(Instance.instance_id == instance_id)
+                .where(
+                    Instance.status.notin_([
+                        InstanceStatus.PAUSED.value,
+                        InstanceStatus.COMPLETED.value,
+                        InstanceStatus.ERROR.value,
+                    ])
+                )
+                .values(
+                    status=InstanceStatus.COMPLETED.value,
+                    updated_at=now_iso,
+                    last_activity_at=now_dt,
+                    version=Instance.version + 1,
+                )
+            )
+            if update_result.rowcount == 0:
+                # Roll back any implicit session state from the failed
+                # UPDATE attempt so the idempotency_skip return is
+                # clean. (No session.add() calls have happened yet at
+                # this point in the function.)
+                session.rollback()
+                logger.warning(
+                    f"Instance {instance_id[:8]}... inlined "
+                    f"cascade UPDATE matched 0 rows (status already "
+                    f"in {{paused,completed,error}}); skipping "
+                    f"completion_report + parent cascade "
+                    f"(TOCTOU defense)"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
             # Create completion report message for parent
             # Include message_id in source for per-message idempotency
             report_message_id = str(uuid.uuid4())
@@ -1866,10 +1938,15 @@ Provide a concise summary:"""
             parent_waiting_children_sse: bool = False
             waiting_children_parent_agent_id: str | None = None
             
+            # PAUSED excluded too: a paused question() parent must not be
+            # auto-completed by a child's completion (resume() owns its
+            # terminal transition). This is a skip guard, not a legitimate
+            # transition write.
             if (
                 is_parent_complete
                 and parent.status != InstanceStatus.COMPLETED.value
                 and parent.status != InstanceStatus.ERROR.value
+                and parent.status != InstanceStatus.PAUSED.value
             ):
                 if bus is not None:
                     # Bus is active — bus callback handles completion.

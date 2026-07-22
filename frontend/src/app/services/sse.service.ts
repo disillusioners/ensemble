@@ -191,13 +191,6 @@ export class SseService {
     this.currentInstanceId = instanceId;
     this.clearEvents();
     this.connectInternal();
-
-    // Reconcile pending injection state from the REST fallback. SSE may
-    // have missed events during a disconnect window (e.g. the user
-    // navigated away while an injection was queued); this catches the
-    // backend's current truth before any pending event arrives. The GET
-    // endpoint is idempotent — no subscription, no polling loop.
-    this.fetchPendingInjection(instanceId);
   }
 
   private connectInternal(): void {
@@ -395,7 +388,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          const pack = data.message as QuestionPack;
+          const pack = (data.message ?? null) as QuestionPack | null;
           this.questionPack.set(pack);
         } catch (err) {
           console.error('[SSE] Failed to parse question_pack:', err);
@@ -507,8 +500,8 @@ export class SseService {
   /**
    * Fetch the current pending injection for ``instanceId`` via the REST
    * fallback endpoint and seed the ``pendingInjection`` signal. Called
-   * from ``connect()`` to reconcile state on initial chat load and after
-   * SSE reconnection — SSE itself drives real-time updates via the
+   * from the chat load flow to reconcile state on initial load and instance
+   * switches — SSE itself drives real-time updates via the
    * ``injection_pending`` / ``injection_consumed`` / ``injection_cleared``
    * event listeners. Errors are logged and swallowed: a missing or
    * 404'd endpoint must not break the chat UI.
@@ -516,6 +509,7 @@ export class SseService {
   fetchPendingInjection(instanceId: string): void {
     this.api.getPendingInjection(instanceId).subscribe({
       next: (resp) => {
+        if (this.currentInstanceId !== instanceId) return;
         if (resp.pending && resp.content !== null) {
           this.pendingInjection.set({
             instance_id: instanceId,
@@ -530,6 +524,21 @@ export class SseService {
       error: (err) => {
         console.error('[SSE] Failed to fetch pending injection:', err);
       },
+    });
+  }
+
+  /**
+   * Fetch the current pending question pack for ``instanceId`` via the REST
+   * fallback endpoint and seed the ``questionPack`` signal. Called from the
+   * chat load flow to reconcile state on initial load and instance switches —
+   * SSE itself drives real-time updates via the ``question_pack`` event
+   * listener. The underlying ApiService Observable logs HTTP errors and recovers
+   * with catchError→of(null), so the signal is set to null when the endpoint fails.
+   */
+  fetchPendingQuestion(instanceId: string): void {
+    this.api.fetchPendingQuestion(instanceId).subscribe((pack) => {
+      if (this.currentInstanceId !== instanceId) return;
+      this.questionPack.set(pack);
     });
   }
 

@@ -554,6 +554,37 @@ async def stream_events(instance_id: str, request: Request):
 
         snapshot_task = asyncio.create_task(_initial_snapshot())
 
+        # 2c. Initial question-pack replay. Mirrors the
+        # ``GET /{instance_id}/question`` endpoint in
+        # ``daemon/routers/instances.py``: a client that connects (or
+        # reconnects) after the ``question_pack`` SSE event was already
+        # emitted should still see the current pending pack on its connect
+        # path. Best-effort — any failure is logged at DEBUG and swallowed
+        # so a slow replay never blocks the SSE loop. Run as a
+        # ``create_task`` for symmetry with ``snapshot_task`` above
+        # (keeps the SSE send-path off the critical path even though
+        # ``get_question_pack`` is in-memory and cheap).
+        async def _initial_question_pack_replay() -> None:
+            try:
+                # Lazy import keeps the service out of every other path
+                # that doesn't need it (matches the convention used by
+                # the answer endpoint in instances.py).
+                from daemon.services.question_manager import pack_to_dict
+                pending_pack = manager._question_manager.get_question_pack(
+                    instance_id
+                )
+                if pending_pack is not None and pending_pack.status == "pending":
+                    await live_hub.stream_question_pack(
+                        instance_id,
+                        pack_to_dict(pending_pack),
+                    )
+            except Exception as e:
+                logger.debug(
+                    f"Failed to replay pending question pack on connect: {e}"
+                )
+
+        question_replay_task = asyncio.create_task(_initial_question_pack_replay())
+
         try:
             while True:
                 if await request.is_disconnected():
@@ -575,10 +606,13 @@ async def stream_events(instance_id: str, request: Request):
                     "data": json.dumps(event),
                 }
         finally:
-            # Cancel the initial snapshot if it's still running so we don't
-            # do a wasted checkpointer round-trip after the client has gone.
+            # Cancel the initial snapshot / question-pack replay if still
+            # running so we don't do a wasted checkpointer round-trip /
+            # question-pack replay after the client has gone.
             if not snapshot_task.done():
                 snapshot_task.cancel()
+            if not question_replay_task.done():
+                question_replay_task.cancel()
             await live_hub.remove_connection(instance_id, queue)
     
     return EventSourceResponse(event_generator(), ping=SSE_PING_INTERVAL)
