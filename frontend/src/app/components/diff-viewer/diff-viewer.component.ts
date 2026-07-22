@@ -1,4 +1,4 @@
-import { AfterViewInit, Component, ElementRef, OnChanges, OnDestroy, ViewChild, inject } from '@angular/core';
+import { Component, ElementRef, OnDestroy, ViewChild, effect, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { EditorView, lineNumbers } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
@@ -35,33 +35,24 @@ import { WorkspaceService } from '../../services/workspace.service';
   `,
   styleUrl: './diff-viewer.component.scss',
 })
-export class DiffViewerComponent implements AfterViewInit, OnChanges, OnDestroy {
+export class DiffViewerComponent implements OnDestroy {
   private readonly workspace = inject(WorkspaceService);
   public readonly diff = this.workspace.currentDiff.asReadonly();
 
-  @ViewChild('mergeContainer', { static: false }) public container?: ElementRef<HTMLElement>;
-
+  private readonly mergeContainer = signal<ElementRef<HTMLElement> | null>(null);
   private mergeView: MergeView | null = null;
 
-  ngAfterViewInit(): void {
-    this.renderDiff();
+  @ViewChild('mergeContainer')
+  private set container(container: ElementRef<HTMLElement> | undefined) {
+    this.mergeContainer.set(container ?? null);
   }
 
-  ngOnChanges(): void {
-    if (this.container) {
-      this.renderDiff();
-    }
-  }
-
-  ngOnDestroy(): void {
-    this.mergeView?.destroy();
-  }
-
-  private renderDiff(): void {
+  private readonly refreshMergeView = effect(() => {
     const d = this.diff();
-    if (!d || !d.has_changes || d.error || !this.container) return;
+    const container = this.mergeContainer();
 
-    this.mergeView?.destroy();
+    this.destroyMergeView();
+    if (!d || !d.has_changes || d.error || !container) return;
 
     this.mergeView = new MergeView({
       a: {
@@ -82,7 +73,16 @@ export class DiffViewerComponent implements AfterViewInit, OnChanges, OnDestroy 
           oneDark,
         ],
       },
-      parent: this.container.nativeElement,
+      parent: container.nativeElement,
     });
+  });
+
+  ngOnDestroy(): void {
+    this.destroyMergeView();
+  }
+
+  private destroyMergeView(): void {
+    this.mergeView?.destroy();
+    this.mergeView = null;
   }
 }

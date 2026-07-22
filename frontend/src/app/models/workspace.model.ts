@@ -35,3 +35,9 @@ export interface GitDiffResponse {
   working_content: string | null;
   error: string | null;
 }
+
+export interface FileChangeEvent {
+  path: string;
+  type: 'modified' | 'created' | 'deleted' | 'moved' | string;
+  timestamp?: number;
+}

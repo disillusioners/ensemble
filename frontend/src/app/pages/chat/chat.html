@@ -47,6 +47,16 @@
 
         <!-- Breadcrumb / Instance info -->
         <div class="header-right">
+          @if (hasRealProject) {
+            <a
+              mat-icon-button
+              matTooltip="Open Workspace Viewer"
+              [routerLink]="['/projects', projectId, 'workspace']"
+              aria-label="Open Workspace Viewer"
+            >
+              <mat-icon>folder_open</mat-icon>
+            </a>
+          }
           <!-- Toggle buttons -->
           <div class="toggle-buttons">
             <button

@@ -1,5 +1,6 @@
 import { Component, inject, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { RouterLink, RouterLinkActive } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
@@ -12,6 +13,8 @@ import { ProjectService } from '../../services/project.service';
   standalone: true,
   imports: [
     CommonModule,
+    RouterLink,
+    RouterLinkActive,
     MatButtonModule,
     MatIconModule,
     MatMenuModule,
@@ -23,6 +26,20 @@ import { ProjectService } from '../../services/project.service';
 export class ProjectTabBarComponent {
   protected readonly tabStateService = inject(TabStateService);
   protected readonly projectService = inject(ProjectService);
+
+  protected get projectId(): string {
+    return this.tabStateService.activeProjectId() ?? 'all';
+  }
+
+  /**
+   * True when the active tab is a real project (not the 'all' pseudo-project).
+   * Workspace tab/links are only valid for real projects because the route
+   * /projects/{id}/workspace 404s for 'all' or null.
+   */
+  protected get hasRealProject(): boolean {
+    const activeId = this.tabStateService.activeProjectId();
+    return activeId !== null && activeId !== 'all';
+  }
 
   /**
    * Computed list of projects that are not currently open as tabs.

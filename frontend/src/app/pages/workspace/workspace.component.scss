@@ -9,6 +9,10 @@
   min-height: 0;
 }
 
+.workspace-container {
+  position: relative;
+}
+
 .file-tree-sidenav {
   width: 280px;
   border-right: 1px solid rgba(255, 255, 255, 0.12);
@@ -97,4 +101,54 @@ mat-button-toggle mat-icon {
   .file-tree-sidenav {
     width: 220px;
   }
+}
+
+.sse-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 12px;
+  color: #9aa0a6;
+  user-select: none;
+}
+
+.sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d93025; /* red when disconnected */
+  transition: background 0.2s ease;
+}
+
+.sse-indicator.sse-connected .sse-dot {
+  background: #1e8e3e; /* green when connected */
+}
+
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: rgba(33, 37, 43, 0.85);
+  color: #d7dae0;
+  font-size: 13px;
+}
+
+.error-banner {
+  position: relative;
+}
+
+.error-icon {
+  flex-shrink: 0;
+}
+
+.error-message {
+  flex: 0 1 auto;
+  min-width: 0;
+  word-break: break-word;
 }

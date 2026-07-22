@@ -41,6 +41,12 @@ class FileChangeMonitor:
 
     _instances: dict[str, "FileChangeMonitor"] = {}
 
+    # Default poll interval for the polling fallback (no watchdog). 5s matches
+    # the original behaviour but is intentionally a class attribute so tests
+    # can monkeypatch it to a much shorter value and avoid racing the
+    # SSE_TIMEOUT_S keepalive loop.
+    DEFAULT_POLL_INTERVAL_S: float = 5.0
+
     @classmethod
     def get_or_create(cls, workdir: str) -> "FileChangeMonitor":
         """Get existing monitor or create a new one.
@@ -60,7 +66,7 @@ class FileChangeMonitor:
         cls._instances[key] = instance
         return instance
 
-    def __init__(self, workdir: str):
+    def __init__(self, workdir: str, poll_interval_s: float | None = None):
         self.workdir = Path(workdir)
         self._subscribers: dict[str, asyncio.Queue] = {}
         self._debounce: dict[str, float] = {}  # path -> last_emit_time
@@ -68,6 +74,13 @@ class FileChangeMonitor:
         self._poll_task: asyncio.Task | None = None
         self._started = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Polling interval is configurable so tests can shorten it; the class
+        # attribute is the canonical default and is what production uses.
+        self._poll_interval_s: float = (
+            poll_interval_s
+            if poll_interval_s is not None
+            else self.DEFAULT_POLL_INTERVAL_S
+        )
 
     async def add_subscriber(self, queue: asyncio.Queue) -> str:
         import uuid
@@ -189,14 +202,14 @@ class FileChangeMonitor:
         """Fallback polling implementation (no watchdog).
 
         Snapshots the directory listing and compares against the previous
-        snapshot every 5 seconds, emitting events for changed/added/removed
-        files.
+        snapshot every ``self._poll_interval_s`` seconds, emitting events for
+        changed/added/removed files.
         """
         last_snapshot: dict[str, float] = {}
         # Initial snapshot
         last_snapshot = self._scan_mtimes()
         while self._started:
-            await asyncio.sleep(5)
+            await asyncio.sleep(self._poll_interval_s)
             current = self._scan_mtimes()
             for path, mtime in current.items():
                 if path not in last_snapshot or last_snapshot[path] != mtime:

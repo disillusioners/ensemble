@@ -5,6 +5,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
@@ -31,6 +32,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     MatIconModule,
     MatProgressSpinnerModule,
     MatSnackBarModule,
+    MatTooltipModule,
     InstanceListComponent,
     ProjectTabBarComponent,
     ChatInterfaceComponent,
@@ -51,6 +53,20 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly projectService = inject(ProjectService);
   private readonly snackBar = inject(MatSnackBar);
   private routeSubscription: Subscription | null = null;
+
+  protected get projectId(): string {
+    return this.tabStateService.activeProjectId() ?? 'all';
+  }
+
+  /**
+   * True when the active tab is a real project (not the 'all' pseudo-project).
+   * The Workspace link points to /projects/{id}/workspace which 404s for 'all'
+   * or null, so the button must be hidden in those cases.
+   */
+  protected get hasRealProject(): boolean {
+    const activeId = this.tabStateService.activeProjectId();
+    return activeId !== null && activeId !== 'all';
+  }
 
   /** Front-end cooldown (ms) between consecutive message sends, preventing
    *  duplicate submissions from double Enter / double click. */

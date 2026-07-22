@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnInit, ViewChild, inject, signal } from '@angular/core';
+import { Component, DestroyRef, OnDestroy, OnInit, ViewChild, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute } from '@angular/router';
@@ -7,6 +7,7 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
 import { WorkspaceService } from '../../services/workspace.service';
 import { FileTreeComponent } from '../../components/file-tree/file-tree.component';
@@ -17,9 +18,16 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
   selector: 'app-workspace',
   standalone: true,
   imports: [
-    CommonModule, MatSidenavModule, MatToolbarModule, MatButtonToggleModule,
-    MatIconModule, MatButtonModule,
-    FileTreeComponent, CodeViewerComponent, DiffViewerComponent,
+    CommonModule,
+    MatSidenavModule,
+    MatToolbarModule,
+    MatButtonToggleModule,
+    MatIconModule,
+    MatButtonModule,
+    MatProgressSpinnerModule,
+    FileTreeComponent,
+    CodeViewerComponent,
+    DiffViewerComponent,
   ],
   template: `
     <div class="workspace-container">
@@ -29,9 +37,10 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
             <mat-icon>folder_open</mat-icon>
             <span>Files</span>
           </div>
-          <app-file-tree [projectId]="projectId"
-                         (fileSelected)="onFileSelected($event)">
-          </app-file-tree>
+          <app-file-tree
+            [projectId]="projectId"
+            (fileSelected)="onFileSelected($event)"
+          ></app-file-tree>
         </mat-sidenav>
 
         <mat-sidenav-content class="content-area">
@@ -48,13 +57,25 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
                 </mat-button-toggle>
               </mat-button-toggle-group>
             }
+            <span
+              class="sse-indicator"
+              [class.sse-connected]="workspace.sseConnected()"
+              [attr.aria-label]="workspace.sseConnected() ? 'Live' : 'Disconnected'"
+            >
+              <span class="sse-dot"></span>
+              <span class="sse-label">{{ workspace.sseConnected() ? 'Live' : 'Disconnected' }}</span>
+            </span>
           </mat-toolbar>
 
           <div class="viewer-content">
             @if (workspace.error(); as errorMessage) {
               <div class="error-banner" role="alert">
-                <mat-icon>error_outline</mat-icon>
-                <span>{{ errorMessage }}</span>
+                <mat-icon class="error-icon">error_outline</mat-icon>
+                <span class="error-message">{{ errorMessage }}</span>
+                <span class="spacer"></span>
+                <button mat-icon-button aria-label="Dismiss error" (click)="workspace.clearError()">
+                  <mat-icon>close</mat-icon>
+                </button>
               </div>
             }
             @if (viewMode() === 'code') {
@@ -65,11 +86,17 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
           </div>
         </mat-sidenav-content>
       </mat-sidenav-container>
+      @if (workspace.loading() && !workspace.currentTree()) {
+        <div class="loading-overlay">
+          <mat-spinner diameter="48"></mat-spinner>
+          <span>Loading workspace…</span>
+        </div>
+      }
     </div>
   `,
   styleUrl: './workspace.component.scss',
 })
-export class WorkspaceComponent implements OnInit {
+export class WorkspaceComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   readonly workspace = inject(WorkspaceService);
   private readonly destroyRef = inject(DestroyRef);
@@ -83,19 +110,26 @@ export class WorkspaceComponent implements OnInit {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     if (this.projectId) {
-      this.workspace.getFileTree(this.projectId).pipe(
-        takeUntilDestroyed(this.destroyRef)
-      ).subscribe(res => this.fileTree.setTree(res.tree));
+      this.workspace
+        .getFileTree(this.projectId)
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe((res) => this.fileTree.setTree(res.tree));
+      this.workspace.connectSSE(this.projectId);
     }
+  }
+
+  ngOnDestroy(): void {
+    this.workspace.disconnectSSE();
   }
 
   onFileSelected(path: string): void {
     this.viewMode.set('code');
-    this.workspace.getFileContent(this.projectId, path).pipe(
-      takeUntilDestroyed(this.destroyRef)
-    ).subscribe({
-      error: () => undefined,
-    });
+    this.workspace
+      .getFileContent(this.projectId, path)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        error: () => undefined,
+      });
   }
 
   onSelectCode(): void {
@@ -105,12 +139,13 @@ export class WorkspaceComponent implements OnInit {
   onSelectDiff(): void {
     const path = this.selectedPath();
     if (path) {
-      this.workspace.getFileDiff(this.projectId, path).pipe(
-        takeUntilDestroyed(this.destroyRef)
-      ).subscribe({
-        next: () => this.viewMode.set('diff'),
-        error: () => this.viewMode.set('diff'),
-      });
+      this.workspace
+        .getFileDiff(this.projectId, path)
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe({
+          next: () => this.viewMode.set('diff'),
+          error: () => this.viewMode.set('diff'),
+        });
     } else {
       this.viewMode.set('diff');
     }

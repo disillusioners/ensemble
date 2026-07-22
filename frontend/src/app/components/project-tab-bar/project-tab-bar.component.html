@@ -32,6 +32,18 @@
     }
   }
 
+  @if (hasRealProject) {
+    <a
+      class="tab workspace-tab"
+      mat-button
+      [routerLink]="['/projects', projectId, 'workspace']"
+      routerLinkActive="active"
+    >
+      <mat-icon>folder_open</mat-icon>
+      <span class="tab-name">Workspace</span>
+    </a>
+  }
+
   <button
     class="tab-add"
     [matMenuTriggerFor]="projectMenu"

@@ -35,6 +35,21 @@ import type {
  *     request errors.
  */
 describe('WorkspaceComponent', () => {
+  class StubEventSource {
+    static instances: StubEventSource[] = [];
+    url: string;
+    onerror: ((e: Event) => void) | null = null;
+    close = jest.fn();
+    addEventListener = jest.fn();
+
+    constructor(url: string) {
+      this.url = url;
+      StubEventSource.instances.push(this);
+    }
+  }
+
+  (globalThis as any).EventSource = StubEventSource;
+
   let fixture: ComponentFixture<WorkspaceComponent>;
   let component: WorkspaceComponent;
   let httpMock: HttpTestingController;
@@ -98,6 +113,7 @@ describe('WorkspaceComponent', () => {
   // ── TestBed setup ──────────────────────────────────────────────
 
   beforeEach(async () => {
+    StubEventSource.instances = [];
     await TestBed.configureTestingModule({
       imports: [WorkspaceComponent],
       providers: [

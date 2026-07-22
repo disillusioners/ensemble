@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, Output, inject } from '@angular/core';
+import { Component, EventEmitter, Input, Output, effect, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatTreeFlatDataSource, MatTreeFlattener, MatTreeModule } from '@angular/material/tree';
 import { FlatTreeControl } from '@angular/cdk/tree';
@@ -72,6 +72,13 @@ export class FileTreeComponent {
 
   public readonly hasChild = (_: number, node: FlatNode): boolean => node.expandable;
 
+  private readonly _fileChangeEffect = effect(() => {
+    const change = this.workspace.fileChanged();
+    if (change) {
+      this.refreshAffectedNode(change.path);
+    }
+  });
+
   setTree(tree: FileTreeNode[]): void {
     this._nestedTree = [...tree];
     this.dataSource.data = tree;
@@ -124,6 +131,41 @@ export class FileTreeComponent {
     return iconMap[ext || ''] || 'insert_drive_file';
   }
 
+  refreshAffectedNode(changedPath: string): void {
+    if (!this.projectId) return;
+    const parentPath = this._parentDir(changedPath);
+    if (parentPath === null) {
+      this.workspace.getFileTree(this.projectId, '.').subscribe({
+        next: (res) => {
+          this._nestedTree = [...res.tree];
+          this.dataSource.data = this._nestedTree;
+          this._restoreExpanded();
+        },
+        error: () => undefined,
+      });
+      return;
+    }
+
+    this.workspace.getFileTree(this.projectId, parentPath).subscribe({
+      next: (res) => this.updateNodeChildren(parentPath, res.tree),
+      error: () => undefined,
+    });
+  }
+
+  private _parentDir(path: string): string | null {
+    if (!path || path.indexOf('/') === -1) return null;
+    const index = path.lastIndexOf('/');
+    return index === 0 ? '' : path.slice(0, index);
+  }
+
+  private _restoreExpanded(): void {
+    this.treeControl.dataNodes.forEach((currentNode) => {
+      if (currentNode.expandable && this._expandedPaths.has(currentNode.path)) {
+        this.treeControl.expand(currentNode);
+      }
+    });
+  }
+
   private updateNodeChildren(path: string, children: FileTreeNode[]): void {
     /** Rebuild MatTreeFlatDataSource with updated children for a directory.
 
@@ -148,12 +190,7 @@ export class FileTreeComponent {
       });
     this._nestedTree = patch(this._nestedTree);
     this.dataSource.data = this._nestedTree;
-
-    this.treeControl.dataNodes.forEach(currentNode => {
-      if (currentNode.expandable && this._expandedPaths.has(currentNode.path)) {
-        this.treeControl.expand(currentNode);
-      }
-    });
+    this._restoreExpanded();
   }
 
   private _nestedTree: FileTreeNode[] | null = null;
