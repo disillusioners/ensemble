@@ -6,7 +6,7 @@ lifecycle service can import it without a service→router import inversion.
 import logging
 from sqlmodel import Session
 
-from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
+from daemon import constants
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +42,12 @@ def get_language_preference(project_repo) -> str:
         project missing, or DB error. 'Auto' is the sentinel for
         "no preference — skip language handling".
     """
-    if project_repo is None or SYSTEM_DEFAULT_PROJECT_ID is None:
+    if project_repo is None or constants.SYSTEM_DEFAULT_PROJECT_ID is None:
         return DEFAULT_LANGUAGE
     try:
         with Session(project_repo.engine) as session:
             record = project_repo.get_metadata_record(
-                session, SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY
+                session, constants.SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY
             )
             if record and record.meta_value:
                 return str(record.meta_value)

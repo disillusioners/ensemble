@@ -61,37 +61,19 @@ from daemon.routers.settings import set_project_repository
 pytestmark = pytest.mark.postgres
 
 
-# ── Autouse: propagate SYSTEM_DEFAULT_PROJECT_ID into the modules that
-# ── imported it via ``from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID``.
-# ── Python binds the imported name to the importing module's namespace, so
-# ── patching ``daemon.constants.SYSTEM_DEFAULT_PROJECT_ID`` (done by the
-# ── conftest autouse fixture) does NOT update already-captured references.
-# ── We need to set it on every consumer module or endpoints will 503 / helpers
-# ── will short-circuit to the default language.
+# ── Autouse: pin SYSTEM_DEFAULT_PROJECT_ID for settings tests. Both the
+# ── settings router and language helper read this shared constant at call time.
 @pytest.fixture(autouse=True)
 def _propagate_system_default_project_id():
-    """Mirror ``daemon.constants.SYSTEM_DEFAULT_PROJECT_ID`` onto consumer modules.
-
-    Consumers: ``daemon.routers.settings`` (raises 503 on the PUT path if
-    the constant is None) and ``daemon.services.language_utils`` (short-
-    circuits to ``DEFAULT_LANGUAGE`` if the constant is None).
-    """
+    """Set and restore the system default project ID used by settings consumers."""
     from daemon import constants
-    from daemon.routers import settings as settings_module
-    from daemon.services import language_utils as language_utils_module
 
-    snapshot = (
-        settings_module.SYSTEM_DEFAULT_PROJECT_ID,
-        language_utils_module.SYSTEM_DEFAULT_PROJECT_ID,
-    )
-    settings_module.SYSTEM_DEFAULT_PROJECT_ID = constants.SYSTEM_DEFAULT_PROJECT_ID
-    language_utils_module.SYSTEM_DEFAULT_PROJECT_ID = (
-        constants.SYSTEM_DEFAULT_PROJECT_ID
-    )
+    original = constants.SYSTEM_DEFAULT_PROJECT_ID
+    constants.SYSTEM_DEFAULT_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
     try:
         yield
     finally:
-        settings_module.SYSTEM_DEFAULT_PROJECT_ID, language_utils_module.SYSTEM_DEFAULT_PROJECT_ID = snapshot
+        constants.SYSTEM_DEFAULT_PROJECT_ID = original
 
 
 # ── PG connection settings (mirror tests/postgres/conftest.py) ────────────────

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from daemon.repositories import SQLModelProjectRepository
 from daemon.services.language_utils import get_language_preference, LANGUAGE_METADATA_KEY, DEFAULT_LANGUAGE
-from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
+from daemon import constants
 from .schemas import LanguagePreferenceResponse, LanguagePreferenceUpdate
 
 logger = logging.getLogger(__name__)
@@ -51,11 +51,11 @@ async def set_language(request: LanguagePreferenceUpdate):
             detail="Language must contain at least one non-whitespace character",
         )
     repo = get_project_repository()  # raises 503 if not initialized
-    if SYSTEM_DEFAULT_PROJECT_ID is None:
+    if constants.SYSTEM_DEFAULT_PROJECT_ID is None:
         raise HTTPException(status_code=503, detail="System default project not initialized")
     # ``repo.set_metadata`` opens a sync SQLAlchemy session and commits; off the
     # event loop so it cannot block other in-flight requests.
     await asyncio.to_thread(
-        repo.set_metadata, SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, cleaned_language
+        repo.set_metadata, constants.SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, cleaned_language
     )
     return LanguagePreferenceResponse(language=cleaned_language)
