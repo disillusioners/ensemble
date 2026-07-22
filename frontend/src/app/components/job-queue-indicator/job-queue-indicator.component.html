@@ -1,17 +1,21 @@
 <div class="job-queue-indicator-container">
   <button
-    mat-icon-button
+    mat-button
     class="queue-button"
-    [matTooltip]="tooltipText()"
-    matTooltipClass="job-queue-tooltip"
-    aria-label="View job queue"
-    (click)="onClick()">
-    <mat-icon
-      [matBadge]="jobCount()"
-      [matBadgeHidden]="!hasJobs()"
-      matBadgeColor="accent"
-      matBadgeSize="small">
-      pending_actions
-    </mat-icon>
+    [class.idle]="isIdle()"
+    [matMenuTriggerFor]="jobQueueMenu"
+    aria-label="View job queue">
+    <span class="queue-count">{{ displayText() }}</span>
   </button>
+
+  <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown">
+    <ng-template matMenuContent>
+      <app-job-queue-panel
+        [runningJobs]="runningJobs()"
+        [recentJobs]="recentJobs()"
+        [projectNameMap]="projectNameMap()"
+        (jobClick)="onJobClick($event)">
+      </app-job-queue-panel>
+    </ng-template>
+  </mat-menu>
 </div>

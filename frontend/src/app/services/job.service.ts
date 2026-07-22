@@ -81,6 +81,20 @@ export class JobService {
     );
   }
 
+  /** Fetch recently completed/failed/cancelled jobs (terminal states). */
+  listRecentJobs(limit = 10): Observable<Job[]> {
+    const params = new HttpParams()
+      .set('status', 'completed,failed,cancelled,dead_letter')
+      .set('limit', limit.toString());
+    return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
+      map((response) => response.jobs),
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to fetch recent jobs');
+        return of([]);
+      })
+    );
+  }
+
   /**
    * GET /api/jobs/{id}
    */

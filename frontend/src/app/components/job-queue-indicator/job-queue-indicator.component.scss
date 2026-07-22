@@ -5,6 +5,12 @@
 .queue-button {
   position: relative;
   color: #94a3b8;
+  min-width: 56px;
+  padding: 0 12px;
+  font-family: monospace;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.3px;
   transition: color 0.15s ease, background-color 0.15s ease;
 
   &:hover {
@@ -12,27 +18,21 @@
     background-color: #1e293b;
   }
 
-  mat-icon {
-    transition: transform 0.2s ease;
+  &.idle {
+    color: #64748b; /* muted grey for 0/0 */
   }
 
-  &:hover mat-icon {
-    transform: scale(1.1);
+  .queue-count {
+    line-height: 1;
   }
 }
 
-/* Tooltip styling: plain monospace-ish block so the newlines form
-   a readable per-project breakdown. The header already uses a dark
-   theme so we match the notification panel palette. */
-::ng-deep .job-queue-tooltip {
-  .mdc-tooltip__surface {
-    background-color: #1e293b;
-    color: #f1f5f9;
-    font-size: 12px;
-    line-height: 1.5;
-    max-width: 320px;
-    white-space: pre-line;
-    padding: 8px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+/* Match the notification-bell dropdown sizing so the embedded panel
+   renders flush against the menu surface. */
+.job-queue-dropdown {
+  ::ng-deep {
+    .mat-mdc-menu-content {
+      padding: 0 !important;
+    }
   }
 }

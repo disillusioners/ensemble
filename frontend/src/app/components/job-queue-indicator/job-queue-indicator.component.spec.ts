@@ -1,93 +1,135 @@
 import { signal, computed } from '@angular/core';
 import { Job, JobStatus } from '../../models/job.model';
-import { createMockJob } from '../../testing/job-test-helpers';
+import { createMockJob, JobStatus as HelperJobStatus } from '../../testing/job-test-helpers';
 
 /**
  * Logic-mirror of JobQueueIndicatorComponent.
  *
  * This project does NOT use Angular TestBed for component tests. Instead, we
- * replicate the component's signal/computed logic in a plain TS class and test
- * it directly — same pattern as job-detail-drawer.component.spec.ts. We expose
- * the private helpers (groupByProject, isRunningStatus, isPendingStatus,
- * shortenId) that the real component keeps private so the mirror stays
- * behaviour-equivalent for the assertions below.
+ * replicate the component's signal/computed logic in a plain TS class and
+ * test it directly — same pattern as job-detail-drawer.component.spec.ts.
+ *
+ * The mirror exposes the private helpers (isRunningStatus, isPendingStatus,
+ * isTerminalStatus, shortenId) that the real component keeps module-private
+ * (or class-private) so the assertions below can exercise them directly. We
+ * also expose the ``runningJobs`` computed and a synthetic ``recentFiltered``
+ * computed that mirrors the sort/filter/cap behaviour of ``fetchJobs``.
  */
 class MockJobQueueIndicatorComponent {
-  /** Raw jobs currently in queued/active state. */
-  private readonly jobs = signal<Job[]>([]);
+  /** Raw active jobs (running + pending) — mirrors ``activeJobs``. */
+  private readonly activeJobs = signal<Job[]>([]);
 
-  /** Cached project_id → project name. Rebuilt on init. */
-  private readonly projectNameMap = signal<Map<string, string>>(new Map());
+  /** Raw recent jobs (terminal) — mirrors ``recentJobs``. */
+  private readonly recentJobs = signal<Job[]>([]);
 
-  /** Computed total count (queued + active). */
-  readonly jobCount = computed(() => this.jobs().length);
+  /** Cached project_id → project name. */
+  private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
 
-  /** Whether the badge should be visible (count > 0). */
-  readonly hasJobs = computed(() => this.jobCount() > 0);
+  // ---------------------------------------------------------------------------
+  // Helpers exposed as methods so tests can call them directly.
+  // ---------------------------------------------------------------------------
 
-  /**
-   * Per-project breakdown rendered in the tooltip. Each entry is a
-   * pre-formatted line so the template can render a simple list.
-   */
-  readonly tooltipLines = computed<string[]>(() => {
-    const grouped = this.groupByProject(this.jobs());
-    if (grouped.size === 0) {
-      return ['No active jobs'];
-    }
-    const nameMap = this.projectNameMap();
-    const lines: string[] = [];
-    const sortedKeys = Array.from(grouped.keys()).sort();
-    for (const projectId of sortedKeys) {
-      const counts = grouped.get(projectId)!;
-      const running = counts.running;
-      const pending = counts.pending;
-      const name = nameMap.get(projectId) ?? this.shortenId(projectId);
-      const parts: string[] = [];
-      if (running > 0) parts.push(`${running} running`);
-      if (pending > 0) parts.push(`${pending} pending`);
-      lines.push(`${name}: ${parts.join(', ')}`);
-    }
-    return lines;
-  });
-
-  /** Joined tooltip text for the matTooltip binding. */
-  readonly tooltipText = computed(() => this.tooltipLines().join('\n'));
-
-  private groupByProject(jobs: Job[]): Map<string, { running: number; pending: number }> {
-    const groups = new Map<string, { running: number; pending: number }>();
-    for (const job of jobs) {
-      const key = job.project_id ?? '__unassigned__';
-      const bucket = groups.get(key) ?? { running: 0, pending: 0 };
-      if (this.isRunningStatus(job.status)) {
-        bucket.running += 1;
-      } else if (this.isPendingStatus(job.status)) {
-        bucket.pending += 1;
-      }
-      groups.set(key, bucket);
-    }
-    return groups;
+  isRunningStatus(s: JobStatus): boolean {
+    return s === 'processing' || (s as string) === 'active';
   }
 
-  private isRunningStatus(status: JobStatus): boolean {
-    return status === 'processing';
+  isPendingStatus(s: JobStatus): boolean {
+    return s === 'pending' || (s as string) === 'queued';
   }
 
-  private isPendingStatus(status: JobStatus): boolean {
-    return status === 'pending';
+  isTerminalStatus(s: JobStatus): boolean {
+    return ['completed', 'failed', 'cancelled', 'dead_letter'].includes(s);
   }
 
-  private shortenId(id: string): string {
+  shortenId(id: string): string {
     return id.length > 8 ? id.substring(0, 8) + '...' : id;
   }
 
-  /** Test helper: set the jobs signal (mirrors real component's private setter). */
-  setJobs(jobs: Job[]): void {
-    this.jobs.set(jobs);
+  // ---------------------------------------------------------------------------
+  // Derived signals — mirror the public computeds on the real component.
+  // ---------------------------------------------------------------------------
+
+  runningCount = computed(
+    () => this.activeJobs().filter((j) => this.isRunningStatus(j.status)).length
+  );
+
+  pendingCount = computed(
+    () => this.activeJobs().filter((j) => this.isPendingStatus(j.status)).length
+  );
+
+  totalNonTerminal = computed(() => this.runningCount() + this.pendingCount());
+
+  isIdle = computed(() => this.totalNonTerminal() === 0);
+
+  displayText = computed(
+    () => `${this.runningCount()}/${this.totalNonTerminal()}`
+  );
+
+  runningJobs = computed(() =>
+    this.activeJobs().filter((j) => this.isRunningStatus(j.status))
+  );
+
+  /**
+   * Synthetic computed: terminal-only subset of ``recentJobs``, sorted by
+   * ``completed_at`` desc (falling back to ``created_at``) and capped at 10.
+   * Mirrors the slice/sort logic in the real component's ``fetchJobs``.
+   */
+  recentFiltered = computed<Job[]>(() => {
+    return this.recentJobs()
+      .filter((j) => !this.isPendingStatus(j.status) && !this.isRunningStatus(j.status))
+      .sort((a, b) => {
+        const aT = a.completed_at ?? a.created_at;
+        const bT = b.completed_at ?? b.created_at;
+        return bT.localeCompare(aT);
+      })
+      .slice(0, 10);
+  });
+
+  // ---------------------------------------------------------------------------
+  // onJobClick navigation helper — mirrors the real component's routing
+  // decisions so tests can assert what the parent would have done.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Capture of the latest onJobClick inputs (for assertions in tests).
+   */
+  onJobClickArgs: { project_id: string | null; instance_id: string | null } | null = null;
+
+  onJobClick(job: Job): {
+    addTabProjectId: string;
+    addTabName: string;
+    navigateTo: (string | null)[];
+  } {
+    const projectKey = job.project_id || 'all';
+    const addTabProjectId = job.project_id ?? 'all';
+    const addTabName = (job.project_id ?? 'all').slice(0, 8);
+    const navigateTo: (string | null)[] = [
+      '/projects',
+      projectKey,
+      'instances',
+      job.instance_id,
+    ];
+    this.onJobClickArgs = {
+      project_id: job.project_id,
+      instance_id: job.instance_id,
+    };
+    return { addTabProjectId, addTabName, navigateTo };
   }
 
-  /** Test helper: set the project name cache. */
-  setProjectNameMap(map: Map<string, string>): void {
-    this.projectNameMap.set(map);
+  // ---------------------------------------------------------------------------
+  // Setters — let tests push data into the signals without poking internals.
+  // ---------------------------------------------------------------------------
+
+  setActiveJobs(j: Job[]): void {
+    this.activeJobs.set(j);
+  }
+
+  setRecentJobs(j: Job[]): void {
+    this.recentJobs.set(j);
+  }
+
+  setProjectNameMap(m: Map<string | null, string>): void {
+    this.projectNameMap.set(m);
   }
 }
 
@@ -103,220 +145,329 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component).toBeTruthy();
     });
 
-    it('should default to 0 jobs and not have jobs', () => {
-      expect(component.jobCount()).toBe(0);
-      expect(component.hasJobs()).toBe(false);
+    it('should default to "0/0" and idle state', () => {
+      expect(component.displayText()).toBe('0/0');
+      expect(component.isIdle()).toBe(true);
+      expect(component.runningCount()).toBe(0);
+      expect(component.pendingCount()).toBe(0);
+      expect(component.totalNonTerminal()).toBe(0);
     });
   });
 
-  describe('jobCount', () => {
-    it('should reflect the number of jobs in the signal', () => {
-      component.setJobs([
-        createMockJob({ status: 'pending' }),
+  describe('runningCount', () => {
+    it('should count only processing jobs', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
         createMockJob({ status: 'processing' }),
         createMockJob({ status: 'pending' }),
       ]);
-      expect(component.jobCount()).toBe(3);
+      expect(component.runningCount()).toBe(2);
     });
 
-    it('should count only jobs currently in the signal', () => {
-      component.setJobs([createMockJob({ status: 'pending' })]);
-      expect(component.jobCount()).toBe(1);
+    it('should treat "active" as running via the defensive fallback', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'active' as unknown as HelperJobStatus }),
+        createMockJob({ status: 'processing' }),
+      ]);
+      expect(component.runningCount()).toBe(2);
+    });
 
-      component.setJobs([
+    it('should not count pending or terminal jobs', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'completed' }),
+        createMockJob({ status: 'failed' }),
+        createMockJob({ status: 'cancelled' }),
+        createMockJob({ status: 'dead_letter' }),
+      ]);
+      expect(component.runningCount()).toBe(0);
+    });
+  });
+
+  describe('pendingCount', () => {
+    it('should count only pending jobs', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'pending' }),
         createMockJob({ status: 'pending' }),
         createMockJob({ status: 'processing' }),
       ]);
-      expect(component.jobCount()).toBe(2);
+      expect(component.pendingCount()).toBe(2);
+    });
+
+    it('should treat "queued" as pending via the defensive fallback', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'queued' as unknown as HelperJobStatus }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      expect(component.pendingCount()).toBe(2);
+    });
+
+    it('should not count processing or terminal jobs', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'completed' }),
+        createMockJob({ status: 'failed' }),
+        createMockJob({ status: 'cancelled' }),
+        createMockJob({ status: 'dead_letter' }),
+      ]);
+      expect(component.pendingCount()).toBe(0);
     });
   });
 
-  describe('hasJobs', () => {
-    it('should be false when count is 0', () => {
-      component.setJobs([]);
-      expect(component.hasJobs()).toBe(false);
+  describe('displayText', () => {
+    it('should produce "2/3" with 2 processing and 1 pending', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      expect(component.displayText()).toBe('2/3');
     });
 
-    it('should be true when count > 0', () => {
-      component.setJobs([createMockJob({ status: 'pending' })]);
-      expect(component.hasJobs()).toBe(true);
+    it('should produce "0/0" with no active jobs', () => {
+      component.setActiveJobs([]);
+      expect(component.displayText()).toBe('0/0');
     });
 
-    it('should be true with a single processing job', () => {
-      component.setJobs([createMockJob({ status: 'processing' })]);
-      expect(component.hasJobs()).toBe(true);
+    it('should produce "0/3" with 0 processing and 3 pending', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      expect(component.displayText()).toBe('0/3');
+    });
+
+    it('should ignore terminal jobs in the denominator', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'completed' }),
+        createMockJob({ status: 'failed' }),
+      ]);
+      // Only the processing job contributes; terminal jobs do NOT inflate Y.
+      expect(component.displayText()).toBe('1/1');
     });
   });
 
-  describe('tooltipLines — grouping by project_id', () => {
-    it('should group jobs by project_id, counting running and pending separately', () => {
-      component.setJobs([
-        createMockJob({ project_id: 'proj-A', status: 'processing' }),
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
-        createMockJob({ project_id: 'proj-A', status: 'processing' }),
-        createMockJob({ project_id: 'proj-B', status: 'pending' }),
-      ]);
-      expect(component.tooltipLines()).toEqual([
-        'proj-A: 2 running, 1 pending',
-        'proj-B: 1 pending',
-      ]);
+  describe('isIdle', () => {
+    it('should be true when there are no active jobs', () => {
+      component.setActiveJobs([]);
+      expect(component.isIdle()).toBe(true);
     });
 
-    it('should show only running when there are no pending jobs in a group', () => {
-      component.setJobs([createMockJob({ project_id: 'proj-A', status: 'processing' })]);
-      expect(component.tooltipLines()).toEqual(['proj-A: 1 running']);
+    it('should be true even when recent (terminal) jobs exist', () => {
+      component.setRecentJobs([createMockJob({ status: 'completed' })]);
+      expect(component.isIdle()).toBe(true);
     });
 
-    it('should show only pending when there are no running jobs in a group', () => {
-      component.setJobs([createMockJob({ project_id: 'proj-A', status: 'pending' })]);
-      expect(component.tooltipLines()).toEqual(['proj-A: 1 pending']);
+    it('should be false when there is at least one running job', () => {
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
+      expect(component.isIdle()).toBe(false);
     });
 
-    it('should ignore jobs with terminal statuses (completed, failed, cancelled, dead_letter)', () => {
-      // Terminal-status jobs are NOT counted as running or pending. We verify
-      // this by mixing a terminal job with an active one: the terminal job
-      // contributes 0 to both counters, so only the active job shows up.
-      component.setJobs([
-        createMockJob({ project_id: 'proj-A', status: 'completed' }),
-        createMockJob({ project_id: 'proj-A', status: 'failed' }),
-        createMockJob({ project_id: 'proj-A', status: 'cancelled' }),
-        createMockJob({ project_id: 'proj-A', status: 'dead_letter' }),
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
-      ]);
-      // Only the pending job is counted; terminal jobs contribute 0 to running.
-      expect(component.tooltipLines()).toEqual(['proj-A: 1 pending']);
+    it('should be false when there is at least one pending job', () => {
+      component.setActiveJobs([createMockJob({ status: 'pending' })]);
+      expect(component.isIdle()).toBe(false);
     });
   });
 
-  describe('tooltipLines — empty state', () => {
-    it('should return ["No active jobs"] when there are no jobs', () => {
-      component.setJobs([]);
-      expect(component.tooltipLines()).toEqual(['No active jobs']);
+  describe('runningJobs (computed subset for panel)', () => {
+    it('should include only processing/active jobs', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'r1', status: 'processing' }),
+        createMockJob({ job_id: 'p1', status: 'pending' }),
+        createMockJob({ job_id: 'r2', status: 'active' as unknown as HelperJobStatus }),
+        createMockJob({ job_id: 'c1', status: 'completed' }),
+      ]);
+      const ids = component.runningJobs().map((j) => j.job_id);
+      expect(ids).toEqual(['r1', 'r2']);
     });
   });
 
-  describe('tooltipLines — running/pending counting', () => {
-    it('should count only processing jobs as running', () => {
-      component.setJobs([
-        createMockJob({ project_id: 'proj-A', status: 'processing' }),
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
+  describe('recentFiltered', () => {
+    it('should filter out pending and processing jobs (terminal only)', () => {
+      component.setRecentJobs([
+        createMockJob({ job_id: 'c1', status: 'completed' }),
+        createMockJob({ job_id: 'p1', status: 'pending' }),
+        createMockJob({ job_id: 'f1', status: 'failed' }),
+        createMockJob({ job_id: 'r1', status: 'processing' }),
+        createMockJob({ job_id: 'd1', status: 'dead_letter' }),
+        createMockJob({ job_id: 'x1', status: 'cancelled' }),
       ]);
-      // processing → running (1); pending → pending (1).
-      expect(component.tooltipLines()).toEqual(['proj-A: 1 running, 1 pending']);
+      const ids = component.recentFiltered().map((j) => j.job_id);
+      expect(ids).toEqual(['c1', 'f1', 'd1', 'x1']);
+    });
+
+    it('should sort by completed_at desc, falling back to created_at', () => {
+      component.setRecentJobs([
+        createMockJob({
+          job_id: 'a',
+          status: 'completed',
+          created_at: '2026-07-20T10:00:00Z',
+          completed_at: '2026-07-20T10:05:00Z',
+        }),
+        createMockJob({
+          job_id: 'b',
+          status: 'completed',
+          created_at: '2026-07-21T10:00:00Z',
+          completed_at: '2026-07-21T10:05:00Z',
+        }),
+        createMockJob({
+          job_id: 'c',
+          status: 'failed',
+          created_at: '2026-07-19T10:00:00Z',
+          completed_at: null,
+        }),
+      ]);
+      const ids = component.recentFiltered().map((j) => j.job_id);
+      // b (newest completed_at), a, c (oldest created_at fallback).
+      expect(ids).toEqual(['b', 'a', 'c']);
+    });
+
+    it('should cap results at 10 entries', () => {
+      const many = Array.from({ length: 15 }, (_, i) =>
+        createMockJob({
+          job_id: `j-${i}`,
+          status: 'completed',
+          created_at: `2026-07-20T10:00:0${i % 10}:00Z`,
+          completed_at: `2026-07-20T10:00:0${i % 10}:00Z`,
+        })
+      );
+      component.setRecentJobs(many);
+      expect(component.recentFiltered().length).toBe(10);
+    });
+
+    it('should return an empty list when there are no terminal jobs', () => {
+      component.setRecentJobs([
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'processing' }),
+      ]);
+      expect(component.recentFiltered()).toEqual([]);
     });
   });
 
-  describe('tooltipLines — sorting', () => {
-    it('should sort lines by project_id for deterministic order', () => {
-      component.setJobs([
-        createMockJob({ project_id: 'proj-Z', status: 'pending' }),
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
-        createMockJob({ project_id: 'proj-M', status: 'pending' }),
+  describe('onJobClick', () => {
+    it('should open project tab and navigate to instance with project_id', () => {
+      const job = createMockJob({
+        job_id: 'job-1',
+        project_id: 'project-abcdef',
+        instance_id: 'inst-xyz',
+        status: 'processing',
+      });
+      const result = component.onJobClick(job);
+      expect(result.addTabProjectId).toBe('project-abcdef');
+      expect(result.addTabName).toBe('project-'); // first 8 chars
+      expect(result.navigateTo).toEqual([
+        '/projects',
+        'project-abcdef',
+        'instances',
+        'inst-xyz',
       ]);
-      expect(component.tooltipLines()).toEqual([
-        'proj-A: 1 pending',
-        'proj-M: 1 pending',
-        'proj-Z: 1 pending',
+      expect(component.onJobClickArgs).toEqual({
+        project_id: 'project-abcdef',
+        instance_id: 'inst-xyz',
+      });
+    });
+
+    it('should fall back to "all" tab when project_id is null', () => {
+      const job = createMockJob({
+        job_id: 'job-2',
+        project_id: null,
+        instance_id: 'inst-zzz',
+        status: 'failed',
+      });
+      const result = component.onJobClick(job);
+      expect(result.addTabProjectId).toBe('all');
+      expect(result.addTabName).toBe('all');
+      expect(result.navigateTo).toEqual([
+        '/projects',
+        'all',
+        'instances',
+        'inst-zzz',
       ]);
+    });
+
+    it('should pass null through as the final path segment when instance_id is null', () => {
+      const job = createMockJob({
+        job_id: 'job-3',
+        project_id: 'project-123',
+        instance_id: null,
+        status: 'completed',
+      });
+      const result = component.onJobClick(job);
+      expect(result.navigateTo.length).toBe(4);
+      expect(result.navigateTo[0]).toBe('/projects');
+      expect(result.navigateTo[1]).toBe('project-123');
+      expect(result.navigateTo[2]).toBe('instances');
+      expect(result.navigateTo[3]).toBeNull();
     });
   });
 
-  describe('tooltipLines — project name resolution', () => {
-    it('should use the cached project name when available', () => {
-      const map = new Map<string, string>([['proj-A', 'Alpha Project']]);
-      component.setProjectNameMap(map);
-      component.setJobs([createMockJob({ project_id: 'proj-A', status: 'pending' })]);
-      expect(component.tooltipLines()).toEqual(['Alpha Project: 1 pending']);
+  describe('isRunningStatus', () => {
+    it('should return true for "processing"', () => {
+      expect(component.isRunningStatus('processing')).toBe(true);
     });
 
-    it('should fall back to shortened project_id when no name is cached', () => {
-      component.setJobs([createMockJob({ project_id: 'proj-A', status: 'pending' })]);
-      expect(component.tooltipLines()).toEqual(['proj-A: 1 pending']);
+    it('should return true for "active" (defensive fallback)', () => {
+      expect(component.isRunningStatus('active' as JobStatus)).toBe(true);
+    });
+
+    it('should return false for non-running statuses', () => {
+      expect(component.isRunningStatus('pending')).toBe(false);
+      expect(component.isRunningStatus('queued' as JobStatus)).toBe(false);
+      expect(component.isRunningStatus('completed')).toBe(false);
+      expect(component.isRunningStatus('failed')).toBe(false);
+      expect(component.isRunningStatus('cancelled')).toBe(false);
+      expect(component.isRunningStatus('dead_letter')).toBe(false);
+    });
+  });
+
+  describe('isPendingStatus', () => {
+    it('should return true for "pending"', () => {
+      expect(component.isPendingStatus('pending')).toBe(true);
+    });
+
+    it('should return true for "queued" (defensive fallback)', () => {
+      expect(component.isPendingStatus('queued' as JobStatus)).toBe(true);
+    });
+
+    it('should return false for non-pending statuses', () => {
+      expect(component.isPendingStatus('processing')).toBe(false);
+      expect(component.isPendingStatus('active' as JobStatus)).toBe(false);
+      expect(component.isPendingStatus('completed')).toBe(false);
+      expect(component.isPendingStatus('failed')).toBe(false);
+      expect(component.isPendingStatus('cancelled')).toBe(false);
+      expect(component.isPendingStatus('dead_letter')).toBe(false);
+    });
+  });
+
+  describe('isTerminalStatus', () => {
+    it('should return true for terminal states', () => {
+      expect(component.isTerminalStatus('completed')).toBe(true);
+      expect(component.isTerminalStatus('failed')).toBe(true);
+      expect(component.isTerminalStatus('cancelled')).toBe(true);
+      expect(component.isTerminalStatus('dead_letter')).toBe(true);
+    });
+
+    it('should return false for active states', () => {
+      expect(component.isTerminalStatus('pending')).toBe(false);
+      expect(component.isTerminalStatus('processing')).toBe(false);
+      expect(component.isTerminalStatus('active' as JobStatus)).toBe(false);
+      expect(component.isTerminalStatus('queued' as JobStatus)).toBe(false);
     });
   });
 
   describe('shortenId', () => {
     it('should truncate ids longer than 8 chars with "..."', () => {
-      // Exposed indirectly via tooltipLines: a project_id without a cached name
-      // whose id exceeds 8 characters gets truncated. substring(0, 8) yields
-      // the first 8 characters followed by "...".
-      const longId = '0123456789abcdef';
-      component.setJobs([createMockJob({ project_id: longId, status: 'pending' })]);
-      expect(component.tooltipLines()).toEqual(['01234567...: 1 pending']);
+      expect(component.shortenId('0123456789abcdef')).toBe('01234567...');
     });
 
     it('should not truncate ids that are exactly 8 chars', () => {
-      const eightChars = '12345678';
-      component.setJobs([createMockJob({ project_id: eightChars, status: 'pending' })]);
-      expect(component.tooltipLines()).toEqual(['12345678: 1 pending']);
+      expect(component.shortenId('12345678')).toBe('12345678');
     });
 
     it('should not truncate ids shorter than 8 chars', () => {
-      const shortId = 'proj-A';
-      component.setJobs([createMockJob({ project_id: shortId, status: 'pending' })]);
-      expect(component.tooltipLines()).toEqual(['proj-A: 1 pending']);
-    });
-  });
-
-  describe('unassigned jobs (project_id=null)', () => {
-    it('should bucket jobs without a project_id under "__unassigned__"', () => {
-      // Cache the project name so the raw bucket key '__unassigned__' is
-      // rendered verbatim (otherwise shortenId truncates the 14-char label).
-      component.setProjectNameMap(new Map([['__unassigned__', '__unassigned__']]));
-      component.setJobs([
-        createMockJob({ project_id: null, status: 'pending' }),
-        createMockJob({ project_id: null, status: 'processing' }),
-      ]);
-      expect(component.tooltipLines()).toEqual(['__unassigned__: 1 running, 1 pending']);
-    });
-
-    it('should separate unassigned jobs from assigned jobs in the breakdown', () => {
-      component.setProjectNameMap(new Map([['__unassigned__', '__unassigned__']]));
-      component.setJobs([
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
-        createMockJob({ project_id: null, status: 'processing' }),
-      ]);
-      // "__unassigned__" sorts before "proj-A" alphabetically.
-      expect(component.tooltipLines()).toEqual([
-        '__unassigned__: 1 running',
-        'proj-A: 1 pending',
-      ]);
-    });
-
-    it('should shorten the long "__unassigned__" label when no name is cached', () => {
-      component.setJobs([createMockJob({ project_id: null, status: 'pending' })]);
-      // '__unassigned__' is 14 chars → truncated to first 8 chars + '...'.
-      expect(component.tooltipLines()).toEqual(['__unassi...: 1 pending']);
-    });
-  });
-
-  describe('tooltipText', () => {
-    it('should join lines with newline', () => {
-      component.setJobs([
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
-        createMockJob({ project_id: 'proj-B', status: 'processing' }),
-      ]);
-      expect(component.tooltipText()).toBe('proj-A: 1 pending\nproj-B: 1 running');
-    });
-
-    it('should render "No active jobs" as a single line when there are no jobs', () => {
-      component.setJobs([]);
-      expect(component.tooltipText()).toBe('No active jobs');
-    });
-
-    it('should contain "\n" between each pair of lines', () => {
-      component.setJobs([
-        createMockJob({ project_id: 'proj-A', status: 'pending' }),
-        createMockJob({ project_id: 'proj-B', status: 'pending' }),
-        createMockJob({ project_id: 'proj-C', status: 'pending' }),
-      ]);
-      const lines = component.tooltipText().split('\n');
-      expect(lines.length).toBe(3);
-      expect(lines).toEqual([
-        'proj-A: 1 pending',
-        'proj-B: 1 pending',
-        'proj-C: 1 pending',
-      ]);
+      expect(component.shortenId('proj-A')).toBe('proj-A');
     });
   });
 });

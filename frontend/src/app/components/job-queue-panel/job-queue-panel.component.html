@@ -1,0 +1,87 @@
+<div class="job-queue-panel" (click)="$event.stopPropagation()">
+  <div class="panel-header">
+    <span class="header-title">Job Queue</span>
+    @if (runningCount() > 0) {
+      <span class="header-count">{{ runningCount() }} running</span>
+    }
+  </div>
+
+  <div class="panel-list">
+    @if (isEmpty()) {
+      <div class="empty-state">
+        <mat-icon>pending_actions</mat-icon>
+        <span class="empty-title">No jobs</span>
+        <span class="empty-subtitle">Queue is currently idle</span>
+      </div>
+    } @else {
+      @if (runningJobs().length > 0) {
+        <div class="section">
+          <div class="section-title">Running</div>
+          @for (job of runningJobs(); track job.job_id) {
+            <div
+              class="job-row running"
+              (click)="onRowClick(job)"
+              (keydown.enter)="onRowClick(job)"
+              (keydown.space)="$event.preventDefault(); onRowClick(job)"
+              role="button"
+              tabindex="0"
+              [matTooltip]="job.instance_id">
+              <div class="job-spinner">
+                <mat-progress-spinner
+                  diameter="16"
+                  mode="indeterminate"
+                  color="accent">
+                </mat-progress-spinner>
+              </div>
+              <div class="job-content">
+                <div class="job-title">
+                  <span class="job-name">{{ resolveTitle(job) }}</span>
+                  <span class="project-badge" [matTooltip]="job.project_id">{{ projectLabel(job) }}</span>
+                </div>
+                <div class="job-meta">
+                  <span class="agent-badge">{{ job.agent_id }}</span>
+                  <span class="status-text">PROCESSING</span>
+                </div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      @if (recentCapped().length > 0) {
+        <div class="section">
+          <div class="section-title">Recent</div>
+          @for (job of recentCapped(); track job.job_id) {
+            <div
+              class="job-row recent"
+              [class.status-completed]="job.status === 'completed'"
+              [class.status-failed]="job.status === 'failed'"
+              [class.status-cancelled]="job.status === 'cancelled'"
+              [class.status-dead_letter]="job.status === 'dead_letter'"
+              (click)="onRowClick(job)"
+              (keydown.enter)="onRowClick(job)"
+              (keydown.space)="$event.preventDefault(); onRowClick(job)"
+              role="button"
+              tabindex="0"
+              [matTooltip]="job.instance_id">
+              <div class="job-icon" [style.color]="getStatusColor(job.status)">
+                <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+              </div>
+              <div class="job-content">
+                <div class="job-title">
+                  <span class="job-name">{{ resolveTitle(job) }}</span>
+                  <span class="project-badge" [matTooltip]="job.project_id">{{ projectLabel(job) }}</span>
+                </div>
+                <div class="job-meta">
+                  <span class="agent-badge">{{ job.agent_id }}</span>
+                  <span class="status-text">{{ job.status }}</span>
+                  <span class="time-text">{{ timeAgo(job.completed_at || job.created_at) }}</span>
+                </div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+    }
+  </div>
+</div>
