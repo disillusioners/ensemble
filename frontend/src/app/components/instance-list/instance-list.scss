@@ -480,12 +480,13 @@
 
 // Pin toggle. Same shape/size as pause/terminate. Hidden by default
 // and revealed on row hover so the cluster stays calm until the user
-// reaches for a row — same convention as pause/terminate. EXCEPTION:
-// when the row is pinned the button stays visible at full opacity so
-// the user can see the pinned state without hovering. ``opacity`` uses
-// its own short transition (0.15s) while background/color keep their
-// 0.2s easing; the pinned rule below uses equal-or-higher specificity
-// than the row-hover rule so pinned always wins.
+// reaches for a row — same convention as pause/terminate, whether the
+// row is pinned or not. The pinned-ness of a row is conveyed by the
+// inset left accent on ``.instance-item.pinned`` (see above), not by a
+// always-visible pin button; the pinned rule below only retints the
+// icon (warm color + filled ``push_pin`` glyph) so the button "reads"
+// as pinned the instant the user hovers. ``opacity`` uses its own short
+// transition (0.15s) while background/color keep their 0.2s easing.
 .pin-btn {
   position: absolute;
   bottom: 8px;
@@ -509,10 +510,13 @@
     opacity: 1;
   }
 
-  // Pinned state: more prominent (filled icon, full opacity, warm
-  // tint) so the row's pinned-ness reads even without hover.
+  // Pinned state: warm tint + filled icon. The button itself stays
+  // hidden by default and only appears on row hover (same as unpinned)
+  // so the cluster remains calm — the pinned-ness is already conveyed
+  // by the inset left accent on ``.instance-item.pinned``. On hover the
+  // pin-btn shows up at full opacity just like before; the mat-icon rule
+  // below swaps the outlined glyph for the filled ``push_pin`` variant.
   &.pinned {
-    opacity: 1;
     background-color: rgba(245, 158, 11, 0.18);
     color: #f59e0b;
 
