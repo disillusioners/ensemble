@@ -10,6 +10,9 @@ class TestJobService {
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
 
+  /** Captures the URL of the most recent request so tests can assert params. */
+  lastRequestUrl: string | null = null;
+
   listJobs(filters?: { status?: string; source?: string; agent_id?: string; project_id?: string; include_deleted?: boolean }) {
     let params = new URLSearchParams();
     if (filters) {
@@ -21,11 +24,40 @@ class TestJobService {
     }
     const queryString = params.toString();
     const url = '/api/jobs' + (queryString ? `?${queryString}` : '');
-    
+    this.lastRequestUrl = url;
+
     return {
       pipe: () => ({
         subscribe: (observer: any) => {
           const mockResponse = { jobs: createMockJobList(3), total: 3 };
+          if (typeof observer === 'function') {
+            observer(mockResponse.jobs);
+          } else if (observer.next) {
+            observer.next(mockResponse.jobs);
+          }
+        }
+      })
+    };
+  }
+
+  listActiveJobs() {
+    // Mirrors real JobService.listActiveJobs: GET /api/jobs?status=queued,active,
+    // then maps response.jobs. We capture the URL so tests can assert the
+    // query string and emit a fixed mock payload.
+    const url = '/api/jobs?status=queued,active';
+    this.lastRequestUrl = url;
+    const mockResponse = {
+      jobs: createMockJobList(3).map((job, i) => ({
+        ...job,
+        job_id: `active-job-${i}`,
+        status: i === 0 ? 'processing' : 'pending',
+      })),
+      total: 3,
+    };
+
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
           if (typeof observer === 'function') {
             observer(mockResponse.jobs);
           } else if (observer.next) {
@@ -310,6 +342,30 @@ describe('JobService', () => {
         agent_id: 'developer'
       }).pipe().subscribe(subscribeSpy);
       expect(subscribeSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('listActiveJobs', () => {
+    it('should send GET /api/jobs?status=queued,active', () => {
+      const subscribeSpy = jest.fn();
+      service.listActiveJobs().pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+      expect(service.lastRequestUrl).toContain('/api/jobs');
+      expect(service.lastRequestUrl).toContain('status=queued,active');
+    });
+
+    it('should return the .jobs array from the response (map response.jobs)', () => {
+      let result: Job[] | null = null;
+      service.listActiveJobs().pipe().subscribe(jobs => { result = jobs; });
+      // listActiveJobs maps response.jobs, so the subscriber receives an
+      // array of Job objects — not the wrapper { jobs, total } object.
+      expect(Array.isArray(result)).toBe(true);
+      expect(result).not.toBeNull();
+      expect(result!.length).toBeGreaterThan(0);
+      expect(result![0]).toHaveProperty('job_id');
+      expect(result![0]).toHaveProperty('status');
+      // Should NOT have a top-level "total" field — that lives on the wrapper.
+      expect(result!).not.toHaveProperty('total');
     });
   });
 
