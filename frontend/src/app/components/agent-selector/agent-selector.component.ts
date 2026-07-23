@@ -1,91 +1,318 @@
-import { Component, Input, Output, EventEmitter, signal, computed } from '@angular/core';
+import {
+  Component,
+  input,
+  output,
+  signal,
+  computed,
+  effect,
+  ElementRef,
+  ViewChild,
+  inject,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { MatCardModule } from '@angular/material/card';
-import { MatButtonModule } from '@angular/material/button';
 import { MatDialogModule, MatDialog } from '@angular/material/dialog';
 import type { Agent, AgentCreate } from '../../models';
 import { AddAgentModalComponent } from '../add-agent-modal/add-agent-modal.component';
 
+const colorMap: Record<string, string> = {
+  'accent-amber': '#f59e0b',
+  'accent-cyan': '#10a7f7',
+  'accent-violet': '#8b5cf6',
+  'accent-emerald': '#10b981',
+  'accent-rose': '#f43f5e',
+  'accent-blue': '#3b82f6',
+  'accent-indigo': '#6366f1',
+  'accent-green': '#22c55e',
+  'accent-purple': '#a855f7',
+};
+
+/**
+ * Searchable agent picker.
+ *
+ * Shows a search input plus a scrollable list of agents (name + description)
+ * with real-time case-insensitive filtering and keyboard navigation.
+ *
+ * Signals are used for all inputs so ``computed()`` re-evaluates correctly
+ * when the parent (HomeComponent) updates ``agents()``.
+ */
 @Component({
   selector: 'app-agent-selector',
   standalone: true,
-  imports: [CommonModule, MatCardModule, MatButtonModule, MatDialogModule],
+  imports: [CommonModule, MatDialogModule],
   templateUrl: './agent-selector.html',
-  styleUrl: './agent-selector.scss'
+  styleUrl: './agent-selector.scss',
 })
 export class AgentSelectorComponent {
-  @Input() agents: Agent[] = [];
-  @Input() selectedAgent: Agent | null = null;
-  @Input() hasInstances = false;
-  @Input() isLoading = false;
+  // ── Signal inputs / outputs ────────────────────────────────────────────
+  readonly agents = input<Agent[]>([]);
+  readonly selectedAgent = input<Agent | null>(null);
+  readonly hasInstances = input(false);
+  readonly isLoading = input(false);
 
-  @Output() selectAgent = new EventEmitter<Agent>();
-  @Output() createInstance = new EventEmitter<void>();
-  @Output() continueInstance = new EventEmitter<string>();
-  @Output() addAgent = new EventEmitter<AgentCreate>();
-  @Output() deleteAgent = new EventEmitter<string>();
-  @Output() startMother = new EventEmitter<void>();
-  @Output() quickCreateInstance = new EventEmitter<Agent>();
-  @Output() viewInstances = new EventEmitter<void>();
+  readonly selectAgent = output<Agent>();
+  readonly createInstance = output<void>();
+  readonly continueInstance = output<string>();
+  readonly addAgent = output<AgentCreate>();
+  readonly deleteAgent = output<string>();
+  readonly startMother = output<void>();
+  readonly quickCreateInstance = output<Agent>();
+  readonly viewInstances = output<void>();
 
-  protected readonly colorMap: Record<string, string> = {
-    'accent-amber': '#f59e0b',
-    'accent-cyan': '#10a7f7',
-    'accent-violet': '#8b5cf6',
-    'accent-emerald': '#10b981',
-    'accent-rose': '#f43f5e',
-    'accent-blue': '#3b82f6',
-    'accent-indigo': '#6366f1',
-    'accent-green': '#22c55e',
-    'accent-purple': '#a855f7',
-  };
+  @ViewChild('searchInput') searchInput!: ElementRef<HTMLInputElement>;
+  @ViewChild('agentList') agentList?: ElementRef<HTMLDivElement>;
 
-  protected isAddModalOpen = signal(false);
+  private readonly dialog = inject(MatDialog);
 
-  protected filteredAgents = computed(() =>
-    this.agents.filter(agent => agent.id !== '_mother')
+  // ── Search / filter state ──────────────────────────────────────────────
+  readonly searchQuery = signal('');
+  readonly focusedIndex = signal(-1);
+
+  /** Exclude the special Mother agent from the pickable list. */
+  readonly selectableAgents = computed(() =>
+    this.agents().filter(agent => agent.id !== '_mother'),
   );
 
-  protected activeColor = computed(() => {
-    return this.selectedAgent ? this.getAgentColor(this.selectedAgent) : '#10a7f7';
+  /** Case-insensitive filter over agent name AND description. */
+  readonly filteredAgents = computed(() => {
+    const query = this.searchQuery().trim().toLowerCase();
+    const base = this.selectableAgents();
+    if (!query) return base;
+    return base.filter(agent => {
+      const name = (agent.name ?? '').toLowerCase();
+      const desc = (agent.description ?? '').toLowerCase();
+      return name.includes(query) || desc.includes(query);
+    });
   });
 
-  constructor(private dialog: MatDialog) {}
+  /** Keep focusedIndex within the bounds of the filtered list. */
+  private readonly _filterEffect = effect(() => {
+    // Establish reactive dependencies.
+    this.searchQuery();
+    const len = this.filteredAgents().length;
+    const idx = this.focusedIndex();
+    if (len === 0) {
+      if (idx !== -1) this.focusedIndex.set(-1);
+    } else if (idx < 0) {
+      this.focusedIndex.set(0);
+    } else if (idx >= len) {
+      this.focusedIndex.set(len - 1);
+    }
+  });
 
-  protected getAgentColor(agent: Agent): string {
-    return this.colorMap[agent.color] || agent.color || '#10a7f7';
+  // ── Helpers ────────────────────────────────────────────────────────────
+  getAgentColor(agent: Agent): string {
+    return colorMap[agent.color] || agent.color || '#10a7f7';
   }
 
-  protected onSelect(agent: Agent): void {
+  get activeColor(): string {
+    const sel = this.selectedAgent();
+    return sel ? this.getAgentColor(sel) : '#10a7f7';
+  }
+
+  get activeDescendant(): string {
+    const idx = this.focusedIndex();
+    const agents = this.filteredAgents();
+    if (idx >= 0 && idx < agents.length) {
+      return `agent-item-${agents[idx].id}`;
+    }
+    return '';
+  }
+
+  // ── Event handlers ─────────────────────────────────────────────────────
+  onSearchInput(event: Event): void {
+    const inputEl = event.target as HTMLInputElement;
+    this.searchQuery.set(inputEl.value);
+  }
+
+  onSearchKeydown(event: KeyboardEvent): void {
+    const agents = this.filteredAgents();
+    if (agents.length === 0 && !['Escape', 'Tab'].includes(event.key)) {
+      return;
+    }
+
+    switch (event.key) {
+      case 'ArrowDown': {
+        event.preventDefault();
+        // Wrap: from last item, going down returns to the first option.
+        const current = this.focusedIndex();
+        const next = current < 0 ? 0 : current >= agents.length - 1 ? 0 : current + 1;
+        this.focusedIndex.set(next);
+        this.scrollToFocused(next);
+        break;
+      }
+      case 'ArrowUp': {
+        event.preventDefault();
+        // Wrap: from first item, going up returns to the last option.
+        const current = this.focusedIndex();
+        const prev = current <= 0 ? agents.length - 1 : current - 1;
+        this.focusedIndex.set(prev);
+        this.scrollToFocused(prev);
+        break;
+      }
+      case 'Home': {
+        event.preventDefault();
+        this.focusedIndex.set(0);
+        this.scrollToFocused(0);
+        break;
+      }
+      case 'End': {
+        event.preventDefault();
+        const last = agents.length - 1;
+        this.focusedIndex.set(last);
+        this.scrollToFocused(last);
+        break;
+      }
+      case 'Enter': {
+        event.preventDefault();
+        const idx = this.focusedIndex();
+        if (idx >= 0 && idx < agents.length) {
+          this.onSelect(agents[idx]);
+        }
+        break;
+      }
+      case 'Escape': {
+        event.preventDefault();
+        if (this.searchQuery() !== '') {
+          this.clearSearch();
+        } else {
+          this.searchInput?.nativeElement.blur();
+        }
+        break;
+      }
+    }
+  }
+
+  onOptionMouseEnter(index: number): void {
+    this.focusedIndex.set(index);
+  }
+
+  onOptionFocus(index: number): void {
+    this.focusedIndex.set(index);
+  }
+
+  onOptionKeydown(event: KeyboardEvent, agent: Agent, index: number): void {
+    const agents = this.filteredAgents();
+
+    switch (event.key) {
+      case 'ArrowDown': {
+        event.preventDefault();
+        // Wrap: from last item, going down returns to the first option.
+        const next = index >= agents.length - 1 ? 0 : index + 1;
+        this.focusedIndex.set(next);
+        this.focusOption(next);
+        break;
+      }
+      case 'ArrowUp': {
+        event.preventDefault();
+        // Wrap: from first item, going up returns to the last option.
+        const previous = index <= 0 ? agents.length - 1 : index - 1;
+        this.focusedIndex.set(previous);
+        this.focusOption(previous);
+        break;
+      }
+      case 'Home': {
+        event.preventDefault();
+        this.focusedIndex.set(0);
+        this.focusOption(0);
+        break;
+      }
+      case 'End': {
+        event.preventDefault();
+        const last = agents.length - 1;
+        this.focusedIndex.set(last);
+        this.focusOption(last);
+        break;
+      }
+      case 'Enter':
+      case ' ': {
+        event.preventDefault();
+        this.onSelect(agent);
+        break;
+      }
+      case 'Escape': {
+        event.preventDefault();
+        this.clearSearch();
+        break;
+      }
+    }
+  }
+
+  /** Select an agent without starting a conversation. */
+  onSelect(agent: Agent): void {
     this.selectAgent.emit(agent);
   }
 
-  protected onCreateInstance(): void {
-    this.createInstance.emit();
+  /**
+   * Start a new conversation with the given agent: record the selection
+   * (so the parent persists it) then ask the parent to create an instance.
+   */
+  onStartConversation(agent: Agent): void {
+    this.onSelect(agent);
+    this.onQuickCreate(agent);
   }
 
-  protected onContinueInstance(instanceId: string): void {
+  onQuickCreate(agent: Agent, event?: Event): void {
+    event?.stopPropagation();
+    this.quickCreateInstance.emit(agent);
+  }
+
+  /**
+   * Restore a previous conversation. ``instanceId`` may be ``'latest'`` to
+   * resume the most recent instance, or a specific instance id.
+   */
+  onContinueInstance(instanceId: string = 'latest'): void {
     this.continueInstance.emit(instanceId);
   }
 
+  /** Ask the parent to create a new instance using its currently selected agent. */
+  onCreateInstance(): void {
+    this.createInstance.emit();
+  }
+
+  /**
+   * Delete an agent. The agent-selector confirms with the user before
+   * emitting because the parent deletes irreversibly.
+   */
+  onDeleteAgent(agent: Agent, event?: Event): void {
+    event?.stopPropagation();
+    if (typeof confirm === 'function' &&
+        !confirm(`Delete agent "${agent.name}"? This will move it to trash.`)) {
+      return;
+    }
+    this.deleteAgent.emit(agent.id);
+  }
+
+  private focusOption(index: number): void {
+    this.scrollToFocused(index);
+    const list = this.agentList?.nativeElement;
+    if (!list) return;
+    const items = list.querySelectorAll('.agent-item');
+    (items[index] as HTMLElement | undefined)?.focus();
+  }
+
+  clearSearch(): void {
+    this.searchQuery.set('');
+    // Reset focus to the top of the list.
+    const len = this.filteredAgents().length;
+    this.focusedIndex.set(len > 0 ? 0 : -1);
+    this.searchInput?.nativeElement.focus();
+  }
+
+  private scrollToFocused(index: number): void {
+    const list = this.agentList?.nativeElement;
+    if (!list) return;
+    const items = list.querySelectorAll('.agent-item');
+    const item = items[index] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  // ── Passthrough handlers (unchanged behavior) ──────────────────────────
   protected onStartMother(): void {
     this.startMother.emit();
   }
 
-  protected onQuickCreate(agent: Agent, event: Event): void {
-    event.stopPropagation();
-    this.quickCreateInstance.emit(agent);
-  }
-
   protected onViewInstances(): void {
     this.viewInstances.emit();
-  }
-
-  protected onDeleteAgent(agent: Agent, event: Event): void {
-    event.stopPropagation();
-    if (confirm(`Delete agent "${agent.name}"? This will move it to trash.`)) {
-      this.deleteAgent.emit(agent.id);
-    }
   }
 
   protected openAddModal(): void {
@@ -93,7 +320,7 @@ export class AgentSelectorComponent {
       width: '480px',
       maxWidth: '95vw',
       panelClass: 'dark-modal-panel',
-      data: {}
+      data: {},
     });
 
     dialogRef.afterClosed().subscribe((result: AgentCreate | undefined) => {
