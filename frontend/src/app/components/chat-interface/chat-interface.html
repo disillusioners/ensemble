@@ -15,7 +15,7 @@
   <!-- Messages container -->
   <div class="messages-container" #messagesContainer>
     <!-- Scrollable area -->
-    <div class="messages-scroll" (scroll)="onScroll($event)">
+    <div class="messages-scroll" #messagesScroll (scroll)="onScroll($event)">
       <div class="messages-wrapper">
         
         <!-- Welcome message when no messages -->

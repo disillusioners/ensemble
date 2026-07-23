@@ -53,6 +53,7 @@ interface MermaidChartContext {
 export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDestroy {
   @ViewChild('messagesEnd') messagesEndRef!: ElementRef<HTMLDivElement>;
   @ViewChild('messagesContainer') messagesContainerRef!: ElementRef<HTMLDivElement>;
+  @ViewChild('messagesScroll') messagesScrollRef!: ElementRef<HTMLDivElement>;
 
   @Input() messages: Message[] = [];
   @Input() isLoading = false;
@@ -70,6 +71,8 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   isNearBottom = signal(true);
   private userHasScrolled = signal(false);
   private isAutoScrolling = false;
+  private scrollTimer50?: ReturnType<typeof setTimeout>;
+  private scrollTimer150?: ReturnType<typeof setTimeout>;
 
   /**
    * Track which chart overlay buttons we've already injected so a
@@ -161,6 +164,8 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       cancelAnimationFrame(this.scanHandle);
       this.scanHandle = null;
     }
+    if (this.scrollTimer50) clearTimeout(this.scrollTimer50);
+    if (this.scrollTimer150) clearTimeout(this.scrollTimer150);
   }
 
   onScroll(event: Event): void {
@@ -185,15 +190,33 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   }
 
   scrollToBottom(): void {
+    if (this.scrollTimer50) clearTimeout(this.scrollTimer50);
+    if (this.scrollTimer150) clearTimeout(this.scrollTimer150);
+
     if (this.messagesEndRef) {
       this.isAutoScrolling = true;
-      this.messagesEndRef.nativeElement.scrollIntoView({ behavior: 'smooth' });
+      // Immediate absolute-bottom scroll on the scroll container
+      const scroller = this.messagesScrollRef?.nativeElement;
+      if (scroller) {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+      // Fallback: messagesEndRef.scrollIntoView with behavior 'auto'
+      this.messagesEndRef.nativeElement.scrollIntoView({ behavior: 'auto' });
       this.isNearBottom.set(true);
       this.userHasScrolled.set(false);
-      // Reset auto-scrolling flag after animation completes
-      setTimeout(() => {
+      // Reapply absolute-bottom at ~50ms
+      this.scrollTimer50 = setTimeout(() => {
+        if (scroller) {
+          scroller.scrollTop = scroller.scrollHeight;
+        }
+      }, 50);
+      // Reapply absolute-bottom at ~150ms and reset the auto-scroll flag
+      this.scrollTimer150 = setTimeout(() => {
+        if (scroller) {
+          scroller.scrollTop = scroller.scrollHeight;
+        }
         this.isAutoScrolling = false;
-      }, 500);
+      }, 150);
     }
   }
 
