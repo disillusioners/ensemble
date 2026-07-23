@@ -296,6 +296,44 @@ def _insert_job_item(
         )
 
 
+def _insert_queue(
+    engine,
+    queue_id: str,
+    project_id: str,
+    queue_type: str = "parallel",
+    queue_name: str | None = None,
+    concurrency_limit: int = 1,
+) -> None:
+    """Insert a JobQueue row directly via standard SQL."""
+    name = queue_name or queue_id
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO job_queues
+                    (queue_id, project_id, queue_name, queue_name_lower,
+                     queue_type, concurrency_limit, is_system, is_paused,
+                     description, created_at, updated_at)
+                VALUES
+                    (:queue_id, :project_id, :queue_name, :queue_name_lower,
+                     :queue_type, :concurrency_limit, 0, 0,
+                     NULL, :created_at, :updated_at)
+                """
+            ),
+            {
+                "queue_id": queue_id,
+                "project_id": project_id,
+                "queue_name": name,
+                "queue_name_lower": name.lower(),
+                "queue_type": queue_type,
+                "concurrency_limit": concurrency_limit,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1: Defer queue job wires is_deferred=True
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3401,3 +3439,173 @@ class TestPeriodicDriftReconciler:
             f"P1_dead_instance detail for job-c1-1. Got details: "
             f"{stats_ok['details']}"
         )
+
+
+class TestPhase3DeferJobPredicateInvariants:
+    """Phase 3 invariant tests for the new job-level predicates
+    ``JobRepository.has_active_non_deferred_work`` /
+    ``has_active_non_background_work`` (Phase 2, 2026-07-23, commits
+    059d1ecc + 5c83e519).
+
+    Each test pins a single invariant the existing predicates must hold
+    so a future refactor cannot silently regress the defer-queue /
+    background-queue idle gate. The tests are PURE READ operations
+    against the repository — no gate wiring, no service construction —
+    so they work on both SQLite (tests/job_queue/conftest.py) and
+    PostgreSQL with no dialect-specific assertions.
+
+    Conventions (mirror test_defer_idle_gate_phase2.py):
+    * SQLite in-memory engine via ``engine`` fixture.
+    * Raw-SQL seeding with the module-level ``_insert_instance`` /
+      ``_insert_job_item`` / ``_insert_queue`` helpers. Booleans bind
+      cleanly on both backends.
+    * Each test sets up a minimal DB state, invokes ONE repository
+      method, asserts the bool.
+    """
+
+    def test_waiting_children_with_active_jobitem_blocks_defer_predicate(self, engine, repository):
+        """Invariant: waiting_children plus active non-defer work blocks defer."""
+        _insert_instance(engine, "inst-wc", "proj-wc", "waiting_children")
+        _insert_queue(engine, "queue-nd-fifo", "proj-wc", "fifo")
+        _insert_job_item(engine, job_id="job-wc", instance_id="inst-wc", project_id="proj-wc", queue_id="queue-nd-fifo", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-wc") is True
+
+    def test_waiting_children_without_jobitem_does_not_block(self, engine, repository):
+        """Invariant: waiting_children without a JobItem does not block."""
+        _insert_instance(engine, "inst-wc-nothing", "proj-wc2", "waiting_children")
+        assert repository.has_active_non_deferred_work("proj-wc2") is False
+
+    def test_running_instance_with_active_jobitem_blocks_defer_predicate(self, engine, repository):
+        """Invariant: running plus active parallel work is busy."""
+        _insert_instance(engine, "inst-run", "proj-run", "running")
+        _insert_queue(engine, "queue-par", "proj-run", "parallel")
+        _insert_job_item(engine, job_id="job-run", instance_id="inst-run", project_id="proj-run", queue_id="queue-par", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-run") is True
+
+    def test_paused_instance_with_active_jobitem_blocks_defer_predicate(self, engine, repository):
+        """Invariant: paused is suspended-but-occupying and remains busy."""
+        _insert_instance(engine, "inst-paused", "proj-paused", "paused")
+        _insert_queue(engine, "queue-fifo-p", "proj-paused", "fifo")
+        _insert_job_item(engine, job_id="job-paused", instance_id="inst-paused", project_id="proj-paused", queue_id="queue-fifo-p", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-paused") is True
+
+    def test_completed_instance_with_active_jobitem_does_not_block(self, engine, repository):
+        """Invariant: completed instances are terminal and do not block."""
+        _insert_instance(engine, "inst-completed", "proj-completed", "completed")
+        _insert_queue(engine, "queue-c", "proj-completed", "fifo")
+        _insert_job_item(engine, job_id="job-c", instance_id="inst-completed", project_id="proj-completed", queue_id="queue-c", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-completed") is False
+
+    def test_error_instance_with_active_jobitem_does_not_block(self, engine, repository):
+        """Invariant: error instances are terminal and do not block."""
+        _insert_instance(engine, "inst-err", "proj-err", "error")
+        _insert_queue(engine, "queue-e", "proj-err", "fifo")
+        _insert_job_item(engine, job_id="job-e", instance_id="inst-err", project_id="proj-err", queue_id="queue-e", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-err") is False
+
+    def test_defer_queue_job_excluded_even_when_instance_waiting_children(self, engine, repository):
+        """Invariant: defer work cannot observe itself as blocking."""
+        _insert_instance(engine, "inst-def-own", "proj-def-own", "waiting_children")
+        _insert_queue(engine, "queue-def-own", "proj-def-own", "defer", concurrency_limit=1)
+        _insert_job_item(engine, job_id="job-def-own", instance_id="inst-def-own", project_id="proj-def-own", queue_id="queue-def-own", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-def-own") is False
+
+    def test_background_queue_job_excluded_even_when_instance_waiting_children(self, engine, repository):
+        """Invariant: background work cannot observe itself as blocking."""
+        _insert_instance(engine, "inst-bg-own", "proj-bg-own", "waiting_children")
+        _insert_queue(engine, "queue-bg-own", "proj-bg-own", "background", concurrency_limit=1)
+        _insert_job_item(engine, job_id="job-bg-own", instance_id="inst-bg-own", project_id="proj-bg-own", queue_id="queue-bg-own", admission_state="active")
+        assert repository.has_active_non_background_work(None) is False
+
+    def test_defer_blocked_by_non_defer_work_on_fifo_queue(self, engine, repository):
+        """Invariant: queued FIFO work counts as non-defer work."""
+        _insert_instance(engine, "inst-fifo", "proj-fifo", "waiting_children")
+        _insert_queue(engine, "queue-fifo-test", "proj-fifo", "fifo")
+        _insert_job_item(engine, job_id="job-fifo", instance_id="inst-fifo", project_id="proj-fifo", queue_id="queue-fifo-test", admission_state="queued")
+        assert repository.has_active_non_deferred_work("proj-fifo") is True
+
+    def test_defer_blocked_by_non_defer_work_on_parallel_queue(self, engine, repository):
+        """Invariant: active parallel work counts as non-defer work."""
+        _insert_instance(engine, "inst-par", "proj-par", "waiting_children")
+        _insert_queue(engine, "queue-par-test", "proj-par", "parallel")
+        _insert_job_item(engine, job_id="job-par", instance_id="inst-par", project_id="proj-par", queue_id="queue-par-test", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-par") is True
+
+    def test_background_blocked_by_normal_work(self, engine, repository):
+        """Invariant: normal work blocks the system-wide background gate."""
+        _insert_instance(engine, "inst-bg-blk", "proj-bg-blk", "waiting_children")
+        _insert_queue(engine, "queue-bg-blk-nd", "proj-bg-blk", "fifo")
+        _insert_job_item(engine, job_id="job-bg-blk", instance_id="inst-bg-blk", project_id="proj-bg-blk", queue_id="queue-bg-blk-nd", admission_state="active")
+        assert repository.has_active_non_background_work(None) is True
+
+    def test_background_blocked_by_defer_work(self, engine, repository):
+        """Invariant: current predicate excludes defer work from the background gate."""
+        _insert_instance(engine, "inst-bg-def", "proj-bg-def", "waiting_children")
+        _insert_queue(engine, "queue-bg-def-d", "proj-bg-def", "defer", concurrency_limit=1)
+        _insert_job_item(engine, job_id="job-bg-def", instance_id="inst-bg-def", project_id="proj-bg-def", queue_id="queue-bg-def-d", admission_state="active")
+        assert repository.has_active_non_background_work(None) is False
+
+    def test_background_unblocked_when_only_background_and_defer_work(self, engine, repository):
+        """Invariant: background-only work does not block its own gate."""
+        _insert_instance(engine, "inst-bg-only", "proj-bg-only", "waiting_children")
+        _insert_queue(engine, "queue-bg-only", "proj-bg-only", "background", concurrency_limit=1)
+        _insert_job_item(engine, job_id="job-bg-only", instance_id="inst-bg-only", project_id="proj-bg-only", queue_id="queue-bg-only", admission_state="active")
+        assert repository.has_active_non_background_work(None) is False
+
+    def test_always_on_idle_instances_no_starvation_lineage_scoping(self, engine, repository):
+        """Invariant: job→instance lineage counts only the job's own live instance and non-defer queue, never blanket-counting idle daemon instances."""
+        for index in range(10):
+            _insert_instance(engine, f"inst-idle-{index}", "proj-many-idle", "idle")
+        _insert_instance(engine, "inst-lineage", "proj-many-idle", "waiting_children")
+        _insert_queue(engine, "queue-lineage", "proj-many-idle", "fifo")
+        _insert_job_item(engine, job_id="job-lineage", instance_id="inst-lineage", project_id="proj-many-idle", queue_id="queue-lineage", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-many-idle") is True
+
+    def test_many_idle_instances_alone_do_not_block(self, engine, repository):
+        """Invariant: always-on idle daemon agents cannot starve defer work."""
+        for index in range(20):
+            _insert_instance(engine, f"inst-all-idle-{index}", "proj-all-idle", "idle")
+        assert repository.has_active_non_deferred_work("proj-all-idle") is False
+
+    def test_queued_admission_state_blocks_defer_predicate(self, engine, repository):
+        """Invariant: queued admission state counts as busy."""
+        _insert_instance(engine, "inst-q", "proj-q", "waiting_children")
+        _insert_queue(engine, "queue-q", "proj-q", "fifo")
+        _insert_job_item(engine, job_id="job-q", instance_id="inst-q", project_id="proj-q", queue_id="queue-q", admission_state="queued")
+        assert repository.has_active_non_deferred_work("proj-q") is True
+
+    def test_terminal_admission_state_does_not_block(self, engine, repository):
+        """Invariant: done admission state does not count as active work."""
+        _insert_instance(engine, "inst-done", "proj-done", "running")
+        _insert_queue(engine, "queue-done", "proj-done", "fifo")
+        _insert_job_item(engine, job_id="job-done", instance_id="inst-done", project_id="proj-done", queue_id="queue-done", admission_state="done")
+        assert repository.has_active_non_deferred_work("proj-done") is False
+
+    def test_defer_job_with_null_queue_id_not_counted_as_non_defer(self, engine, repository):
+        """Invariant: current predicate treats NULL queue_id as non-defer via its explicit ``queue_type IS NULL`` branch; the live instance therefore makes this known edge case busy."""
+        _insert_instance(engine, "inst-null-q", "proj-null-q", "waiting_children")
+        _insert_job_item(engine, job_id="job-null-q", instance_id="inst-null-q", project_id="proj-null-q", queue_id=None, admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-null-q") is True
+
+    def test_project_isolation_defer_predicate(self, engine, repository):
+        """Invariant: project-scoped defer activity cannot leak across projects."""
+        _insert_instance(engine, "inst-iso-a", "proj-iso-a", "waiting_children")
+        _insert_instance(engine, "inst-iso-b", "proj-iso-b", "idle")
+        _insert_queue(engine, "queue-iso", "proj-iso-a", "fifo")
+        _insert_job_item(engine, job_id="job-iso", instance_id="inst-iso-a", project_id="proj-iso-a", queue_id="queue-iso", admission_state="active")
+        assert repository.has_active_non_deferred_work("proj-iso-a") is True
+        assert repository.has_active_non_deferred_work("proj-iso-b") is False
+
+    def test_predicate_consistency_with_paused_terminal_matrix(self, engine, repository):
+        """Invariant: every non-terminal status, including paused, idle, and queued, is busy; terminal statuses are not."""
+        expected_by_status = {"idle": True, "running": True, "waiting_children": True, "paused": True, "queued": True, "completed": False, "error": False, "terminated": False, "failed": False}
+
+        def check(status, expected):
+            project_id = f"proj-matrix-{status}"
+            _insert_instance(engine, f"inst-matrix-{status}", project_id, status)
+            _insert_queue(engine, f"queue-matrix-{status}", project_id, "fifo")
+            _insert_job_item(engine, job_id=f"job-matrix-{status}", instance_id=f"inst-matrix-{status}", project_id=project_id, queue_id=f"queue-matrix-{status}", admission_state="active")
+            assert repository.has_active_non_deferred_work(project_id) is expected
+
+        for status, expected in expected_by_status.items():
+            check(status, expected)
