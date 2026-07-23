@@ -156,19 +156,17 @@
         ></app-message-input>
       }
 
-      <!-- Workspace overlay. Renders on top of the chat header,
-           interface, and message input within the chat area. Closes via
-           the Hide button or by toggling the same project's icon. The
-           WorkspaceService LRU cache preserves background state across
-           hide/show cycles. -->
-      @if (showWorkspace()) {
-        <div class="workspace-overlay">
-          <app-workspace
-            [projectId]="workspaceProjectId()!"
-            (hide)="onWorkspaceHide()"
-          ></app-workspace>
-        </div>
-      }
     </div>
+
+    <!-- Workspace overlay. Renders on top of the instance sidebar and chat area.
+         Closes via the Hide button or by toggling the same project's icon. The
+         WorkspaceService LRU cache preserves background state across hide/show
+         cycles. -->
+    @if (showWorkspace()) {
+      <app-workspace
+        [projectId]="workspaceProjectId()!"
+        (hide)="onWorkspaceHide()"
+      ></app-workspace>
+    }
   </div>
 </div>
