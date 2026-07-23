@@ -430,7 +430,7 @@ ensure.md Release Gate — 4 critical E2E workflow tests against live daemon (lo
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | ensure.md Release Gate: 4 E2E workflow tests (happy path, pause+resume, terminate+revive, 3-level cascade). Requires daemon on :8079 + SSL cleanup + PYTEST_TIMEOUT=280. Pack runs all 4 at once; per ensure.md, run individually via `-k` filter for one-by-one execution. | 5 min | 2026-07-22 | ✅ PASS (4/4 individually — happy_path 74s, pause+resume 70s, terminate+revive 80s, 3-level cascade 154s; total ~6m18s wall-clock sequential) |
+| e2e_workflows_ensure_test | test/packs/e2e_workflows_ensure_test.sh | ensure.md Release Gate: 4 E2E workflow tests (happy path, pause+resume, terminate+revive, 3-level cascade). Requires daemon on :8079 + SSL cleanup + PYTEST_TIMEOUT=280. Pack runs all 4 at once; per ensure.md, run individually via `-k` filter for one-by-one execution. | 5 min | 2026-07-23 | ✅ PASS (4/4 individually on `latest` @ ea6becf6 — happy_path 80s, pause+resume 58s, terminate+revive 59s, 3-level cascade 176s; total ~6m13s wall-clock sequential. Post-merge verification clean) |
 
 ## Searchable Dropdowns Packs (2026-07-22)
 
