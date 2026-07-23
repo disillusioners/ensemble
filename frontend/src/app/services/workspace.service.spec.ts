@@ -255,4 +255,170 @@ describe('WorkspaceService', () => {
 
     expect(service.error()).toBeNull();
   });
+
+  // ── LRU per-project state cache ───────────────────────────────────
+
+  describe('LRU per-project state cache', () => {
+    it('exposes a maxCachedProjects of 5', () => {
+      expect(service.maxCachedProjects).toBe(5);
+    });
+
+    it('returns null from restoreState when nothing is cached', () => {
+      expect(service.restoreState('nope')).toBeNull();
+      expect(service.hasCachedState('nope')).toBe(false);
+    });
+
+    it('snapshots the current signals and returns them from restoreState', () => {
+      const response = makeTreeResponse();
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      const req = httpTesting.expectOne(
+        (r) => r.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(response);
+
+      service.selectedPath.set('src/main.py');
+      service.saveCurrentState('project-1', { viewMode: 'diff' });
+
+      expect(service.hasCachedState('project-1')).toBe(true);
+
+      const restored = service.restoreState('project-1');
+      expect(restored).not.toBeNull();
+      expect(restored!.projectId).toBe('project-1');
+      expect(restored!.tree).toEqual(response.tree);
+      expect(restored!.selectedPath).toBe('src/main.py');
+      expect(restored!.viewMode).toBe('diff');
+
+      // Signals are also re-applied from the cache.
+      expect(service.currentTree()).toEqual(response.tree);
+      expect(service.selectedPath()).toBe('src/main.py');
+    });
+
+    it('preserves prior cached extras when a partial save is provided', () => {
+      const response = makeTreeResponse();
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting.expectOne((r) => r.url === '/api/workspace/project-1/tree').flush(response);
+
+      // First save includes both viewMode and expandedPaths.
+      service.saveCurrentState('project-1', {
+        viewMode: 'diff',
+        expandedPaths: ['src', 'src/components'],
+      });
+      // Second save only updates viewMode — expandedPaths must survive.
+      service.saveCurrentState('project-1', { viewMode: 'code' });
+
+      const restored = service.restoreState('project-1');
+      expect(restored!.viewMode).toBe('code');
+      expect(restored!.expandedPaths).toEqual(['src', 'src/components']);
+    });
+
+    it('ignores saveCurrentState when projectId is empty', () => {
+      service.saveCurrentState('');
+      expect(service.cacheSize()).toBe(0);
+      expect(service.hasCachedState('')).toBe(false);
+    });
+
+    it('evicts the least-recently-used entry when exceeding capacity', () => {
+      const tree = makeTreeResponse().tree;
+      // Fill the cache with 5 distinct projects.
+      for (let i = 1; i <= 5; i++) {
+        const pid = `project-${i}`;
+        service.saveCurrentState(pid, { viewMode: 'code' });
+        // Force currentTree() to vary so saves capture meaningful state.
+        service.currentTree.set([{ ...tree[0], name: pid }]);
+      }
+      expect(service.cacheSize()).toBe(5);
+
+      // Touch project-1 to make it most-recently-used, then add a 6th.
+      service.saveCurrentState('project-1');
+      service.saveCurrentState('project-6', { viewMode: 'code' });
+
+      expect(service.cacheSize()).toBe(5);
+      expect(service.hasCachedState('project-1')).toBe(true);
+      // project-2 should have been evicted (oldest untouched entry).
+      expect(service.hasCachedState('project-2')).toBe(false);
+      expect(service.hasCachedState('project-6')).toBe(true);
+    });
+
+    it('promotes an existing entry to most-recently-used on save', () => {
+      service.saveCurrentState('project-a');
+      service.saveCurrentState('project-b');
+      service.saveCurrentState('project-c');
+
+      // Re-save project-a — it should now be at the tail (MRU) and
+      // project-b the head (LRU).
+      service.saveCurrentState('project-a');
+      // Adding 4 more projects will evict b, c, d, e in that order, but
+      // project-a should always survive.
+      for (const pid of ['d', 'e', 'f']) {
+        service.saveCurrentState(`project-${pid}`);
+      }
+      // project-a should still be present.
+      expect(service.hasCachedState('project-a')).toBe(true);
+    });
+
+    it('clears a single entry via clearCache(projectId)', () => {
+      service.saveCurrentState('project-x');
+      service.saveCurrentState('project-y');
+      expect(service.cacheSize()).toBe(2);
+
+      service.clearCache('project-x');
+
+      expect(service.hasCachedState('project-x')).toBe(false);
+      expect(service.hasCachedState('project-y')).toBe(true);
+      expect(service.cacheSize()).toBe(1);
+    });
+
+    it('clears the entire cache when clearCache is called with no arg', () => {
+      service.saveCurrentState('project-x');
+      service.saveCurrentState('project-y');
+
+      service.clearCache();
+
+      expect(service.cacheSize()).toBe(0);
+      expect(service.hasCachedState('project-x')).toBe(false);
+      expect(service.hasCachedState('project-y')).toBe(false);
+    });
+
+    it('marks an entry as most-recently-used when restored', () => {
+      service.saveCurrentState('project-a');
+      service.saveCurrentState('project-b');
+      service.saveCurrentState('project-c');
+      service.saveCurrentState('project-d');
+      service.saveCurrentState('project-e');
+      expect(service.cacheSize()).toBe(5);
+
+      // Touch 'a' via restore so it becomes MRU.
+      service.restoreState('project-a');
+
+      // Add 2 more projects — a should survive; b should be evicted
+      // first since it's the LRU after the touch.
+      service.saveCurrentState('project-f');
+      service.saveCurrentState('project-g');
+
+      expect(service.hasCachedState('project-a')).toBe(true);
+      expect(service.hasCachedState('project-b')).toBe(false);
+      expect(service.hasCachedState('project-g')).toBe(true);
+    });
+
+    it('auto-saves the outgoing project state when switching via getFileTree', () => {
+      // Load project-1, then switch to project-2. Switching should
+      // snapshot project-1's state first.
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse({ tree: [{ name: 'p1', path: '.', type: 'directory', size: null, children: null }] }));
+
+      service.selectedPath.set('src/p1.ts');
+
+      // Switch to project-2 — this should auto-save project-1.
+      service.getFileTree('project-2').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-2/tree')
+        .flush(makeTreeResponse({ project_id: 'project-2' }));
+
+      expect(service.hasCachedState('project-1')).toBe(true);
+      const cached = service.restoreState('project-1');
+      expect(cached!.selectedPath).toBe('src/p1.ts');
+    });
+  });
 });

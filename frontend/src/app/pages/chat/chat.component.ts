@@ -1,6 +1,6 @@
 import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild, Signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ActivatedRoute, Router, RouterModule } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
@@ -18,6 +18,7 @@ import { ChatInterfaceComponent } from '../../components/chat-interface/chat-int
 import { MessageInputComponent, MessagePayload } from '../../components/message-input/message-input.component';
 import { TodoListComponent } from '../../components/todo-list/todo-list.component';
 import { QuestionWizardComponent } from '../../components/question-wizard/question-wizard.component';
+import { WorkspaceComponent } from '../workspace/workspace.component';
 import type { Agent, InstanceInfo, Message } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
@@ -27,7 +28,6 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
   standalone: true,
   imports: [
     CommonModule,
-    RouterModule,
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
@@ -38,7 +38,8 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     ChatInterfaceComponent,
     MessageInputComponent,
     TodoListComponent,
-    QuestionWizardComponent
+    QuestionWizardComponent,
+    WorkspaceComponent
   ],
   templateUrl: './chat.html',
   styleUrl: './chat.scss'
@@ -505,6 +506,43 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   protected onResumeInstanceFromList(instanceId: string): void {
     this.api.resumeInstance(instanceId).subscribe({ error: (err: any) => console.error('Resume failed:', err) });
+  }
+
+  // Workspace overlay state. The overlay covers the chat area (header +
+  // interface + input) when shown. Closing it via Hide triggers the
+  // WorkspaceService LRU cache to retain project state, so re-opening
+  // restores the prior file tree.
+  readonly showWorkspace = signal(false);
+  readonly workspaceProjectId = signal<string | null>(null);
+
+  /**
+   * Handle workspace icon click from the project tab bar.
+   * Same project toggles off; different project switches to that project.
+   */
+  protected onWorkspaceToggle(projectId: string): void {
+    if (this.showWorkspace() && this.workspaceProjectId() === projectId) {
+      this.showWorkspace.set(false);
+      return;
+    }
+    this.workspaceProjectId.set(projectId);
+    this.showWorkspace.set(true);
+  }
+
+  /**
+   * Handle the workspace overlay's Hide button. State is preserved by
+   * WorkspaceService's LRU cache, so no extra work is needed here.
+   */
+  protected onWorkspaceHide(): void {
+    this.showWorkspace.set(false);
+  }
+
+  /**
+   * Toggle the workspace overlay from the chat header button. Targets
+   * the currently active project (resolved via existing projectId getter).
+   */
+  protected onHeaderWorkspaceToggle(): void {
+    if (!this.hasRealProject) return;
+    this.onWorkspaceToggle(this.projectId);
   }
 
   // Expose for template

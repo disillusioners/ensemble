@@ -1,6 +1,5 @@
-import { Component, inject, computed } from '@angular/core';
+import { Component, inject, computed, Output, EventEmitter } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { RouterLink, RouterLinkActive } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
@@ -13,8 +12,6 @@ import { ProjectService } from '../../services/project.service';
   standalone: true,
   imports: [
     CommonModule,
-    RouterLink,
-    RouterLinkActive,
     MatButtonModule,
     MatIconModule,
     MatMenuModule,
@@ -27,19 +24,11 @@ export class ProjectTabBarComponent {
   protected readonly tabStateService = inject(TabStateService);
   protected readonly projectService = inject(ProjectService);
 
-  protected get projectId(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
-  }
-
   /**
-   * True when the active tab is a real project (not the 'all' pseudo-project).
-   * Workspace tab/links are only valid for real projects because the route
-   * /projects/{id}/workspace 404s for 'all' or null.
+   * Emitted when the workspace icon on a project tab is clicked.
+   * Carries the project ID (tab.id) so the parent can open the workspace view.
    */
-  protected get hasRealProject(): boolean {
-    const activeId = this.tabStateService.activeProjectId();
-    return activeId !== null && activeId !== 'all';
-  }
+  @Output() readonly workspaceToggle = new EventEmitter<string>();
 
   /**
    * Computed list of projects that are not currently open as tabs.
@@ -61,5 +50,16 @@ export class ProjectTabBarComponent {
   protected onCloseTab(event: Event, tabId: string): void {
     event.stopPropagation();
     this.tabStateService.removeTab(tabId);
+  }
+
+  /**
+   * Handle clicking the workspace icon on a project tab.
+   * Stops propagation and default so the click does not also switch tabs,
+   * then emits the project ID to the parent.
+   */
+  protected onWorkspaceClick(event: Event, projectId: string): void {
+    event.stopPropagation();
+    event.preventDefault();
+    this.workspaceToggle.emit(projectId);
   }
 }

@@ -125,6 +125,12 @@ mat-button-toggle mat-icon {
   background: #1e8e3e; /* green when connected */
 }
 
+.hide-button {
+  margin-left: 8px;
+  flex-shrink: 0;
+  color: #d7dae0;
+}
+
 .loading-overlay {
   position: absolute;
   inset: 0;

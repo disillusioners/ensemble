@@ -9,6 +9,44 @@ import {
   GitDiffResponse,
 } from '../models/workspace.model';
 
+/** Maximum number of projects kept in the LRU state cache. */
+const MAX_CACHED_PROJECTS = 5;
+
+/**
+ * Serializable snapshot of per-project workspace state. Used to preserve
+ * file tree, selection, view mode, expanded tree paths and scroll position
+ * across project switches. Plain data only — no Angular signals or
+ * non-serializable refs — so it can be safely stored in an LRU cache and
+ * round-tripped if persistence is added later.
+ */
+export interface WorkspaceState {
+  /** Project identifier the state belongs to. */
+  projectId: string;
+  /** Last-loaded file tree (or null if nothing was loaded yet). */
+  tree: FileTreeNode[] | null;
+  /** Currently selected file path (or null). */
+  selectedPath: string | null;
+  /** Active view mode. */
+  viewMode: 'code' | 'diff';
+  /** Expanded tree-node paths captured from the FileTreeComponent. */
+  expandedPaths: string[];
+  /** ScrollTop of the main viewer (0 when untracked). */
+  scrollTop: number;
+  /** Timestamp of the snapshot, useful for debugging / eviction policy. */
+  capturedAt: number;
+}
+
+/**
+ * Caller-supplied UI fields that live outside the service's own signals
+ * (e.g. viewMode owned by the component, expanded paths owned by the
+ * FileTreeComponent). Pass these in at save-time so the cache contains a
+ * complete snapshot, and read them off the returned WorkspaceState at
+ * restore-time.
+ */
+export type WorkspaceUiExtras = Partial<
+  Pick<WorkspaceState, 'viewMode' | 'expandedPaths' | 'scrollTop'>
+>;
+
 @Injectable({ providedIn: 'root' })
 export class WorkspaceService implements OnDestroy {
   private readonly http = inject(HttpClient);
@@ -18,6 +56,12 @@ export class WorkspaceService implements OnDestroy {
 
   // Track current project ID for SSE auto-refresh callbacks
   private _currentProjectId: string | null = null;
+
+  // ── LRU state cache ───────────────────────────────────────────────
+  // Map preserves insertion order in JS, which we use as the LRU recency
+  // list: most-recently-used entries are re-inserted at the tail; the
+  // head is always the least-recently-used candidate for eviction.
+  private readonly _stateCache = new Map<string, WorkspaceState>();
 
   // State signals
   readonly sseConnected = signal(false);
@@ -32,6 +76,11 @@ export class WorkspaceService implements OnDestroy {
   /** GET /api/workspace/{projectId}/tree */
   getFileTree(projectId: string, path: string = '.'): Observable<FileTreeResponse> {
     if (this._currentProjectId && this._currentProjectId !== projectId) {
+      // Save outgoing project's state before resetting signals. The caller
+      // is expected to have provided extras via saveCurrentState() before
+      // triggering the switch — this branch only snapshots the service's
+      // own signals. Extras should already be cached by then.
+      this.saveCurrentState(this._currentProjectId);
       this.resetState();
     }
     this.loading.set(true);
@@ -88,6 +137,7 @@ export class WorkspaceService implements OnDestroy {
   connectSSE(projectId: string): void {
     this.disconnectSSE();
     if (this._currentProjectId && this._currentProjectId !== projectId) {
+      this.saveCurrentState(this._currentProjectId);
       this.resetState();
     }
     this._currentProjectId = projectId;
@@ -168,6 +218,104 @@ export class WorkspaceService implements OnDestroy {
 
   ngOnDestroy(): void {
     this.disconnectSSE();
+  }
+
+  // ── LRU cache API ──────────────────────────────────────────────────
+
+  /**
+   * Snapshot the current service signals into the LRU cache for
+   * `projectId`, optionally merging in caller-supplied UI fields (view
+   * mode, expanded paths, scroll position). The entry is marked
+   * most-recently-used; if the cache is over capacity, the
+   * least-recently-used entry is evicted.
+   *
+   * No-op when `projectId` is empty.
+   */
+  saveCurrentState(projectId: string, uiExtras: WorkspaceUiExtras = {}): void {
+    if (!projectId) return;
+
+    // Preserve any prior cached extras so a caller passing only viewMode
+    // doesn't accidentally wipe previously-saved expandedPaths.
+    const prior = this._stateCache.get(projectId);
+    const state: WorkspaceState = {
+      projectId,
+      tree: this.currentTree(),
+      selectedPath: this.selectedPath(),
+      viewMode: uiExtras.viewMode ?? prior?.viewMode ?? 'code',
+      expandedPaths: uiExtras.expandedPaths ?? prior?.expandedPaths ?? [],
+      scrollTop: uiExtras.scrollTop ?? prior?.scrollTop ?? 0,
+      capturedAt: Date.now(),
+    };
+
+    // Re-insert to mark MRU; Map.set on an existing key re-orders it to
+    // the tail in insertion-order iteration, which is exactly what we
+    // want for LRU semantics.
+    if (this._stateCache.has(projectId)) {
+      this._stateCache.delete(projectId);
+    }
+    this._stateCache.set(projectId, state);
+
+    // Evict LRU (oldest = first iterated) while over capacity.
+    while (this._stateCache.size > MAX_CACHED_PROJECTS) {
+      const oldestKey = this._stateCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      this._stateCache.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Return cached state for `projectId` and mark it most-recently-used.
+   * Applies the cache to the live service signals (tree, selectedPath)
+   * so consumers immediately see the restored data. Returns null when
+   * nothing is cached. The returned `WorkspaceState` contains caller-UI
+   * fields (viewMode, expandedPaths, scrollTop) that the consuming
+   * component is expected to apply to itself / its child components.
+   *
+   * Does NOT change `_currentProjectId`; callers must do that themselves
+   * after deciding how to load the project (cache vs fresh fetch).
+   */
+  restoreState(projectId: string): WorkspaceState | null {
+    const state = this._stateCache.get(projectId);
+    if (!state) return null;
+
+    // Promote to MRU by re-inserting.
+    this._stateCache.delete(projectId);
+    this._stateCache.set(projectId, state);
+
+    // Apply service-owned fields to live signals.
+    this.currentTree.set(state.tree);
+    this.selectedPath.set(state.selectedPath);
+    this.currentFile.set(null);
+    this.currentDiff.set(null);
+
+    return state;
+  }
+
+  /** True when `projectId` has a cached snapshot. */
+  hasCachedState(projectId: string): boolean {
+    return this._stateCache.has(projectId);
+  }
+
+  /**
+   * Clear one project's cached state, or the entire cache when `projectId`
+   * is omitted.
+   */
+  clearCache(projectId?: string): void {
+    if (projectId === undefined) {
+      this._stateCache.clear();
+      return;
+    }
+    this._stateCache.delete(projectId);
+  }
+
+  /** Test/debug accessor — current size of the LRU cache. */
+  cacheSize(): number {
+    return this._stateCache.size;
+  }
+
+  /** Maximum capacity of the LRU cache. Exposed for tests and diagnostics. */
+  get maxCachedProjects(): number {
+    return MAX_CACHED_PROJECTS;
   }
 
   private handleFileChange(changedPath: string): void {

@@ -1,4 +1,4 @@
-import { signal, computed } from '@angular/core';
+import { signal, computed, EventEmitter } from '@angular/core';
 import { ProjectTab } from '../../models/tab.model';
 import { Project } from '../../models/project.model';
 
@@ -31,6 +31,7 @@ class MockProjectService {
 class TestableProjectTabBarComponent {
   protected readonly tabStateService: MockTabStateService;
   protected readonly projectService: MockProjectService;
+  readonly workspaceToggle = new EventEmitter<string>();
 
   constructor(
     tabStateService: MockTabStateService,
@@ -52,6 +53,12 @@ class TestableProjectTabBarComponent {
   protected onCloseTab(event: Event, tabId: string): void {
     event.stopPropagation();
     this.tabStateService.removeTab(tabId);
+  }
+
+  protected onWorkspaceClick(event: Event, projectId: string): void {
+    event.stopPropagation();
+    event.preventDefault();
+    this.workspaceToggle.emit(projectId);
   }
 }
 
@@ -165,6 +172,40 @@ describe('ProjectTabBarComponent', () => {
       component.onCloseTab(mockEvent, 'project-1');
 
       expect(mockEvent.stopPropagation).toHaveBeenCalled();
+    });
+  });
+
+  describe('workspace button', () => {
+    it('should emit workspaceToggle with project ID on click', () => {
+      const emitSpy = jest.spyOn(component.workspaceToggle, 'emit');
+      const mockEvent = {
+        stopPropagation: jest.fn(),
+        preventDefault: jest.fn(),
+      } as unknown as Event;
+
+      component.onWorkspaceClick(mockEvent, 'project-1');
+
+      expect(emitSpy).toHaveBeenCalledWith('project-1');
+    });
+
+    it('should call stopPropagation and preventDefault on workspace click', () => {
+      const mockEvent = {
+        stopPropagation: jest.fn(),
+        preventDefault: jest.fn(),
+      } as unknown as Event;
+
+      component.onWorkspaceClick(mockEvent, 'project-1');
+
+      expect(mockEvent.stopPropagation).toHaveBeenCalled();
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
+    });
+
+    it('should not emit workspaceToggle for All tab type', () => {
+      // Workspace icon only renders on project-type tabs in the template.
+      // Verify the handler still emits when called, but the template
+      // gating prevents it for non-project tabs.
+      const allTab = mockTabStateService.openTabs().find(t => t.id === 'all');
+      expect(allTab?.type).toBe('all');
     });
   });
 

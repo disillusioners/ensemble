@@ -53,6 +53,10 @@ class TestableChatComponent {
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
 
+  // Workspace overlay state — mirrors ChatComponent signals
+  readonly showWorkspace = signal(false);
+  readonly workspaceProjectId = signal<string | null>(null);
+
   /** Mirrors ChatComponent.SEND_COOLDOWN_MS */
   private readonly SEND_COOLDOWN_MS = 3000;
   private lastSendTime = 0;
@@ -138,6 +142,34 @@ class TestableChatComponent {
 
   protected onBackToHome(): void {
     this.navigateCalls.push({ path: ['/'] });
+  }
+
+  // Workspace overlay handlers — mirrors ChatComponent
+  protected onWorkspaceToggle(projectId: string): void {
+    if (this.showWorkspace() && this.workspaceProjectId() === projectId) {
+      this.showWorkspace.set(false);
+      return;
+    }
+    this.workspaceProjectId.set(projectId);
+    this.showWorkspace.set(true);
+  }
+
+  protected onWorkspaceHide(): void {
+    this.showWorkspace.set(false);
+  }
+
+  protected get hasRealProject(): boolean {
+    const activeId = this.tabStateService.activeProjectId();
+    return activeId !== null && activeId !== 'all';
+  }
+
+  protected get projectId(): string {
+    return this.tabStateService.activeProjectId() ?? 'all';
+  }
+
+  protected onHeaderWorkspaceToggle(): void {
+    if (!this.hasRealProject) return;
+    this.onWorkspaceToggle(this.projectId);
   }
 
   // Simulates the navigation that happens after instance creation in handleInstanceIdChange
@@ -419,6 +451,65 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       component.onSendMessage({ content: 'hello' });
 
       expect(mockApiService.sendMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Workspace overlay', () => {
+    it('should start hidden with no project id', () => {
+      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceProjectId()).toBeNull();
+    });
+
+    it('should open the overlay for the toggled project', () => {
+      component.onWorkspaceToggle('proj-a');
+
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-a');
+    });
+
+    it('should toggle off when the same project is clicked again', () => {
+      component.onWorkspaceToggle('proj-a');
+      component.onWorkspaceToggle('proj-a');
+
+      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceProjectId()).toBe('proj-a');
+    });
+
+    it('should switch projects when a different project is clicked while open', () => {
+      component.onWorkspaceToggle('proj-a');
+      component.onWorkspaceToggle('proj-b');
+
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-b');
+    });
+
+    it('should close the overlay via onWorkspaceHide', () => {
+      component.onWorkspaceToggle('proj-a');
+      component.onWorkspaceHide();
+
+      expect(component.showWorkspace()).toBe(false);
+    });
+
+    it('should require a real project for the header toggle', () => {
+      tabStateService.activeProjectId.set(null);
+      component.onHeaderWorkspaceToggle();
+
+      expect(component.showWorkspace()).toBe(false);
+    });
+
+    it('should open the overlay from the header for the active project', () => {
+      tabStateService.activeProjectId.set('proj-header');
+      component.onHeaderWorkspaceToggle();
+
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-header');
+    });
+
+    it('should not open for the all pseudo-project from the header', () => {
+      tabStateService.activeProjectId.set('all');
+      component.onHeaderWorkspaceToggle();
+
+      expect(component.showWorkspace()).toBe(false);
     });
   });
 });

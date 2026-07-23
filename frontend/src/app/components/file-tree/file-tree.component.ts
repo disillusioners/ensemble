@@ -84,6 +84,32 @@ export class FileTreeComponent {
     this.dataSource.data = tree;
   }
 
+  /**
+   * Read-only snapshot of currently-expanded directory paths, used by the
+   * workspace LRU cache to preserve the tree's expansion state across
+   * project switches. The returned array is a fresh copy — mutating it has
+   * no effect on the component.
+   */
+  getExpandedPaths(): string[] {
+    return Array.from(this._expandedPaths);
+  }
+
+  /**
+   * Replace the set of expanded paths and re-apply expansion to the current
+   * tree. Safe to call AFTER `setTree()` so the flat data nodes exist when
+   * `_restoreExpanded()` walks them. Used by `WorkspaceComponent` when
+   * restoring a cached workspace state.
+   */
+  restoreExpandedPaths(paths: string[]): void {
+    this._expandedPaths.clear();
+    for (const p of paths) {
+      this._expandedPaths.add(p);
+    }
+    if (this.dataSource.data && this.dataSource.data.length > 0) {
+      this._restoreExpanded();
+    }
+  }
+
   toggleNode(node: FlatNode): void {
     if (!node.loaded) {
       if (this._inFlightPaths.has(node.path)) return;

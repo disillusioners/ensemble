@@ -9,6 +9,15 @@
         [matTooltipDisabled]="tab.name.length <= 20"
       >
         <span class="tab-name">{{ tab.name }}</span>
+        <button
+          class="workspace-btn"
+          type="button"
+          (click)="onWorkspaceClick($event, tab.id)"
+          matTooltip="View workspace"
+          [attr.aria-label]="'Open workspace for ' + tab.name"
+        >
+          <mat-icon>folder_open</mat-icon>
+        </button>
         <span
           class="close-btn"
           role="button"
@@ -30,18 +39,6 @@
         <span class="tab-name">{{ tab.name }}</span>
       </button>
     }
-  }
-
-  @if (hasRealProject) {
-    <a
-      class="tab workspace-tab"
-      mat-button
-      [routerLink]="['/projects', projectId, 'workspace']"
-      routerLinkActive="active"
-    >
-      <mat-icon>folder_open</mat-icon>
-      <span class="tab-name">Workspace</span>
-    </a>
   }
 
   <button

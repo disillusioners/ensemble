@@ -1,6 +1,6 @@
 <div class="chat-container">
   <!-- Project tab bar (positioned under header, above main content) -->
-  <app-project-tab-bar />
+  <app-project-tab-bar (workspaceToggle)="onWorkspaceToggle($event)" />
 
   <div class="main-content">
     <!-- Instance sidebar -->
@@ -48,14 +48,15 @@
         <!-- Breadcrumb / Instance info -->
         <div class="header-right">
           @if (hasRealProject) {
-            <a
+            <button
               mat-icon-button
               matTooltip="Open Workspace Viewer"
-              [routerLink]="['/projects', projectId, 'workspace']"
+              [class.active]="showWorkspace() && workspaceProjectId() === projectId"
+              (click)="onHeaderWorkspaceToggle()"
               aria-label="Open Workspace Viewer"
             >
               <mat-icon>folder_open</mat-icon>
-            </a>
+            </button>
           }
           <!-- Toggle buttons -->
           <div class="toggle-buttons">
@@ -153,6 +154,20 @@
           (pauseInstance)="onPauseInstance()"
           (resumeInstance)="onResumeInstance($event)"
         ></app-message-input>
+      }
+
+      <!-- Workspace overlay. Renders on top of the chat header,
+           interface, and message input within the chat area. Closes via
+           the Hide button or by toggling the same project's icon. The
+           WorkspaceService LRU cache preserves background state across
+           hide/show cycles. -->
+      @if (showWorkspace()) {
+        <div class="workspace-overlay">
+          <app-workspace
+            [projectId]="workspaceProjectId()!"
+            (hide)="onWorkspaceHide()"
+          ></app-workspace>
+        </div>
       }
     </div>
   </div>

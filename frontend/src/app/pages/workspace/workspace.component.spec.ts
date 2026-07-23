@@ -8,6 +8,7 @@ import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { ActivatedRoute } from '@angular/router';
 import { By } from '@angular/platform-browser';
 import { Subject } from 'rxjs';
+import { Component } from '@angular/core';
 import { WorkspaceComponent } from './workspace.component';
 import { WorkspaceService } from '../../services/workspace.service';
 import { FileTreeComponent } from '../../components/file-tree/file-tree.component';
@@ -16,6 +17,24 @@ import type {
   FileTreeResponse,
   GitDiffResponse,
 } from '../../models/workspace.model';
+
+/**
+ * Lightweight host component used to drive the workspace through a
+ * template-bound `[projectId]` input. Lets us exercise the overlay use
+ * case (host-driven input, route absent) reliably from a test.
+ */
+@Component({
+  standalone: true,
+  imports: [WorkspaceComponent],
+  template: `<app-workspace
+    [projectId]="projectId"
+    (hide)="hideCount = (hideCount ?? 0) + 1"
+  ></app-workspace>`,
+})
+class WorkspaceHostComponent {
+  projectId = '';
+  hideCount = 0;
+}
 
 /**
  * Tests for `WorkspaceComponent`.
@@ -399,6 +418,216 @@ describe('WorkspaceComponent', () => {
 
       workspaceService.selectedPath.set(null);
       expect(component.selectedPath()).toBeNull();
+    });
+  });
+
+  // ── 7) @Input() projectId (overlay mode) ─────────────────────────
+
+  describe('@Input() projectId (overlay mode)', () => {
+    let hostFixture: ComponentFixture<WorkspaceHostComponent>;
+    let host: WorkspaceHostComponent;
+    let workspace: WorkspaceComponent;
+    let localHttp: HttpTestingController;
+    let localService: WorkspaceService;
+
+    beforeEach(async () => {
+      TestBed.resetTestingModule();
+      StubEventSource.instances = [];
+      await TestBed.configureTestingModule({
+        imports: [WorkspaceHostComponent],
+        providers: [
+          provideHttpClient(),
+          provideHttpClientTesting(),
+          provideNoopAnimations(),
+          WorkspaceService,
+          // Route returns null — the input should win regardless.
+          {
+            provide: ActivatedRoute,
+            useValue: { snapshot: { paramMap: { get: () => null } } },
+          },
+        ],
+      }).compileComponents();
+
+      hostFixture = TestBed.createComponent(WorkspaceHostComponent);
+      host = hostFixture.componentInstance;
+      localHttp = TestBed.inject(HttpTestingController);
+      localService = TestBed.inject(WorkspaceService);
+
+      // Reach into the projected <app-workspace>.
+      workspace = hostFixture.debugElement
+        .query(By.directive(WorkspaceComponent))
+        .componentInstance;
+    });
+
+    afterEach(() => {
+      localHttp.verify();
+    });
+
+    function flushTree(projectId: string, body?: FileTreeResponse): void {
+      const req = localHttp.expectOne(
+        (r) => r.url === `/api/workspace/${projectId}/tree`
+      );
+      req.flush(
+        body ?? makeTreeResponse({ project_id: projectId })
+      );
+    }
+
+    it('uses the @Input() value when no route param is present', () => {
+      host.projectId = 'input-project';
+      hostFixture.detectChanges();
+
+      expect(workspace.projectId).toBe('input-project');
+      flushTree('input-project');
+    });
+
+    it('loads the file tree for the input-driven project', () => {
+      host.projectId = 'input-project';
+      hostFixture.detectChanges();
+
+      const req = localHttp.expectOne(
+        (r) =>
+          r.url === '/api/workspace/input-project/tree' &&
+          r.params.get('path') === '.'
+      );
+      expect(req.request.method).toBe('GET');
+      req.flush(makeTreeResponse({ project_id: 'input-project' }));
+    });
+
+    it('reacts to a projectId change with a fresh HTTP fetch (cache miss)', () => {
+      host.projectId = 'first-project';
+      hostFixture.detectChanges();
+      flushTree('first-project');
+
+      // Drive the new value through both the host binding and the child
+      // instance setter for reliability across Angular versions.
+      host.projectId = 'second-project';
+      const wsInstance = hostFixture.debugElement.query(
+        By.directive(WorkspaceComponent)
+      ).componentInstance as WorkspaceComponent;
+      wsInstance.projectId = 'second-project';
+      hostFixture.detectChanges();
+
+      // Capture the second project's request via `match` BEFORE flushing
+      // (flushed requests are removed from the pending queue). Verifies
+      // the setter triggered a fresh HTTP fetch and not a cache hit.
+      const pending = localHttp.match(
+        (r) => r.url.endsWith('/tree') && r.params.get('path') === '.'
+      );
+      expect(pending.length).toBe(1);
+      expect(pending[0].request.url).toBe(
+        '/api/workspace/second-project/tree'
+      );
+
+      pending[0].flush(makeTreeResponse({ project_id: 'second-project' }));
+      expect(wsInstance.projectId).toBe('second-project');
+    });
+
+    it('skips HTTP when switching to a project that has cached state', () => {
+      // Seed the cache directly so we can verify the component avoids
+      // an HTTP fetch on switch. Set selectedPath BEFORE saving so the
+      // snapshot captures it (saveCurrentState reads live signal values).
+      localService.selectedPath.set('src/cached.ts');
+      localService.saveCurrentState('cached-project', { viewMode: 'diff' });
+
+      host.projectId = 'cached-project';
+      hostFixture.detectChanges();
+
+      // No /tree HTTP request should have been issued.
+      localHttp.expectNone(
+        (r) => r.url === '/api/workspace/cached-project/tree'
+      );
+
+      // Cached state should have been applied to the component.
+      expect(workspace.viewMode()).toBe('diff');
+      expect(workspace.selectedPath()).toBe('src/cached.ts');
+    });
+
+    it('does NOT regress to the route value when the input is set', () => {
+      // Even with a stale route param, the input wins.
+      host.projectId = 'from-input';
+      hostFixture.detectChanges();
+
+      expect(workspace.projectId).toBe('from-input');
+      flushTree('from-input');
+    });
+  });
+
+  // ── 8) @Output() hide event ──────────────────────────────────────
+
+  describe('@Output() hide', () => {
+    let hostFixture: ComponentFixture<WorkspaceHostComponent>;
+    let host: WorkspaceHostComponent;
+    let localHttp: HttpTestingController;
+
+    beforeEach(async () => {
+      TestBed.resetTestingModule();
+      StubEventSource.instances = [];
+      await TestBed.configureTestingModule({
+        imports: [WorkspaceHostComponent],
+        providers: [
+          provideHttpClient(),
+          provideHttpClientTesting(),
+          provideNoopAnimations(),
+          WorkspaceService,
+          {
+            provide: ActivatedRoute,
+            useValue: { snapshot: { paramMap: { get: () => 'route-project' } } },
+          },
+        ],
+      }).compileComponents();
+
+      hostFixture = TestBed.createComponent(WorkspaceHostComponent);
+      host = hostFixture.componentInstance;
+      localHttp = TestBed.inject(HttpTestingController);
+
+      host.projectId = 'route-project';
+      hostFixture.detectChanges();
+
+      // Drain the initial tree request so httpMock.verify() passes later.
+      const req = localHttp.expectOne(
+        (r) => r.url === '/api/workspace/route-project/tree'
+      );
+      req.flush(makeTreeResponse({ project_id: 'route-project' }));
+    });
+
+    afterEach(() => {
+      localHttp.verify();
+    });
+
+    it('exposes a hide EventEmitter on the component', () => {
+      const workspaceDebug = hostFixture.debugElement.query(
+        By.directive(WorkspaceComponent)
+      );
+      const ws = workspaceDebug.componentInstance;
+      expect(ws.hide).toBeDefined();
+      expect(typeof ws.hide.emit).toBe('function');
+    });
+
+    it('renders a Hide button in the toolbar', () => {
+      const hideBtn = hostFixture.debugElement.query(
+        By.css('[data-testid="workspace-hide"]')
+      );
+      expect(hideBtn).not.toBeNull();
+      expect(hideBtn.nativeElement.getAttribute('aria-label')).toBe(
+        'Hide workspace'
+      );
+    });
+
+    it('emits hide when the Hide button is clicked', () => {
+      expect(host.hideCount).toBe(0);
+
+      const hideBtn = hostFixture.debugElement.query(
+        By.css('[data-testid="workspace-hide"]')
+      );
+      hideBtn.nativeElement.click();
+      hostFixture.detectChanges();
+
+      expect(host.hideCount).toBe(1);
+
+      hideBtn.nativeElement.click();
+      hostFixture.detectChanges();
+
+      expect(host.hideCount).toBe(2);
     });
   });
 });
