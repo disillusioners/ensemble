@@ -35,6 +35,7 @@ def _create_task_with_status(
     message_id: str = "test-message",
     status: str = TaskStatus.PENDING.value,
     is_deferred: bool = False,
+    is_background: bool = False,
 ) -> Task:
     """Insert a task with a specific status directly via raw SQL.
 
@@ -49,6 +50,13 @@ def _create_task_with_status(
     repository's public API does not yet expose a "create deferred
     task" call path for tests to use, so we use this helper to insert
     deferred rows for the defer-gate tests.
+
+    The ``is_background`` parameter (defer-leak bug fix, 2026-07-23)
+    mirrors the pattern: lets background-queue tests insert
+    ``is_background=True`` task rows directly. Without this the
+    helper would silently default to ``is_background=False`` and the
+    background-gate regression test could not set up a candidate
+    background task.
     """
     created_at = datetime.now(timezone.utc)
     with engine.begin() as conn:
@@ -57,10 +65,12 @@ def _create_task_with_status(
                 """
                 INSERT INTO task (task_type, instance_id, message_id, status,
                                   retry_count, created_at, cancel_requested,
-                                  retry_scheduled, work_id, is_deferred)
+                                  retry_scheduled, work_id, is_deferred,
+                                  is_background)
                 VALUES (:task_type, :instance_id, :message_id, :status,
                         :retry_count, :created_at, :cancel_requested,
-                        :retry_scheduled, :work_id, :is_deferred)
+                        :retry_scheduled, :work_id, :is_deferred,
+                        :is_background)
                 """
             ),
             {
@@ -76,6 +86,7 @@ def _create_task_with_status(
                 # Python bool so the bind works on both SQLite
                 # (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true).
                 "is_deferred": is_deferred,
+                "is_background": is_background,
             },
         )
         task_id = result.lastrowid
@@ -1584,6 +1595,293 @@ class TestDeferQueueGate:
         claimed = repository.claim_pending_task(worker_id="worker-1")
         assert claimed is not None
         assert claimed.id == deferred.id
+
+
+class TestBackgroundQueueGate:
+    """Regression tests for the background queue idle gate in
+    :meth:`TaskRepository.claim_pending_task`.
+
+    Defer-leak bug fix (2026-07-23): the predicate-based background
+    gate (``has_active_non_background_work``) and the predicate-based
+    defer gate (``has_active_non_deferred_work``) were already fixed
+    by removing ``is_deferred = false`` so defer work IS counted as
+    non-background work. The same fix had to be applied to the
+    inlined copy of the background gate inside
+    :meth:`claim_pending_task` — the predicate and the atomic claim
+    path must agree, or background tasks can still be admitted via
+    the atomic claim while defer work is active. This test class pins
+    the inline-gate behaviour:
+
+    1. A background task cannot be claimed while a defer task is
+       PENDING and the defer task's instance is paused (so the
+       candidate falls through to the background task).
+    2. A background task CAN be claimed when no defer or
+       non-background work is active.
+    3. A defer task CAN still be claimed normally (verifies the
+       defer gate section is unaffected by the fix).
+    """
+
+    def _insert_instance(
+        self,
+        engine,
+        instance_id: str,
+        project_id: str,
+        status: str = "running",
+    ) -> None:
+        """Insert a minimal Instance row directly via raw SQL.
+
+        Mirrors the helper in :class:`TestDeferQueueGate`. Kept local
+        because both gate-test classes want a private insertion
+        helper and refactoring to module level is out of scope for
+        this regression fix.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO instances
+                        (instance_id, agent_id, agent_dir, status, project_id,
+                         created_at, updated_at, version)
+                    VALUES
+                        (:instance_id, :agent_id, :agent_dir, :status, :project_id,
+                         :created_at, :updated_at, 1)
+                    """
+                ),
+                {
+                    "instance_id": instance_id,
+                    "agent_id": "developer",
+                    "agent_dir": "agents/developer",
+                    "status": status,
+                    "project_id": project_id,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+
+    def test_background_task_blocked_when_defer_task_active_without_jobitem(
+        self, repository, engine
+    ):
+        """Inline background-gate regression (defer-leak fix,
+        2026-07-23).
+
+        Setup: a PENDING defer task on a paused instance + a PENDING
+        background task on a running instance. The defer task is
+        OLDER (created first) so it is the inner SELECT's first
+        candidate, but the pause gate blocks it — the SELECT falls
+        through to the background task. The background task is the
+        candidate; the background gate must then block it because
+        the defer task is non-background work that counts as a
+        blocker.
+
+        Pre-fix: the inline SQL had
+        ``AND t3.is_deferred = :is_deferred_false`` in the EXISTS,
+        so the defer task was invisible to the background gate and
+        the background task was wrongly claimed.
+        Post-fix: the predicate is just
+        ``AND t3.is_background = :is_background_false``; the defer
+        task matches and the background task is correctly held back.
+        """
+        # 1. Older PENDING defer task on a paused instance.
+        self._insert_instance(engine, "inst-bg-1", "project-bg", status="paused")
+        defer_task = _create_task_with_status(
+            engine,
+            task_type=TaskType.SEND_REPORT.value,
+            instance_id="inst-bg-1",
+            message_id="m-bg-defer",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+            is_background=False,
+        )
+
+        # 2. Younger PENDING background task on a running instance.
+        self._insert_instance(engine, "inst-bg-2", "project-bg", status="running")
+        bg_task = _create_task_with_status(
+            engine,
+            task_type=TaskType.SEND_REPORT.value,
+            instance_id="inst-bg-2",
+            message_id="m-bg-bg",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+            is_background=True,
+        )
+
+        # Sanity: bg_task is strictly younger so it is reached only
+        # after the pause gate filters out defer_task.
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT created_at FROM task WHERE id = :id"),
+                {"id": defer_task.id},
+            ).fetchone()
+            defer_created_at_raw = row.created_at
+            defer_created_at = (
+                datetime.fromisoformat(defer_created_at_raw)
+                if isinstance(defer_created_at_raw, str)
+                else defer_created_at_raw
+            )
+            conn.execute(
+                text("UPDATE task SET created_at = :created_at WHERE id = :id"),
+                {
+                    "created_at": defer_created_at + timedelta(seconds=10),
+                    "id": bg_task.id,
+                },
+            )
+
+        # 3. claim_pending_task must NOT claim the background task.
+        claimed = repository.claim_pending_task(worker_id="worker-bg-1")
+
+        assert claimed is None, (
+            "claim_pending_task returned a background task while a "
+            "defer task is active in the system — the inline "
+            "background gate in claim_pending_task still had the "
+            "defer-leak bug (its EXISTS subquery filtered out "
+            "is_deferred=true rows, so defer tasks were invisible "
+            "to the background gate via the atomic claim path)."
+        )
+
+        # 4. Both tasks remain untouched.
+        db_defer = repository.get(defer_task.id)
+        assert db_defer is not None
+        assert db_defer.status == TaskStatus.PENDING.value
+        db_bg = repository.get(bg_task.id)
+        assert db_bg is not None
+        assert db_bg.status == TaskStatus.PENDING.value
+
+    def test_background_task_claimable_when_only_background_work_active(
+        self, repository, engine
+    ):
+        """Background task IS claimable when no defer or non-background
+        work is active anywhere.
+
+        Sanity check: the background gate must only block the
+        background task when there is something non-background to
+        wait for. A system with only background tasks pending should
+        let one through.
+        """
+        self._insert_instance(engine, "inst-bg-only", "project-bg-only", status="running")
+        bg_task = _create_task_with_status(
+            engine,
+            task_type=TaskType.SEND_REPORT.value,
+            instance_id="inst-bg-only",
+            message_id="m-bg-only",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+            is_background=True,
+        )
+
+        claimed = repository.claim_pending_task(worker_id="worker-bg-only")
+
+        assert claimed is not None, (
+            "claim_pending_task returned None for a lone background "
+            "task — the background gate is wrongly firing when there "
+            "is no non-background work to wait for."
+        )
+        assert claimed.id == bg_task.id
+        assert claimed.status == TaskStatus.RUNNING.value
+
+    def test_defer_task_still_claimable_after_background_gate_fix(
+        self, repository, engine
+    ):
+        """Sanity check: the defer gate section is unaffected by the
+        background-gate fix.
+
+        A PENDING defer task on a running instance in an idle project
+        (no other active work) must still be claimable. If this test
+        fails after the fix, the change accidentally touched the
+        defer gate SQL.
+        """
+        self._insert_instance(engine, "inst-defer-still", "project-defer-still", status="running")
+        defer_task = _create_task_with_status(
+            engine,
+            task_type=TaskType.SEND_REPORT.value,
+            instance_id="inst-defer-still",
+            message_id="m-defer-still",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+            is_background=False,
+        )
+
+        claimed = repository.claim_pending_task(worker_id="worker-defer-still")
+
+        assert claimed is not None, (
+            "claim_pending_task returned None for a defer task in an "
+            "idle project — the defer gate section was accidentally "
+            "broken by the background-gate fix."
+        )
+        assert claimed.id == defer_task.id
+        assert claimed.status == TaskStatus.RUNNING.value
+
+    def test_background_gate_blocks_with_only_defer_in_other_project(
+        self, repository, engine
+    ):
+        """Background gate is system-wide: a defer task in project A
+        blocks a background candidate in project B.
+
+        This pins the documented scope asymmetry — unlike the defer
+        gate (project-scoped), the background gate waits across
+        projects. After the defer-leak fix, the inline SQL must
+        still recognise a defer task in any project as a blocker
+        for the background candidate.
+        """
+        # Project A: PENDING defer task on a paused instance (so the
+        # candidate ordering falls through to the background task
+        # without the pause gate trying to claim the defer task).
+        self._insert_instance(engine, "inst-A-paused", "project-A", status="paused")
+        defer_A = _create_task_with_status(
+            engine,
+            task_type=TaskType.SEND_REPORT.value,
+            instance_id="inst-A-paused",
+            message_id="m-A-defer",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+            is_background=False,
+        )
+
+        # Project B: PENDING background task on a running instance.
+        self._insert_instance(engine, "inst-B-run", "project-B", status="running")
+        bg_B = _create_task_with_status(
+            engine,
+            task_type=TaskType.SEND_REPORT.value,
+            instance_id="inst-B-run",
+            message_id="m-B-bg",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+            is_background=True,
+        )
+
+        # Force ordering: defer_A older so it is the inner SELECT's
+        # first candidate; pause gate filters it out; bg_B becomes
+        # the candidate.
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT created_at FROM task WHERE id = :id"),
+                {"id": defer_A.id},
+            ).fetchone()
+            defer_created_at_raw = row.created_at
+            defer_created_at = (
+                datetime.fromisoformat(defer_created_at_raw)
+                if isinstance(defer_created_at_raw, str)
+                else defer_created_at_raw
+            )
+            conn.execute(
+                text("UPDATE task SET created_at = :created_at WHERE id = :id"),
+                {
+                    "created_at": defer_created_at + timedelta(seconds=10),
+                    "id": bg_B.id,
+                },
+            )
+
+        claimed = repository.claim_pending_task(worker_id="worker-cross")
+
+        assert claimed is None, (
+            "claim_pending_task returned the background task while a "
+            "defer task is PENDING in another project — the inline "
+            "background gate's system-wide scope is broken (it "
+            "should block cross-project, not just same-project)."
+        )
+        db_bg = repository.get(bg_B.id)
+        assert db_bg is not None
+        assert db_bg.status == TaskStatus.PENDING.value
 
 
 class TestTaskCompletion:
