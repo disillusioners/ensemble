@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -129,13 +131,16 @@ async def put_file_content(
             detail={"error": "file_too_large", "size_bytes": len(content_bytes)},
         )
     try:
-        await asyncio.to_thread(_write_file_safe, target, body.content)
+        written = await asyncio.to_thread(_write_file_safe, target, body.content)
     except ValueError:
         raise HTTPException(status_code=400, detail={"error": "path_is_directory"})
+    except OSError as e:
+        logger.error("Atomic write to %s failed: %s", target, e)
+        raise HTTPException(status_code=500, detail={"error": "write_failed"})
     return FileWriteResponse(
         project_id=project_id,
         path=body.path,
-        size_bytes=len(content_bytes),
+        size_bytes=written,
         saved=True,
     )
 
@@ -247,19 +252,50 @@ def _read_file_safe(target: Path, guard: WorkspaceGuard, offset: int, limit: int
     }
 
 
-def _write_file_safe(target: Path, content: str) -> None:
-    """Write ``content`` to ``target``, creating parent dirs as needed.
+def _write_file_safe(target: Path, content: str) -> int:
+    """Write ``content`` to ``target`` atomically.
 
-    Synchronous — call via ``asyncio.to_thread`` from async endpoints
-    so the event loop isn't blocked on filesystem I/O. Caller is
-    responsible for any size validation (see the endpoint's
-    ``MAX_FILE_SIZE_BYTES`` check) and path containment
-    (``resolve_strict``).
+    The bytes are written to a temporary file in the target's parent directory,
+    then ``os.replace`` atomically renames it into place. Any temporary file
+    left after a failure is removed.
+
+    Synchronous — call via ``asyncio.to_thread`` from async endpoints so
+    the event loop isn't blocked on filesystem I/O. Caller is responsible
+    for size validation (see ``MAX_FILE_SIZE_BYTES`` in the endpoint) and
+    path containment (``resolve_strict``).
+
+    Returns:
+        The number of bytes written.
+
+    Raises:
+        ValueError: If ``target`` is a directory.
+        OSError: On a filesystem failure.
     """
     if target.is_dir():
         raise ValueError("path_is_directory")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+
+    content_bytes = content.encode("utf-8")
+    fd, tmp_str = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "wb") as temp_file:
+            temp_file.write(content_bytes)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(str(tmp_path), str(target))
+    except Exception:
+        logger.exception("Failed to write %s atomically", target)
+        raise
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            logger.warning("Failed to clean up temporary file %s", tmp_path)
+    return len(content_bytes)
 
 
 _LANGUAGE_MAP = {

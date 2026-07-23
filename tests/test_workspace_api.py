@@ -736,6 +736,76 @@ class TestPutFileContent:
         assert target.read_text(encoding="utf-8") == body_text
 
     @pytest.mark.asyncio
+    async def test_put_permission_error_returns_500_write_failed(
+        self, client, workdir, monkeypatch
+    ):
+        """A filesystem permission failure returns the ``write_failed`` envelope."""
+        def _raise_permission(target, content):
+            raise PermissionError("simulated permission denied")
+
+        monkeypatch.setattr(workspace_module, "_write_file_safe", _raise_permission)
+        ac, _, project_id = client
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "perm.txt", "content": "x"},
+        )
+
+        assert response.status_code == 500, response.text
+        detail = response.json().get("detail") or response.json()
+        assert detail.get("error") == "write_failed"
+
+    @pytest.mark.asyncio
+    async def test_put_directory_target_returns_400_path_is_directory(
+        self, client, workdir
+    ):
+        """Writing to a directory is rejected before a temp file is created."""
+        ac, _, project_id = client
+        assert (workdir / "src").is_dir()
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "src", "content": "should fail"},
+        )
+
+        assert response.status_code == 400, response.text
+        detail = response.json().get("detail") or response.json()
+        assert detail.get("error") == "path_is_directory"
+        leaked = [p.name for p in workdir.iterdir() if p.name.endswith(".tmp")]
+        assert not leaked, f"Temp file leaked after directory rejection: {leaked}"
+
+    @pytest.mark.asyncio
+    async def test_put_atomic_write_preserves_existing_file_on_failure(
+        self, client, workdir, monkeypatch
+    ):
+        """A failed atomic overwrite leaves the existing file intact."""
+        target = workdir / "atomic.txt"
+        original_content = "ORIGINAL-CONTENT-DO-NOT-LOSE\n"
+        target.write_text(original_content, encoding="utf-8")
+
+        # Fail after the real atomic writer has created, written, and fsynced
+        # its temporary file, but before it can replace the existing target.
+        def _fail_replace(*args, **kwargs):
+            raise OSError("simulated crash during os.replace")
+
+        monkeypatch.setattr(workspace_module.os, "replace", _fail_replace)
+        ac, _, project_id = client
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "atomic.txt", "content": "NEW-CONTENT-SHOULD-NOT-WIN\n"},
+        )
+
+        assert response.status_code == 500, response.text
+        detail = response.json().get("detail") or response.json()
+        assert detail.get("error") == "write_failed"
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == original_content, (
+            "Existing file was truncated or overwritten despite atomic-write failure"
+        )
+        leaked = list(workdir.glob(".*.tmp")) + list(workdir.glob("*.tmp"))
+        assert not leaked, f"Temp file leaked after failed write: {leaked}"
+
+    @pytest.mark.asyncio
     async def test_put_unknown_project_returns_404(self, client):
         """``PUT`` against an unknown ``project_id`` → 404, no side effects."""
         ac, _, _ = client
