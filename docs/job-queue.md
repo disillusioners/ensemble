@@ -343,41 +343,41 @@ Two mechanisms cooperate to keep defer/background queues from running while work
 
 1. **Bus watcher lifecycle keeps `JobItem` active.** When a non-defer message job spawns a child, the `DependencyBus` registers a pending watcher. While the watcher is pending, the message job's `admission_state` stays `active`. The watcher is only released when the child reaches a terminal state, allowing the message job to finalize to `done`. This keeps the job "in flight" across the full message + children lifecycle, including the inter-turn gaps between `process_message` and the eventual `process_report` turns.
 
-2. **Job predicate in admission gates is load-bearing.** All admission gates (`_defer_idle_check` in `job_processor`, `_select_next_eligible_job` defer/background branches in `job_queue_service`, `_is_idle` in `maintenance`) read the durable job / `instance` lifecycle via `JobQueueRepository.has_active_non_deferred_work` / `has_active_non_background_work`. A non-defer job is considered "in flight" while its `admission_state` is `queued` / `active` **and** its instance is non-terminal (`running` / `waiting_children` / `paused`).
+2. **Job predicates carry lifecycle state into idle checks.** The defer/background admission paths read the durable job / `instance` lifecycle through `JobRepository.has_active_non_deferred_work` / `has_active_non_background_work`; maintenance's `_is_idle` uses the system-wide non-deferred form as an idle-detection probe. In the admission paths, a non-defer job is considered "in flight" while its `admission_state` is `queued` / `active` **and** its instance is non-terminal (`running` / `waiting_children` / `paused`). Because the job predicate follows the job → instance lineage, it still sees a parent during the `waiting_children` inter-turn gap even when no `task` row exists. The background form preserves the same lifecycle coverage with system-wide scope.
 
 ### Belt-and-Suspenders Pattern
 
-The two mechanisms layer for safety:
+The two signals layer for safety, but each consumer has a distinct role:
 
-- **Job predicate** is the **definition** of "idle". It scopes to job → instance lineage so that a `waiting_children` parent in one project never blocks unrelated work.
-- **Task predicate** (`TaskRepository.has_active_non_deferred_work` / `has_active_non_background_work`) is kept **only inside `claim_pending_task`** as an atomic race guard. It catches:
-  - Inter-turn gaps where the durable lifecycle briefly disagrees with the task layer.
-  - Virtual / queue-less work — work that runs without a `JobItem` row but still holds an active `task`. The job predicate cannot see queue-less work; the task predicate can.
+- **Job predicate** is the primary definition of "idle" for admission. It scopes to job → instance lineage so that a `waiting_children` parent in one project never blocks unrelated defer work.
+- **Task predicates** (`TaskRepository.has_active_non_deferred_work` / `has_active_non_background_work`) are fallback legs after the job predicate in the `job_processor` and `job_queue_service` admission gates. They also feed the maintenance idle probe and provide defense-in-depth for virtual / queue-less work — work that runs without a `JobItem` row but still holds an active `task`. The job predicate cannot see queue-less work; the task predicate can.
+- The same task-level conditions are additionally represented inside `claim_pending_task` as an atomic SQL guard, rather than as a separate application-level pre-check.
 
-If either predicate says "busy", the gate blocks. The job predicate is the primary; the task predicate is the belt-and-suspenders backstop.
+The phrase "either predicate is active, so block" applies to admission gates only. There, the job predicate is checked first and an active result from either predicate prevents admission. The maintenance probe and the atomic claim guard have the separate semantics described below.
 
 > **Asymmetry.** The FIFO lane's `waiting_children` carve-out (`daemon/repositories/task/repository.py:653`) is intentionally **not** mirrored here. The FIFO carve-out lets a `waiting_children` parent yield its FIFO slot to a *different* instance; the defer gate deliberately treats `waiting_children` as busy. See [Carve-out parity](#carve-out-parity) below.
 
-### Fail-CLOSED Behavior
+### Gate Topology
 
-All admission gates wrap predicate calls in `try/except` and **block on error**:
+The three consumers of the idle signals must not be conflated:
+
+| Consumer | Live topology | Failure / result semantics |
+|----------|---------------|----------------------------|
+| **Admission gates** — `job_processor` Gate A (`_defer_idle_check`, `_background_idle_check`) and `job_queue_service` Gate B (the defer/background branches of `_select_next_eligible_job`) | `JobRepository` predicate first **OR** corresponding `TaskRepository` predicate as a fallback leg | **Fail-CLOSED.** An active result from either predicate blocks admission; predicate-call errors are treated as busy. |
+| **Maintenance probe** — `maintenance._is_idle` | Uses `JobRepository.has_active_non_deferred_work(None)` and `TaskRepository.has_active_non_deferred_work(None)` as the same system-wide non-deferred probes, alongside its other checks | **Not an admission gate. Fail-OPEN / best effort.** An active result makes the probe report not idle, while an error is logged and the probe continues to the next check; the probe may ultimately report idle. |
+| **Atomic claim guard** — `TaskRepository.claim_pending_task` | The task-level defer/background conditions are inlined in the atomic candidate-selection SQL | No separate application-level fail policy. The SQL guard participates in the claim statement itself. |
+
+### Fail-CLOSED Behavior (Admission Gates Only)
+
+The `job_processor` and `job_queue_service` admission gates wrap their job-predicate and task-predicate calls and **block on error**:
 
 - If a transient database error occurs (lock contention, connection blip, schema mismatch), the gate reports "busy" rather than admitting.
 - A failing predicate is treated as evidence that the durable lifecycle is unreadable, not as evidence that the project is idle.
 - This is a deliberate safety posture: a momentary block is acceptable; a premature admission causes the original bug (defer running while non-defer work is in flight).
 
-Concretely: every **admission** gate — `_defer_idle_check`, `_background_idle_check`, the defer branch of `_select_next_eligible_job`, and the background branch of `_select_next_eligible_job` — catches exceptions from the predicate and treats the error as "busy" / `non_defer_active=True` / `non_background_active=True`. The unified admission-gate policy is **fail-CLOSED**.
+Concretely, `_defer_idle_check`, `_background_idle_check`, the defer branch of `_select_next_eligible_job`, and the background branch of `_select_next_eligible_job` use the unified **fail-CLOSED** admission policy. This policy applies only to those admission gates; it does not turn `maintenance._is_idle` into an admission gate and does not add an application-level policy around the atomic claim SQL.
 
-> **Maintenance `_is_idle` is intentionally different.** The maintenance idle probe (`daemon/services/maintenance.py:_is_idle`) does NOT catch predicate errors as "not idle" — each probe (job predicate, task predicate, `list_all_pending` / `find_processing_jobs`, request registry) is wrapped in `try/except`, but on exception it logs a warning and **continues to the next probe** rather than returning `False`. If every probe raises, `_is_idle` returns `True` (idle) and the maintenance loop runs. This is **fail-OPEN at the probe layer** for `_is_idle`.
->
-> The predicates themselves have asymmetric exception handling, which is worth knowing but does not change the probe-layer posture:
->
-> - `JobQueueRepository.has_active_non_deferred_work` has its own internal `try/except` and returns `False` on DB error (fail-OPEN at the predicate layer — see `daemon/repositories/job_queue/repository.py:699-705`). A failed call therefore looks like "no active work" to `_is_idle`.
-> - `TaskRepository.has_active_non_deferred_work` does NOT swallow exceptions — it lets them propagate, and `_is_idle`'s per-probe `try/except` catches and logs them.
->
-> Either way, `_is_idle` falls through to the next probe and the loop reaches `return True` if no probe returns `False`. The maintenance loop is therefore best-effort: a transient DB failure delays a housekeeping cycle rather than wedging it, and a sustained DB outage surfaces as "no maintenance ran" — not as silent defer/background admission, because the predicates that feed admission are wrapped fail-CLOSED at the admission gates. If a future maintenance gate needs to fail closed, the right place to add it is `_is_idle`'s outer call (or a `_is_idle_fail_closed()` variant), not by tightening the per-probe `try/except` blocks.
->
-> The unified **policy** is: *admission gates fail closed; maintenance `_is_idle` is best-effort with a fail-OPEN probe loop*. The belt-and-suspenders pattern still holds for the admission gates (job predicate is primary; task predicate is the atomic race-guard backstop inside `claim_pending_task`), but it does NOT extend to `_is_idle`'s per-probe exception handling.
+> **Maintenance `_is_idle` is a probe, not an admission gate.** Each job/task predicate probe (`daemon/services/maintenance.py:_is_idle`), along with `list_all_pending` / `find_processing_jobs` and the request registry, is wrapped in `try/except`. On exception it logs a warning and continues rather than returning `False`; if every probe raises or reports no work, `_is_idle` returns `True` and the maintenance loop runs. This is **fail-OPEN at the probe layer** and is intentionally best-effort. An active predicate result can make maintenance skip a cycle, but it does not itself decide defer/background admission.
 
 ### Paused Instances Remain Busy
 
@@ -406,7 +406,7 @@ The FIFO lane has a `waiting_children` carve-out that lets a waiting parent yiel
 **What changed (two-phase fix).**
 
 - **Phase 1** (commit `6e077ddd`, since removed as dead code) tried adding an instance-status gate. It was found to be unreachable: lifecycle events commit `instance.status` to terminal BEFORE publishing, so the gate always saw terminal state.
-- **Phase 2** (commits `059d1ecc`, `5c83e519`) restored lifecycle-aware predicates on `JobQueueRepository`: `has_active_non_deferred_work(project_id)` (project-scoped) and `has_active_non_background_work()` (system-wide). Both count jobs with `admission_state IN ('queued','active')` whose instance is non-terminal. The `DependencyBus` now keeps pending watchers through the inter-report gap, so the message job's `admission_state` stays `active` for the full message + children lifecycle.
+- **Phase 2** (commits `059d1ecc`, `5c83e519`) restored lifecycle-aware predicates on `JobRepository`: `has_active_non_deferred_work(project_id)` (project-scoped) and `has_active_non_background_work()` (system-wide). Both count jobs with `admission_state IN ('queued','active')` whose instance is non-terminal. The `DependencyBus` now keeps pending watchers through the inter-report gap, so the message job's `admission_state` stays `active` for the full message + children lifecycle.
 
 **Verified by.** `tests/job_queue/test_defer_idle_gate_phase2.py` (27 tests: predicate unit tests, incident reproduction, and gate composition) and existing invariant coverage in `tests/job_queue/test_seam_invariants.py` (W-series: NULL `message_id` guard, defer-not-admitted during active virtual work, defer-completes after idle).
 
