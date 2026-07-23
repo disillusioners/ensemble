@@ -193,18 +193,22 @@ class JobProcessor:
         it is reached through the already-injected
         ``InstanceManager._task_repo`` attribute.
 
+        Phase 2 (defer-queue idle gate, 2026-07-23) adds the
+        job-granular ``JobRepository.has_active_non_deferred_work``
+        predicate for admission-lifecycle rows. The task predicate remains a
+        required second check when the job predicate returns False because a
+        Task can exist without a backing JobItem.
+
         Fallback contract (test back-compat):
 
-        * If the attribute is missing (``getattr(...) is None``), fall
-          back to the legacy ``count_active_jobs_in_non_defer_queues``
-          so a partially-initialised manager (e.g. a smoke-test
-          harness) does not permanently starve the defer queue.
-        * If the attribute resolves to a ``Mock`` (detected via the
+        * If the ``_queue_service._repository`` does not expose a
+          ``has_active_non_deferred_work`` method (older test fixtures
+          that mock the legacy ``count_active_jobs_in_non_defer_queues``
+          API), OR the repository is a ``Mock`` (detected via the
           ``_mock_name`` + ``_mock_methods`` private-attribute
-          fingerprint), fall back to the legacy count. This keeps
-          pre-Phase-1 test fixtures — which only mock the legacy API
-          — green. Phase 1 test migration (see ``phase1-plan.md``) is
-          a separate work item and will let us drop this fallback.
+          fingerprint), fall back to the task-granular predicate.
+        * If the task-granular predicate is also unavailable or is a
+          Mock, fall back to the legacy count.
 
         All blocking DB calls are wrapped in ``asyncio.to_thread`` so
         the surrounding event loop stays responsive.
@@ -224,6 +228,35 @@ class JobProcessor:
             by mocking the legacy method; the shared predicate path
             coerces the ``bool`` to ``int``.
         """
+        # Check the job predicate first, but do not treat a False result as
+        # conclusive: active Tasks may exist without a backing JobItem.
+        #
+        # W3 (fail-CLOSED, 2026-07-23): a transient DB error during
+        # the predicate call must NOT silently release the defer
+        # queue. Wrap the call in try/except; on error, log a
+        # warning and return 1 (blocked) so the defer queue waits.
+        # Mirrors the ``maintenance.py`` ``_is_idle`` posture and
+        # keeps the defer / background gates consistent.
+        queue_repo = getattr(self._queue_service, "_repository", None)
+        if (
+            queue_repo is not None
+            and not self._looks_like_mock(queue_repo)
+            and hasattr(queue_repo, "has_active_non_deferred_work")
+        ):
+            try:
+                active = await asyncio.to_thread(
+                    queue_repo.has_active_non_deferred_work, project_id
+                )
+                if isinstance(active, bool) and active:
+                    return 1
+            except Exception as e:
+                logger.warning(
+                    f"JobProcessor._defer_idle_check: job predicate "
+                    f"raised {e!r} for project_id={project_id!r} — "
+                    f"failing CLOSED (returning 1)"
+                )
+                return 1
+
         task_repo = getattr(self._instance_manager, "_task_repo", None)
         if (
             task_repo is not None
@@ -234,18 +267,43 @@ class JobProcessor:
             # Gate B, and maintenance agree. Coerce bool → int so the
             # return contract stays `int`-shaped (matches the legacy
             # count).
-            active = await asyncio.to_thread(
-                task_repo.has_active_non_deferred_work, project_id
-            )
+            #
+            # W3 (fail-CLOSED): same posture as the job predicate
+            # above — wrap in try/except and return 1 on error so the
+            # defer queue waits during a transient DB failure.
+            try:
+                active = await asyncio.to_thread(
+                    task_repo.has_active_non_deferred_work, project_id
+                )
+            except Exception as e:
+                logger.warning(
+                    f"JobProcessor._defer_idle_check: task predicate "
+                    f"raised {e!r} for project_id={project_id!r} — "
+                    f"failing CLOSED (returning 1)"
+                )
+                return 1
             return int(bool(active))
         # Legacy / test fallback: keep behaviour identical to the
         # pre-Phase-1 implementation so existing fixtures that mock
         # ``count_active_jobs_in_non_defer_queues`` remain operational
         # until the Phase 1 test migration lands.
-        return await asyncio.to_thread(
-            self._queue_service._repository.count_active_jobs_in_non_defer_queues,
-            project_id,
-        )
+        #
+        # W3 (fail-CLOSED): the legacy count path also gets a
+        # try/except wrap so a transient DB failure here too is
+        # treated as "active" (return 1) rather than silently
+        # releasing the defer queue.
+        try:
+            return await asyncio.to_thread(
+                self._queue_service._repository.count_active_jobs_in_non_defer_queues,
+                project_id,
+            )
+        except Exception as e:
+            logger.warning(
+                f"JobProcessor._defer_idle_check: legacy count path "
+                f"raised {e!r} for project_id={project_id!r} — "
+                f"failing CLOSED (returning 1)"
+            )
+            return 1
 
     async def _background_idle_check(self) -> int:
         """Return 1 (truthy) when background work should wait, 0 when it may run.
@@ -268,9 +326,14 @@ class JobProcessor:
           system-wide (Phase 3 background seam, 2026-07-14) so we
           pass ``None`` as the ``project_id`` explicitly.
 
-        Sister method to :meth:`_defer_idle_check`: same task_repo
-        access path (through ``InstanceManager._task_repo``), same
-        Mock-detection fallback via :meth:`_looks_like_mock`, same
+        Phase 2 (defer-queue idle gate, 2026-07-23) adds the
+        job-granular ``JobRepository.has_active_non_background_work``
+        predicate. It runs first, followed by the task predicate when no
+        active job is found, matching :meth:`_defer_idle_check` and covering
+        job-less Tasks.
+
+        Sister method to :meth:`_defer_idle_check`: same Mock-detection
+        fallback via :meth:`_looks_like_mock`, same
         ``asyncio.to_thread`` wrapping for non-blocking DB I/O, same
         ``int(bool(...))`` coercion so the return contract stays
         ``int``-shaped (matches the defer path). Tests that mock the
@@ -286,6 +349,33 @@ class JobProcessor:
             fallback returns the raw ``int`` for back-compat with tests
             that mock the legacy method.
         """
+        # System-wide sister check: job rows first, followed by task rows
+        # when no active job is found so job-less Tasks still block the
+        # background queue.
+        #
+        # W3 (fail-CLOSED, 2026-07-23): each predicate call is wrapped
+        # in try/except. On error, log a warning and return 1 so the
+        # background queue waits during a transient DB failure.
+        # Mirrors the defer-gate posture in :meth:`_defer_idle_check`.
+        queue_repo = getattr(self._queue_service, "_repository", None)
+        if (
+            queue_repo is not None
+            and not self._looks_like_mock(queue_repo)
+            and hasattr(queue_repo, "has_active_non_background_work")
+        ):
+            try:
+                active = await asyncio.to_thread(
+                    queue_repo.has_active_non_background_work, None
+                )
+                if isinstance(active, bool) and active:
+                    return 1
+            except Exception as e:
+                logger.warning(
+                    f"JobProcessor._background_idle_check: job predicate "
+                    f"raised {e!r} — failing CLOSED (returning 1)"
+                )
+                return 1
+
         task_repo = getattr(self._instance_manager, "_task_repo", None)
         if (
             task_repo is not None
@@ -298,9 +388,21 @@ class JobProcessor:
             # return contract stays `int`-shaped (matches the defer
             # path). Pass ``None`` explicitly for ``project_id`` —
             # the background predicate is always system-wide.
-            active = await asyncio.to_thread(
-                task_repo.has_active_non_background_work, None
-            )
+            #
+            # W3 (fail-CLOSED): wrap the call in try/except so a
+            # transient DB failure here too is treated as "active"
+            # (return 1) rather than silently releasing the
+            # background queue.
+            try:
+                active = await asyncio.to_thread(
+                    task_repo.has_active_non_background_work, None
+                )
+            except Exception as e:
+                logger.warning(
+                    f"JobProcessor._background_idle_check: task predicate "
+                    f"raised {e!r} — failing CLOSED (returning 1)"
+                )
+                return 1
             return int(bool(active))
         # Legacy / test fallback: same defensive posture as
         # ``_defer_idle_check`` — if the production predicate is not
@@ -308,6 +410,12 @@ class JobProcessor:
         # treat the system as active so background work does not
         # claim prematurely. Once the Phase 3 test migration lands
         # this fallback can be dropped.
+        #
+        # W3 (fail-CLOSED): the legacy fallback path also returns 1
+        # on exception (treated as "active") for symmetry with the
+        # predicate paths above. Previously this was an unconditional
+        # ``return 1`` fallback; the W3 fix widens it to also cover
+        # transient DB failures during the legacy count.
         return 1
 
     async def _emit_in_progress_if_children_pending(
