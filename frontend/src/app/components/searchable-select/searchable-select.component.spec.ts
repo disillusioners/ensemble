@@ -194,4 +194,28 @@ describe('SearchableSelectComponent', () => {
       expect(fresh.componentInstance.options()).toEqual([]);
     });
   });
+
+  // ── onFocus ──────────────────────────────────────────────────────
+  describe('onFocus', () => {
+    it('clears displayText so filteredOptions shows all options', () => {
+      // Set a selected value with display text
+      component.writeValue('banana');
+      expect(component.displayText()).toBe('Banana'); // verify setup
+
+      // Simulate focus — should clear display text
+      component.onFocus();
+
+      // displayText should now be empty
+      expect(component.displayText()).toBe('');
+      // filteredOptions should return ALL options (not filtered by "Banana")
+      expect(component.filteredOptions().length).toBe(OPTIONS.length);
+    });
+
+    it('does NOT change the underlying value when focusing', () => {
+      component.writeValue('apple');
+      component.onFocus();
+      // Value is unchanged
+      expect(component.value()).toBe('apple');
+    });
+  });
 });
