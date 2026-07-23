@@ -67,9 +67,9 @@ export class AgentSelectorComponent {
   readonly searchQuery = signal('');
   readonly focusedIndex = signal(-1);
 
-  /** Exclude the special Mother agent from the pickable list. */
+  /** Exclude system agents (e.g. Mother) from the pickable list. */
   readonly selectableAgents = computed(() =>
-    this.agents().filter(agent => agent.id !== '_mother'),
+    this.agents().filter(agent => !agent.system),
   );
 
   /** Case-insensitive filter over agent name AND description. */
@@ -192,6 +192,9 @@ export class AgentSelectorComponent {
 
   onOptionKeydown(event: KeyboardEvent, agent: Agent, index: number): void {
     const agents = this.filteredAgents();
+    if (agents.length === 0 && !['Escape', 'Tab'].includes(event.key)) {
+      return;
+    }
 
     switch (event.key) {
       case 'ArrowDown': {

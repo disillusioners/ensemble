@@ -22,7 +22,6 @@
         [value]="searchQuery()"
         (input)="onSearchInput($event)"
         (keydown)="onSearchKeydown($event)"
-        role="searchbox"
         aria-label="Search agents by name or description"
         [attr.aria-controls]="'agent-list'"
         [attr.aria-activedescendant]="activeDescendant || null"
@@ -52,7 +51,6 @@
       class="agent-list"
       role="listbox"
       aria-label="Select an agent"
-      [attr.aria-activedescendant]="activeDescendant || null"
     >
       @for (agent of filteredAgents(); track agent.id; let i = $index) {
         <div class="agent-row" [class.selected-row]="selectedAgent()?.id === agent.id">

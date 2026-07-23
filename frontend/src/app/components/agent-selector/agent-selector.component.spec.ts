@@ -42,6 +42,7 @@ const AGENTS: Agent[] = [
     description: 'Creates and manages agents',
     icon: 'hub',
     color: 'accent-cyan',
+    system: true,
   },
 ];
 
