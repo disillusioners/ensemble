@@ -601,6 +601,25 @@ class JobRepository:
         work is genuinely done; the residual job row is awaiting
         observer finalization but is no longer "actively working".
 
+        **Paused behaviour (W2 invariant, 2026-07-23):** a paused
+        ``Instance`` is NOT in the terminal set
+        (``completed`` / ``error`` / ``terminated`` / ``failed``) — so
+        its JobItem IS counted as active non-deferred work and the
+        defer queue stays held. The JobItem itself is in
+        ``admission_state='active'`` (NOT ``'paused'`` / ``'queued'``)
+        because pause is an *Instance* concern, not a JobItem
+        concern: the per-queue lock stays held and the job stays
+        admission-active. This matches the sister
+        ``TaskRepository.has_active_non_deferred_work`` predicate,
+        which counts ``Task.status='paused'`` as blocking for the
+        same reason (the car park the task occupies is suspended,
+        not released). Pause = "suspended-but-occupying", NOT idle —
+        the defer / background gate contract is "wait until every
+        parallel slot is either running or terminal, never paused".
+        A paused instance whose job is admitted while paused is the
+        2026-07-17 ``send_message``→``pause_instance``→``defer_admit``
+        bug; this predicate prevents re-introducing it.
+
         Implemented via raw SQL with ``self.engine.begin()`` because
         the JOIN produces a single round-trip and the ``LEFT JOIN
         ... OR`` predicate is awkward to express (and easy to
@@ -697,6 +716,26 @@ class JobRepository:
         BOTH defer AND background queue types so a background queue
         only fires when every other project's normal/defer lanes are
         idle.
+
+        **Paused behaviour (W2 invariant, 2026-07-23):** matches the
+        defer predicate exactly — a paused ``Instance`` is NOT in
+        the terminal set (``completed`` / ``error`` /
+        ``terminated`` / ``failed``) so its JobItem IS counted as
+        active non-background work and the background queue stays
+        held. The JobItem's own ``admission_state`` is ``'active'``
+        (NOT ``'paused'``) because pause is an Instance concern, not
+        a JobItem concern — the per-queue lock stays held even when
+        the underlying instance is paused. The sister
+        ``TaskRepository.has_active_non_background_work`` predicate
+        mirrors this: ``Task.status='paused'`` counts as blocking
+        because the task occupies its slot under suspension (the
+        ``is_deferred=false AND is_background=false`` filter on the
+        task table passes for a paused Task). Pause = suspended-but-
+        occupying, NOT idle; the background gate contract is "wait
+        until every parallel slot is either running or terminal,
+        never paused" — a paused instance whose background job is
+        admitted while paused reproduces the dev_run.log ``pause →
+        background_admit`` bug.
 
         The ``project_id`` argument is accepted for symmetry with
         :meth:`has_active_non_deferred_work` but is INTENTIONALLY

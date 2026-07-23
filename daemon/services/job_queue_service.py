@@ -2448,18 +2448,34 @@ class JobQueueService:
             # between graph turns; the task predicate catches tasks that have
             # no backing JobItem. A non-bool job result means the repository is
             # probably a loose Mock, so ignore it and use the task predicate.
+            #
+            # W3 (fail-CLOSED, 2026-07-23): each predicate call is wrapped
+            # in try/except so a transient DB error during the call is
+            # treated as "active" (non_defer_active=True) — the defer
+            # queue MUST NOT be silently released by a transient
+            # failure. Mirrors the JobProcessor._defer_idle_check
+            # posture.
             repo = getattr(self, "_repository", None)
             job_result: bool | None = None
             if (
                 repo is not None
                 and hasattr(repo, "has_active_non_deferred_work")
             ):
-                result = await asyncio.to_thread(
-                    repo.has_active_non_deferred_work, project_id
-                )
-                if isinstance(result, bool):
-                    job_result = result
-                    non_defer_active = result
+                try:
+                    result = await asyncio.to_thread(
+                        repo.has_active_non_deferred_work, project_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"_select_next_eligible_job: defer job predicate "
+                        f"raised {e!r} for project_id={project_id!r} — "
+                        f"failing CLOSED (non_defer_active=True)"
+                    )
+                    non_defer_active = True
+                else:
+                    if isinstance(result, bool):
+                        job_result = result
+                        non_defer_active = result
 
             if not non_defer_active:
                 if task_repo is None:
@@ -2470,11 +2486,19 @@ class JobQueueService:
                     if job_result is None:
                         non_defer_active = True
                 else:
-                    non_defer_active = bool(
-                        await asyncio.to_thread(
-                            task_repo.has_active_non_deferred_work, project_id
+                    try:
+                        non_defer_active = bool(
+                            await asyncio.to_thread(
+                                task_repo.has_active_non_deferred_work, project_id
+                            )
                         )
-                    )
+                    except Exception as e:
+                        logger.warning(
+                            f"_select_next_eligible_job: defer task predicate "
+                            f"raised {e!r} for project_id={project_id!r} — "
+                            f"failing CLOSED (non_defer_active=True)"
+                        )
+                        non_defer_active = True
 
         # BACKGROUND gate: system-wide check, "is non-deferred,
         # non-background work active ANYWHERE?". Only computed when
@@ -2488,18 +2512,33 @@ class JobQueueService:
             # Sister check to the defer branch above. The job predicate is
             # system-wide (hence ``None``); the task predicate additionally
             # covers active tasks with no backing JobItem.
+            #
+            # W3 (fail-CLOSED): wrap both predicate calls in try/except
+            # so a transient DB failure is treated as "active"
+            # (non_background_active=True). Mirrors the defer branch
+            # above and the JobProcessor._background_idle_check
+            # posture.
             repo = getattr(self, "_repository", None)
             job_result: bool | None = None
             if (
                 repo is not None
                 and hasattr(repo, "has_active_non_background_work")
             ):
-                result = await asyncio.to_thread(
-                    repo.has_active_non_background_work, None
-                )
-                if isinstance(result, bool):
-                    job_result = result
-                    non_background_active = result
+                try:
+                    result = await asyncio.to_thread(
+                        repo.has_active_non_background_work, None
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"_select_next_eligible_job: background job predicate "
+                        f"raised {e!r} — failing CLOSED "
+                        f"(non_background_active=True)"
+                    )
+                    non_background_active = True
+                else:
+                    if isinstance(result, bool):
+                        job_result = result
+                        non_background_active = result
 
             if not non_background_active:
                 if task_repo is None:
@@ -2508,11 +2547,19 @@ class JobQueueService:
                     if job_result is None:
                         non_background_active = True
                 else:
-                    non_background_active = bool(
-                        await asyncio.to_thread(
-                            task_repo.has_active_non_background_work, None
+                    try:
+                        non_background_active = bool(
+                            await asyncio.to_thread(
+                                task_repo.has_active_non_background_work, None
+                            )
                         )
-                    )
+                    except Exception as e:
+                        logger.warning(
+                            f"_select_next_eligible_job: background task predicate "
+                            f"raised {e!r} — failing CLOSED "
+                            f"(non_background_active=True)"
+                        )
+                        non_background_active = True
 
         # Iterate through pending jobs and select first eligible.
         # Three-way admission decision:
