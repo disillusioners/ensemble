@@ -17,12 +17,12 @@
       class="agent-icon"
       [style.background-color]="activeColor + '20'"
     >
-      {{ selectedAgent?.icon || '🤖' }}
+      {{ selectedAgent()?.icon || '🤖' }}
     </div>
     
     <!-- Agent name -->
     <span class="agent-name">
-      {{ selectedAgent?.name || 'Select Agent' }}
+      {{ selectedAgent()?.name || 'Select Agent' }}
     </span>
     
     <!-- Chevron icon -->
@@ -71,12 +71,12 @@
           <button
             #menuItem
             class="menu-item"
-            [class.selected]="selectedAgent?.id === agent.id"
+            [class.selected]="selectedAgent()?.id === agent.id"
             [class.focused]="focusedAgentId === agent.id"
             [style.--item-color]="getAgentColor(agent)"
             [attr.role]="'option'"
             [attr.id]="'agent-option-' + agent.id"
-            [attr.aria-selected]="selectedAgent?.id === agent.id"
+            [attr.aria-selected]="selectedAgent()?.id === agent.id"
             [attr.aria-label]="agent.name + ': ' + agent.description"
             [tabindex]="focusedAgentId === agent.id ? '0' : '-1'"
             (click)="selectAgent(agent)"
@@ -96,7 +96,7 @@
             <div class="item-info">
               <div
                 class="item-name"
-                [style.color]="selectedAgent?.id === agent.id ? getAgentColor(agent) : ''"
+                [style.color]="selectedAgent()?.id === agent.id ? getAgentColor(agent) : ''"
               >
                 {{ agent.name }}
               </div>
@@ -106,7 +106,7 @@
             </div>
 
             <!-- Selection indicator -->
-            @if (selectedAgent?.id === agent.id) {
+            @if (selectedAgent()?.id === agent.id) {
               <mat-icon class="check-icon" [style.color]="getAgentColor(agent)">
                 check
               </mat-icon>

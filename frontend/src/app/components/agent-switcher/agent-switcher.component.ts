@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed, effect, HostListener, ElementRef, ViewChild, inject } from '@angular/core';
+import { Component, input, output, signal, computed, effect, HostListener, ElementRef, ViewChild, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -25,9 +25,9 @@ const colorMap: Record<string, string> = {
   styleUrl: './agent-switcher.scss'
 })
 export class AgentSwitcherComponent {
-  @Input() agents: Agent[] = [];
-  @Input() selectedAgent: Agent | null = null;
-  @Output() agentChange = new EventEmitter<Agent>();
+  readonly agents = input<Agent[]>([]);
+  readonly selectedAgent = input<Agent | null>(null);
+  readonly agentChange = output<Agent>();
 
   @ViewChild('triggerButton') triggerButton!: ElementRef<HTMLButtonElement>;
   @ViewChild('dropdownMenu') dropdownMenu!: ElementRef<HTMLDivElement>;
@@ -40,7 +40,7 @@ export class AgentSwitcherComponent {
 
   // Filter out system agents from selection
   readonly selectableAgents = computed(() =>
-    this.agents.filter(agent => !agent.system)
+    this.agents().filter(agent => !agent.system)
   );
 
   // Further filter by search query (case-insensitive, matches name OR description)
@@ -75,7 +75,7 @@ export class AgentSwitcherComponent {
   }
 
   get activeColor(): string {
-    return this.selectedAgent ? this.getAgentColor(this.selectedAgent) : '#10a7f7';
+    return this.selectedAgent() ? this.getAgentColor(this.selectedAgent()!) : '#10a7f7';
   }
 
   get activeDescendant(): string {
@@ -107,7 +107,7 @@ export class AgentSwitcherComponent {
         setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
         return;
       }
-      const currentIndex = agents.findIndex(a => a.id === this.selectedAgent?.id);
+      const currentIndex = agents.findIndex(a => a.id === this.selectedAgent()?.id);
       this.focusedIndex.set(currentIndex >= 0 ? currentIndex : 0);
       setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
     } else {
@@ -321,7 +321,7 @@ export class AgentSwitcherComponent {
     const agents = this.filteredAgents();
     if (agents.length === 0) return;
     if (this.focusedIndex() < 0) {
-      const currentIndex = agents.findIndex(a => a.id === this.selectedAgent?.id);
+      const currentIndex = agents.findIndex(a => a.id === this.selectedAgent()?.id);
       this.focusedIndex.set(currentIndex >= 0 ? currentIndex : 0);
     }
   }
