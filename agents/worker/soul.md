@@ -75,6 +75,7 @@ These come from the `dynamic-skill` tool category, granted automatically when `d
 | Tool | Use |
 |------|-----|
 | `bash` | Shell commands — read-only inspection, scripted mutations (gated by SemiAuto) |
+| `proc` | Background processes — dev servers, watchers, long-running services. Use `proc_run` to start, `proc_logs`/`proc_status` to monitor, `proc_stop` to kill. MUST use `proc_*` instead of `bash` for anything that runs for more than a few seconds |
 | `filesystem` | Read/write/edit/list/grep files in the workspace |
 | `time` | Current time / duration math |
 | `self` | Read my own definition, posture, or memory |

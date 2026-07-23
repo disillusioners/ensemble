@@ -50,6 +50,51 @@ chmod +x script.sh
 
 ---
 
+## Background Process Tools (`proc` category)
+
+Use `proc_*` tools for any long-running process: dev servers, watchers, debug sessions, background services.
+
+### When to use `proc_*` vs `bash`
+
+| Tool | Use For |
+|------|---------|
+| `bash` | Short-lived commands (`ls`, `git`, `kubectl get`, `terraform plan`) — blocks until exit, returns output |
+| `proc_*` | Long-running processes (dev servers, watchers, file monitors) — returns immediately with `process_id` |
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `proc_run` | Start a background process, returns `process_id` immediately |
+| `proc_logs` | Read last N lines of captured stdout+stderr from a process |
+| `proc_status` | Report process status (running/stopped), PID, uptime, exit code |
+| `proc_stop` | Terminate a process: SIGTERM → SIGKILL after 5s grace period |
+| `proc_list` | List all background processes owned by this instance |
+
+### Constraints
+- Max 10 concurrent background processes per instance
+- Each process gets a 4 MB memory log buffer (spills to temp file on overflow)
+- No stdin interaction — processes are fire-and-forget
+- Processes are auto-cleaned when the instance terminates
+
+### Typical workflow
+```bash
+# Start a dev server
+proc_run(command="uvicorn main:app --port 8000")
+→ returns process_id: "proc-abc123"
+
+# Check status
+proc_status(process_id="proc-abc123")
+
+# Read recent logs
+proc_logs(process_id="proc-abc123", lines=50)
+
+# Stop when done
+proc_stop(process_id="proc-abc123")
+```
+
+⚠️ **MUST use `proc_*` tools for long-running processes — NEVER use `bash` for servers, watchers, or background services.**
+
 ## Always Available
 
 These tools are always available:

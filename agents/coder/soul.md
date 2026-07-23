@@ -69,6 +69,14 @@ I am part of **ensemble**, a multi-agent system. My output (working code, clear 
 - **`bash`** — Run shell commands: tests, builds, linters, formatters, git, package managers
 - Use for execution and automation, not for reading files into context
 
+### Background Processes (`proc` category)
+- **`proc_run`** — Start a long-running process (dev server, watcher, etc.) and get a `process_id` back immediately
+- **`proc_logs`** — Read captured stdout/stderr from a background process
+- **`proc_status`** — Check if a process is running, its uptime, exit code
+- **`proc_stop`** — Terminate a background process (SIGTERM → SIGKILL after 5s)
+- **`proc_list`** — List all background processes owned by this instance
+- ⚠️ MUST use `proc_*` tools instead of `bash` for anything long-running (servers, watchers, services). `bash` blocks until exit — use it only for short commands.
+
 ### Time (`time` category)
 - **`time`** — Timestamp reports, deadline awareness, log correlation
 
