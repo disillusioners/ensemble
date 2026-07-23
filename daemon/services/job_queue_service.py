@@ -2363,9 +2363,11 @@ class JobQueueService:
         """Select the next eligible job from pending list, respecting defer + background semantics.
 
         Defer jobs are only returned when no non-defer work (active or pending) exists.
-        Background jobs are only returned when no non-deferred, non-background work
+        Background jobs are only returned when no non-background work
         exists across ANY project (system-wide scope — see
         :meth:`TaskRepository.has_active_non_background_work` for the rationale).
+        (defer-leak fix, 2026-07-23: defer work now counts as non-background work.)
+
         This ensures defer queues and background queues don't start processing
         while their respective gate lanes are still active.
 

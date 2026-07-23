@@ -194,21 +194,28 @@ def _create_task_with_status(
     message_id: str | None = None,
     status: str = TaskStatus.PENDING.value,
     is_deferred: bool = False,
+    is_background: bool = False,
     task_type: str = TaskType.PROCESS_MESSAGE.value,
     work_id: str | None = None,
 ) -> int:
     """Insert a Task row directly via SQL and return its integer id.
 
     Mirrors the helper in test_task_repository.py — TaskRepository.create
-    doesn't expose ``is_deferred`` so seam-invariant tests that need to
-    seed a deferred (or running) row without going through the claim
-    path use this helper. The Python bool for ``is_deferred`` keeps the
-    bind working on both SQLite (INTEGER 0/1) and PostgreSQL
-    (BOOLEAN false/true).
+    doesn't expose ``is_deferred`` / ``is_background`` so seam-invariant
+    tests that need to seed a deferred / background row without going
+    through the claim path use this helper. The Python bool for the
+    flags keeps the bind working on both SQLite (INTEGER 0/1) and
+    PostgreSQL (BOOLEAN false/true).
 
     ``work_id``: when provided, stamps the Task with an explicit
     cross-system identifier (e.g. a JobItem's ``job_id`` for a job's
     driving Task). Defaults to a fresh UUID4 (the model default).
+
+    Added ``is_background`` to the helper for Phase 4 defer-leak
+    regression tests (commit fix/bg-queue-defer-leak, 2026-07-23):
+    the background-gate tests need to stamp ``is_background=True`` on
+    a Task row so the ``TaskRepository.has_active_non_background_work``
+    predicate correctly excludes it.
     """
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
@@ -218,11 +225,11 @@ def _create_task_with_status(
                 INSERT INTO task
                     (task_type, instance_id, message_id, status,
                      retry_count, created_at, cancel_requested,
-                     retry_scheduled, work_id, is_deferred)
+                     retry_scheduled, work_id, is_deferred, is_background)
                 VALUES
                     (:task_type, :instance_id, :message_id, :status,
                      :retry_count, :created_at, :cancel_requested,
-                     :retry_scheduled, :work_id, :is_deferred)
+                     :retry_scheduled, :work_id, :is_deferred, :is_background)
                 """
             ),
             {
@@ -236,6 +243,7 @@ def _create_task_with_status(
                 "retry_scheduled": False,
                 "work_id": work_id or str(uuid.uuid4()),
                 "is_deferred": is_deferred,
+                "is_background": is_background,
             },
         )
         return result.lastrowid
@@ -3539,11 +3547,32 @@ class TestPhase3DeferJobPredicateInvariants:
         assert repository.has_active_non_background_work(None) is True
 
     def test_background_blocked_by_defer_work(self, engine, repository):
-        """Invariant: current predicate excludes defer work from the background gate."""
+        """Invariant: defer work DOES block the system-wide background gate.
+
+        Fix for the defer-leak bug (2026-07-23): a defer-queue job IS
+        non-background work, so the background gate must block when
+        defer lanes are active. Pre-fix the predicate excluded
+        ``queue_type IN ('defer', 'background')`` so a defer job was
+        invisible to the background gate and a background queue
+        fired while defer work was still in flight.
+        """
         _insert_instance(engine, "inst-bg-def", "proj-bg-def", "waiting_children")
         _insert_queue(engine, "queue-bg-def-d", "proj-bg-def", "defer", concurrency_limit=1)
         _insert_job_item(engine, job_id="job-bg-def", instance_id="inst-bg-def", project_id="proj-bg-def", queue_id="queue-bg-def-d", admission_state="active")
-        assert repository.has_active_non_background_work(None) is False
+        assert repository.has_active_non_background_work(None) is True
+
+    def test_defer_blocked_by_paused_defer_job(self, engine, repository):
+        """Invariant: paused defer work still blocks the background gate.
+
+        A deferred JobItem on a paused instance is suspended-but-occupying
+        (matches the defer-queue pause semantics from W2 2026-07-23):
+        it must still block the background gate so a paused defer lane
+        cannot leak a background admission.
+        """
+        _insert_instance(engine, "inst-bg-def-paused", "proj-bg-def-paused", "paused")
+        _insert_queue(engine, "queue-bg-def-paused-d", "proj-bg-def-paused", "defer", concurrency_limit=1)
+        _insert_job_item(engine, job_id="job-bg-def-paused", instance_id="inst-bg-def-paused", project_id="proj-bg-def-paused", queue_id="queue-bg-def-paused-d", admission_state="active")
+        assert repository.has_active_non_background_work(None) is True
 
     def test_background_unblocked_when_only_background_and_defer_work(self, engine, repository):
         """Invariant: background-only work does not block its own gate."""
@@ -3609,3 +3638,259 @@ class TestPhase3DeferJobPredicateInvariants:
 
         for status, expected in expected_by_status.items():
             check(status, expected)
+
+
+class TestPhase4BackgroundGateDeferLeakRegression:
+    """Phase 4 regression tests for the defer-leak bug in
+    ``has_active_non_background_work`` (commit fix/bg-queue-defer-leak,
+    2026-07-23).
+
+    Background: the Phase 2 / Phase 3 job- and task-granular
+    ``has_active_non_background_work`` predicates over-excluded defer
+    queues — their SQL was ``queue_type NOT IN ('defer', 'background')``
+    on the job side and ``is_deferred=false AND is_background=false``
+    on the task side. The net effect was a deferred-leak: with a defer
+    job still ``admission_state='active'`` on a defer queue, the
+    background gate saw no work and admitted a background job while
+    the defer lane was still busy. Phase 4 closes the leak:
+
+    * ``JobRepository.has_active_non_background_work`` now excludes ONLY
+      ``queue_type = 'background'`` (defer lanes count as
+      non-background work).
+    * ``TaskRepository.has_active_non_background_work`` now filters only
+      on ``is_background=false`` (defer tasks count as non-background
+      work).
+
+    These tests pin the corrected semantics so a future refactor
+    cannot re-introduce the defer-leak. Mirrors the conventions of
+    ``TestPhase3DeferJobPredicateInvariants`` above: raw-SQL seeding
+    via ``_insert_instance`` / ``_insert_queue`` / ``_insert_job_item``
+    and boolean binds portably on both SQLite and PostgreSQL.
+    """
+
+    # ─── JobRepository.has_active_non_background_work ────────────────────────
+
+    def test_defer_job_active_blocks_background_gate(self, engine, repository):
+        """PRIMARY REGRESSION TEST — defer queue job active ⇒ background
+        gate blocks.
+
+        Pre-fix the predicate excluded ``queue_type IN ('defer',
+        'background')`` so a defer job was invisible to the background
+        gate. With the defer-leak fix (2026-07-23) defer lanes are
+        counted as non-background work, so a background queue cannot
+        be admitted while a defer job is active.
+        """
+        # Arrange — defer queue + ACTIVE defer JobItem + non-terminal instance.
+        _insert_instance(engine, "inst-bg-leak-d", "proj-bg-leak-d", "waiting_children")
+        _insert_queue(engine, "queue-bg-leak-d", "proj-bg-leak-d", "defer", concurrency_limit=1)
+        _insert_job_item(
+            engine,
+            job_id="job-bg-leak-d",
+            instance_id="inst-bg-leak-d",
+            project_id="proj-bg-leak-d",
+            queue_id="queue-bg-leak-d",
+            admission_state="active",
+        )
+
+        # Act — system-wide probe (the predicate ignores project_id).
+        result = repository.has_active_non_background_work(None)
+
+        # Assert — gate blocks because defer work IS non-background work.
+        assert result is True, (
+            "Defer-leak regression: defer queue with an active JobItem "
+            "MUST block the background gate (defer is non-background "
+            "work). Pre-fix this returned False."
+        )
+
+    def test_normal_fifo_job_active_blocks_background_gate(self, engine, repository):
+        """A FIFO queue's active job blocks the background gate (existing
+        behaviour preserved by the fix).
+
+        Sanity check that the defer-leak fix did not regress the
+        normal case: parallel / fifo / queue-less work still counts as
+        non-background and blocks the gate.
+        """
+        _insert_instance(engine, "inst-bg-fifo", "proj-bg-fifo", "running")
+        _insert_queue(engine, "queue-bg-fifo", "proj-bg-fifo", "fifo")
+        _insert_job_item(
+            engine,
+            job_id="job-bg-fifo",
+            instance_id="inst-bg-fifo",
+            project_id="proj-bg-fifo",
+            queue_id="queue-bg-fifo",
+            admission_state="active",
+        )
+        assert repository.has_active_non_background_work(None) is True
+
+    def test_normal_parallel_job_active_blocks_background_gate(self, engine, repository):
+        """A parallel queue's active job blocks the background gate.
+
+        Mirror of the FIFO case: parallel work is non-background work
+        and the gate must block when a parallel job is active.
+        """
+        _insert_instance(engine, "inst-bg-par", "proj-bg-par", "running")
+        _insert_queue(engine, "queue-bg-par", "proj-bg-par", "parallel")
+        _insert_job_item(
+            engine,
+            job_id="job-bg-par",
+            instance_id="inst-bg-par",
+            project_id="proj-bg-par",
+            queue_id="queue-bg-par",
+            admission_state="active",
+        )
+        assert repository.has_active_non_background_work(None) is True
+
+    def test_idle_system_unblocks_background_gate(self, engine, repository):
+        """No work in any queue ⇒ background gate releases (idle ⇒ admit).
+
+        Sanity check the steady-state idle case: a background queue
+        may be admitted when no other queue has active work.
+        """
+        # Arrange — empty system (no JobItem rows at all).
+        _insert_instance(engine, "inst-bg-idle", "proj-bg-idle", "idle")
+
+        # Act + Assert — gate releases.
+        assert repository.has_active_non_background_work(None) is False
+
+    def test_background_only_work_unblocks_background_gate(self, engine, repository):
+        """Only background work active ⇒ background gate releases.
+
+        N background workers must not starve themselves: a background
+        queue is the only type that the predicate excludes, so when
+        ONLY background lanes are active the gate returns False and
+        more background work can be admitted.
+        """
+        _insert_instance(engine, "inst-bg-only", "proj-bg-only", "running")
+        _insert_queue(engine, "queue-bg-only", "proj-bg-only", "background", concurrency_limit=1)
+        _insert_job_item(
+            engine,
+            job_id="job-bg-only",
+            instance_id="inst-bg-only",
+            project_id="proj-bg-only",
+            queue_id="queue-bg-only",
+            admission_state="active",
+        )
+        assert repository.has_active_non_background_work(None) is False
+
+    def test_terminal_defer_job_unblocks_background_gate(self, engine, repository):
+        """Terminal instance with defer job ⇒ background gate releases.
+
+        The defer-leak fix preserves the terminal-instance carve-out:
+        a defer JobItem whose instance is terminal (``completed`` /
+        ``error`` / ``terminated`` / ``failed``) is NOT counted as
+        active, so the background gate correctly releases.
+        """
+        _insert_instance(engine, "inst-bg-def-done", "proj-bg-def-done", "completed")
+        _insert_queue(engine, "queue-bg-def-done-d", "proj-bg-def-done", "defer", concurrency_limit=1)
+        _insert_job_item(
+            engine,
+            job_id="job-bg-def-done",
+            instance_id="inst-bg-def-done",
+            project_id="proj-bg-def-done",
+            queue_id="queue-bg-def-done-d",
+            admission_state="active",
+        )
+        assert repository.has_active_non_background_work(None) is False
+
+    def test_defer_job_queued_admission_state_blocks_background_gate(self, engine, repository):
+        """A defer job in ``admission_state='queued'`` (not yet dispatched)
+        blocks the background gate.
+
+        Like the defer predicate, the background predicate counts BOTH
+        ``queued`` and ``active`` admission states — a defer lane with
+        a backed-up queued job is still busy and must hold the
+        background gate.
+        """
+        _insert_instance(engine, "inst-bg-def-q", "proj-bg-def-q", "idle")
+        _insert_queue(engine, "queue-bg-def-q-d", "proj-bg-def-q", "defer", concurrency_limit=1)
+        _insert_job_item(
+            engine,
+            job_id="job-bg-def-q",
+            instance_id="inst-bg-def-q",
+            project_id="proj-bg-def-q",
+            queue_id="queue-bg-def-q-d",
+            admission_state="queued",
+        )
+        assert repository.has_active_non_background_work(None) is True
+
+    # ─── TaskRepository.has_active_non_background_work ────────────────────────
+
+    def test_defer_task_blocks_background_gate_task_predicate(self, task_repository, engine):
+        """TaskRepository.has_active_non_background_work also blocks on
+        defer tasks (the belt to the job predicate's suspenders).
+
+        Task 2 of the defer-leak fix removed ``is_deferred=false`` from
+        the task predicate so defer TASKS without a backing JobItem
+        (the rare queue-less case the job predicate cannot see) also
+        block the background gate. Without a Task row for a defer
+        job, the job predicate already blocks via the JobItem path;
+        but a defer Task with no JobItem must still block via the
+        task predicate so the gate's belt-and-suspenders defence
+        never has a hole.
+        """
+        # Arrange — non-terminal instance + a defer Task in PENDING.
+        # No JobItem: this is the queue-less / virtual-job case the
+        # task predicate alone can see.
+        _insert_instance(engine, "inst-bg-leak-t", "proj-bg-leak-t", "running")
+        _create_task_with_status(
+            engine,
+            instance_id="inst-bg-leak-t",
+            message_id="m-bg-leak-t",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+        )
+
+        # Act — system-wide probe (the task predicate is also
+        # system-wide for the background shape).
+        result = task_repository.has_active_non_background_work()
+
+        # Assert — defer Task blocks the background gate.
+        assert result is True, (
+            "Task-level defer-leak regression: a defer Task "
+            "(is_deferred=true, is_background=false, status=pending) "
+            "MUST block the background gate. Pre-fix the task "
+            "predicate excluded is_deferred=true and let background "
+            "admit while defer tasks were in flight."
+        )
+
+    def test_background_task_does_not_block_its_own_gate_task_predicate(
+        self, task_repository, engine
+    ):
+        """A background Task (is_background=true) does NOT count as
+        non-background work — the predicate excludes ONLY background.
+
+        Mirror of the job-predicate background-only test, on the task
+        side. Background tasks must not block their own gate (the
+        same starvation-prevention invariant the job predicate holds
+        on ``queue_type='background'``).
+        """
+        _insert_instance(engine, "inst-bg-task-self", "proj-bg-task-self", "running")
+        _create_task_with_status(
+            engine,
+            instance_id="inst-bg-task-self",
+            message_id="m-bg-task-self",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+            is_background=True,
+        )
+        assert task_repository.has_active_non_background_work() is False
+
+    def test_normal_task_blocks_background_gate_task_predicate(
+        self, task_repository, engine
+    ):
+        """A normal non-deferred, non-background Task blocks the
+        background gate (existing behaviour preserved).
+
+        Sanity check on the task side: the fix did not regress the
+        non-background-blocking semantics for the common case.
+        """
+        _insert_instance(engine, "inst-bg-task-nd", "proj-bg-task-nd", "running")
+        _create_task_with_status(
+            engine,
+            instance_id="inst-bg-task-nd",
+            message_id="m-bg-task-nd",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+            is_background=False,
+        )
+        assert task_repository.has_active_non_background_work() is True

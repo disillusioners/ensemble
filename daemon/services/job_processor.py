@@ -319,12 +319,14 @@ class JobProcessor:
         **Scope difference from** :meth:`_defer_idle_check`:
 
         * DEFER checks a single project's non-deferred work count.
-        * BACKGROUND checks the SYSTEM's non-deferred, non-background
-          work count — it must wait until every project is idle on
-          its non-deferred, non-background lanes. The
-          ``has_active_non_background_work`` predicate is
+        * BACKGROUND checks the SYSTEM's non-background work count — it
+          must wait until every project is idle on its non-background
+          lanes. The ``has_active_non_background_work`` predicate is
           system-wide (Phase 3 background seam, 2026-07-14) so we
           pass ``None`` as the ``project_id`` explicitly.
+
+          (defer-leak fix, 2026-07-23: defer work now counts as
+          non-background work.)
 
         Phase 2 (defer-queue idle gate, 2026-07-23) adds the
         job-granular ``JobRepository.has_active_non_background_work``
@@ -341,10 +343,10 @@ class JobProcessor:
         until the Phase 3 background-seam test migration lands.
 
         Returns:
-            Truthy ``int`` (1) when non-deferred, non-background work is
+            Truthy ``int`` (1) when non-background work is
             active ANYWHERE in the system — i.e. the caller should
             ``continue`` past this background queue. Falsy ``0`` when
-            every project's non-deferred, non-background lanes are idle
+            every project's non-background lanes are idle
             and the background queue may admit its next job. The legacy
             fallback returns the raw ``int`` for back-compat with tests
             that mock the legacy method.

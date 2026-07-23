@@ -1515,7 +1515,7 @@ class TaskRepository:
             return bool(row[0])
 
     def has_active_non_background_work(self, project_id: str | None = None) -> bool:
-        """Return True if there is any non-deferred, non-background in-flight task.
+        """Return True if there is any non-background in-flight task.
 
         Phase 3 background-seam (2026-07-14): the shared predicate backing
         the background-queue idle gate. Sister query to
@@ -1524,13 +1524,25 @@ class TaskRepository:
         :meth:`claim_pending_task` for the defer predicate this mirrors)
         so the claim path and the admission probe can never disagree.
 
+        Defer-work inclusion (defer-leak bug fix, 2026-07-23):
+        ``is_deferred`` is INTENTIONALLY NOT filtered out — a defer
+        task MUST count as non-background work so it blocks the
+        background gate. The defer predicate
+        :meth:`has_active_non_deferred_work` excludes defer work
+        (defer queues should not block themselves), but the
+        background predicate excludes ONLY background work. They are
+        not symmetric. ``TaskRepository.has_active_non_background_work``
+        and :meth:`JobRepository.has_active_non_background_work` agree:
+        defer work is non-background work and blocks the background
+        gate.
+
         Scope difference from the defer predicate:
 
         * DEFER is **project-scoped** — a project's defer queue only
           waits for non-deferred work in the SAME project.
         * BACKGROUND is **system-wide** — a background task waits for
-          non-deferred, non-background work across ALL projects. This is
-          the documented scope asymmetry from
+          non-background work across ALL projects. This is the
+          documented scope asymmetry from
           ``feature/virtual-job-management-surface`` Phase 3 background
           seam (2026-07-14).
 
@@ -1543,10 +1555,9 @@ class TaskRepository:
         lookups in callers stay uniform.
 
         Returns:
-            True if at least one ``is_deferred=false`` AND
-            ``is_background=false`` task exists with status
-            ``pending``, ``running``, or ``paused`` across ANY project;
-            False otherwise.
+            True if at least one ``is_background=false`` task exists
+            with status ``pending``, ``running``, or ``paused`` across
+            ANY project (defer tasks included); False otherwise.
 
         Dialect notes mirror :meth:`has_active_non_deferred_work`
         exactly — Python ``False`` booleans as bound parameters so the
@@ -1570,7 +1581,6 @@ class TaskRepository:
                     SELECT 1 FROM task t
                     JOIN instances i ON t.instance_id = i.instance_id
                     WHERE t.status IN (:status_pending, :status_running, :status_paused)
-                      AND t.is_deferred = :is_deferred_false
                       AND t.is_background = :is_background_false
                 )
             """)
@@ -1578,7 +1588,6 @@ class TaskRepository:
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
                 "status_paused": TaskStatus.PAUSED.value,
-                "is_deferred_false": False,
                 "is_background_false": False,
             }).fetchone()
             return bool(row[0])
