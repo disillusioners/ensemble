@@ -94,6 +94,10 @@ export class SearchableSelectComponent<V = any> implements ControlValueAccessor 
   setDisabledState(isDisabled: boolean): void { this.disabledFromCva.set(isDisabled); }
 
   // ── Template handlers ──────────────────────────────────────────────
+  onFocus(): void {
+    this.displayText.set('');
+  }
+
   onInput(event: Event): void {
     const v = (event.target as HTMLInputElement).value;
     this.displayText.set(v);
