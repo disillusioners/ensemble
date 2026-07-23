@@ -18,7 +18,7 @@ export interface Question {
 export interface QuestionPack {
   instance_id: string;
   questions: Question[];
-  status: 'pending' | 'answered';
+  status: 'pending' | 'answered' | 'dismissed';
   answers: Record<string, string>;
   created_at: string;
 }

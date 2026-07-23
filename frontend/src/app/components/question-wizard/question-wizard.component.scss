@@ -171,13 +171,46 @@
 
 // Navigation row at the bottom of the wizard. Mirrors the editor-actions
 // pattern from todo-list.component.scss — same flat bottom border that
-// visually detaches the action area from the question body.
+// visually detaches the action area from the question body. The Clear
+// button is the only child on the left; the primary / secondary nav
+// actions are grouped on the right via `.wizard-nav-actions`.
 .wizard-nav {
   display: flex;
   gap: 6px;
   padding: 8px 12px;
   border-top: 1px solid #1e293b;
   justify-content: flex-end;
+  align-items: center;
+}
+
+.wizard-nav-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+}
+
+// Clear button — the most muted action in the wizard. Ghost style:
+// transparent background, muted text, no border, hover surfaces a subtle
+// red tint to signal the destructive nature of dismissing the question
+// without answering. Overrides `.editor-btn` cyan primary and the
+// `.secondary` variant so it reads as the least prominent option.
+.clear-btn {
+  background: transparent;
+  color: #94a3b8;
+  border: 1px solid transparent;
+  margin-right: auto;
+
+  &:hover:not(:disabled) {
+    background: rgba(239, 83, 80, 0.08);
+    color: #f87171;
+    border-color: rgba(239, 83, 80, 0.25);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #ef5350;
+    outline-offset: 2px;
+  }
 }
 
 // Editor button style lifted from .editor-btn in todo-list.component.scss

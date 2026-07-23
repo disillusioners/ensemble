@@ -52,6 +52,10 @@ export class QuestionWizardComponent {
   isSubmitting = signal(false);
   /** Last submission error message; null when no error is being surfaced. */
   submitError = signal<string | null>(null);
+  /** True while the dismiss HTTP request is in-flight. */
+  isDismissing = signal(false);
+  /** Last dismiss error message; null when no error is being surfaced. */
+  dismissError = signal<string | null>(null);
   /**
    * Closure-scoped dedupe tracker for the pack effect (previously). Promoted
    * to a class field so the instanceId effect can reset it on instance
@@ -125,6 +129,8 @@ export class QuestionWizardComponent {
       this.answers.set({});
       this.isSubmitting.set(false);
       this.submitError.set(null);
+      this.isDismissing.set(false);
+      this.dismissError.set(null);
       // Reset the dedupe tracker so a new instance's pack is not mistaken
       // for an SSE re-delivery of the previous instance's pack.
       this.lastSeenPackCreatedAt = null;
@@ -144,6 +150,8 @@ export class QuestionWizardComponent {
       this.answers.set({});
       this.isSubmitting.set(false);
       this.submitError.set(null);
+      this.isDismissing.set(false);
+      this.dismissError.set(null);
     }, { allowSignalWrites: true });
   }
 
@@ -230,9 +238,56 @@ export class QuestionWizardComponent {
       });
   }
 
+  /**
+   * Dismiss the current question pack without answering. NON-OPTIMISTIC —
+   * wait for the API. On success we only clear the dismissing flag; the
+   * SSE ``question_pack`` event with status='dismissed' is what clears
+   * the signal and flips ``isVisible`` to false. On error we surface a
+   * message and keep the wizard open so the user can retry.
+   *
+   * Stale-response guard: captures ``targetInstanceId`` right before
+   * subscribing and bails out of callbacks if the user switched instances
+   * while the request was in-flight. Mirrors the ``submit()`` pattern.
+   */
+  dismiss(): void {
+    if (this.isDismissing()) return;
+    if (this.isSubmitting()) return;   // prevent both in-flight at once
+    if (!this.isVisible()) return;      // bail if wizard already hiding
+    const targetInstanceId = this.instanceId();
+    this.isDismissing.set(true);
+    this.api.dismissQuestion(targetInstanceId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          if (this.instanceId() !== targetInstanceId) {
+            this.isDismissing.set(false);
+            return;
+          }
+          this.isDismissing.set(false);
+          this.dismissError.set(null);
+          // SSE will (in the same handler) flip question_pack.status to
+          // 'dismissed' (or null the signal outright), at which point
+          // isVisible() returns false and the @if wrapper hides the
+          // wizard.
+        },
+        error: (err) => {
+          if (this.instanceId() !== targetInstanceId) {
+            this.isDismissing.set(false);
+            return;
+          }
+          console.error('[QuestionWizard] Failed to dismiss question:', err);
+          this.isDismissing.set(false);
+          this.dismissError.set(
+            'Failed to dismiss question: ' + (err?.error?.message || err?.message || 'Unknown error')
+          );
+        },
+      });
+  }
+
   /** Clear the displayed error (called from the close button). */
   clearError(): void {
     this.submitError.set(null);
+    this.dismissError.set(null);
   }
 
   /**

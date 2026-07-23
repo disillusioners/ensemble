@@ -786,6 +786,175 @@ async def get_pending_question(instance_id: str, request: Request) -> dict:
     }
 
 
+# 6d. POST /instances/{instance_id}/question/dismiss - Dismiss a pending
+#     question pack without answering; resume the instance cascade.
+#
+# Mirrors ``answer_questions`` (6b) end-to-end but does NOT store answers
+# — instead it drops the question state and unwinds the pause. The user
+# intent is "I don't want to answer this; keep going without me". Like
+# the answer endpoint, this route:
+#   1. Validates the instance exists (uniform 404 contract).
+#   2. Returns 404 if no question pack exists for the instance.
+#   3. Emits a ``question_pack`` SSE event with ``status="dismissed"``
+#      BEFORE the resume cascade — same F3 timing invariant.
+#   4. Cascades resume to target + all paused children.
+#
+# The state unwinding sequence (clear pack → clear pause flag → discard
+# deferred-pause marker) mirrors ``_cleanup_instance_state`` exactly
+# (manager.py:2238-2245). The only difference is that we do NOT touch
+# ``_graph_tasks`` / ``_pending_injections`` / ``_request_registry`` —
+# the instance keeps running, just past the pause barrier.
+@router.post("/{instance_id}/question/dismiss")
+async def dismiss_question(
+    instance_id: str,
+    request: Request,
+) -> dict:
+    """Dismiss a pending question pack without answering; resume cascade.
+
+    The instance must have a question pack (set by the ``question`` tool
+    before the graph paused). Clears the pack, drops the pause-requested
+    flag, discards any deferred-pause marker, emits a ``question_pack``
+    SSE event with ``status="dismissed"``, then mirrors the PAUSED-branch
+    resume fan-out from ``answer_questions``: cascade-resumes target +
+    all paused children, and for each resumed instance calls
+    ``resume_processing_job`` — the target receives a HumanMessage
+    indicating dismissal; children resume silently from their checkpoint.
+
+    Errors:
+        * ``404`` if the instance is unknown to the manager.
+        * ``404`` if no question pack exists for the instance.
+        * ``503`` if the daemon is in write-paused mode (migration).
+    """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+    # 1. Validate instance exists — uniform 404 contract.
+    await _check_instance_exists(manager, instance_id)
+
+    # 2. Capture the pack BEFORE clearing so the SSE payload can carry
+    #    the dismissed question snapshot. Same 404 contract as
+    #    answer_questions when no pack exists.
+    from daemon.services.question_manager import pack_to_dict
+
+    pack = manager._question_manager.get_question_pack(instance_id)
+    if pack is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=(
+                    f"No question pack for instance {instance_id!r}. "
+                    "The user can only dismiss a question that was "
+                    "actually asked."
+                ),
+            ).model_dump(),
+        )
+
+    # NEW: reject if already answered/dismissed — dismissing a non-pending
+    # pack would emit a misleading ``status="dismissed"`` SSE event and
+    # could race the original answer/cascade path. 409 Conflict signals
+    # the request is valid in shape but the resource is in the wrong state.
+    if pack.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=(
+                    f"Question pack for instance {instance_id!r} is no "
+                    f"longer pending (status: {pack.status}). Only "
+                    "pending packs can be dismissed."
+                ),
+            ).model_dump(),
+        )
+
+    # 3. Unwind question state — mirror _cleanup_instance_state
+    #    (manager.py:2238-2245) minus the lifecycle-only entries
+    #    (graph_task / pending_injections / request_registry).
+    #    The instance is being resumed, NOT terminated.
+    manager._question_manager.clear_question_pack(instance_id)
+    manager.clear_question_pause_requested(instance_id)
+    # C2 fix — drop the deferred-pause marker. Without this discard the
+    # post-graph completion path in instance_messaging would still fire
+    # pause_instance_cascade for this instance, racing the resume below
+    # and producing the exact torn PAUSED→RUNNING state we just unwound.
+    manager._deferred_question_pause.discard(instance_id)
+
+    # 4. Emit SSE: question_pack with status="dismissed". Best-effort —
+    #    the resume cascade must proceed even if SSE fails. Reuse the
+    #    frozen pack_to_dict schema so the frontend's existing parser
+    #    handles the event without code changes.
+    live_hub = getattr(request.app.state, "live_hub", None)
+    if live_hub is not None:
+        try:
+            dismissed_payload = pack_to_dict(pack)
+            dismissed_payload["status"] = "dismissed"
+            await live_hub.stream_question_pack(instance_id, dismissed_payload)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"question_pack SSE emission failed for dismiss on "
+                f"instance {instance_id}: {e}"
+            )
+
+    # 5. Mirror the PAUSED-branch resume fan-out from messages.py (F10)
+    #    and the answer endpoint above. Target gets the dismissal
+    #    HumanMessage; children resume silently from their checkpoint —
+    #    they were paused as a side effect of the parent's question and
+    #    don't need a new message.
+    try:
+        resume_result = await manager.resume_instance_cascade(instance_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to resume instance: {e}",
+            ).model_dump(),
+        )
+
+    target_id = resume_result.get("target_id", instance_id)
+    dismiss_msg = "[User dismissed the question without answering.]"
+
+    resume_results: dict = {}
+    for resumed_id in resume_result["resumed_ids"]:
+        is_target = resumed_id == target_id
+        try:
+            job_result = await manager.resume_processing_job(
+                resumed_id,
+                message=dismiss_msg if is_target else "resume",
+                silent=not is_target,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to resume processing for "
+                f"{resumed_id[:8]}...: {e}"
+            )
+            job_result = {"status": "error", "error": str(e)}
+        if job_result is None:
+            logger.debug(
+                f"No active PROCESSING job for instance "
+                f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
+            )
+        resume_results[resumed_id] = (
+            job_result if job_result is not None else {"status": "no_active_job"}
+        )
+
+    return {
+        "status": "dismissed",
+        "instance_id": instance_id,
+        "resume_info": {
+            "resumed": True,
+            "resumed_ids": resume_result["resumed_ids"],
+            "skipped_ids": resume_result["skipped_ids"],
+            "target_id": target_id,
+            "resume_results": resume_results,
+        },
+    }
+
+
 # 7. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
 @router.post("/{instance_id}/stop", deprecated=True)
 async def stop_instance_deprecated(

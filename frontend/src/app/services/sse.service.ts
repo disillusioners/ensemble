@@ -384,20 +384,27 @@ export class SseService {
     });
 
     // Question pack event (Phase 4 / Question Tool). Carries the full
-    // QuestionPack inside ``data.message`` (status='pending' or
-    // 'answered'). Visibility is driven entirely by this signal — see the
-    // ``questionPack`` declaration for the F3 rationale (the pause cascade
-    // swallows the status_change→paused event, so the wizard cannot rely
-    // on it). On 'answered' the frontend wizard auto-hides via the
-    // ``status === 'pending'`` check; we still store the answered pack
-    // briefly so a re-render doesn't blank the answer list, then drop it
-    // on the next clearEvents() cycle.
+    // QuestionPack inside ``data.message`` (status='pending',
+    // 'answered', or 'dismissed'). Visibility is driven entirely by this
+    // signal — see the ``questionPack`` declaration for the F3 rationale
+    // (the pause cascade swallows the status_change→paused event, so the
+    // wizard cannot rely on it). On 'answered' the frontend wizard
+    // auto-hides via the ``status === 'pending'`` check; we still store
+    // the answered pack briefly so a re-render doesn't blank the answer
+    // list, then drop it on the next clearEvents() cycle. On 'dismissed'
+    // we null the signal outright so the dismissed state is unambiguous
+    // (no possibility of a stale answered-style payload re-populating the
+    // wizard mid-dismiss).
     eventSource.addEventListener('question_pack', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
           const pack = (data.message ?? null) as QuestionPack | null;
-          this.questionPack.set(pack);
+          if (pack && pack.status === 'dismissed') {
+            this.questionPack.set(null);
+          } else {
+            this.questionPack.set(pack);
+          }
         } catch (err) {
           console.error('[SSE] Failed to parse question_pack:', err);
         }

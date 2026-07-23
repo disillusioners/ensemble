@@ -414,8 +414,9 @@ class LiveEventHub:
             pack: Question-pack dict (output of
                 :func:`daemon.services.question_manager.pack_to_dict`).
                 Carries ``instance_id``, ``status`` (``pending`` |
-                ``answered``), ``created_at``, ``questions`` (list of
-                per-question dicts), and ``answers``.
+                ``answered`` | ``dismissed``), ``created_at``,
+                ``questions`` (list of per-question dicts), and
+                ``answers``.
         """
         event: dict[str, Any] = {
             "instance_id": instance_id,

@@ -304,4 +304,19 @@ export class ApiService {
     );
   }
 
+  /**
+   * Dismiss a pending question pack without answering. POST
+   * /api/instances/{id}/question/dismiss. The backend will clear the
+   * pending pack and resume the instance with a no-op signal so the
+   * graph stops waiting on input. The frontend relies on the
+   * `question_pack` SSE event with status='dismissed' to hide the wizard
+   * — not on the HTTP response.
+   */
+  dismissQuestion(instanceId: string): Observable<QuestionPack> {
+    return this.http.post<QuestionPack>(
+      `${this.API_BASE}/instances/${instanceId}/question/dismiss`,
+      {}
+    );
+  }
+
 }

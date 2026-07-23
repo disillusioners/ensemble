@@ -56,6 +56,8 @@ config.local.yaml
 .env.prod
 agents-ensemble.db
 test-results/*
+frontend/test-results/
+frontend/test-results/auto-scroll/
 frontend/playwright-report/
 test_e2e_queue.db
 test_e2e_instance_title.db

@@ -29,7 +29,7 @@
                 type="button"
                 class="option-chip"
                 [class.selected]="isSelected(q, opt)"
-                [disabled]="isSubmitting()"
+                [disabled]="isSubmitting() || isDismissing()"
                 (click)="selectOption(opt)"
               >
                 {{ opt }}
@@ -38,16 +38,19 @@
           </div>
         }
 
-        @if (q.allow_custom) {
-          <input
-            type="text"
-            class="custom-input"
-            placeholder="Type your own answer..."
-            [value]="answers()[q.id] || ''"
-            [disabled]="isSubmitting()"
-            (input)="customInput($event, q)"
-          />
-        }
+        <!--
+          Custom answer is always available regardless of `q.allow_custom`.
+          The placeholder nudges the user when the agent did not explicitly
+          request custom input, but the field itself is never hidden.
+        -->
+        <input
+          type="text"
+          class="custom-input"
+          [placeholder]="q.allow_custom ? 'Type your own answer...' : 'Type a custom answer anyway...'"
+          [value]="answers()[q.id] || ''"
+          [disabled]="isSubmitting() || isDismissing()"
+          (input)="customInput($event, q)"
+        />
 
         @if (q.required) {
           <span class="required-hint">Required</span>
@@ -67,39 +70,68 @@
       </div>
     }
 
+    @if (dismissError()) {
+      <div class="wizard-error">
+        <span>{{ dismissError() }}</span>
+        <button
+          type="button"
+          class="wizard-error-close"
+          (click)="clearError()"
+          aria-label="Dismiss error"
+        >✕</button>
+      </div>
+    }
+
     <div class="wizard-nav">
-      @if (currentIndex() > 0) {
-        <button
-          type="button"
-          class="editor-btn secondary"
-          (click)="prev()"
-          [disabled]="isSubmitting()"
-        >
-          Back
-        </button>
-      }
+      <!--
+        Secondary action on the left. Only shown while a wizard is actually
+        renderable (we're inside the @if (isVisible()) block above). The
+        Clear button is disabled during both submit and dismiss to keep
+        the in-flight request lifecycle stable.
+      -->
+      <button
+        type="button"
+        class="editor-btn clear-btn"
+        (click)="dismiss()"
+        [disabled]="isDismissing() || isSubmitting()"
+      >
+        {{ isDismissing() ? 'Clearing...' : 'Clear' }}
+      </button>
 
-      @if (!isLastQuestion()) {
-        <button
-          type="button"
-          class="editor-btn"
-          (click)="next()"
-          [disabled]="!canProceed() || isSubmitting()"
-        >
-          Next
-        </button>
-      }
+      <div class="wizard-nav-actions">
+        @if (currentIndex() > 0) {
+          <button
+            type="button"
+            class="editor-btn secondary"
+            (click)="prev()"
+            [disabled]="isSubmitting() || isDismissing()"
+          >
+            Back
+          </button>
+        }
 
-      @if (isLastQuestion()) {
-        <button
-          type="button"
-          class="editor-btn"
-          (click)="submit()"
-          [disabled]="!canSubmit() || isSubmitting()"
-        >
-          {{ isSubmitting() ? 'Submitting...' : 'Submit Answers' }}
-        </button>
-      }
+        @if (!isLastQuestion()) {
+          <button
+            type="button"
+            class="editor-btn"
+            (click)="next()"
+            [disabled]="!canProceed() || isSubmitting() || isDismissing()"
+          >
+            Next
+          </button>
+        }
+
+        @if (isLastQuestion()) {
+          <button
+            type="button"
+            class="editor-btn"
+            (click)="submit()"
+            [disabled]="!canSubmit() || isSubmitting() || isDismissing()"
+          >
+            {{ isSubmitting() ? 'Submitting...' : 'Submit Answers' }}
+          </button>
+        }
+      </div>
     </div>
   </div>
 }
