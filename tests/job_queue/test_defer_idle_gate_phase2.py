@@ -10,8 +10,12 @@ introduced two new predicates on ``JobRepository``:
     ``waiting_children`` window when no task row exists yet; the job
     predicate closes that gap.
   * ``has_active_non_background_work(project_id)`` — sister method
-    that excludes BOTH defer AND background queue types so a background
-    queue only fires when every project's normal/defer lanes are idle.
+    that excludes ONLY the background queue type (defer IS counted as
+    non-background work) so a background queue only fires when every
+    project's normal/defer lanes are idle. The defer-leak bug fix
+    (2026-07-23) removed ``defer`` from the exclusion set — pre-fix a
+    defer job was invisible to the background gate and could leak a
+    background admission while defer work was still active.
 
 These predicates sit alongside the existing task-granular
 ``TaskRepository.has_active_non_deferred_work`` /
@@ -31,8 +35,10 @@ The tests in this module cover:
   admission state, instance status, project isolation, system-wide
   probe, and queue-less jobs.
 * **TestJobBasedPredicateNonBackgroundWork**: the
-  ``has_active_non_background_work`` predicate across the same axes,
-  with the additional "defer counts, background excluded" semantics.
+   ``has_active_non_background_work`` predicate across the same axes,
+   with the "defer counts as non-background work" semantics added by
+   the 2026-07-23 defer-leak bug fix (defer queue jobs are now
+   counted).
 * **TestIncidentReproduction**: the 2026-07-23 inter-report-gap bug
   scenario where a parent in ``waiting_children`` with an active
   JobItem was invisible to the task-granular predicate.
@@ -498,23 +504,27 @@ class TestJobBasedPredicateNonDeferredWork:
 class TestJobBasedPredicateNonBackgroundWork:
     """Phase 2 job-based background-predicate tests.
 
-    Sister method: ``has_active_non_background_work`` excludes BOTH
-    defer AND background queue types so a background queue only
-    fires when every project's normal/defer lanes are idle. The
-    ``project_id`` argument is INTENTIONALLY IGNORED — the background
-    predicate is always system-wide (Phase 3 background-seam
-    invariant).
+    Sister method: ``has_active_non_background_work`` excludes ONLY
+    the ``background`` queue type so a background queue only fires
+    when every non-background lane (normal, defer, parallel, fifo)
+    across the system is idle. **Defer work IS non-background work**
+    and blocks the background gate (defer-leak bug fix, 2026-07-23).
+    The ``project_id`` argument is INTENTIONALLY IGNORED — the
+    background predicate is always system-wide (Phase 3 background-
+    seam invariant).
     """
 
-    def test_defer_queue_job_excluded_from_non_background(self, engine, repository):
-        """A defer queue's job IS excluded from non-background work.
+    def test_defer_queue_job_counts_as_non_background(self, engine, repository):
+        """A defer queue's job IS counted as non-background work.
 
-        The predicate counts "non-defer AND non-background" work:
-        ``queue_type NOT IN ('defer', 'background')``. Defer queue
-        jobs are intentionally invisible to the background gate so a
-        defer queue firing in one project does not block a
-        background queue in another (background waits for *normal*
-        lane work only, not other background-or-defer traffic).
+        Fix for the defer-leak bug (2026-07-23): defer work counts as
+        non-background work, so the background gate MUST block when a
+        defer queue is active. ``queue_type NOT IN ('background')``
+        now; defer queue jobs match the exclusion-OR branch
+        (``queue_type IS NULL OR queue_type != :q_background``) and
+        are counted. Pre-fix this test asserted the buggy behaviour
+        (defer job excluded from the background gate), which let a
+        background queue fire while defer work was still in flight.
         """
         _insert_instance(
             engine, "inst-bg-d-1", project_id="proj-bg-d", status="running"
@@ -530,7 +540,7 @@ class TestJobBasedPredicateNonBackgroundWork:
             queue_id="queue-bg-d-1",
             admission_state="active",
         )
-        assert repository.has_active_non_background_work() is False
+        assert repository.has_active_non_background_work() is True
 
     def test_fifo_queue_job_counts_as_active(self, engine, repository):
         """A FIFO queue's job is non-background and IS counted."""

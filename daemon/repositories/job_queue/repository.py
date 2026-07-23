@@ -708,14 +708,25 @@ class JobRepository:
     def has_active_non_background_work(
         self, project_id: str | None = None
     ) -> bool:
-        """Return True iff there is active non-defer AND non-background work
-        that should hold a background queue back.
+        """Return True iff there is active non-background work that
+        should hold a background queue back.
 
-        Phase 2 (background-queue idle gate, 2026-07-23). Sister
-        method to :meth:`has_active_non_deferred_work` that excludes
-        BOTH defer AND background queue types so a background queue
-        only fires when every other project's normal/defer lanes are
-        idle.
+        Phase 2 (background-queue idle gate, 2026-07-23) — bug fix
+        for the defer-queue leak (2026-07-23): sister method to
+        :meth:`has_active_non_deferred_work` that excludes ONLY
+        the ``background`` queue type. A background queue fires
+        only when every other queue type (normal, defer, parallel,
+        fifo, plus queue-less work) is idle. **Defer work IS
+        non-background work** — defer work in any project must
+        block the background gate so a background queue is not
+        admitted while defer tasks are still in flight.
+
+        **Why defer counts as non-background work**: the background
+        queue is system-wide and should starve whenever there is
+        real pending work on a defer queue, just as it does for
+        parallel / fifo / queue-less work. Excluding defer would
+        allow a background queue to fire while defer lanes are
+        still active, which is the defer-leak bug being fixed here.
 
         **Paused behaviour (W2 invariant, 2026-07-23):** matches the
         defer predicate exactly — a paused ``Instance`` is NOT in
@@ -728,23 +739,21 @@ class JobRepository:
         the underlying instance is paused. The sister
         ``TaskRepository.has_active_non_background_work`` predicate
         mirrors this: ``Task.status='paused'`` counts as blocking
-        because the task occupies its slot under suspension (the
-        ``is_deferred=false AND is_background=false`` filter on the
-        task table passes for a paused Task). Pause = suspended-but-
-        occupying, NOT idle; the background gate contract is "wait
-        until every parallel slot is either running or terminal,
-        never paused" — a paused instance whose background job is
-        admitted while paused reproduces the dev_run.log ``pause →
-        background_admit`` bug.
+        because the task occupies its slot under suspension. Pause =
+        suspended-but-occupying, NOT idle; the background gate
+        contract is "wait until every parallel slot is either
+        running or terminal, never paused" — a paused instance
+        whose background job is admitted while paused reproduces
+        the dev_run.log ``pause → background_admit`` bug.
 
         The ``project_id`` argument is accepted for symmetry with
         :meth:`has_active_non_deferred_work` but is INTENTIONALLY
         IGNORED — the background predicate is system-wide (the
         background queue must wait for the entire system to be idle
-        on its non-deferred, non-background lanes, not just one
-        project). The maintainer of this method must keep that
-        invariant: do not add a ``project_id`` filter without
-        revisiting the background-queue gate contract.
+        on its non-background lanes, not just one project). The
+        maintainer of this method must keep that invariant: do not
+        add a ``project_id`` filter without revisiting the
+        background-queue gate contract.
 
         Returns:
             True iff any matching row exists. Returns False on empty
@@ -762,7 +771,7 @@ class JobRepository:
                         "  WHERE j.admission_state IN ('queued', 'active')"
                         "    AND j.deleted_at IS NULL"
                         "    AND (q.queue_type IS NULL"
-                        "         OR q.queue_type NOT IN (:q_defer, :q_background))"
+                        "         OR q.queue_type != :q_background)"
                         "    AND (j.instance_id IS NULL"
                         "         OR (i.status != :term_completed"
                         "             AND i.status != :term_error"
@@ -771,7 +780,6 @@ class JobRepository:
                         ")"
                     ),
                     {
-                        "q_defer": "defer",
                         "q_background": "background",
                         "term_completed": "completed",
                         "term_error": "error",
