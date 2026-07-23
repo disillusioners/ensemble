@@ -550,15 +550,30 @@ class TaskRepository:
                     -- Background queue idle gate (Phase 3 background
                     -- seam, 2026-07-14). Held back when this candidate
                     -- is a background task AND there is active
-                    -- non-deferred, non-background work ANYWHERE in the
-                    -- system. Scope is system-wide (NO project_id
-                    -- filter) — this is the documented asymmetry from
-                    -- the defer gate: background work waits for ALL
-                    -- projects to be idle on their non-deferred,
-                    -- non-background lanes, not just the candidate's
-                    -- project. Mirrors :meth:`has_active_non_background_work`
-                    -- so the claim path and the admission probe
-                    -- cannot disagree.
+                    -- non-background work ANYWHERE in the system. Scope
+                    -- is system-wide (NO project_id filter) — this is
+                    -- the documented asymmetry from the defer gate:
+                    -- background work waits for ALL projects to be idle
+                    -- on their non-background lanes, not just the
+                    -- candidate's project. Mirrors
+                    -- :meth:`has_active_non_background_work` so the
+                    -- claim path and the admission probe cannot
+                    -- disagree.
+                    --
+                    -- Defer-leak bug fix (2026-07-23): the predicate
+                    -- fix (Phase 2) removed ``is_deferred = false``
+                    -- from the standalone
+                    -- ``has_active_non_background_work`` so defer
+                    -- work IS counted as non-background work. This
+                    -- inline copy of the gate had the same defect
+                    -- (the ``t3.is_deferred = false`` clause was
+                    -- removed from the inner EXISTS below) which
+                    -- made defer tasks invisible to the background
+                    -- gate via the atomic claim path — admitting
+                    -- background work while defer tasks were active.
+                    -- Removed here for parity with the predicate;
+                    -- the ``is_deferred_false`` bind stays because
+                    -- the DEFER gate above still uses it.
                     AND NOT (
                         task.is_background = :is_background_true
                         AND EXISTS (
@@ -566,13 +581,12 @@ class TaskRepository:
                             JOIN instances i3
                                 ON t3.instance_id = i3.instance_id
                             WHERE t3.status IN (:status_pending, :status_running, :status_paused)
-                              AND t3.is_deferred = :is_deferred_false
                               AND t3.is_background = :is_background_false
                             -- Deliberately NO project_id scoping — the
                             -- background gate is system-wide by
                             -- design. A background candidate only
                             -- claims when every project is idle on
-                            -- its non-deferred, non-background lanes.
+                            -- its non-background lanes.
                         )
                     )
                     AND instance_id NOT IN (
