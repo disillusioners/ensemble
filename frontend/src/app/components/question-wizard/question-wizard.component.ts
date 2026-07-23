@@ -203,6 +203,7 @@ export class QuestionWizardComponent {
    */
   submit(): void {
     if (this.isSubmitting()) return;
+    if (this.isDismissing()) return;
     if (!this.canSubmit()) return;
     const targetInstanceId = this.instanceId();
     const payload: Record<string, string> = {};

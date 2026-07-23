@@ -663,3 +663,125 @@ class TestDismissEndpointWritePaused:
         manager.clear_question_pause_requested.assert_not_called()
         manager.resume_instance_cascade.assert_not_awaited()
         state["live_hub"].stream_question_pack.assert_not_awaited()
+
+
+# ============================================================================
+# Cascade failure handling — W1
+# ============================================================================
+
+
+class TestDismissCascadeFailure:
+    """Resume cascade exceptions propagate as 500 with state already cleared."""
+
+    def test_cascade_runtime_error_returns_500_and_state_already_cleared(
+        self, client_and_state_for_dismiss,
+    ):
+        """A ``RuntimeError`` from the resume cascade returns 500.
+
+        The endpoint wraps ``manager.resume_instance_cascade`` in a
+        try/except that raises ``HTTPException(500, INTERNAL_ERROR)``.
+        Because the state unwinding (clear pack + clear pause flag +
+        discard deferred marker) and the SSE emission run BEFORE the
+        cascade call, both must be observable even when the cascade
+        raises.
+
+        Asserts:
+            * status 500
+            * response body ``detail.code == "INTERNAL_ERROR"``
+            * ``clear_question_pack`` was called (state was unwound)
+            * ``stream_question_pack`` was called (SSE emitted first)
+        """
+        from daemon.services.question_manager import QuestionPack
+
+        pack = QuestionPack(instance_id="inst-dismiss", questions=[])
+        client, state = client_and_state_for_dismiss
+        manager = _make_manager_for_dismiss_endpoint(
+            instance_exists=True,
+            question_pack=pack,
+        )
+        manager.resume_instance_cascade.side_effect = RuntimeError(
+            "cascade boom",
+        )
+        hub = _make_live_hub()
+        state["manager"] = manager
+        state["live_hub"] = hub
+
+        response = client.post("/instances/inst-dismiss/question/dismiss")
+
+        assert response.status_code == 500, response.text
+        body = response.json()
+        assert body["detail"]["code"] == "INTERNAL_ERROR"
+        assert "cascade boom" in body["detail"]["message"]
+        # State was unwound BEFORE the cascade ran — proves the cleanup
+        # is not gated on cascade success.
+        manager._question_manager.clear_question_pack.assert_called_once_with(
+            "inst-dismiss",
+        )
+        # SSE was emitted BEFORE the cascade failure — F3 timing invariant.
+        hub.stream_question_pack.assert_awaited_once()
+        manager.resume_instance_cascade.assert_awaited_once_with("inst-dismiss")
+        manager.resume_processing_job.assert_not_awaited()
+
+
+# ============================================================================
+# Empty resumed_ids — W2
+# ============================================================================
+
+
+class TestDismissEmptyResumeList:
+    """Empty ``resumed_ids`` returns 200 with no per-instance resume job spawned."""
+
+    def test_empty_resumed_ids_returns_200_and_no_resume_processing_calls(
+        self, client_and_state_for_dismiss,
+    ):
+        """A no-op cascade (``resumed_ids == []``) returns 200 with no jobs.
+
+        When the cascade reports nothing to resume, the per-instance
+        fan-out loop does not execute, so ``resume_processing_job`` is
+        never awaited. The endpoint still returns 200 — the dismiss
+        itself succeeded; the cascade simply had no work to do.
+
+        Asserts:
+            * status 200
+            * ``resume_info.resumed`` matches the endpoint's actual
+              value (currently hardcoded ``True``; the important
+              contract is that the response is well-formed and the
+              frontend gets a clean 200, not a 5xx)
+            * ``resume_info.resume_results`` is an empty dict
+            * ``resume_processing_job`` was NOT awaited
+        """
+        from daemon.services.question_manager import QuestionPack
+
+        pack = QuestionPack(instance_id="inst-dismiss", questions=[])
+        client, state = client_and_state_for_dismiss
+        manager = _make_manager_for_dismiss_endpoint(
+            instance_exists=True,
+            question_pack=pack,
+        )
+        manager.resume_instance_cascade = AsyncMock(
+            return_value={
+                "resumed_ids": [],
+                "skipped_ids": ["inst-dismiss"],
+                "target_id": "inst-dismiss",
+            },
+        )
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        response = client.post("/instances/inst-dismiss/question/dismiss")
+
+        assert response.status_code == 200, response.text
+        resume_info = response.json()["resume_info"]
+        # Match the actual endpoint contract: ``resumed`` is currently
+        # hardcoded ``True`` in the response builder (line 949 in
+        # daemon/routers/instances.py). The contract that matters here
+        # is that the endpoint returns 200 with a well-formed body
+        # rather than leaking the "nothing to resume" condition as a
+        # 5xx or a 404.
+        assert resume_info["resumed"] is True  # Matches the answer endpoint.
+        assert resume_info["resumed_ids"] == []
+        assert resume_info["skipped_ids"] == ["inst-dismiss"]
+        # Empty resume_results — the per-instance loop never executed.
+        assert resume_info["resume_results"] == {}
+        # No graph re-entry was kicked off.
+        manager.resume_processing_job.assert_not_awaited()
