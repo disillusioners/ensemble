@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core';
+import { Component, computed, effect, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { WorkspaceService } from '../../services/workspace.service';
 import { CodemirrorDirective } from './codemirror.directive';
@@ -23,7 +23,9 @@ import { CodemirrorDirective } from './codemirror.directive';
         @if (!f.binary) {
           <div class="code-content" [appCodemirror]=""
                [content]="f.content"
-               [language]="f.language"></div>
+               [language]="f.language"
+               [editable]="true"
+               (contentChange)="onContentChange($event)"></div>
         } @else {
           <div class="binary-placeholder">
             Binary file — preview not available ({{ formatSize(f.size_bytes) }})
@@ -36,7 +38,25 @@ import { CodemirrorDirective } from './codemirror.directive';
 })
 export class CodeViewerComponent {
   private readonly workspace = inject(WorkspaceService);
+  private readonly originalContent = signal<string>('');
   public readonly file = this.workspace.currentFile.asReadonly();
+  public readonly editedContent = signal<string>('');
+  public readonly isDirty = computed(() => this.editedContent() !== this.originalContent());
+  public readonly currentContent = this.editedContent.asReadonly();
+
+  constructor() {
+    effect(() => {
+      const file = this.file();
+      if (file && !file.binary) {
+        this.originalContent.set(file.content);
+        this.editedContent.set(file.content);
+      }
+    });
+  }
+
+  onContentChange(content: string): void {
+    this.editedContent.set(content);
+  }
 
   formatSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;

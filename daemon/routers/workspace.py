@@ -22,7 +22,7 @@ from daemon.services.file_change_monitor import FileChangeMonitor
 
 from .workspace_schemas import (
     FileTreeResponse, FileContentResponse, GitDiffResponse,
-    FileTreeNode,
+    FileTreeNode, FileWriteRequest, FileWriteResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,41 @@ async def get_file_content(
         truncated=content_data["truncated"],
         binary=content_data["binary"],
         size_bytes=content_data["size_bytes"],
+    )
+
+
+@router.put("/{project_id}/file", response_model=FileWriteResponse)
+async def put_file_content(
+    project_id: str,
+    body: FileWriteRequest,
+):
+    """Write file content to the project workspace.
+
+    Mirrors the read endpoint's path-safety story: ``resolve_strict``
+    enforces the workdir boundary before any filesystem write, and the
+    content size is bounded by the same ``MAX_FILE_SIZE_BYTES`` cap
+    applied on read.
+    """
+    workdir = await _get_workdir(project_id)
+    guard = _get_guard(workdir)
+    target, err = guard.resolve_strict(body.path)
+    if err:
+        raise HTTPException(status_code=403, detail={"error": err})
+    content_bytes = body.content.encode("utf-8")
+    if len(content_bytes) > guard.MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": "file_too_large", "size_bytes": len(content_bytes)},
+        )
+    try:
+        await asyncio.to_thread(_write_file_safe, target, body.content)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "path_is_directory"})
+    return FileWriteResponse(
+        project_id=project_id,
+        path=body.path,
+        size_bytes=len(content_bytes),
+        saved=True,
     )
 
 
@@ -210,6 +245,21 @@ def _read_file_safe(target: Path, guard: WorkspaceGuard, offset: int, limit: int
         "size_bytes": stat.st_size,
         "error": None,
     }
+
+
+def _write_file_safe(target: Path, content: str) -> None:
+    """Write ``content`` to ``target``, creating parent dirs as needed.
+
+    Synchronous — call via ``asyncio.to_thread`` from async endpoints
+    so the event loop isn't blocked on filesystem I/O. Caller is
+    responsible for any size validation (see the endpoint's
+    ``MAX_FILE_SIZE_BYTES`` check) and path containment
+    (``resolve_strict``).
+    """
+    if target.is_dir():
+        raise ValueError("path_is_directory")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
 
 
 _LANGUAGE_MAP = {

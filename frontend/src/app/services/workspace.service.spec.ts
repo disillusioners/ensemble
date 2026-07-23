@@ -9,6 +9,7 @@ import {
   FileContentResponse,
   FileTreeNode,
   FileTreeResponse,
+  FileWriteResponse,
   GitDiffResponse,
 } from '../models/workspace.model';
 
@@ -210,6 +211,120 @@ describe('WorkspaceService', () => {
 
     const req = httpTesting.expectOne('/api/workspace/project-1/diff?path=src/main.py');
     req.flush('Server error', { status: 500, statusText: 'Server Error' });
+  });
+
+  it('should save the selected file via PUT and refresh currentFile content/size', (done) => {
+    // Load a file first so currentFile is populated.
+    const loaded = makeFileContent({
+      path: 'src/main.py',
+      content: 'old content',
+      size_bytes: 11,
+    });
+    service.getFileContent('project-1', 'src/main.py').subscribe({ error: () => undefined });
+    httpTesting
+      .expectOne((r) => r.url === '/api/workspace/project-1/file')
+      .flush(loaded);
+
+    const newContent = 'new content';
+    const saveResponse: FileWriteResponse = {
+      project_id: 'project-1',
+      path: 'src/main.py',
+      size_bytes: newContent.length,
+      saved: true,
+    };
+
+    service.saveFile('project-1', 'src/main.py', newContent).subscribe({
+      next: (result) => {
+        expect(result).toEqual(saveResponse);
+        expect(service.currentFile()?.content).toBe(newContent);
+        expect(service.currentFile()?.size_bytes).toBe(newContent.length);
+        done();
+      },
+      error: done.fail,
+    });
+
+    const req = httpTesting.expectOne(
+      (request) =>
+        request.method === 'PUT' &&
+        request.url === '/api/workspace/project-1/file'
+    );
+    expect(req.request.body).toEqual({ path: 'src/main.py', content: newContent });
+    req.flush(saveResponse);
+  });
+
+  it('should not mutate currentFile when the saved path differs from selectedPath', (done) => {
+    const loaded = makeFileContent({
+      path: 'src/main.py',
+      content: 'old content',
+      size_bytes: 11,
+    });
+    service.getFileContent('project-1', 'src/main.py').subscribe({ error: () => undefined });
+    httpTesting
+      .expectOne((r) => r.url === '/api/workspace/project-1/file')
+      .flush(loaded);
+
+    const saveResponse: FileWriteResponse = {
+      project_id: 'project-1',
+      path: 'src/other.py',
+      size_bytes: 5,
+      saved: true,
+    };
+
+    service.saveFile('project-1', 'src/other.py', 'hello').subscribe({
+      next: () => {
+        // Unrelated file — currentFile must stay unchanged.
+        expect(service.currentFile()?.content).toBe('old content');
+        expect(service.currentFile()?.path).toBe('src/main.py');
+        expect(service.currentFile()?.size_bytes).toBe(11);
+        done();
+      },
+      error: done.fail,
+    });
+
+    const req = httpTesting.expectOne(
+      (request) =>
+        request.method === 'PUT' &&
+        request.url === '/api/workspace/project-1/file'
+    );
+    expect(req.request.body).toEqual({ path: 'src/other.py', content: 'hello' });
+    req.flush(saveResponse);
+  });
+
+  it('should re-throw a save 500', (done) => {
+    service.saveFile('project-1', 'src/main.py', 'hello').subscribe({
+      next: () => done.fail('expected error'),
+      error: (error) => {
+        expect(error.status).toBe(500);
+        expect(service.error()).toContain('500');
+        done();
+      },
+    });
+
+    const req = httpTesting.expectOne(
+      (request) =>
+        request.method === 'PUT' &&
+        request.url === '/api/workspace/project-1/file'
+    );
+    req.flush('Server error', { status: 500, statusText: 'Server Error' });
+  });
+
+  it('should URL-encode the project id on saveFile', (done) => {
+    service.saveFile('team/project with spaces', 'src/main.py', 'x').subscribe({
+      next: () => done(),
+      error: done.fail,
+    });
+
+    const req = httpTesting.expectOne(
+      (request) =>
+        request.method === 'PUT' &&
+        request.url === '/api/workspace/team%2Fproject%20with%20spaces/file'
+    );
+    req.flush({
+      project_id: 'team/project with spaces',
+      path: 'src/main.py',
+      size_bytes: 1,
+      saved: true,
+    });
   });
 
   it('should expand a directory by requesting its node path', (done) => {

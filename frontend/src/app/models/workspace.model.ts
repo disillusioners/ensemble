@@ -41,3 +41,15 @@ export interface FileChangeEvent {
   type: 'modified' | 'created' | 'deleted' | 'moved' | string;
   timestamp?: number;
 }
+
+export interface FileWriteRequest {
+  path: string;
+  content: string;
+}
+
+export interface FileWriteResponse {
+  project_id: string;
+  path: string;
+  size_bytes: number;
+  saved: boolean;
+}

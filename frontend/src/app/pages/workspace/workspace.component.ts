@@ -2,6 +2,7 @@ import {
   Component,
   DestroyRef,
   EventEmitter,
+  HostListener,
   Input,
   OnDestroy,
   OnInit,
@@ -18,6 +19,8 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatMenuModule } from '@angular/material/menu';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
 import { WorkspaceService } from '../../services/workspace.service';
@@ -52,6 +55,8 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
     MatButtonToggleModule,
     MatIconModule,
     MatButtonModule,
+    MatMenuModule,
+    MatSnackBarModule,
     MatProgressSpinnerModule,
     FileTreeComponent,
     CodeViewerComponent,
@@ -73,7 +78,17 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
 
         <mat-sidenav-content class="content-area">
           <mat-toolbar class="content-toolbar">
-            <span class="toolbar-title">{{ selectedPath() || 'Select a file' }}</span>
+            <span class="toolbar-title">
+              {{ selectedPath() || 'Select a file' }}
+              @if (isCodeViewerDirty()) {
+                <span
+                  class="dirty-indicator"
+                  data-testid="dirty-indicator"
+                  aria-label="Unsaved changes"
+                  title="Unsaved changes"
+                >*</span>
+              }
+            </span>
             <span class="spacer"></span>
             @if (selectedPath()) {
               <mat-button-toggle-group [value]="viewMode()">
@@ -104,6 +119,33 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
               <mat-icon>visibility_off</mat-icon>
             </button>
           </mat-toolbar>
+
+          @if (selectedPath()) {
+            <div class="editor-menubar">
+              <button
+                mat-button
+                type="button"
+                class="file-menu-trigger"
+                data-testid="file-menu-trigger"
+                aria-label="File menu"
+                [matMenuTriggerFor]="fileMenu"
+              >
+                File
+              </button>
+              <mat-menu #fileMenu="matMenu">
+                <button
+                  mat-menu-item
+                  type="button"
+                  data-testid="save-menu-item"
+                  [disabled]="!canSave()"
+                  (click)="saveFile()"
+                >
+                  <span>Save</span>
+                  <span class="shortcut">Ctrl+S</span>
+                </button>
+              </mat-menu>
+            </div>
+          }
 
           <div class="viewer-content">
             @if (workspace.error(); as errorMessage) {
@@ -138,8 +180,10 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   readonly workspace = inject(WorkspaceService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly snackBar = inject(MatSnackBar);
 
   @ViewChild(FileTreeComponent, { static: true }) private fileTree!: FileTreeComponent;
+  @ViewChild(CodeViewerComponent) codeViewer?: CodeViewerComponent;
 
   /**
    * Active project ID. May be set by the host (overlay mode) or read from
@@ -230,6 +274,66 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
   onHide(): void {
     this.hide.emit();
+  }
+
+  /**
+   * Whether the open file has unsaved edits. Reads the code viewer's
+   * computed `isDirty` signal. Returns false when no file is selected,
+   * when the view mode is `diff`, or when the code viewer's view child
+   * has not yet been resolved.
+   */
+  isCodeViewerDirty(): boolean {
+    return this.viewMode() === 'code' && !!this.codeViewer?.isDirty();
+  }
+
+  /**
+   * Whether the Save menu item should be enabled. Save is allowed only
+   * when a file is selected AND the code viewer reports dirty state.
+   */
+  canSave(): boolean {
+    return !!this.selectedPath() && this.isCodeViewerDirty();
+  }
+
+  /**
+   * PUT the current editor content to the workspace backend. Surfaces
+   * success and failure via MatSnackBar. No-op when `canSave()` is false
+   * (no file selected, or nothing dirty).
+   */
+  saveFile(): void {
+    if (!this.canSave()) {
+      return;
+    }
+    const path = this.selectedPath();
+    if (!path || !this.codeViewer) {
+      return;
+    }
+    this.workspace
+      .saveFile(this.projectId, path, this.codeViewer.currentContent())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          this.snackBar.open('File saved', 'Dismiss', { duration: 3000 });
+        },
+        error: () => {
+          this.snackBar.open('Failed to save file', 'Dismiss', { duration: 5000 });
+        },
+      });
+  }
+
+  /**
+   * Ctrl/Cmd+S — trigger save. Prevented from the browser default so
+   * the page does not try to save as HTML. Active only when the menu
+   * bar is logically visible (a file is selected).
+   */
+  @HostListener('window:keydown', ['$event'])
+  onSaveKeydown(event: KeyboardEvent): void {
+    if (!(event.ctrlKey || event.metaKey) || event.key !== 's') {
+      return;
+    }
+    event.preventDefault();
+    if (this.canSave()) {
+      this.saveFile();
+    }
   }
 
   /**

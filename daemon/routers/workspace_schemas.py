@@ -169,6 +169,38 @@ class GitDiffResponse(BaseModel):
     )
 
 
+class FileWriteRequest(BaseModel):
+    """Request body for ``PUT /api/workspace/file``.
+
+    Attributes:
+        path: Path of the file relative to workdir (where to write).
+        content: UTF-8 string content to write to the file. Empty
+            string is permitted (creates an empty file).
+    """
+
+    path: str = Field(..., description="Path relative to workdir")
+    content: str = Field(..., description="UTF-8 content to write")
+
+
+class FileWriteResponse(BaseModel):
+    """Response body for ``PUT /api/workspace/file``.
+
+    Attributes:
+        project_id: Owning project ID.
+        path: Path of the file relative to workdir (as requested).
+        size_bytes: Exact byte size of the written content (UTF-8
+            encoded length of ``content``).
+        saved: Always ``True`` on success; included so the client can
+            treat the response as a discriminated success/failure
+            envelope without inspecting status codes.
+    """
+
+    project_id: str = Field(..., description="Owning project ID")
+    path: str = Field(..., description="Path relative to workdir")
+    size_bytes: int = Field(..., description="Byte size of the written content")
+    saved: bool = Field(default=True, description="True on successful write")
+
+
 class WorkspaceErrorResponse(BaseModel):
     """Uniform error envelope for all workspace endpoints.
 
@@ -197,5 +229,7 @@ __all__ = [
     "FileTreeResponse",
     "FileContentResponse",
     "GitDiffResponse",
+    "FileWriteRequest",
+    "FileWriteResponse",
     "WorkspaceErrorResponse",
 ]

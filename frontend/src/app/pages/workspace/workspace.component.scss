@@ -72,6 +72,40 @@ mat-button-toggle mat-icon {
   overflow: hidden;
 }
 
+.editor-menubar {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 4px;
+  background: #21252b;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #d7dae0;
+  flex-shrink: 0;
+}
+
+.editor-menubar .file-menu-trigger {
+  color: #d7dae0;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.editor-menubar .shortcut {
+  margin-left: auto;
+  padding-left: 16px;
+  font-size: 11px;
+  color: #9aa0a6;
+  letter-spacing: 0.04em;
+}
+
+.dirty-indicator {
+  color: #e0af68;
+  margin-left: 6px;
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1;
+  user-select: none;
+}
+
 .error-banner {
   display: flex;
   align-items: center;

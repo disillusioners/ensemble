@@ -565,6 +565,205 @@ class TestGetFileContent:
 
 
 # ============================================================================
+# PUT /api/workspace/{project_id}/file
+# ============================================================================
+
+
+class TestPutFileContent:
+    """``PUT /api/workspace/{project_id}/file`` writes file content to disk."""
+
+    @pytest.mark.asyncio
+    async def test_put_new_file_writes_content_to_disk(self, client, workdir):
+        """Writing a brand-new file → 200, response echoes path/size, file exists."""
+        ac, _, project_id = client
+        target = workdir / "written.py"
+        body_text = "print('hello, world')\n"
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "written.py", "content": body_text},
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["project_id"] == project_id
+        assert data["path"] == "written.py"
+        assert data["saved"] is True
+        assert data["size_bytes"] == len(body_text.encode("utf-8"))
+
+        # File actually exists on disk with the bytes we sent.
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == body_text
+
+    @pytest.mark.asyncio
+    async def test_put_overwrites_existing_file(self, client, workdir):
+        """Writing to an existing file replaces its content (not appends)."""
+        ac, _, project_id = client
+        target = workdir / "src" / "hello.py"
+        original = target.read_text(encoding="utf-8")
+        replacement = "def hello():\n    return 'replaced'\n"
+        assert replacement != original  # sanity
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "src/hello.py", "content": replacement},
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["size_bytes"] == len(replacement.encode("utf-8"))
+        assert target.read_text(encoding="utf-8") == replacement
+        # And the original content is gone (no append).
+        assert "return 'world'" not in target.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_put_creates_missing_parent_directories(self, client, workdir):
+        """Writing to a nested path creates intermediate directories."""
+        ac, _, project_id = client
+        nested = workdir / "new_dir" / "sub" / "leaf.txt"
+        assert not nested.parent.exists()  # sanity: parent dirs missing
+        body_text = "leaf\n"
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "new_dir/sub/leaf.txt", "content": body_text},
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["path"] == "new_dir/sub/leaf.txt"
+        assert data["size_bytes"] == len(body_text.encode("utf-8"))
+        assert nested.exists()
+        assert nested.read_text(encoding="utf-8") == body_text
+
+    @pytest.mark.asyncio
+    async def test_put_traversal_rejected_and_does_not_escape(
+        self, client, tmp_path
+    ):
+        """A path aimed outside the workdir must be rejected (4xx) and the
+        would-be target file must NOT be created on disk."""
+        ac, _, project_id = client
+        evil_target = tmp_path / "evil.txt"  # outside the project workdir
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": str(evil_target), "content": "should not leak"},
+        )
+        assert response.status_code in (400, 403, 404)
+        assert not evil_target.exists()
+
+    @pytest.mark.asyncio
+    async def test_put_traversal_via_relative_dotdot_rejected(self, client):
+        """``path=../../../etc/passwd`` → 403 (matches the GET endpoint's behavior)."""
+        ac, _, project_id = client
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "../../../etc/passwd", "content": "should not leak"},
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_put_absolute_path_outside_workdir_rejected(self, client):
+        """``path=/etc/passwd`` → 403 — absolute escapes are rejected too."""
+        ac, _, project_id = client
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "/etc/passwd", "content": "should not leak"},
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_put_oversized_content_returns_413(self, client, workdir, monkeypatch):
+        """Content exceeding the (monkeypatched) ``MAX_FILE_SIZE_BYTES`` → 413.
+
+        Mirrors the GET endpoint's ``test_oversized_file_returns_413``
+        pattern: shrink the guard's limit so a small payload trips it.
+        Also verifies that the pre-existing file on disk is not modified
+        by the rejected write.
+        """
+        monkeypatch.setattr(WorkspaceGuard, "MAX_FILE_SIZE_BYTES", 16)
+        ac, _, project_id = client
+        original_content = (workdir / "big.txt").read_text(encoding="utf-8")
+        oversized = "x" * 256  # well over the patched 16-byte cap
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "big.txt", "content": oversized},
+        )
+
+        assert response.status_code == 413
+        detail = response.json().get("detail") or response.json()
+        assert detail.get("error") == "file_too_large"
+        # The rejected write must not have changed the file on disk.
+        assert (workdir / "big.txt").read_text(encoding="utf-8") == original_content
+
+    @pytest.mark.asyncio
+    async def test_put_empty_content_succeeds_with_zero_size(self, client, workdir):
+        """Empty content is allowed; ``size_bytes`` is 0 and the file is empty."""
+        ac, _, project_id = client
+        target = workdir / "empty.txt"
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "empty.txt", "content": ""},
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["saved"] is True
+        assert data["size_bytes"] == 0
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == ""
+
+    @pytest.mark.asyncio
+    async def test_put_unicode_content_preserved(self, client, workdir):
+        """Non-ASCII UTF-8 content round-trips: ``size_bytes`` matches byte length."""
+        ac, _, project_id = client
+        target = workdir / "unicode.txt"
+        body_text = "café — 你好 — 🦀\n"
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "unicode.txt", "content": body_text},
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["size_bytes"] == len(body_text.encode("utf-8"))
+        assert target.read_text(encoding="utf-8") == body_text
+
+    @pytest.mark.asyncio
+    async def test_put_unknown_project_returns_404(self, client):
+        """``PUT`` against an unknown ``project_id`` → 404, no side effects."""
+        ac, _, _ = client
+
+        response = await ac.put(
+            "/api/workspace/no-such-project-id-12345/file",
+            json={"path": "x.txt", "content": "x"},
+        )
+
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_put_missing_content_field_returns_422(self, client, workdir):
+        """Omitting the required ``content`` field → 422 (Pydantic validation).
+
+        Pins the contract: ``content`` is a required field of ``FileWriteRequest``.
+        """
+        ac, _, project_id = client
+
+        response = await ac.put(
+            f"/api/workspace/{project_id}/file",
+            json={"path": "x.txt"},
+        )
+
+        assert response.status_code == 422
+
+
+# ============================================================================
 # GET /api/workspace/{project_id}/diff
 # ============================================================================
 

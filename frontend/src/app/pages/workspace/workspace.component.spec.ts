@@ -9,12 +9,15 @@ import { ActivatedRoute } from '@angular/router';
 import { By } from '@angular/platform-browser';
 import { Subject } from 'rxjs';
 import { Component } from '@angular/core';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { WorkspaceComponent } from './workspace.component';
 import { WorkspaceService } from '../../services/workspace.service';
 import { FileTreeComponent } from '../../components/file-tree/file-tree.component';
+import { CodeViewerComponent } from '../../components/code-viewer/code-viewer.component';
 import type {
   FileContentResponse,
   FileTreeResponse,
+  FileWriteResponse,
   GitDiffResponse,
 } from '../../models/workspace.model';
 
@@ -115,6 +118,52 @@ describe('WorkspaceComponent', () => {
       error: null,
       ...overrides,
     };
+  }
+
+  function makeWriteResponse(
+    overrides: Partial<FileWriteResponse> = {}
+  ): FileWriteResponse {
+    return {
+      project_id: 'test-project-id',
+      path: 'src/main.ts',
+      size_bytes: 16,
+      saved: true,
+      ...overrides,
+    };
+  }
+
+  /**
+   * Drive the workspace to a "file selected and loaded" state. Flushes
+   * the initial tree request and the file content request so subsequent
+   * tests can mutate the dirty flag or assert save behaviour.
+   */
+  function selectFile(path: string = 'src/main.ts'): FileContentResponse {
+    component.onFileSelected(path);
+    const req = httpMock.expectOne(
+      (r) =>
+        r.url === '/api/workspace/test-project-id/file' &&
+        r.params.get('path') === path
+    );
+    expect(req.request.method).toBe('GET');
+    const response = makeFileContent({ path });
+    req.flush(response);
+    fixture.detectChanges();
+    return response;
+  }
+
+  /**
+   * Locate the embedded CodeViewerComponent and mark it dirty by
+   * diverging `editedContent` from `originalContent`. Returns the
+   * viewer's component instance so callers can assert other state.
+   */
+  function markDirty(): CodeViewerComponent {
+    const codeViewerDebug = fixture.debugElement.query(
+      By.directive(CodeViewerComponent)
+    );
+    const codeViewer = codeViewerDebug.componentInstance as CodeViewerComponent;
+    codeViewer.editedContent.set('export const modified = true;');
+    fixture.detectChanges();
+    return codeViewer;
   }
 
   /**
@@ -628,6 +677,316 @@ describe('WorkspaceComponent', () => {
       hostFixture.detectChanges();
 
       expect(host.hideCount).toBe(2);
+    });
+  });
+
+  // ── 9) File > Save menu — menubar, canSave, saveFile, snackbar ───
+
+  describe('File > Save menu', () => {
+    /** Flush the initial tree request fired by ngOnInit. */
+    function bootWithTree(): void {
+      fixture.detectChanges();
+      flushInitialTree();
+    }
+
+    it('hides the editor menubar when no file is selected', () => {
+      bootWithTree();
+
+      const trigger = fixture.debugElement.query(
+        By.css('[data-testid="file-menu-trigger"]')
+      );
+      expect(trigger).toBeNull();
+    });
+
+    it('renders the editor menubar after a file is selected', () => {
+      bootWithTree();
+      selectFile();
+
+      const trigger = fixture.debugElement.query(
+        By.css('[data-testid="file-menu-trigger"]')
+      );
+      expect(trigger).not.toBeNull();
+      expect(trigger.nativeElement.textContent.trim()).toBe('File');
+    });
+
+    it('does not render the dirty indicator when content is clean', () => {
+      bootWithTree();
+      selectFile();
+
+      const indicator = fixture.debugElement.query(
+        By.css('[data-testid="dirty-indicator"]')
+      );
+      expect(indicator).toBeNull();
+    });
+
+    it('renders the dirty indicator after the editor content changes', () => {
+      bootWithTree();
+      selectFile();
+      markDirty();
+
+      const indicator = fixture.debugElement.query(
+        By.css('[data-testid="dirty-indicator"]')
+      );
+      expect(indicator).not.toBeNull();
+      expect(indicator.nativeElement.textContent.trim()).toBe('*');
+      expect(indicator.nativeElement.getAttribute('aria-label')).toBe(
+        'Unsaved changes'
+      );
+    });
+
+    describe('canSave()', () => {
+      it('is false when no file is selected', () => {
+        bootWithTree();
+        expect(component.canSave()).toBe(false);
+      });
+
+      it('is false when a file is selected but content is not dirty', () => {
+        bootWithTree();
+        selectFile();
+
+        expect(component.canSave()).toBe(false);
+      });
+
+      it('is true when a file is selected and content is dirty', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        expect(component.canSave()).toBe(true);
+      });
+
+      it('is false when the view mode is diff even if content is dirty', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        // Simulate switching to diff view — the code viewer is still
+        // dirty in the background, but the menubar should never enable
+        // save against a diff view.
+        component.viewMode.set('diff');
+        fixture.detectChanges();
+
+        expect(component.canSave()).toBe(false);
+      });
+    });
+
+    describe('saveFile()', () => {
+      it('is a no-op when no file is selected', () => {
+        bootWithTree();
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const snackBar = TestBed.inject(MatSnackBar);
+        const openSpy = jest.spyOn(snackBar, 'open');
+
+        component.saveFile();
+
+        expect(saveFileSpy).not.toHaveBeenCalled();
+        expect(openSpy).not.toHaveBeenCalled();
+        httpMock.expectNone(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+      });
+
+      it('is a no-op when the file is not dirty', () => {
+        bootWithTree();
+        selectFile();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const snackBar = TestBed.inject(MatSnackBar);
+        const openSpy = jest.spyOn(snackBar, 'open');
+
+        component.saveFile();
+
+        expect(saveFileSpy).not.toHaveBeenCalled();
+        expect(openSpy).not.toHaveBeenCalled();
+      });
+
+      it('PUTs the current content to the file endpoint with correct params', () => {
+        bootWithTree();
+        selectFile('src/main.ts');
+        markDirty();
+
+        component.saveFile();
+
+        const req = httpMock.expectOne(
+          (r) =>
+            r.url === '/api/workspace/test-project-id/file' &&
+            r.method === 'PUT'
+        );
+        expect(req.request.body).toEqual({
+          path: 'src/main.ts',
+          content: 'export const modified = true;',
+        });
+        req.flush(makeWriteResponse({ path: 'src/main.ts', size_bytes: 32 }));
+      });
+
+      it('shows success snackbar after the save resolves', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        // Use the component's own injector so the spy targets the same
+        // MatSnackBar instance the component holds via `inject()`.
+        const snackBar = fixture.debugElement.injector.get(MatSnackBar);
+        const openSpy = jest.spyOn(snackBar, 'open');
+
+        component.saveFile();
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush(makeWriteResponse());
+
+        expect(openSpy).toHaveBeenCalledWith(
+          'File saved',
+          'Dismiss',
+          expect.objectContaining({ duration: 3000 })
+        );
+      });
+
+      it('shows error snackbar when the save errors', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const snackBar = fixture.debugElement.injector.get(MatSnackBar);
+        const openSpy = jest.spyOn(snackBar, 'open');
+
+        component.saveFile();
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush('boom', { status: 500, statusText: 'Server Error' });
+
+        expect(openSpy).toHaveBeenCalledWith(
+          'Failed to save file',
+          'Dismiss',
+          expect.objectContaining({ duration: 5000 })
+        );
+      });
+
+      it('routes through the real WorkspaceService.saveFile with the right args', () => {
+        bootWithTree();
+        selectFile('src/app.ts');
+        const codeViewer = markDirty();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+
+        component.saveFile();
+
+        expect(saveFileSpy).toHaveBeenCalledWith(
+          'test-project-id',
+          'src/app.ts',
+          codeViewer.currentContent()
+        );
+
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush(makeWriteResponse({ path: 'src/app.ts' }));
+      });
+    });
+
+    describe('Ctrl/Cmd+S keyboard shortcut', () => {
+      function keydown(init: Partial<KeyboardEventInit>): KeyboardEvent {
+        // Tests don't need a real event with native preventDefault — but
+        // we still spy on it so we can verify the browser default is
+        // being suppressed exactly when we expect.
+        return new KeyboardEvent('keydown', { bubbles: true, ...init });
+      }
+
+      it('saves and prevents default when Ctrl+S is pressed and the file is dirty', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const event = keydown({ key: 's', ctrlKey: true });
+        const preventDefaultSpy = jest.spyOn(event, 'preventDefault');
+
+        component.onSaveKeydown(event);
+
+        expect(preventDefaultSpy).toHaveBeenCalled();
+        expect(saveFileSpy).toHaveBeenCalled();
+
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush(makeWriteResponse());
+      });
+
+      it('saves when Cmd+S is pressed (macOS)', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const event = keydown({ key: 's', metaKey: true });
+
+        component.onSaveKeydown(event);
+
+        expect(saveFileSpy).toHaveBeenCalled();
+
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush(makeWriteResponse());
+      });
+
+      it('prevents default but does NOT save when no file is selected', () => {
+        bootWithTree();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const event = keydown({ key: 's', ctrlKey: true });
+        const preventDefaultSpy = jest.spyOn(event, 'preventDefault');
+
+        component.onSaveKeydown(event);
+
+        expect(preventDefaultSpy).toHaveBeenCalled();
+        expect(saveFileSpy).not.toHaveBeenCalled();
+      });
+
+      it('prevents default but does NOT save when the file is not dirty', () => {
+        bootWithTree();
+        selectFile();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const event = keydown({ key: 's', ctrlKey: true });
+        const preventDefaultSpy = jest.spyOn(event, 'preventDefault');
+
+        component.onSaveKeydown(event);
+
+        expect(preventDefaultSpy).toHaveBeenCalled();
+        expect(saveFileSpy).not.toHaveBeenCalled();
+      });
+
+      it('does nothing for plain "s" keypress without modifier', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const event = keydown({ key: 's' });
+        const preventDefaultSpy = jest.spyOn(event, 'preventDefault');
+
+        component.onSaveKeydown(event);
+
+        expect(preventDefaultSpy).not.toHaveBeenCalled();
+        expect(saveFileSpy).not.toHaveBeenCalled();
+      });
+
+      it('does nothing for Ctrl+A or other Ctrl-modified keys', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        const event = keydown({ key: 'a', ctrlKey: true });
+        const preventDefaultSpy = jest.spyOn(event, 'preventDefault');
+
+        component.onSaveKeydown(event);
+
+        expect(preventDefaultSpy).not.toHaveBeenCalled();
+        expect(saveFileSpy).not.toHaveBeenCalled();
+      });
     });
   });
 });

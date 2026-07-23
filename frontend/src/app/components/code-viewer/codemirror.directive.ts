@@ -1,4 +1,13 @@
-import { Directive, ElementRef, Input, OnChanges, OnDestroy, SimpleChanges } from '@angular/core';
+import {
+  Directive,
+  ElementRef,
+  EventEmitter,
+  Input,
+  OnChanges,
+  OnDestroy,
+  Output,
+  SimpleChanges,
+} from '@angular/core';
 import { EditorState, Compartment, Extension } from '@codemirror/state';
 import { EditorView, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
 import { oneDark } from '@codemirror/theme-one-dark';
@@ -30,9 +39,12 @@ export class CodemirrorDirective implements OnChanges, OnDestroy {
   @Input() appCodemirror: string | undefined = '';
   @Input() content = '';
   @Input() language: string | null = null;
+  @Input() editable: boolean = false;
+  @Output() contentChange = new EventEmitter<string>();
 
   private view: EditorView | null = null;
   private readonly langCompartment = new Compartment();
+  private readonly editableCompartment = new Compartment();
 
   constructor(private readonly el: ElementRef<HTMLElement>) {}
 
@@ -50,6 +62,14 @@ export class CodemirrorDirective implements OnChanges, OnDestroy {
         effects: this.langCompartment.reconfigure(this.getLangExtension())
       });
     }
+    if (changes['editable'] && this.view) {
+      this.view.dispatch({
+        effects: this.editableCompartment.reconfigure([
+          EditorView.editable.of(this.editable),
+          EditorState.readOnly.of(!this.editable),
+        ]),
+      });
+    }
   }
 
   private initView(): void {
@@ -57,14 +77,21 @@ export class CodemirrorDirective implements OnChanges, OnDestroy {
       state: EditorState.create({
         doc: this.content,
         extensions: [
-          EditorView.editable.of(false),  // READ-ONLY
-          EditorState.readOnly.of(true),
+          this.editableCompartment.of([
+            EditorView.editable.of(this.editable),
+            EditorState.readOnly.of(!this.editable),
+          ]),
           lineNumbers(),
           highlightActiveLine(),
           highlightActiveLineGutter(),
           oneDark,
           this.langCompartment.of(this.getLangExtension()),
           EditorView.lineWrapping,
+          EditorView.updateListener.of((update) => {
+            if (update.docChanged) {
+              this.contentChange.emit(update.state.doc.toString());
+            }
+          }),
         ],
       }),
       parent: this.el.nativeElement,

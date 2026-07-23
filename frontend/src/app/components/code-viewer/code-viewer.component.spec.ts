@@ -221,4 +221,69 @@ describe('CodeViewerComponent', () => {
       expect(fixture.nativeElement.querySelector('.code-viewer')).toBeNull();
     });
   });
+
+  // ── 7) Edit mode: dirty state tracking ─────────────────────────
+
+  describe('edit mode', () => {
+    beforeEach(() => {
+      mockWorkspace.currentFile.set(makeFile({ content: 'original' }));
+      fixture.detectChanges();
+    });
+
+    it('should start not dirty after file load', () => {
+      expect(component.isDirty()).toBe(false);
+      expect(component.editedContent()).toBe('original');
+    });
+
+    it('should expose the current content as a public readonly signal', () => {
+      expect(component.currentContent()).toBe('original');
+    });
+
+    it('should mark dirty when content changes via onContentChange', () => {
+      component.onContentChange('edited');
+      expect(component.isDirty()).toBe(true);
+      expect(component.editedContent()).toBe('edited');
+      expect(component.currentContent()).toBe('edited');
+    });
+
+    it('should clear dirty when content returns to original', () => {
+      component.onContentChange('edited');
+      expect(component.isDirty()).toBe(true);
+      component.onContentChange('original');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('should reset editedContent to new file content when file changes', () => {
+      component.onContentChange('edited');
+      expect(component.isDirty()).toBe(true);
+
+      mockWorkspace.currentFile.set(makeFile({ path: 'src/other.ts', content: 'fresh content' }));
+      fixture.detectChanges();
+
+      expect(component.editedContent()).toBe('fresh content');
+      expect(component.currentContent()).toBe('fresh content');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('should bind [editable]="true" to the codemirror directive in the template', () => {
+      const codeContent = fixture.nativeElement.querySelector('.code-content') as HTMLElement | null;
+      expect(codeContent).toBeTruthy();
+      const cmContent = codeContent?.querySelector('.cm-content') as HTMLElement | null;
+      expect(cmContent?.getAttribute('contenteditable')).toBe('true');
+    });
+
+    it('should reset on any file signal change', () => {
+      component.onContentChange('edited');
+      expect(component.isDirty()).toBe(true);
+
+      // A newly emitted file value resets both snapshots, even when its
+      // content matches the current edit. This is the intentional simple behavior.
+      mockWorkspace.currentFile.set(makeFile({ content: 'edited' }));
+      fixture.detectChanges();
+
+      expect(component.editedContent()).toBe('edited');
+      expect(component.currentContent()).toBe('edited');
+      expect(component.isDirty()).toBe(false);
+    });
+  });
 });

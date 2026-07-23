@@ -6,6 +6,8 @@ import {
   FileContentResponse,
   FileTreeNode,
   FileTreeResponse,
+  FileWriteRequest,
+  FileWriteResponse,
   GitDiffResponse,
 } from '../models/workspace.model';
 
@@ -124,6 +126,35 @@ export class WorkspaceService implements OnDestroy {
         tap((res) => this.currentDiff.set(res)),
         catchError((err) => {
           this.error.set(err.message || 'Failed to get diff');
+          throw err;
+        })
+      );
+  }
+
+  /** PUT /api/workspace/{projectId}/file */
+  saveFile(projectId: string, path: string, content: string): Observable<FileWriteResponse> {
+    const body: FileWriteRequest = { path, content };
+    return this.http
+      .put<FileWriteResponse>(
+        `${this.API_BASE}/${encodeURIComponent(projectId)}/file`,
+        body
+      )
+      .pipe(
+        tap((res) => {
+          // If the saved file is the currently selected one, refresh its
+          // in-memory content + size so the editor reflects the write
+          // without needing a round-trip to the server.
+          const current = this.currentFile();
+          if (current && current.path === path) {
+            this.currentFile.set({
+              ...current,
+              content,
+              size_bytes: res.size_bytes,
+            });
+          }
+        }),
+        catchError((err) => {
+          this.error.set(err.message || 'Failed to save file');
           throw err;
         })
       );
