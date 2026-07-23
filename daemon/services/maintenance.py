@@ -267,6 +267,25 @@ class MaintenanceService:
         # init or test setup that doesn't care about tasks), the probe is
         # skipped, matching the existing "missing dependency ⇒ skip the
         # check" pattern.
+        #
+        # Phase 2 (defer-queue idle gate, 2026-07-23): check both
+        # work-tracking tables. The job predicate catches active admission
+        # lifecycle rows, while the task predicate below catches active Tasks
+        # that have no backing JobItem. A non-bool job result is ignored so a
+        # loosely configured Mock cannot make the system look busy.
+        if self._job_queue_service is not None:
+            repo = getattr(self._job_queue_service, "_repository", None)
+            if repo is not None and hasattr(repo, "has_active_non_deferred_work"):
+                try:
+                    has_work = await asyncio.to_thread(
+                        repo.has_active_non_deferred_work, None
+                    )
+                    if isinstance(has_work, bool) and has_work:
+                        return False
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to check job repository: has_active_non_deferred_work: {e}"
+                    )
         if self._task_repository is not None:
             try:
                 has_work = await asyncio.to_thread(

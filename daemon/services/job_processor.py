@@ -193,18 +193,22 @@ class JobProcessor:
         it is reached through the already-injected
         ``InstanceManager._task_repo`` attribute.
 
+        Phase 2 (defer-queue idle gate, 2026-07-23) adds the
+        job-granular ``JobRepository.has_active_non_deferred_work``
+        predicate for admission-lifecycle rows. The task predicate remains a
+        required second check when the job predicate returns False because a
+        Task can exist without a backing JobItem.
+
         Fallback contract (test back-compat):
 
-        * If the attribute is missing (``getattr(...) is None``), fall
-          back to the legacy ``count_active_jobs_in_non_defer_queues``
-          so a partially-initialised manager (e.g. a smoke-test
-          harness) does not permanently starve the defer queue.
-        * If the attribute resolves to a ``Mock`` (detected via the
+        * If the ``_queue_service._repository`` does not expose a
+          ``has_active_non_deferred_work`` method (older test fixtures
+          that mock the legacy ``count_active_jobs_in_non_defer_queues``
+          API), OR the repository is a ``Mock`` (detected via the
           ``_mock_name`` + ``_mock_methods`` private-attribute
-          fingerprint), fall back to the legacy count. This keeps
-          pre-Phase-1 test fixtures — which only mock the legacy API
-          — green. Phase 1 test migration (see ``phase1-plan.md``) is
-          a separate work item and will let us drop this fallback.
+          fingerprint), fall back to the task-granular predicate.
+        * If the task-granular predicate is also unavailable or is a
+          Mock, fall back to the legacy count.
 
         All blocking DB calls are wrapped in ``asyncio.to_thread`` so
         the surrounding event loop stays responsive.
@@ -224,6 +228,20 @@ class JobProcessor:
             by mocking the legacy method; the shared predicate path
             coerces the ``bool`` to ``int``.
         """
+        # Check the job predicate first, but do not treat a False result as
+        # conclusive: active Tasks may exist without a backing JobItem.
+        queue_repo = getattr(self._queue_service, "_repository", None)
+        if (
+            queue_repo is not None
+            and not self._looks_like_mock(queue_repo)
+            and hasattr(queue_repo, "has_active_non_deferred_work")
+        ):
+            active = await asyncio.to_thread(
+                queue_repo.has_active_non_deferred_work, project_id
+            )
+            if isinstance(active, bool) and active:
+                return 1
+
         task_repo = getattr(self._instance_manager, "_task_repo", None)
         if (
             task_repo is not None
@@ -268,9 +286,14 @@ class JobProcessor:
           system-wide (Phase 3 background seam, 2026-07-14) so we
           pass ``None`` as the ``project_id`` explicitly.
 
-        Sister method to :meth:`_defer_idle_check`: same task_repo
-        access path (through ``InstanceManager._task_repo``), same
-        Mock-detection fallback via :meth:`_looks_like_mock`, same
+        Phase 2 (defer-queue idle gate, 2026-07-23) adds the
+        job-granular ``JobRepository.has_active_non_background_work``
+        predicate. It runs first, followed by the task predicate when no
+        active job is found, matching :meth:`_defer_idle_check` and covering
+        job-less Tasks.
+
+        Sister method to :meth:`_defer_idle_check`: same Mock-detection
+        fallback via :meth:`_looks_like_mock`, same
         ``asyncio.to_thread`` wrapping for non-blocking DB I/O, same
         ``int(bool(...))`` coercion so the return contract stays
         ``int``-shaped (matches the defer path). Tests that mock the
@@ -286,6 +309,21 @@ class JobProcessor:
             fallback returns the raw ``int`` for back-compat with tests
             that mock the legacy method.
         """
+        # System-wide sister check: job rows first, followed by task rows
+        # when no active job is found so job-less Tasks still block the
+        # background queue.
+        queue_repo = getattr(self._queue_service, "_repository", None)
+        if (
+            queue_repo is not None
+            and not self._looks_like_mock(queue_repo)
+            and hasattr(queue_repo, "has_active_non_background_work")
+        ):
+            active = await asyncio.to_thread(
+                queue_repo.has_active_non_background_work, None
+            )
+            if isinstance(active, bool) and active:
+                return 1
+
         task_repo = getattr(self._instance_manager, "_task_repo", None)
         if (
             task_repo is not None

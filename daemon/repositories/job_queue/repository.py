@@ -580,6 +580,174 @@ class JobRepository:
             )
             return db_session.exec(stmt).one()
 
+    def has_active_non_deferred_work(
+        self, project_id: str | None = None
+    ) -> bool:
+        """Return True iff there is active non-defer work that should hold a
+        defer queue back.
+
+        Phase 2 (defer-queue idle gate, 2026-07-23). The shared
+        ``TaskRepository.has_active_non_deferred_work`` predicate is
+        task-granular — it sees the project as "idle" during the
+        inter-turn ``waiting_children`` window when no task row exists.
+        This job-granular variant counts ``JobItem`` rows with
+        ``admission_state IN ('queued', 'active')`` whose owning queue
+        is either missing or NOT a defer queue, AND whose linked instance
+        is either missing or non-terminal.
+
+        The instance-status check matters: a job whose instance has
+        already reached a terminal status (completed / error / terminated /
+        failed) must not block the defer queue — the originating
+        work is genuinely done; the residual job row is awaiting
+        observer finalization but is no longer "actively working".
+
+        Implemented via raw SQL with ``self.engine.begin()`` because
+        the JOIN produces a single round-trip and the ``LEFT JOIN
+        ... OR`` predicate is awkward to express (and easy to
+        misoptimize) via the SQLAlchemy ORM when the right-hand side
+        is optional. Parameterized binds keep the query dialect-
+        portable (works on SQLite and PostgreSQL).
+
+        Args:
+            project_id: Optional project scope. When ``None`` (the
+                caller is system-wide, e.g. the maintenance idle
+                probe), all projects are evaluated. When set, only
+                jobs in that project are counted.
+
+        Returns:
+            True iff any matching row exists. Returns False on empty
+            result, and on repository/database errors (fail-OPEN
+            semantics — a transient DB failure must not wedge the
+            defer queue; the alternative leg of the gate will block
+            when DB is truly down).
+        """
+        try:
+            with self.engine.begin() as conn:
+                if project_id is None:
+                    row = conn.execute(
+                        text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM job_queue_items j"
+                            "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+                            "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
+                            "  WHERE j.admission_state IN ('queued', 'active')"
+                            "    AND j.deleted_at IS NULL"
+                            "    AND (q.queue_type IS NULL"
+                            "         OR q.queue_type != :queue_type_defer)"
+                            "    AND (j.instance_id IS NULL"
+                            "         OR (i.status != :term_completed"
+                            "             AND i.status != :term_error"
+                            "             AND i.status != :term_terminated"
+                            "             AND i.status != :term_failed))"
+                            ")"
+                        ),
+                        {
+                            "queue_type_defer": "defer",
+                            "term_completed": "completed",
+                            "term_error": "error",
+                            "term_terminated": "terminated",
+                            "term_failed": "failed",
+                        },
+                    ).first()
+                else:
+                    row = conn.execute(
+                        text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM job_queue_items j"
+                            "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+                            "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
+                            "  WHERE j.project_id = :project_id"
+                            "    AND j.admission_state IN ('queued', 'active')"
+                            "    AND j.deleted_at IS NULL"
+                            "    AND (q.queue_type IS NULL"
+                            "         OR q.queue_type != :queue_type_defer)"
+                            "    AND (j.instance_id IS NULL"
+                            "         OR (i.status != :term_completed"
+                            "             AND i.status != :term_error"
+                            "             AND i.status != :term_terminated"
+                            "             AND i.status != :term_failed))"
+                            ")"
+                        ),
+                        {
+                            "project_id": project_id,
+                            "queue_type_defer": "defer",
+                            "term_completed": "completed",
+                            "term_error": "error",
+                            "term_terminated": "terminated",
+                            "term_failed": "failed",
+                        },
+                    ).first()
+        except Exception as e:
+            logger.warning(
+                f"has_active_non_deferred_work failed "
+                f"(project_id={project_id!r}): {e} — "
+                "treating as False (fail-OPEN on DB error)"
+            )
+            return False
+        return bool(row[0]) if row is not None else False
+
+    def has_active_non_background_work(
+        self, project_id: str | None = None
+    ) -> bool:
+        """Return True iff there is active non-defer AND non-background work
+        that should hold a background queue back.
+
+        Phase 2 (background-queue idle gate, 2026-07-23). Sister
+        method to :meth:`has_active_non_deferred_work` that excludes
+        BOTH defer AND background queue types so a background queue
+        only fires when every other project's normal/defer lanes are
+        idle.
+
+        The ``project_id`` argument is accepted for symmetry with
+        :meth:`has_active_non_deferred_work` but is INTENTIONALLY
+        IGNORED — the background predicate is system-wide (the
+        background queue must wait for the entire system to be idle
+        on its non-deferred, non-background lanes, not just one
+        project). The maintainer of this method must keep that
+        invariant: do not add a ``project_id`` filter without
+        revisiting the background-queue gate contract.
+
+        Returns:
+            True iff any matching row exists. Returns False on empty
+            result, and on repository/database errors (fail-OPEN).
+        """
+        del project_id  # intentionally ignored — background is system-wide
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "  SELECT 1 FROM job_queue_items j"
+                        "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+                        "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
+                        "  WHERE j.admission_state IN ('queued', 'active')"
+                        "    AND j.deleted_at IS NULL"
+                        "    AND (q.queue_type IS NULL"
+                        "         OR q.queue_type NOT IN (:q_defer, :q_background))"
+                        "    AND (j.instance_id IS NULL"
+                        "         OR (i.status != :term_completed"
+                        "             AND i.status != :term_error"
+                        "             AND i.status != :term_terminated"
+                        "             AND i.status != :term_failed))"
+                        ")"
+                    ),
+                    {
+                        "q_defer": "defer",
+                        "q_background": "background",
+                        "term_completed": "completed",
+                        "term_error": "error",
+                        "term_terminated": "terminated",
+                        "term_failed": "failed",
+                    },
+                ).first()
+        except Exception as e:
+            logger.warning(
+                f"has_active_non_background_work failed: {e} — "
+                "treating as False (fail-OPEN on DB error)"
+            )
+            return False
+        return bool(row[0]) if row is not None else False
+
     def backfill_system_default_project_id(self, project_id: str) -> int:
         """Idempotently assign ``project_id`` to job rows missing one.
 
