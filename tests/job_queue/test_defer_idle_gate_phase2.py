@@ -359,12 +359,11 @@ class TestJobBasedPredicateNonDeferredWork:
         )
         assert repository.has_active_non_deferred_work("proj-defer") is False
 
-    def test_queued_job_counts_as_active(self, engine, repository):
-        """A ``queued`` job (not yet dispatched) must count as active work.
+    def test_queued_job_does_not_count_as_active(self, engine, repository):
+        """A ``queued`` job (not yet dispatched) must not count as active work.
 
-        The predicate covers BOTH ``queued`` and ``active`` admission
-        states so a project with only queued (not-yet-dispatched) jobs
-        still blocks the defer queue — preserving FIFO priority.
+        The defer predicate checks only ``active`` admission state, so a
+        queued non-defer job does not block defer admission.
         """
         _insert_instance(
             engine, "inst-q-1", project_id="proj-q", status="idle"
@@ -380,7 +379,7 @@ class TestJobBasedPredicateNonDeferredWork:
             queue_id="queue-nd-5",
             admission_state="queued",
         )
-        assert repository.has_active_non_deferred_work("proj-q") is True
+        assert repository.has_active_non_deferred_work("proj-q") is False
 
     def test_done_job_excluded(self, engine, repository):
         """A ``done`` job must NOT count as active work."""
@@ -494,6 +493,103 @@ class TestJobBasedPredicateNonDeferredWork:
             admission_state="active",
         )
         assert repository.has_active_non_deferred_work("proj-paused") is True
+
+    def test_queued_defer_and_background_with_empty_parallel_returns_false(
+        self, engine, repository
+    ):
+        """Queued defer/background work does not block on an empty parallel lane."""
+        _insert_instance(engine, "inst-deadlock-1", project_id="proj-deadlock")
+        _insert_queue(
+            engine, "queue-defer-deadlock-1", "proj-deadlock", "defer"
+        )
+        _insert_queue(
+            engine, "queue-background-deadlock-1", "proj-deadlock", "background"
+        )
+        _insert_queue(
+            engine, "queue-parallel-deadlock-1", "proj-deadlock", "parallel"
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-defer-deadlock-1",
+            instance_id="inst-deadlock-1",
+            project_id="proj-deadlock",
+            queue_id="queue-defer-deadlock-1",
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-background-deadlock-1",
+            instance_id="inst-deadlock-1",
+            project_id="proj-deadlock",
+            queue_id="queue-background-deadlock-1",
+        )
+        assert repository.has_active_non_deferred_work("proj-deadlock") is False
+
+    def test_queued_defer_and_active_parallel_returns_true(self, engine, repository):
+        """An active parallel job still blocks defer admission."""
+        _insert_instance(engine, "inst-deadlock-2", project_id="proj-deadlock-2")
+        _insert_queue(
+            engine, "queue-defer-deadlock-2", "proj-deadlock-2", "defer"
+        )
+        _insert_queue(
+            engine, "queue-parallel-deadlock-2", "proj-deadlock-2", "parallel"
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-defer-deadlock-2",
+            instance_id="inst-deadlock-2",
+            project_id="proj-deadlock-2",
+            queue_id="queue-defer-deadlock-2",
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-parallel-deadlock-2",
+            instance_id="inst-deadlock-2",
+            project_id="proj-deadlock-2",
+            queue_id="queue-parallel-deadlock-2",
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        assert repository.has_active_non_deferred_work("proj-deadlock-2") is True
+
+    def test_active_defer_and_queued_background_returns_true(self, engine, repository):
+        """Active defer work blocks the background gate."""
+        _insert_instance(engine, "inst-deadlock-3", project_id="proj-deadlock-3")
+        _insert_queue(
+            engine, "queue-defer-deadlock-3", "proj-deadlock-3", "defer"
+        )
+        _insert_queue(
+            engine, "queue-background-deadlock-3", "proj-deadlock-3", "background"
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-defer-deadlock-3",
+            instance_id="inst-deadlock-3",
+            project_id="proj-deadlock-3",
+            queue_id="queue-defer-deadlock-3",
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-background-deadlock-3",
+            instance_id="inst-deadlock-3",
+            project_id="proj-deadlock-3",
+            queue_id="queue-background-deadlock-3",
+        )
+        assert repository.has_active_non_background_work() is True
+
+    def test_queued_defer_only_returns_false(self, engine, repository):
+        """A queued defer job alone does not count as non-deferred work."""
+        _insert_instance(engine, "inst-deadlock-4", project_id="proj-deadlock-4")
+        _insert_queue(
+            engine, "queue-defer-deadlock-4", "proj-deadlock-4", "defer"
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-defer-deadlock-4",
+            instance_id="inst-deadlock-4",
+            project_id="proj-deadlock-4",
+            queue_id="queue-defer-deadlock-4",
+        )
+        assert repository.has_active_non_deferred_work("proj-deadlock-4") is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
