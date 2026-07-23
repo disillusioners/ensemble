@@ -3292,7 +3292,7 @@ class JobFeedbackObserver:
                     # silent return).
                     raise InvalidTransitionError(
                         job_id=job_id,
-                        from_state=existing.status,
+                        from_state=existing.admission_state,
                         to_state=to_status,
                     )
                 else:
