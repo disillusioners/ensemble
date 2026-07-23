@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed, HostListener, ElementRef, ViewChild, inject } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, effect, HostListener, ElementRef, ViewChild, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -36,11 +36,39 @@ export class AgentSwitcherComponent {
 
   isOpen = signal(false);
   focusedIndex = signal(-1);
+  searchQuery = signal('');
 
   // Filter out system agents from selection
-  readonly selectableAgents = computed(() => 
+  readonly selectableAgents = computed(() =>
     this.agents.filter(agent => !agent.system)
   );
+
+  // Further filter by search query (case-insensitive, matches name OR description)
+  readonly filteredAgents = computed(() => {
+    const query = this.searchQuery().trim().toLowerCase();
+    const base = this.selectableAgents();
+    if (!query) return base;
+    return base.filter(agent => {
+      const name = (agent.name ?? '').toLowerCase();
+      const desc = (agent.description ?? '').toLowerCase();
+      return name.includes(query) || desc.includes(query);
+    });
+  });
+
+  // Keep focusedIndex within bounds as the filtered list shrinks/grows
+  private readonly _filterEffect = effect(() => {
+    // Establish reactive dependencies
+    this.searchQuery();
+    const len = this.filteredAgents().length;
+    const idx = this.focusedIndex();
+    if (len === 0) {
+      if (idx !== -1) this.focusedIndex.set(-1);
+    } else if (idx < 0) {
+      this.focusedIndex.set(0);
+    } else if (idx >= len) {
+      this.focusedIndex.set(len - 1);
+    }
+  });
 
   getAgentColor(agent: Agent): string {
     return colorMap[agent.color] || agent.color || '#10a7f7';
@@ -52,16 +80,18 @@ export class AgentSwitcherComponent {
 
   get activeDescendant(): string {
     const idx = this.focusedIndex();
-    if (idx >= 0 && idx < this.selectableAgents().length) {
-      return `agent-option-${this.selectableAgents()[idx].id}`;
+    const agents = this.filteredAgents();
+    if (idx >= 0 && idx < agents.length) {
+      return `agent-option-${agents[idx].id}`;
     }
     return '';
   }
 
   get focusedAgentId(): string | null {
     const idx = this.focusedIndex();
-    if (idx >= 0 && idx < this.selectableAgents().length) {
-      return this.selectableAgents()[idx].id;
+    const agents = this.filteredAgents();
+    if (idx >= 0 && idx < agents.length) {
+      return agents[idx].id;
     }
     return null;
   }
@@ -71,7 +101,7 @@ export class AgentSwitcherComponent {
     if (this.isOpen()) {
       this.updateDropdownMaxHeight();
       // When opening, focus the trigger button and set initial focused index
-      const agents = this.selectableAgents();
+      const agents = this.filteredAgents();
       if (agents.length === 0) {
         this.focusedIndex.set(-1);
         setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
@@ -82,6 +112,7 @@ export class AgentSwitcherComponent {
       setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
     } else {
       this.focusedIndex.set(-1);
+      this.searchQuery.set('');
     }
   }
 
@@ -98,15 +129,17 @@ export class AgentSwitcherComponent {
     this.agentChange.emit(agent);
     this.isOpen.set(false);
     this.focusedIndex.set(-1);
+    this.searchQuery.set('');
   }
 
   closeDropdown(): void {
     this.isOpen.set(false);
     this.focusedIndex.set(-1);
+    this.searchQuery.set('');
   }
 
   onTriggerKeydown(event: KeyboardEvent): void {
-    const agents = this.selectableAgents();
+    const agents = this.filteredAgents();
     const currentIndex = this.focusedIndex();
 
     switch (event.key) {
@@ -123,13 +156,13 @@ export class AgentSwitcherComponent {
       case 'ArrowDown':
         event.preventDefault();
         if (!this.isOpen()) {
-          const agents = this.selectableAgents();
+          const agents = this.filteredAgents();
           if (agents.length === 0) return;
           this.isOpen.set(true);
           this.focusedIndex.set(0);
           setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
         } else {
-          const agents = this.selectableAgents();
+          const agents = this.filteredAgents();
           if (agents.length === 0) return;
           const nextIndex = currentIndex < agents.length - 1 ? currentIndex + 1 : 0;
           this.focusedIndex.set(nextIndex);
@@ -140,13 +173,13 @@ export class AgentSwitcherComponent {
       case 'ArrowUp':
         event.preventDefault();
         if (!this.isOpen()) {
-          const agents = this.selectableAgents();
+          const agents = this.filteredAgents();
           if (agents.length === 0) return;
           this.isOpen.set(true);
           this.focusedIndex.set(agents.length - 1);
           setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
         } else {
-          const agents = this.selectableAgents();
+          const agents = this.filteredAgents();
           if (agents.length === 0) return;
           const prevIndex = currentIndex > 0 ? currentIndex - 1 : agents.length - 1;
           this.focusedIndex.set(prevIndex);
@@ -209,6 +242,16 @@ export class AgentSwitcherComponent {
         this.handleArrowUp();
         break;
 
+      case 'Home':
+        event.preventDefault();
+        this.focusFirst();
+        break;
+
+      case 'End':
+        event.preventDefault();
+        this.focusLast();
+        break;
+
       case 'Tab':
         // Close dropdown and allow natural tab behavior
         this.closeDropdown();
@@ -216,8 +259,23 @@ export class AgentSwitcherComponent {
     }
   }
 
+  private focusFirst(): void {
+    if (this.filteredAgents().length === 0) return;
+    this.focusedIndex.set(0);
+    this.scrollToFocused(0);
+    this.focusOption(0);
+  }
+
+  private focusLast(): void {
+    const lastIndex = this.filteredAgents().length - 1;
+    if (lastIndex < 0) return;
+    this.focusedIndex.set(lastIndex);
+    this.scrollToFocused(lastIndex);
+    this.focusOption(lastIndex);
+  }
+
   private handleArrowDown(): void {
-    const agents = this.selectableAgents();
+    const agents = this.filteredAgents();
     if (agents.length === 0) return;
     const currentIndex = this.focusedIndex();
     const nextIndex = currentIndex < agents.length - 1 ? currentIndex + 1 : 0;
@@ -227,7 +285,7 @@ export class AgentSwitcherComponent {
   }
 
   private handleArrowUp(): void {
-    const agents = this.selectableAgents();
+    const agents = this.filteredAgents();
     if (agents.length === 0) return;
     const currentIndex = this.focusedIndex();
     const prevIndex = currentIndex > 0 ? currentIndex - 1 : agents.length - 1;
@@ -260,11 +318,66 @@ export class AgentSwitcherComponent {
 
   onMenuFocus(): void {
     // Ensure focusedIndex is valid when menu receives focus
-    const agents = this.selectableAgents();
+    const agents = this.filteredAgents();
     if (agents.length === 0) return;
     if (this.focusedIndex() < 0) {
       const currentIndex = agents.findIndex(a => a.id === this.selectedAgent?.id);
       this.focusedIndex.set(currentIndex >= 0 ? currentIndex : 0);
+    }
+  }
+
+  onSearchInput(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    this.searchQuery.set(input.value);
+  }
+
+  onSearchKeydown(event: KeyboardEvent): void {
+    const agents = this.filteredAgents();
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        if (agents.length === 0) return;
+        this.focusedIndex.set(0);
+        this.scrollToFocused(0);
+        this.focusOption(0);
+        break;
+
+      case 'ArrowUp':
+        event.preventDefault();
+        if (agents.length === 0) return;
+        const lastIdx = agents.length - 1;
+        this.focusedIndex.set(lastIdx);
+        this.scrollToFocused(lastIdx);
+        this.focusOption(lastIdx);
+        break;
+
+      case 'Enter':
+        event.preventDefault();
+        const idx = this.focusedIndex();
+        if (idx >= 0 && idx < agents.length) {
+          this.selectAgent(agents[idx]);
+        }
+        break;
+
+      case 'Escape':
+        event.preventDefault();
+        event.stopPropagation();
+        if (this.searchQuery() !== '') {
+          this.searchQuery.set('');
+          const len = this.filteredAgents().length;
+          if (len > 0) this.focusedIndex.set(0);
+        } else {
+          this.closeDropdown();
+          this.triggerButton?.nativeElement?.focus();
+        }
+        break;
+
+      case 'Tab':
+        event.stopPropagation();
+        this.closeDropdown();
+        break;
+
+      // Other keys: allow typing into the input normally
     }
   }
 
