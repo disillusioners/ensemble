@@ -66,3 +66,6 @@ test_*.db
 data_dev/*
 opencode_sessions.db
 test-screenshots/*
+
+# E2E test screenshots (binary artifacts)
+frontend/tests/e2e-shots/
