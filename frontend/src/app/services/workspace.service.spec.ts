@@ -939,6 +939,76 @@ describe('WorkspaceService', () => {
         .flush(response);
     });
 
+    it('delivers a stale file response without mutating tabs after a generation bump', () => {
+      const response = makeFileContent({ path: 'src/main.py', content: 'stale' });
+      let delivered: FileContentResponse | undefined;
+
+      service.getFileContent('project-1', 'src/main.py').subscribe((result) => {
+        delivered = result;
+      });
+      const req = httpTesting.expectOne(
+        (r) => r.url === '/api/workspace/project-1/file' && r.params.get('path') === 'src/main.py',
+      );
+
+      service.resetState();
+      req.flush(response);
+
+      expect(delivered).toEqual(response);
+      expect(service.openTabs()).toEqual([]);
+      expect(service.activeTabPath()).toBeNull();
+      expect(service.currentFile()).toBeNull();
+    });
+
+    it('re-clicking an already-open tab activates it without refetching content', () => {
+      const response = makeFileContent({ path: 'src/main.py', content: 'loaded' });
+      service.openFile('project-1', 'src/main.py');
+      httpTesting
+        .expectOne(
+          (r) => r.url === '/api/workspace/project-1/file' && r.params.get('path') === 'src/main.py',
+        )
+        .flush(response);
+
+      service.openTab('src/other.py');
+      expect(service.activeTabPath()).toBe('src/other.py');
+
+      service.openFile('project-1', 'src/main.py');
+
+      expect(service.activeTabPath()).toBe('src/main.py');
+      expect(service.currentFile()).toEqual(response);
+      httpTesting.expectNone(
+        (r) => r.url === '/api/workspace/project-1/file' && r.params.get('path') === 'src/main.py',
+      );
+    });
+
+    it('ensureTabContent fetches content for a restored tab with an empty cache', () => {
+      service.openTab('src/main.py');
+      service.saveCurrentState('project-1');
+      service.restoreState('project-1');
+      expect(service.currentFile()).toBeNull();
+
+      service.ensureTabContent('project-1', 'src/main.py');
+      const req = httpTesting.expectOne(
+        (r) => r.url === '/api/workspace/project-1/file' && r.params.get('path') === 'src/main.py',
+      );
+      const response = makeFileContent({ path: 'src/main.py', content: 'restored' });
+      req.flush(response);
+
+      expect(service.currentFile()).toEqual(response);
+      expect(service.activeTabPath()).toBe('src/main.py');
+    });
+
+    it('ensureTabContent skips tabs with cached content and paths that are not open', () => {
+      const response = makeFileContent({ path: 'src/main.py', content: 'cached' });
+      service.openTab('src/main.py');
+      service.cacheTabContent(response);
+
+      service.ensureTabContent('project-1', 'src/main.py');
+      service.ensureTabContent('project-1', 'src/not-open.py');
+
+      httpTesting.expectNone((r) => r.url === '/api/workspace/project-1/file');
+      expect(service.currentFile()).toEqual(response);
+    });
+
     it('saveFile does NOT mutate currentFile or clean the dirty flag (F2 contract preserved)', (done) => {
       // Open a tab, seed content, mark dirty.
       service.openTab('src/main.py');

@@ -7,13 +7,15 @@ import {
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { ActivatedRoute } from '@angular/router';
 import { By } from '@angular/platform-browser';
-import { Subject } from 'rxjs';
+import { Subject, of } from 'rxjs';
 import { Component } from '@angular/core';
 import { MatSnackBar } from '@angular/material/snack-bar';
+import { MatDialog } from '@angular/material/dialog';
 import { WorkspaceComponent } from './workspace.component';
 import { WorkspaceService } from '../../services/workspace.service';
 import { FileTreeComponent } from '../../components/file-tree/file-tree.component';
 import { CodeViewerComponent } from '../../components/code-viewer/code-viewer.component';
+import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
 import type {
   FileContentResponse,
   FileTreeResponse,
@@ -38,6 +40,14 @@ class WorkspaceHostComponent {
   projectId = '';
   hideCount = 0;
 }
+
+/**
+ * The dialog spy is installed on the same MatDialog instance injected into
+ * WorkspaceComponent. This avoids depending on MatDialogModule's provider
+ * precedence while keeping `afterClosed()` synchronous and controllable.
+ */
+let nextDialogResult: boolean | undefined;
+let dialogOpenSpy: jest.SpyInstance;
 
 /**
  * Tests for `WorkspaceComponent`.
@@ -207,6 +217,7 @@ describe('WorkspaceComponent', () => {
 
   beforeEach(async () => {
     StubEventSource.instances = [];
+    nextDialogResult = undefined;
     await TestBed.configureTestingModule({
       imports: [WorkspaceComponent],
       providers: [
@@ -224,6 +235,11 @@ describe('WorkspaceComponent', () => {
     }).compileComponents();
 
     fixture = TestBed.createComponent(WorkspaceComponent);
+    dialogOpenSpy = jest
+      .spyOn(fixture.debugElement.injector.get(MatDialog), 'open')
+      .mockReturnValue({
+        afterClosed: () => of(nextDialogResult),
+      } as any);
     component = fixture.componentInstance;
     httpMock = TestBed.inject(HttpTestingController);
     workspaceService = TestBed.inject(WorkspaceService);
@@ -1129,6 +1145,29 @@ describe('WorkspaceComponent', () => {
         expect(codeViewer.isDirty()).toBe(false);
       });
 
+      it('markSaved() receives the PUT body captured at saveFile entry, not a re-read after response', () => {
+        bootWithTree();
+        selectFile();
+        const codeViewer = markDirty();
+        const capturedAtSave = codeViewer.currentContent();
+        const markSavedSpy = jest.spyOn(codeViewer, 'markSaved');
+
+        component.saveFile();
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+
+        // Simulate the user typing more between the PUT departing and
+        // the response landing. The markSaved baseline must reflect the
+        // already-PUT body, not the new edits — so the file stays
+        // dirty for the additional keystrokes.
+        codeViewer.editedContent.set('export const modified = true!\n// and more');
+        req.flush(makeWriteResponse());
+
+        expect(markSavedSpy).toHaveBeenCalledWith(capturedAtSave);
+        expect(codeViewer.isDirty()).toBe(true);
+      });
+
       it('routes through the real WorkspaceService.saveFile with the right args', () => {
         bootWithTree();
         selectFile('src/app.ts');
@@ -1273,6 +1312,22 @@ describe('WorkspaceComponent', () => {
         expect(spy).toHaveBeenCalledWith('src/a.ts');
       });
 
+      it('onTabClick also calls workspace.ensureTabContent to hydrate the tab', () => {
+        bootWithTree();
+        selectFile('src/a.ts');
+        const spy = jest.spyOn(workspaceService, 'ensureTabContent');
+
+        component.onTabClick('src/a.ts');
+
+        // ensureTabContent is a no-op when the tab is already hydrated,
+        // but it must still be called on every tab click so a tab
+        // restored from cache with no content gets fetched.
+        expect(spy).toHaveBeenCalledWith(
+          'test-project-id',
+          'src/a.ts'
+        );
+      });
+
       it('onTabClose calls workspace.closeFile with the closed path', () => {
         bootWithTree();
         selectFile('src/a.ts');
@@ -1281,6 +1336,72 @@ describe('WorkspaceComponent', () => {
         component.onTabClose('src/a.ts');
 
         expect(spy).toHaveBeenCalledWith('src/a.ts');
+      });
+
+      it('onTabClose also calls codeViewer.forgetTab to release per-path edit state', () => {
+        bootWithTree();
+        selectFile('src/a.ts');
+        const codeViewer = fixture.debugElement.query(
+          By.directive(CodeViewerComponent)
+        ).componentInstance as CodeViewerComponent;
+        const forgetTabSpy = jest.spyOn(codeViewer, 'forgetTab');
+
+        component.onTabClose('src/a.ts');
+
+        expect(forgetTabSpy).toHaveBeenCalledWith('src/a.ts');
+      });
+
+      it('onTabClose opens the shared confirmation dialog and cancels cleanly when dismissed', () => {
+        bootWithTree();
+        selectFile('src/a.ts');
+        workspaceService.setFileDirty('src/a.ts', true);
+        nextDialogResult = false;
+        const closeFileSpy = jest.spyOn(workspaceService, 'closeFile');
+
+        component.onTabClose('src/a.ts');
+
+        expect(dialogOpenSpy).toHaveBeenCalledTimes(1);
+        expect(dialogOpenSpy).toHaveBeenCalledWith(
+          ConfirmDialogComponent,
+          expect.objectContaining({
+            width: '420px',
+            panelClass: 'dark-modal-panel',
+            data: {
+              title: 'Discard Unsaved Changes',
+              message: '"a.ts" has unsaved changes. Close and discard them?',
+              confirmLabel: 'Discard',
+              cancelLabel: 'Cancel',
+              destructive: true,
+            },
+          }),
+        );
+        expect(closeFileSpy).not.toHaveBeenCalled();
+        expect(workspaceService.isTabOpen('src/a.ts')).toBe(true);
+      });
+
+      it('onTabClose closes a dirty tab only after the user confirms', () => {
+        bootWithTree();
+        selectFile('src/a.ts');
+        workspaceService.setFileDirty('src/a.ts', true);
+        nextDialogResult = true;
+        const closeFileSpy = jest.spyOn(workspaceService, 'closeFile');
+
+        component.onTabClose('src/a.ts');
+
+        expect(dialogOpenSpy).toHaveBeenCalledTimes(1);
+        expect(closeFileSpy).toHaveBeenCalledWith('src/a.ts');
+        expect(workspaceService.isTabOpen('src/a.ts')).toBe(false);
+      });
+
+      it('onTabClose skips the confirmation dialog when the tab is not dirty', () => {
+        bootWithTree();
+        selectFile('src/b.ts');
+        const closeFileSpy = jest.spyOn(workspaceService, 'closeFile');
+
+        component.onTabClose('src/b.ts');
+
+        expect(dialogOpenSpy).not.toHaveBeenCalled();
+        expect(closeFileSpy).toHaveBeenCalledWith('src/b.ts');
       });
 
       it('onFileSelected routes through workspace.openFile', () => {

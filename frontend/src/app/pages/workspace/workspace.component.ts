@@ -23,6 +23,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
 import { WorkspaceService } from '../../services/workspace.service';
@@ -30,6 +31,10 @@ import { FileTreeComponent } from '../../components/file-tree/file-tree.componen
 import { CodeViewerComponent } from '../../components/code-viewer/code-viewer.component';
 import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.component';
 import { FileTabsComponent } from '../../components/file-tabs/file-tabs.component';
+import {
+  ConfirmDialogComponent,
+  ConfirmDialogData,
+} from '../../components/confirm-dialog/confirm-dialog.component';
 
 /**
  * Workspace viewer.
@@ -60,6 +65,7 @@ import { FileTabsComponent } from '../../components/file-tabs/file-tabs.componen
     MatButtonModule,
     MatTooltipModule,
     MatSnackBarModule,
+    MatDialogModule,
     MatProgressSpinnerModule,
     FileTreeComponent,
     CodeViewerComponent,
@@ -184,6 +190,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   readonly workspace = inject(WorkspaceService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
 
   @ViewChild(FileTreeComponent, { static: true }) private fileTree!: FileTreeComponent;
@@ -284,17 +291,60 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    * Switch the active tab. Driven by FileTabsComponent's `(tabClick)`
    * output. `setActiveFile` is a no-op when the path is not open, so
    * a stale reference cannot corrupt tab state.
+   *
+   * `ensureTabContent` populates the per-path content cache when the
+   * tab was restored from cache with no content (e.g. after a
+   * project switch back to a project that still had this tab open in
+   * its LRU snapshot). It is a no-op when the tab is already hydrated
+   * or not open, so calling it on every click is safe and avoids
+   * duplicate fetches.
    */
   onTabClick(path: string): void {
     this.workspace.setActiveFile(path);
+    this.workspace.ensureTabContent(this.projectId, path);
   }
 
   /**
    * Close a tab. Driven by FileTabsComponent's `(closeTab)` output.
    * The service handles active-tab rebalancing (preferring the right
    * neighbour, then left, then null).
+   *
+   * If the tab has unsaved edits, the user is prompted with the shared
+   * confirmation dialog before the edit state is discarded. `forgetTab`
+   * is called on the code viewer's per-path edit-state map so a re-opened
+   * tab starts from a clean baseline instead of inheriting stale state.
    */
   onTabClose(path: string): void {
+    const tab = this.workspace.openFiles().find((file) => file.path === path);
+    if (!tab?.dirty) {
+      this.finishTabClose(path);
+      return;
+    }
+
+    this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, {
+        width: '420px',
+        panelClass: 'dark-modal-panel',
+        data: {
+          title: 'Discard Unsaved Changes',
+          message: `"${tab.name}" has unsaved changes. Close and discard them?`,
+          confirmLabel: 'Discard',
+          cancelLabel: 'Cancel',
+          destructive: true,
+        },
+      })
+      .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((confirmed: boolean | undefined) => {
+        if (confirmed) {
+          this.finishTabClose(path);
+        }
+      });
+  }
+
+  /** Complete a tab close after any unsaved-change confirmation. */
+  private finishTabClose(path: string): void {
+    this.codeViewer?.forgetTab(path);
     this.workspace.closeFile(path);
   }
 
@@ -407,9 +457,16 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     if (!path || !this.codeViewer) {
       return;
     }
+    // Capture the editor content BEFORE the PUT departs. The same
+    // snapshot is sent as the PUT body AND handed to `markSaved` on
+    // success, so the saved-state baseline is aligned with what was
+    // actually written to disk — not with whatever the editor holds at
+    // response time (which may have drifted if the user typed between
+    // the PUT departing and the response landing).
+    const savedContent = this.codeViewer.currentContent();
     this.saving.set(true);
     this.workspace
-      .saveFile(this.projectId, path, this.codeViewer.currentContent())
+      .saveFile(this.projectId, path, savedContent)
       .pipe(
         takeUntilDestroyed(this.destroyRef),
         finalize(() => this.saving.set(false))
@@ -418,8 +475,11 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
         next: () => {
           // Align the saved-state baseline so `isDirty()` becomes false
           // and a follow-up SSE push of the same file can refresh the
-          // editor (this is the round-trip of our own save).
-          this.codeViewer!.markSaved(this.codeViewer!.currentContent());
+          // editor (this is the round-trip of our own save). Use the
+          // captured `savedContent` — the same string we PUT — so the
+          // baseline reflects what landed on disk, not any
+          // post-send edits.
+          this.codeViewer!.markSaved(savedContent);
           this.snackBar.open('File saved', 'Dismiss', { duration: 3000 });
         },
         error: (err: unknown) => {
@@ -547,14 +607,19 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
         // one fetch fires here — there is no `selectedPath`-watching
         // effect that would re-trigger.
         //
-        // With multi-file tabs, `restoreState` already repopulated the
-        // service's `_tabList` and `_activeFilePath`. Calling `openFile`
-        // for the active path re-asserts the active tab AND fires the
-        // `getFileContent` fetch internally; we must NOT also call
-        // `getFileContent` directly or we'd issue a duplicate request.
+        // With multi-file tabs, `restoreState` repopulates the service's
+        // tab list and active path but intentionally leaves content out of
+        // the cache. Add the path if an older snapshot does not include it,
+        // activate it, and use `ensureTabContent` as the single hydration
+        // entry point. Unlike `openFile(projectId, path)`, this avoids a
+        // duplicate request when the tab already exists.
         const restoredActivePath = restored.activeFilePath ?? restored.selectedPath;
         if (restoredActivePath) {
-          this.workspace.openFile(projectId, restoredActivePath);
+          if (!this.workspace.isTabOpen(restoredActivePath)) {
+            this.workspace.openTab(restoredActivePath);
+          }
+          this.workspace.setActiveFile(restoredActivePath);
+          this.workspace.ensureTabContent(projectId, restoredActivePath);
         }
 
         // SSE needs the new projectId targeted for file-change refresh.
