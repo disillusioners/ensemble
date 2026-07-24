@@ -768,6 +768,79 @@ describe('WorkspaceComponent', () => {
 
         expect(component.canSave()).toBe(false);
       });
+
+      // ── F3 — binary files are read-only, Save must be disabled.
+      // The CodeViewerComponent's effect clears editedContent on entry
+      // to a binary file, so isDirty() is false; we also assert the
+      // canSave() binary guard at the workspace layer for defence in
+      // depth.
+      it('is false when the current file is binary (F3)', () => {
+        bootWithTree();
+        selectFile('image.png');
+
+        // Drive the file signal directly to a binary record.
+        workspaceService.currentFile.set(
+          makeFileContent({
+            path: 'image.png',
+            content: '',
+            language: null,
+            total_lines: 0,
+            binary: true,
+            size_bytes: 1024,
+          })
+        );
+        fixture.detectChanges();
+
+        // Bypass the editor's read-only guard and force isDirty=true to
+        // prove canSave() refuses on the binary flag alone.
+        const codeViewerDebug = fixture.debugElement.query(
+          By.directive(CodeViewerComponent)
+        );
+        const codeViewer = codeViewerDebug.componentInstance as CodeViewerComponent;
+        codeViewer.editedContent.set('dirty');
+        // originalContent stays at '' so isDirty() === true.
+        expect(codeViewer.isDirty()).toBe(true);
+
+        expect(component.canSave()).toBe(false);
+      });
+
+      // ── F4 — truncated files are read-only, Save must be disabled.
+      it('is false when the current file is truncated (F4)', () => {
+        bootWithTree();
+        selectFile('big.txt');
+
+        workspaceService.currentFile.set(
+          makeFileContent({
+            path: 'big.txt',
+            content: 'partial…',
+            language: 'plaintext',
+            total_lines: 1000,
+            truncated: true,
+            size_bytes: 1_048_576,
+          })
+        );
+        fixture.detectChanges();
+
+        const codeViewerDebug = fixture.debugElement.query(
+          By.directive(CodeViewerComponent)
+        );
+        const codeViewer = codeViewerDebug.componentInstance as CodeViewerComponent;
+        codeViewer.editedContent.set('dirty');
+        expect(codeViewer.isDirty()).toBe(true);
+
+        expect(component.canSave()).toBe(false);
+      });
+
+      // ── F7 — saving flag must be honoured by canSave().
+      it('is false while a save is in flight (F7)', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+        expect(component.canSave()).toBe(true);
+
+        component.saving.set(true);
+        expect(component.canSave()).toBe(false);
+      });
     });
 
     describe('saveFile()', () => {
@@ -856,11 +929,164 @@ describe('WorkspaceComponent', () => {
         );
         req.flush('boom', { status: 500, statusText: 'Server Error' });
 
+        // F8 — status-mapped message; not the old generic "Failed to save file".
+        // Uses `statusText` rather than `message` so the snackbar avoids
+        // Angular's verbose "Http failure response for /…" prefix.
         expect(openSpy).toHaveBeenCalledWith(
-          'Failed to save file',
+          'Failed to save file: 500 Server Error',
           'Dismiss',
           expect.objectContaining({ duration: 5000 })
         );
+      });
+
+      // ── F8 — status-code-specific snackbar messages ──────────────
+      // The component owns the status → message mapping so the snackbar
+      // is the single error presentation; the service deliberately does
+      // NOT set its error signal for save failures.
+      it.each([
+        [413, 'File too large'],
+        [403, 'Permission denied'],
+        [404, 'Project or file not found'],
+        [0, 'Network error — check connection'],
+      ])(
+        'maps HTTP status %i to "%s" in the error snackbar',
+        (status, expectedMessage) => {
+          bootWithTree();
+          selectFile();
+          markDirty();
+
+          const snackBar = fixture.debugElement.injector.get(MatSnackBar);
+          const openSpy = jest.spyOn(snackBar, 'open');
+
+          component.saveFile();
+          const req = httpMock.expectOne(
+            (r) => r.url === '/api/workspace/test-project-id/file'
+          );
+          req.flush('boom', { status, statusText: 'X' });
+
+          expect(openSpy).toHaveBeenCalledWith(
+            expectedMessage,
+            'Dismiss',
+            expect.objectContaining({ duration: 5000 })
+          );
+        }
+      );
+
+      // ── F7 — in-flight save guard ────────────────────────────────
+      // After saveFile() is called but before the PUT resolves,
+      // canSave() must be false and a second saveFile() call must NOT
+      // fire a concurrent PUT.
+      it('blocks concurrent saveFile calls while a save is in flight (F7)', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        // Use a Subject so the PUT stays pending.
+        const pending = new Subject<FileWriteResponse>();
+        jest
+          .spyOn(workspaceService, 'saveFile')
+          .mockReturnValue(pending.asObservable());
+
+        expect(component.saving()).toBe(false);
+        component.saveFile();
+        expect(component.saving()).toBe(true);
+        expect(workspaceService.saveFile).toHaveBeenCalledTimes(1);
+
+        // canSave must reflect the in-flight state.
+        expect(component.canSave()).toBe(false);
+
+        // A second saveFile() call must be a no-op — no extra PUT.
+        component.saveFile();
+        expect(workspaceService.saveFile).toHaveBeenCalledTimes(1);
+
+        // Ctrl+S while saving must also be a no-op.
+        const ctrlS = new KeyboardEvent('keydown', {
+          key: 's',
+          ctrlKey: true,
+          bubbles: true,
+        });
+        const preventDefaultSpy = jest.spyOn(ctrlS, 'preventDefault');
+        component.onSaveKeydown(ctrlS);
+        expect(workspaceService.saveFile).toHaveBeenCalledTimes(1);
+
+        // Resolving the PUT must clear the saving flag.
+        pending.next({
+          project_id: 'test-project-id',
+          path: 'src/main.ts',
+          size_bytes: 1,
+          saved: true,
+        });
+        pending.complete();
+        expect(component.saving()).toBe(false);
+        expect(component.canSave()).toBe(false); // also not dirty anymore
+      });
+
+      it('clears saving on error so the user can retry (F7 finalize on both paths)', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const pending = new Subject<FileWriteResponse>();
+        jest
+          .spyOn(workspaceService, 'saveFile')
+          .mockReturnValue(pending.asObservable());
+
+        component.saveFile();
+        expect(component.saving()).toBe(true);
+
+        pending.error(new Error('boom'));
+        expect(component.saving()).toBe(false);
+        expect(component.canSave()).toBe(true); // still dirty, can retry
+      });
+
+      it('exposes the saving signal for the menu item binding (F7)', () => {
+        bootWithTree();
+        selectFile();
+        markDirty();
+
+        const pending = new Subject<FileWriteResponse>();
+        jest
+          .spyOn(workspaceService, 'saveFile')
+          .mockReturnValue(pending.asObservable());
+
+        // The menu item's `<span>{{ saving() ? 'Saving…' : 'Save' }}</span>`
+        // binding reads this signal — assert the signal flips correctly
+        // so the template binding renders the expected text.
+        expect(component.saving()).toBe(false);
+
+        component.saveFile();
+        fixture.detectChanges();
+        expect(component.saving()).toBe(true);
+
+        pending.next({
+          project_id: 'test-project-id',
+          path: 'src/main.ts',
+          size_bytes: 1,
+          saved: true,
+        });
+        pending.complete();
+        fixture.detectChanges();
+        expect(component.saving()).toBe(false);
+      });
+
+      // ── F2 — successful save aligns the saved-state baseline ─────
+      // After a successful save, codeViewer.markSaved() is called so
+      // isDirty() becomes false and a follow-up SSE push (the round-trip
+      // of our own save) is allowed to refresh the editor.
+      it('calls codeViewer.markSaved() after a successful save (F2)', () => {
+        bootWithTree();
+        selectFile();
+        const codeViewer = markDirty();
+        const markSavedSpy = jest.spyOn(codeViewer, 'markSaved');
+
+        component.saveFile();
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush(makeWriteResponse());
+
+        expect(markSavedSpy).toHaveBeenCalledTimes(1);
+        expect(codeViewer.isDirty()).toBe(false);
       });
 
       it('routes through the real WorkspaceService.saveFile with the right args', () => {

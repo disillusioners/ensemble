@@ -213,7 +213,7 @@ describe('WorkspaceService', () => {
     req.flush('Server error', { status: 500, statusText: 'Server Error' });
   });
 
-  it('should save the selected file via PUT and refresh currentFile content/size', (done) => {
+  it('should save the selected file via PUT and return the response (F2 — service is side-effect free)', (done) => {
     // Load a file first so currentFile is populated.
     const loaded = makeFileContent({
       path: 'src/main.py',
@@ -236,8 +236,14 @@ describe('WorkspaceService', () => {
     service.saveFile('project-1', 'src/main.py', newContent).subscribe({
       next: (result) => {
         expect(result).toEqual(saveResponse);
-        expect(service.currentFile()?.content).toBe(newContent);
-        expect(service.currentFile()?.size_bytes).toBe(newContent.length);
+        // F2 — the service MUST NOT mutate `currentFile` after a save.
+        // The previous behaviour (tap that broadcasted the saved content
+        // back through `currentFile`) caused the CodeViewerComponent's
+        // effect to reset `editedContent`, clobbering keystrokes typed
+        // while the PUT was in flight. Dirty-state management is now
+        // owned by the component (`codeViewer.markSaved()`).
+        expect(service.currentFile()?.content).toBe('old content');
+        expect(service.currentFile()?.size_bytes).toBe(11);
         done();
       },
       error: done.fail,
@@ -252,7 +258,7 @@ describe('WorkspaceService', () => {
     req.flush(saveResponse);
   });
 
-  it('should not mutate currentFile when the saved path differs from selectedPath', (done) => {
+  it('should never mutate currentFile when saving a different path (F2 — service is side-effect free)', (done) => {
     const loaded = makeFileContent({
       path: 'src/main.py',
       content: 'old content',
@@ -272,7 +278,8 @@ describe('WorkspaceService', () => {
 
     service.saveFile('project-1', 'src/other.py', 'hello').subscribe({
       next: () => {
-        // Unrelated file — currentFile must stay unchanged.
+        // Saving an unrelated file must not touch currentFile either —
+        // the service no longer mutates currentFile under any save path.
         expect(service.currentFile()?.content).toBe('old content');
         expect(service.currentFile()?.path).toBe('src/main.py');
         expect(service.currentFile()?.size_bytes).toBe(11);
@@ -290,12 +297,18 @@ describe('WorkspaceService', () => {
     req.flush(saveResponse);
   });
 
-  it('should re-throw a save 500', (done) => {
+  it('should re-throw a save 500 and MUST NOT set the error signal (F8 — single error presentation)', (done) => {
+    // F8 — save errors are surfaced by the consumer's snackbar, not by
+    // the service's error banner. The catchError rethrows without
+    // touching `this.error` to avoid the double-banner UX.
+    service.error.set('Previous failure'); // Seed to prove we don't overwrite.
+
     service.saveFile('project-1', 'src/main.py', 'hello').subscribe({
       next: () => done.fail('expected error'),
       error: (error) => {
         expect(error.status).toBe(500);
-        expect(service.error()).toContain('500');
+        // The error signal is NOT mutated by saveFile catchError.
+        expect(service.error()).toBe('Previous failure');
         done();
       },
     });

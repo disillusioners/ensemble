@@ -131,7 +131,24 @@ export class WorkspaceService implements OnDestroy {
       );
   }
 
-  /** PUT /api/workspace/{projectId}/file */
+  /**
+   * PUT /api/workspace/{projectId}/file
+   *
+   * Intentionally side-effect free on the service's own signals:
+   *   - We do NOT mutate `currentFile` here. F2 — the previous
+   *     implementation re-broadcast the saved content through
+   *     `currentFile`, which retriggered the CodeViewerComponent's
+   *     `currentFile` effect and reset `editedContent`, clobbering
+   *     any keystrokes the user typed while the PUT was in flight.
+   *   - We do NOT set `this.error` in catchError. F8 — the
+   *     WorkspaceComponent shows the failure via a status-mapped
+   *     MatSnackBar (single error presentation). Writing here too
+   *     produced a double-banner UX.
+   *
+   * Dirty-state management is owned by the consumer: after the PUT
+   * resolves, the component calls `codeViewer.markSaved()` to align
+   * the saved-state baseline with the content that was just written.
+   */
   saveFile(projectId: string, path: string, content: string): Observable<FileWriteResponse> {
     const body: FileWriteRequest = { path, content };
     return this.http
@@ -140,21 +157,10 @@ export class WorkspaceService implements OnDestroy {
         body
       )
       .pipe(
-        tap((res) => {
-          // If the saved file is the currently selected one, refresh its
-          // in-memory content + size so the editor reflects the write
-          // without needing a round-trip to the server.
-          const current = this.currentFile();
-          if (current && current.path === path) {
-            this.currentFile.set({
-              ...current,
-              content,
-              size_bytes: res.size_bytes,
-            });
-          }
-        }),
         catchError((err) => {
-          this.error.set(err.message || 'Failed to save file');
+          // Rethrow unchanged so the component's snackbar handler can
+          // map status → message. Deliberately NOT touching `this.error`
+          // — single presentation per F8.
           throw err;
         })
       );

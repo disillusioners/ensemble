@@ -199,7 +199,10 @@ describe('CodeViewerComponent', () => {
       expect(badge?.textContent).toContain('Truncated');
     });
 
-    it('should still render the code content area (text files are never replaced)', () => {
+    it('should render the truncated placeholder instead of the code editor (F4)', () => {
+      // F4 — a truncated preview is never editable; the editor must
+      // show a read-only placeholder so the user cannot accidentally
+      // edit the preview and overwrite the full file on save.
       mockWorkspace.currentFile.set(makeFile({
         path: 'big.txt',
         content: 'partial contents…',
@@ -210,7 +213,8 @@ describe('CodeViewerComponent', () => {
       }));
       fixture.detectChanges();
 
-      expect(fixture.nativeElement.querySelector('.code-content')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.truncated-placeholder')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.code-content')).toBeNull();
     });
   });
 
@@ -272,18 +276,184 @@ describe('CodeViewerComponent', () => {
       expect(cmContent?.getAttribute('contenteditable')).toBe('true');
     });
 
-    it('should reset on any file signal change', () => {
+    // ── F1/F2: same-file reload (SSE / save response) must NOT clobber
+    //    unsaved edits. The effect gates the reset on `editedContent ===
+    //    savedBaseline`; only when there are no unsaved edits does it
+    //    pull in the new on-disk content.
+    it('should preserve unsaved edits when the SAME file is reloaded (SSE push)', () => {
       component.onContentChange('edited');
       expect(component.isDirty()).toBe(true);
 
-      // A newly emitted file value resets both snapshots, even when its
-      // content matches the current edit. This is the intentional simple behavior.
-      mockWorkspace.currentFile.set(makeFile({ content: 'edited' }));
+      // Same path (`src/main.ts`), fresh content from disk — the SSE
+      // round-trip of an external write must not stomp the keystrokes
+      // typed after the in-flight save was sent.
+      mockWorkspace.currentFile.set(
+        makeFile({ path: 'src/main.ts', content: 'fresh-from-disk' })
+      );
       fixture.detectChanges();
 
       expect(component.editedContent()).toBe('edited');
       expect(component.currentContent()).toBe('edited');
+      expect(component.isDirty()).toBe(true);
+    });
+
+    it('should accept the new content when the SAME file is reloaded with no unsaved edits', () => {
+      // Not dirty — saved baseline equals edited content. Safe to pull
+      // in the latest on-disk content (e.g. user reverted their edits
+      // and an SSE push arrives).
       expect(component.isDirty()).toBe(false);
+
+      mockWorkspace.currentFile.set(
+        makeFile({ path: 'src/main.ts', content: 'fresh-from-disk' })
+      );
+      fixture.detectChanges();
+
+      expect(component.editedContent()).toBe('fresh-from-disk');
+      expect(component.currentContent()).toBe('fresh-from-disk');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    // ── F2: `markSaved()` aligns the saved-state baseline with the
+    //    currently-edited content so a follow-up SSE push (the round-trip
+    //    of our own save) is allowed to refresh the editor.
+    it('markSaved() should make isDirty false without changing editedContent', () => {
+      component.onContentChange('edited');
+      expect(component.isDirty()).toBe(true);
+
+      component.markSaved();
+
+      expect(component.editedContent()).toBe('edited');
+      expect(component.currentContent()).toBe('edited');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('after markSaved(), a same-file reload with new content is accepted', () => {
+      component.onContentChange('edited');
+      component.markSaved();
+      expect(component.isDirty()).toBe(false);
+
+      // The round-trip of our own save lands — same path, fresh content.
+      // Now that the baseline matches the editor, the gated effect
+      // accepts the refresh.
+      mockWorkspace.currentFile.set(
+        makeFile({ path: 'src/main.ts', content: 'edited' })
+      );
+      fixture.detectChanges();
+
+      expect(component.editedContent()).toBe('edited');
+      expect(component.isDirty()).toBe(false);
+    });
+  });
+
+  // ── 8) F3: binary file read-only guards ─────────────────────────
+
+  describe('binary file guards (F3)', () => {
+    it('should reset editedContent to empty when switching from a text file to a binary file', () => {
+      // Seed with a text file and dirty edits.
+      mockWorkspace.currentFile.set(makeFile({ content: 'original' }));
+      fixture.detectChanges();
+      component.onContentChange('user typing');
+      expect(component.isDirty()).toBe(true);
+
+      // Switch to a binary file — the editor buffer must NOT carry the
+      // previous text file's content forward, otherwise Save would
+      // overwrite the binary with stale text.
+      mockWorkspace.currentFile.set(
+        makeFile({
+          path: 'image.png',
+          content: '',
+          language: null,
+          total_lines: 0,
+          binary: true,
+          size_bytes: 1024,
+        })
+      );
+      fixture.detectChanges();
+
+      expect(component.editedContent()).toBe('');
+      expect(component.currentContent()).toBe('');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('should render the binary placeholder instead of the code editor', () => {
+      mockWorkspace.currentFile.set(
+        makeFile({
+          path: 'image.png',
+          content: '',
+          language: null,
+          total_lines: 0,
+          binary: true,
+          size_bytes: 1024,
+        })
+      );
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.binary-placeholder')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.code-content')).toBeNull();
+    });
+  });
+
+  // ── 9) F4: truncated file read-only guards ──────────────────────
+
+  describe('truncated file guards (F4)', () => {
+    it('should reset editedContent to empty when switching from a text file to a truncated file', () => {
+      mockWorkspace.currentFile.set(makeFile({ content: 'original' }));
+      fixture.detectChanges();
+      component.onContentChange('user typing');
+      expect(component.isDirty()).toBe(true);
+
+      // Switch to a truncated preview — never seed the editor with the
+      // truncated slice, otherwise Save would destroy the file by
+      // writing only the preview slice to disk.
+      mockWorkspace.currentFile.set(
+        makeFile({
+          path: 'big.txt',
+          content: 'partial contents…',
+          language: 'plaintext',
+          total_lines: 1000,
+          truncated: true,
+          size_bytes: 1_048_576,
+        })
+      );
+      fixture.detectChanges();
+
+      expect(component.editedContent()).toBe('');
+      expect(component.currentContent()).toBe('');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('should render the truncated placeholder instead of the code editor', () => {
+      mockWorkspace.currentFile.set(
+        makeFile({
+          path: 'big.txt',
+          content: 'partial contents…',
+          language: 'plaintext',
+          total_lines: 1000,
+          truncated: true,
+          size_bytes: 1_048_576,
+        })
+      );
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.truncated-placeholder')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.code-content')).toBeNull();
+    });
+
+    it('should render the Truncated badge', () => {
+      mockWorkspace.currentFile.set(
+        makeFile({
+          path: 'big.txt',
+          content: 'partial contents…',
+          language: null,
+          total_lines: 1000,
+          truncated: true,
+          size_bytes: 1_048_576,
+        })
+      );
+      fixture.detectChanges();
+
+      const badge = fixture.nativeElement.querySelector('.badge.truncated') as HTMLElement | null;
+      expect(badge?.textContent).toContain('Truncated');
     });
   });
 });

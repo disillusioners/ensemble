@@ -12,7 +12,9 @@ import {
   signal,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { finalize } from 'rxjs';
 import { CommonModule } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
 import { ActivatedRoute } from '@angular/router';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
@@ -140,7 +142,7 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
                   [disabled]="!canSave()"
                   (click)="saveFile()"
                 >
-                  <span>Save</span>
+                  <span>{{ saving() ? 'Saving…' : 'Save' }}</span>
                   <span class="shortcut">Ctrl+S</span>
                 </button>
               </mat-menu>
@@ -221,6 +223,14 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   public readonly viewMode = signal<'code' | 'diff'>('code');
 
   /**
+   * F7 — in-flight save guard. Set true at the start of `saveFile()`,
+   * cleared in a `finalize` callback so both success and error paths
+   * reset the flag. `canSave()` consults this to disable the Save menu
+   * item and block Ctrl+S spam from firing concurrent PUTs.
+   */
+  public readonly saving = signal(false);
+
+  /**
    * Flag distinguishing "the setter has run with a real (non-default)
    * value at least once" from "we're still in ngOnInit waiting to
    * resolve the route fallback". The setter defers to ngOnInit until
@@ -288,16 +298,55 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
   /**
    * Whether the Save menu item should be enabled. Save is allowed only
-   * when a file is selected AND the code viewer reports dirty state.
+   * when ALL of the following hold:
+   *   - No save is currently in flight (F7)
+   *   - A file is selected
+   *   - The code viewer reports dirty state
+   *   - The active view is `code` (not `diff`)
+   *   - The current file is editable (F3/F4 — binary and truncated
+   *     files are read-only and the editor buffer is intentionally
+   *     cleared on entry, so `isDirty()` would already be false;
+   *     this is a belt-and-suspenders guard against future changes
+   *     to the read-only guard inside the editor.)
    */
   canSave(): boolean {
-    return !!this.selectedPath() && this.isCodeViewerDirty();
+    if (this.saving()) {
+      return false;
+    }
+    if (!this.selectedPath()) {
+      return false;
+    }
+    if (this.viewMode() !== 'code') {
+      return false;
+    }
+    if (!this.codeViewer?.isDirty()) {
+      return false;
+    }
+    const file = this.codeViewer?.file();
+    if (file?.binary || file?.truncated) {
+      return false;
+    }
+    return true;
   }
 
   /**
    * PUT the current editor content to the workspace backend. Surfaces
    * success and failure via MatSnackBar. No-op when `canSave()` is false
-   * (no file selected, or nothing dirty).
+   * (no file selected, view is diff, not dirty, file is read-only, or a
+   * save is already in flight).
+   *
+   * F1/F2 — On success, `codeViewer.markSaved()` aligns the
+   * saved-state baseline with the content that was just written so the
+   * `savedBaseline`-gated effect allows a same-file SSE push to refresh
+   * the editor (which is the round-trip of our own save).
+   *
+   * F7 — `saving` is set true at entry and cleared in a `finalize`
+   * callback so both success and error paths reset the flag.
+   *
+   * F8 — Single error presentation: the snackbar is the only user-facing
+   * surface for save errors. The service deliberately does NOT set its
+   * `error` signal in `catchError` so we don't get the double-banner
+   * UX. HTTP status codes are mapped to user-friendly messages here.
    */
   saveFile(): void {
     if (!this.canSave()) {
@@ -307,17 +356,51 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     if (!path || !this.codeViewer) {
       return;
     }
+    this.saving.set(true);
     this.workspace
       .saveFile(this.projectId, path, this.codeViewer.currentContent())
-      .pipe(takeUntilDestroyed(this.destroyRef))
+      .pipe(
+        takeUntilDestroyed(this.destroyRef),
+        finalize(() => this.saving.set(false))
+      )
       .subscribe({
         next: () => {
+          // Align the saved-state baseline so `isDirty()` becomes false
+          // and a follow-up SSE push of the same file can refresh the
+          // editor (this is the round-trip of our own save).
+          this.codeViewer!.markSaved();
           this.snackBar.open('File saved', 'Dismiss', { duration: 3000 });
         },
-        error: () => {
-          this.snackBar.open('Failed to save file', 'Dismiss', { duration: 5000 });
+        error: (err: unknown) => {
+          this.snackBar.open(
+            this.mapSaveError(err),
+            'Dismiss',
+            { duration: 5000 }
+          );
         },
       });
+  }
+
+  /**
+   * Translate a save error into a user-friendly snackbar message keyed
+   * on the HTTP status. Falls back to a generic message for unexpected
+   * status codes / shapes. Keeping the mapping here — and out of the
+   * service — preserves the "single error presentation" invariant from
+   * F8 (the snackbar is the only place the user sees the failure).
+   *
+   * Uses `statusText` rather than `message` so the snackbar reads
+   * `"Failed to save file: 500 Server Error"` instead of Angular's
+   * verbose default `"Http failure response for /…: 500 Server Error"`.
+   */
+  private mapSaveError(err: unknown): string {
+    const httpErr = err instanceof HttpErrorResponse ? err : null;
+    const status = httpErr?.status;
+    if (status === 413) return 'File too large';
+    if (status === 403) return 'Permission denied';
+    if (status === 404) return 'Project or file not found';
+    if (status === 0) return 'Network error — check connection';
+    const statusText = httpErr?.statusText ?? '';
+    return `Failed to save file: ${status ?? 'unknown'}${statusText ? ' ' + statusText : ''}`;
   }
 
   /**

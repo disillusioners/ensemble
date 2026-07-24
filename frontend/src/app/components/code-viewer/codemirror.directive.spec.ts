@@ -1,5 +1,6 @@
 import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Transaction } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { CodemirrorDirective } from './codemirror.directive';
 
@@ -11,12 +12,20 @@ import { CodemirrorDirective } from './codemirror.directive';
       [appCodemirror]=""
       [content]="content"
       [language]="language"
+      (contentChange)="onContentChange($event)"
     ></div>
   `,
 })
 class HostComponent {
   content = 'print("hello")';
   language: string | null | undefined = 'python';
+  emitCount = 0;
+  lastEmittedContent: string | null = null;
+
+  onContentChange(value: string): void {
+    this.lastEmittedContent = value;
+    this.emitCount++;
+  }
 }
 
 describe('CodemirrorDirective', () => {
@@ -108,5 +117,58 @@ describe('CodemirrorDirective', () => {
     // No assertions on highlighting tokens — see the comment in the
     // language-swap test for why jsdom can't reliably render them.
     expect(contentElement()?.getAttribute('contenteditable')).toBe('false');
+  });
+
+  // ── contentChange filtering: F1/F2 same-file clobber guard ─────
+  //
+  // The directive's `contentChange` output only fires for user-initiated
+  // edits (`t.isUserEvent('input')`). Programmatic dispatches — the
+  // `[content]` sync in `ngOnChanges`, the language swap, and any
+  // external `view.dispatch(...)` — must NOT emit. This is the primary
+  // mechanism preventing F1/F2 clobbering of unsaved edits when the
+  // same file is reloaded via SSE.
+
+  function editorView(): EditorView | null {
+    const el = fixture.nativeElement.querySelector('.cm-editor') as HTMLElement | null;
+    return el ? EditorView.findFromDOM(el) : null;
+  }
+
+  it('should NOT emit contentChange for a programmatic doc change', () => {
+    const view = editorView();
+    expect(view).not.toBeNull();
+
+    host.emitCount = 0;
+    host.lastEmittedContent = null;
+
+    // Dispatch WITHOUT an `userEvent` annotation — simulates the
+    // `[content]` sync inside `ngOnChanges`. The doc does change
+    // (`docChanged === true`), but no transaction carries the
+    // `input` user-event annotation, so the output must not fire.
+    view!.dispatch({
+      changes: { from: 0, to: view!.state.doc.length, insert: 'programmatic' },
+    });
+
+    expect(host.emitCount).toBe(0);
+    expect(host.lastEmittedContent).toBeNull();
+  });
+
+  it('should emit contentChange for a user-input doc change', () => {
+    const view = editorView();
+    expect(view).not.toBeNull();
+
+    host.emitCount = 0;
+    host.lastEmittedContent = null;
+
+    // Dispatch WITH the `Transaction.userEvent.of('input')` annotation
+    // — this is what CodeMirror 6 attaches to typing/paste/drop/IME
+    // composition transactions from real user inputs. The directive's
+    // `isUserEvent('input')` filter must let this through.
+    view!.dispatch({
+      changes: { from: 0, to: view!.state.doc.length, insert: 'user typed' },
+      annotations: [Transaction.userEvent.of('input')],
+    });
+
+    expect(host.emitCount).toBe(1);
+    expect(host.lastEmittedContent).toBe('user typed');
   });
 });

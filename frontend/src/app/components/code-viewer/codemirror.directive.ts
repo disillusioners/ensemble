@@ -88,7 +88,19 @@ export class CodemirrorDirective implements OnChanges, OnDestroy {
           this.langCompartment.of(this.getLangExtension()),
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
-            if (update.docChanged) {
+            // Only surface USER-initiated edits via `contentChange`.
+            // Programmatic dispatches (the `[content]` sync in
+            // `ngOnChanges` below, and the language swap above) also
+            // fire `docChanged` and would otherwise clobber the host
+            // component's `editedContent` signal every time a file
+            // reloads — defeating the savedBaseline gating that
+            // preserves unsaved edits across same-file SSE reloads.
+            //
+            // `isUserEvent('input')` is true for any user-driven doc
+            // change (typing, paste, drop, IME composition). It is
+            // false for dispatches we issue programmatically because
+            // those do not carry a userEvent annotation.
+            if (update.docChanged && update.transactions.some((t) => t.isUserEvent('input'))) {
               this.contentChange.emit(update.state.doc.toString());
             }
           }),
