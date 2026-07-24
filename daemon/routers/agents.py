@@ -4,12 +4,13 @@ import json
 import logging
 import shutil
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from daemon.models import AgentInfo, AgentListResponse, AgentCreate, ErrorResponse, ErrorCodes
+from daemon.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -29,43 +30,34 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 @router.get("", response_model=AgentListResponse)
 async def list_agents():
-    """List all available agents by scanning the agents directory."""
-    agents_dir = BASE_DIR / "agents"
+    """List all available agents with version information."""
+    registry = get_registry()
+    grouped = registry.list_all_grouped()
+
     result = []
-    
-    if agents_dir.exists():
-        for agent_path in sorted(agents_dir.iterdir()):
-            # Skip hidden directories (starting with .) and non-directories
-            if not agent_path.is_dir() or agent_path.name.startswith("."):
-                continue
-            
-            # Skip special internal directories that aren't agents
-            if agent_path.name in ("_trash", "_baby_template"):
-                continue
-            
-            # Skip internal agents (starting with _)
-            if agent_path.name.startswith("_"):
-                continue
-            
-            meta_path = agent_path / "meta.json"
-            if meta_path.exists():
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    
-                    result.append(AgentInfo(
-                        id=meta.get("id", agent_path.name),
-                        name=meta.get("name", agent_path.name.title()),
-                        description=meta.get("description", ""),
-                        icon=meta.get("icon", "🤖"),
-                        color=meta.get("color", "accent-blue"),
-                        version=meta.get("version"),
-                        agent_dir=f"./agents/{agent_path.name}",
-                        system=meta.get("system", False),
-                    ))
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning(f"Failed to load meta.json for {agent_path.name}: {e}")
-    
+    for agent_id, versions in sorted(grouped.items()):
+        # C4: Apply _ prefix filter to match pre-refactor router behavior
+        if agent_id.startswith("_"):
+            continue
+
+        available_tags = sorted(
+            [v.version_tag for v in versions],
+            key=lambda tag: (tag is not None, tag or ""),
+        )
+        for meta in versions:
+            result.append(AgentInfo(
+                id=meta.id,
+                name=meta.name,
+                description=meta.description,
+                icon=meta.icon,
+                color=meta.color,
+                version=meta.version,
+                agent_dir=str(meta.path),
+                system=meta.system,
+                version_tag=meta.version_tag,
+                available_versions=available_tags,
+            ))
+
     return AgentListResponse(agents=result)
 
 

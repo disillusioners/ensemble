@@ -229,6 +229,12 @@ class AgentRegistry:
             # "developer[v2]" registers as base="developer" with tag="v2"
             # rather than id="developer[v2]".
             base_agent_id, version_tag = _parse_agent_dir_name(agent_path.name)
+            meta_id = meta.get("id")
+            if meta_id and meta_id != base_agent_id:
+                logger.warning(
+                    f"Agent '{base_agent_id}' meta.json has id='{meta_id}' which differs "
+                    "from directory name. Directory name takes precedence for versioning."
+                )
             agent_id = meta.get("id", base_agent_id)
 
             # Build AgentMetadata with defaults for missing fields

@@ -3019,6 +3019,8 @@ class InstanceManager:
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables
             "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
+            # instances.agent_tag: agent version tag for directory-suffix versioning
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
             # instance_execution_leases: the Execution Gate's per-instance
             # lease table. SQLite gets it via the .sql migration at
             # ``daemon/migrations/versions/20260614_000002_create_instance_execution_leases.sql``;
@@ -4078,6 +4080,7 @@ class InstanceManager:
         instance_name: str | None = None,
         invoked_as_tool: bool = False,
         model: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
@@ -4097,6 +4100,7 @@ class InstanceManager:
                 env OPENAI_MODEL. If the list is non-empty and this model is not
                 allowed, the override is silently ignored and the default model
                 is used.
+            version_tag: Optional agent version tag. ``None`` selects the base agent.
 
         Returns:
             A ``(instance_id, validated_model_override)`` tuple. ``validated_model_override``
@@ -4119,6 +4123,7 @@ class InstanceManager:
             instance_name=instance_name,
             invoked_as_tool=invoked_as_tool,
             model=model,
+            version_tag=version_tag,
         )
 
     async def ensure_mcp_preloaded(self, instance_id: str) -> None:
@@ -4151,7 +4156,13 @@ class InstanceManager:
         except Exception as e:
             logger.warning(f"MCP preload failed for {instance_id[:8]}: {e}")
 
-    async def spawn_instance_with_mcp(self, *, instance_id: str, **kwargs) -> str:
+    async def spawn_instance_with_mcp(
+        self,
+        *,
+        instance_id: str,
+        version_tag: str | None = None,
+        **kwargs,
+    ) -> str:
         """Async spawn with MCP preload and cleanup on failure.
 
         1. Preloads MCP tools
@@ -4160,6 +4171,7 @@ class InstanceManager:
 
         Args:
             instance_id: The pre-generated instance ID.
+            version_tag: Optional agent version tag. ``None`` selects the base agent.
             **kwargs: Passed to spawn_instance().
 
         Returns:
@@ -4177,7 +4189,9 @@ class InstanceManager:
             # ``spawn_instance`` tool layer); the wrapper contract remains
             # ``-> str`` for downstream HTTP / API consumers.
             instance_id, _validated_model_override = self.spawn_instance(
-                instance_id=instance_id, **kwargs
+                instance_id=instance_id,
+                version_tag=version_tag,
+                **kwargs,
             )
             return instance_id
         except Exception:

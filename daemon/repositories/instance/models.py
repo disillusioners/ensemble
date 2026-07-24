@@ -53,6 +53,11 @@ class Instance(SQLModel, table=True):
     agent_id: str = Field(index=True)
     agent_dir: str = Field(index=True)
     agent_name: str | None = Field(default=None, index=True)
+    agent_tag: str | None = Field(
+        default=None,
+        sa_column=Column("agent_tag", String, nullable=True)
+        # W9: No index — agent_tag filtering is rare
+    )
     parent_id: str | None = Field(default=None, index=True)
     status: str = Field(default=InstanceStatus.IDLE.value, index=True)
     
@@ -83,6 +88,7 @@ class Instance(SQLModel, table=True):
             "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
             "agent_name": self.agent_name,
+            "agent_tag": self.agent_tag,
             "parent_id": self.parent_id,
             "status": self.status,
             "title": self.title,

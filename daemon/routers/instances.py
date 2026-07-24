@@ -238,6 +238,7 @@ async def create_instance(
             agent_id=instance_create.agent_id,
             instance_id=instance_id,
             project_id=instance_create.project_id,
+            version_tag=instance_create.version_tag,
         )
     except ValueError as e:
         error_msg = str(e)
@@ -263,6 +264,7 @@ async def create_instance(
     return InstanceInfo(
         instance_id=instance_meta["instance_id"],
         agent_id=instance_meta["agent_id"],
+        agent_tag=instance_meta.get("agent_tag"),
         agent_dir=instance_meta["agent_dir"],
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),
@@ -330,6 +332,7 @@ async def list_instances(
         instances.append(InstanceInfo(
             instance_id=inst["instance_id"],
             agent_id=inst["agent_id"],
+            agent_tag=inst.get("agent_tag"),
             agent_dir=inst["agent_dir"],
             status=InstanceStatus(inst["status"]),
             parent_id=inst.get("parent_id"),
@@ -384,6 +387,7 @@ async def get_instance(
     return InstanceInfo(
         instance_id=instance_meta["instance_id"],
         agent_id=instance_meta["agent_id"],
+        agent_tag=instance_meta.get("agent_tag"),
         agent_dir=instance_meta["agent_dir"],
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),

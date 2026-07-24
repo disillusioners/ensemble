@@ -1009,11 +1009,15 @@ class InstanceLifecycleService:
         instance_name: str | None = None,
         invoked_as_tool: bool = False,
         model: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
         Args:
-            agent_id: Agent ID (e.g., "developer").
+            agent_id: Agent ID (e.g., "developer"). May also be a path like
+                ``"./agents/developer"`` or ``"agents/developer"`` — the
+                registry normalizes a path to the base agent ID before
+                version lookup.
             instance_id: Optional instance ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent instance ID for hierarchical instances.
             project_id: Optional project ID for project context.
@@ -1025,6 +1029,14 @@ class InstanceLifecycleService:
                 ``OPENAI_MODEL``. If the list is non-empty and ``model`` is not
                 allowed, the override is silently ignored and the default model
                 is used (no error).
+            version_tag: Optional agent version tag (e.g., ``"v2"``).
+                ``None`` selects the base (untagged) agent. When an
+                explicit non-None tag is supplied and no matching
+                version exists, this method raises ``ValueError`` —
+                the fallback-to-base contract (C2) only applies to the
+                implicit ``None`` case. The resolved tag is persisted
+                as ``Instance.agent_tag`` (C1) so the same version is
+                reloaded on restore from the database.
 
         Returns:
             A ``(instance_id, validated_model_override)`` tuple where
@@ -1039,7 +1051,8 @@ class InstanceLifecycleService:
 
         Raises:
             ValueError: If max_children_per_instance limit is exceeded,
-                or if agent_id is not found.
+                if agent_id is not found, or if ``version_tag`` does not
+                match any available version of the resolved agent.
         """
         # Normalize project_id: accept "null"/"none"/""/None as system
         # default. The None case MUST be normalised too — root instances
@@ -1057,7 +1070,19 @@ class InstanceLifecycleService:
         # Resolve agent
         registry = get_registry()
         resolved_agent_id = registry.resolve_to_id(agent_id) or agent_id
-        metadata = registry.get(resolved_agent_id)
+
+        if version_tag is not None:
+            metadata = registry.get_version(resolved_agent_id, version_tag)
+            if metadata is None:
+                available = registry.list_versions(resolved_agent_id)
+                raise ValueError(
+                    f"Version tag '{version_tag}' not found for agent '{resolved_agent_id}'. "
+                    f"Available: {available}"
+                )
+        else:
+            metadata = registry.get_version(resolved_agent_id, None)
+            if metadata is None:
+                metadata = registry.get(resolved_agent_id)
         if metadata is None:
             raise ValueError(f"Agent not found: {resolved_agent_id}")
         resolved_agent_dir = str(metadata.path)
@@ -1098,13 +1123,12 @@ class InstanceLifecycleService:
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(resolved_agent_dir)
-        # D15: version_tag=None for Phase 1; Phase 2 will thread the actual tag from spawn args.
         system_prompt, token_count = load_and_cache_prompt(
             resolved_agent_id,
             agent_path,
             prompt_cache,
             mcp_tool_names,
-            version_tag=None,
+            version_tag=version_tag,
         )
 
         # Apply the post-cache append chain for context, metadata, time,
@@ -1244,6 +1268,7 @@ class InstanceLifecycleService:
             instance_id=instance_id,
             resolved_agent_id=resolved_agent_id,
             resolved_agent_dir=resolved_agent_dir,
+            version_tag=version_tag,
             agent_name=agent_name,
             parent_id=parent_id,
             project_id=project_id,
@@ -2429,22 +2454,29 @@ class InstanceLifecycleService:
         mcp_tool_names = self._get_mcp_tool_names(instance_id, stored_mcp)
         
         registry = get_registry()
-        agent_meta = registry.get_resolved(meta.agent_id)
+        agent_tag = getattr(meta, "agent_tag", None)
+        agent_meta = registry.get_version(meta.agent_id, agent_tag)
         if agent_meta is None:
-            raise ValueError(f"Agent not found: {meta.agent_id}")
+            if agent_tag is not None:
+                logger.warning(
+                    f"Agent tag '{agent_tag}' not found for '{meta.agent_id}' during restore, "
+                    f"falling back to base version"
+                )
+            agent_meta = registry.get_resolved(meta.agent_id)
+        if agent_meta is None:
+            raise ValueError(f"Agent not found: {meta.agent_id} (tag: {agent_tag})")
         resolved_agent_id = meta.agent_id
 
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(agent_meta.path)
-        # D15: version_tag=None for Phase 1; Phase 2 will thread the actual tag from meta.
         system_prompt, token_count = load_and_cache_prompt(
             resolved_agent_id,
             agent_path,
             prompt_cache,
             mcp_tool_names,
-            version_tag=None,
+            version_tag=agent_tag,
         )
 
         # Apply the post-cache append chain for context, metadata, time,
@@ -2995,6 +3027,7 @@ class InstanceLifecycleService:
         instance_id: str,
         resolved_agent_id: str,
         resolved_agent_dir: str,
+        version_tag: str | None,
         agent_name: str,
         parent_id: str | None,
         project_id: str | None,
@@ -3064,6 +3097,7 @@ class InstanceLifecycleService:
                 instance_id=instance_id,
                 project_id=project_id,
                 agent_id=resolved_agent_id,
+                agent_tag=version_tag,
                 agent_dir=resolved_agent_dir,
                 agent_name=agent_name,
                 parent_id=parent_id,

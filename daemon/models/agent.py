@@ -12,6 +12,14 @@ class AgentInfo(BaseModel):
     version: str | None = Field(default=None, description="Agent version")
     agent_dir: str = Field(..., description="Path to the agent directory")
     system: bool = Field(default=False, description="Whether this is a system agent")
+    version_tag: str | None = Field(
+        default=None,
+        description="Version tag for this agent entry (None = base). Derived from directory suffix [tag].",
+    )
+    available_versions: list[str | None] = Field(
+        default_factory=list,
+        description="All available version tags for this agent_id. None in the list means base version exists.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -23,7 +31,9 @@ class AgentInfo(BaseModel):
                 "color": "accent-cyan",
                 "version": "1.0.0",
                 "agent_dir": "./agents/developer",
-                "system": False
+                "system": False,
+                "version_tag": None,
+                "available_versions": [None, "experimental"],
             }
         }
     )

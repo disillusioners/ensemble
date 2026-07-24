@@ -605,6 +605,50 @@ class TestAgentVersioning:
         reg.discover()
         assert reg.get("developer[v2]") is None
 
+    def test_get_resolved_composite_key_returns_none(
+        self, temp_agents_dir: Path
+    ) -> None:
+        """W1 regression: get_resolved must NOT resolve composite keys.
+
+        D16 keystone invariant: ``get_resolved`` is the canonical-id lookup
+        used by legacy spawn/restore paths. It must ignore composite keys
+        like ``"developer[v2]"`` and return ``None`` — otherwise callers
+        would accidentally load a tagged prompt while believing they had
+        the base agent.
+        """
+        # Build a registry that contains BOTH base and tagged variants so
+        # the test would fail if get_resolved fell through to a more
+        # permissive lookup path.
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        # Composite key → None (no fallback to base, no fallback to tagged).
+        assert reg.get_resolved("developer[v2]") is None
+
+        # Sanity: base path still resolves correctly — proves the test
+        # didn't accidentally break resolution for valid ids.
+        base = reg.get_resolved("developer")
+        assert base is not None
+        assert base.id == "developer"
+        assert base.version_tag is None
+
+    def test_get_resolved_composite_key_returns_none_tagged_only(
+        self, temp_agents_dir: Path
+    ) -> None:
+        """Even with no base agent present, a composite key must return None
+        from get_resolved — never auto-resolve to a tagged variant."""
+        # Only tagged variant, no base "developer".
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        # Composite key still None — get_resolved never accepts [tag] suffixes.
+        assert reg.get_resolved("developer[v2]") is None
+
     def test_resolve_pure_id_ignores_composite_key(self, temp_agents_dir: Path) -> None:
         self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
         reg = AgentRegistry(temp_agents_dir)

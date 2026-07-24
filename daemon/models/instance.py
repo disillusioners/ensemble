@@ -15,6 +15,7 @@ class InstanceCreate(BaseModel):
     agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
     instance_id: str | None = Field(default=None, description="Optional instance ID")
     project_id: str | None = Field(default=None, description="Optional project ID for associating instance with a project")
+    version_tag: str | None = Field(default=None, description="Optional agent version tag (None = base). Selects a tagged variant of the agent.")
 
     @model_validator(mode='after')
     def validate_agent(self):
@@ -59,6 +60,7 @@ class InstanceInfo(BaseModel):
     color_tag: str | None = Field(default=None, description="UI color tag (e.g., 'red', 'blue', '#ff0000') for this instance (UI-only preference)")
     icon_tag: str | None = Field(default=None, description="UI icon tag for this instance (UI-only preference)")
     pinned_at: datetime | None = Field(default=None, description="When this instance was pinned (UI-only preference)")
+    agent_tag: str | None = Field(default=None, description="Agent version tag (None = base). Selects a tagged variant of the agent.")
 
     model_config = ConfigDict(
         json_schema_extra={
