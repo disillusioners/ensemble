@@ -53,9 +53,16 @@ export class CodemirrorDirective implements OnChanges, OnDestroy {
       this.initView();
     }
     if (changes['content'] && this.view) {
-      this.view.dispatch({
-        changes: { from: 0, to: this.view.state.doc.length, insert: this.content }
-      });
+      // Guard: skip the dispatch when the incoming content equals the
+      // current document. This prevents cursor jumps when the binding
+      // round-trips the user's own input back (editedContent → binding
+      // → ngOnChanges), and also avoids clobbering restored edits on
+      // tab switch-back where the signal was already set by the effect.
+      if (this.content !== this.view.state.doc.toString()) {
+        this.view.dispatch({
+          changes: { from: 0, to: this.view.state.doc.length, insert: this.content }
+        });
+      }
     }
     if (changes['language'] && this.view) {
       this.view.dispatch({

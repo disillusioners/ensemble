@@ -419,7 +419,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
           // Align the saved-state baseline so `isDirty()` becomes false
           // and a follow-up SSE push of the same file can refresh the
           // editor (this is the round-trip of our own save).
-          this.codeViewer!.markSaved();
+          this.codeViewer!.markSaved(this.codeViewer!.currentContent());
           this.snackBar.open('File saved', 'Dismiss', { duration: 3000 });
         },
         error: (err: unknown) => {

@@ -71,7 +71,7 @@ interface EditState {
           </div>
         } @else {
           <div class="code-content" [appCodemirror]=""
-               [content]="f.content"
+               [content]="editedContent()"
                [language]="f.language"
                [editable]="!f.binary && !f.truncated"
                (contentChange)="onContentChange($event)"></div>
@@ -295,20 +295,53 @@ export class CodeViewerComponent {
    * follow-up SSE push of the same file is allowed to refresh the
    * editor (the round-trip of our own save). Also mirrors the new
    * clean state to the service so the tab's dirty dot clears.
+   *
+   * `savedContent` is the body that was actually sent in the PUT. We
+   * align the baseline to THAT, not to the live `editedContent()`,
+   * because the user may have typed more characters between the PUT
+   * departing and the response arriving. If they did, `editedContent
+   * !== savedContent`, and the file should remain dirty — the disk
+   * holds the older PUT body, so isDirty must stay true. We use
+   * `untracked()` for signal reads inside this handler to avoid
+   * creating unwanted effect dependencies (markSaved is called from
+   * event handlers, not effects, but the read safety is cheap).
    */
-  markSaved(): void {
-    const content = this.editedContent();
-    this.setBaseline(content);
-    this.setOriginal(content);
-    const path = this.currentFilePath();
-    if (path) {
-      this.editStateMap.set(path, {
-        original: content,
-        edited: content,
-        baseline: content,
-      });
-      this.workspace.setFileDirty(path, false);
+  markSaved(savedContent: string): void {
+    const path = untracked(() => this.currentFilePath());
+    this.setBaseline(savedContent);
+
+    // Only update originalContent if the edited content still matches
+    // what was saved. If the user typed more after the PUT departed,
+    // editedContent !== savedContent, so the file remains correctly
+    // dirty.
+    if (untracked(() => this.editedContent()) === savedContent) {
+      this.setOriginal(savedContent);
     }
+    // If editedContent !== savedContent, the original stays as the
+    // pre-save version, so isDirty remains true — correct behavior.
+
+    if (path) {
+      // Update the map entry.
+      this.editStateMap.set(path, {
+        original: untracked(() => this.originalContent()),
+        edited: untracked(() => this.editedContent()),
+        baseline: savedContent,
+      });
+      this.workspace.setFileDirty(
+        path,
+        untracked(() => this.editedContent()) !== untracked(() => this.originalContent())
+      );
+    }
+  }
+
+  /**
+   * Remove a path's entry from the per-path edit-state map. Called by
+   * `WorkspaceComponent.onTabClose(path)` when a tab is closed so the
+   * map does not retain stale state for a re-opened tab and does not
+   * grow without bound across the session.
+   */
+  forgetTab(path: string): void {
+    this.editStateMap.delete(path);
   }
 
   formatSize(bytes: number): string {

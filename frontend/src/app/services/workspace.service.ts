@@ -2,9 +2,8 @@ import { Injectable, NgZone, OnDestroy, computed, inject, signal } from '@angula
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable, catchError, finalize, of, tap } from 'rxjs';
 import {
-  OpenFileTab,
-
   FileContentResponse,
+  FileChangeEvent,
   FileTreeNode,
   FileTreeResponse,
   FileWriteRequest,
@@ -69,6 +68,13 @@ export class WorkspaceService implements OnDestroy {
 
   // Track current project ID for SSE auto-refresh callbacks
   private _currentProjectId: string | null = null;
+
+  /**
+   * Monotonically increasing project-state generation. File-content
+   * requests capture the current value and may only mutate tab state if
+   * it is unchanged when their response arrives.
+   */
+  private _projectGeneration = 0;
 
   /**
    * Project ID that the `currentTree` signal's data belongs to. Updated
@@ -192,11 +198,17 @@ export class WorkspaceService implements OnDestroy {
 
   /** GET /api/workspace/{projectId}/file */
   getFileContent(projectId: string, path: string): Observable<FileContentResponse> {
+    const requestGeneration = this._projectGeneration;
     const params = new HttpParams().set('path', path);
     return this.http
       .get<FileContentResponse>(`${this.API_BASE}/${encodeURIComponent(projectId)}/file`, { params })
       .pipe(
         tap((res) => {
+          // The response is still delivered to subscribers, but a request
+          // from an earlier project generation must not repopulate or
+          // activate tabs after a project switch/reset.
+          if (requestGeneration !== this._projectGeneration) return;
+
           // Open or activate the tab for this file, then cache its
           // content. `selectedPath` and `currentFile` are computed from
           // the tab state, so this tap transitively updates both.
@@ -344,6 +356,7 @@ export class WorkspaceService implements OnDestroy {
    * do not flash briefly while the new project's data is loading.
    */
   resetState(): void {
+    this._projectGeneration++;
     this.currentTree.set(null);
     this._treeProjectId = null;
     this._tabList.set([]);
@@ -386,14 +399,28 @@ export class WorkspaceService implements OnDestroy {
    */
   openFile(projectId: string, path?: string): void {
     const filePath = path ?? projectId;
-    const label = this.deriveTabName(filePath);
-    if (!this.isTabOpen(filePath)) {
-      this._tabList.update((list) => [...list, { path: filePath, name: label }]);
+    if (this.isTabOpen(filePath)) {
+      this._activeFilePath.set(filePath);
+      return;
     }
+
+    const label = this.deriveTabName(filePath);
+    this._tabList.update((list) => [...list, { path: filePath, name: label }]);
     this._activeFilePath.set(filePath);
-    if (path) {
+    if (path !== undefined) {
       this.getFileContent(projectId, filePath).subscribe({ error: () => this.closeFile(filePath) });
     }
+  }
+
+  /**
+   * Fetch content for an open tab only when its content cache is empty.
+   * Restored tabs intentionally have no cached content; callers can use
+   * this after activation to hydrate one without making activation itself
+   * perform I/O. Absent tabs and already-hydrated tabs are no-ops.
+   */
+  ensureTabContent(projectId: string, path: string): void {
+    if (!this.isTabOpen(path) || this._tabContents().has(path)) return;
+    this.getFileContent(projectId, path).subscribe({ error: () => undefined });
   }
 
   /**

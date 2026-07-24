@@ -57,6 +57,6 @@ export interface FileWriteResponse {
 export interface OpenFileTab {
   path: string;
   name: string;
-  content: FileContentResponse | null;
+  content?: FileContentResponse | null;
   dirty: boolean;
 }

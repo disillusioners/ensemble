@@ -300,7 +300,7 @@ describe('CodeViewerComponent', () => {
       component.onContentChange('edited');
       expect(component.isDirty()).toBe(true);
 
-      component.markSaved();
+      component.markSaved('edited');
 
       expect(component.editedContent()).toBe('edited');
       expect(component.currentContent()).toBe('edited');
@@ -309,7 +309,7 @@ describe('CodeViewerComponent', () => {
 
     it('after markSaved(), a same-file reload with new content is accepted', () => {
       component.onContentChange('edited');
-      component.markSaved();
+      component.markSaved('edited');
       expect(component.isDirty()).toBe(false);
 
       // The round-trip of our own save lands — same path, fresh content.
@@ -523,7 +523,7 @@ describe('CodeViewerComponent', () => {
       component.onContentChange('a-edited');
       mockWorkspace.setFileDirty.mockClear();
 
-      component.markSaved();
+      component.markSaved('a-edited');
       expect(mockWorkspace.setFileDirty).toHaveBeenCalledWith('a.ts', false);
       expect(component.isDirty()).toBe(false);
 
@@ -540,7 +540,7 @@ describe('CodeViewerComponent', () => {
       component.onContentChange('b-edited');
 
       mockWorkspace.setFileDirty.mockClear();
-      component.markSaved();
+      component.markSaved('b-edited');
       // Only the active file (b.ts) is cleared; A's dirty flag is
       // untouched. The user must explicitly switch to A and save it
       // to clear A's dirty state.
@@ -549,6 +549,60 @@ describe('CodeViewerComponent', () => {
         'a.ts',
         expect.anything()
       );
+    });
+
+    it('forgetTab(path) removes the entry so a re-opened tab shows fresh content', () => {
+      // Open A, edit it, switch to B (so A's edit is parked in the map).
+      switchTo('a.ts', 'a-original');
+      component.onContentChange('a-stale-edit');
+      switchTo('b.ts', 'b-original');
+      // Close A — the tab-close handler calls forgetTab.
+      component.forgetTab('a.ts');
+      // Re-open A. The map no longer has the stale edit, so the
+      // editor loads fresh disk content and is clean.
+      switchTo('a.ts', 'a-original');
+      expect(component.editedContent()).toBe('a-original');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('forgetTab(path) is a no-op for paths not in the map', () => {
+      expect(() => component.forgetTab('never-opened.ts')).not.toThrow();
+    });
+
+    it('markSaved(savedContent) clears dirty when editedContent matches savedContent', () => {
+      switchTo('a.ts', 'a-original');
+      component.onContentChange('a-edited');
+      expect(component.isDirty()).toBe(true);
+
+      // Simulate the PUT response: saved content matches what is
+      // currently in the editor (no additional typing happened).
+      component.markSaved('a-edited');
+
+      expect(component.editedContent()).toBe('a-edited');
+      expect(component.isDirty()).toBe(false);
+      expect(mockWorkspace.setFileDirty).toHaveBeenLastCalledWith('a.ts', false);
+    });
+
+    it('markSaved(savedContent) keeps the file dirty when the user typed more after the PUT departed', () => {
+      switchTo('a.ts', 'a-original');
+      component.onContentChange('a-first-edit');
+      expect(component.isDirty()).toBe(true);
+
+      // PUT departs with 'a-first-edit'. Before the response returns,
+      // the user types more — editedContent now diverges from the
+      // PUT body.
+      component.onContentChange('a-first-edit-and-more');
+
+      // Response arrives. markSaved aligns the baseline to the
+      // content that was actually saved ('a-first-edit'), not to the
+      // newer editedContent. Because editedContent ('a-first-edit-
+      // and-more') !== savedContent ('a-first-edit'), the file must
+      // remain dirty.
+      component.markSaved('a-first-edit');
+
+      expect(component.editedContent()).toBe('a-first-edit-and-more');
+      expect(component.isDirty()).toBe(true);
+      expect(mockWorkspace.setFileDirty).toHaveBeenLastCalledWith('a.ts', true);
     });
 
     it('clears all edit state when switching to no file (null)', () => {
