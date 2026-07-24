@@ -213,4 +213,55 @@ describe('FileTreeComponent', () => {
       expect(component.getExpandedPaths()).toEqual(['src']);
     });
   });
+
+  // ── 8) openPaths / isFileOpen (multi-file tab highlighting) ────
+
+  describe('isFileOpen', () => {
+    it('should return true for paths present in openPaths', () => {
+      fixture.componentRef.setInput('openPaths', ['src/main.ts', 'README.md']);
+      expect(component.isFileOpen('src/main.ts')).toBe(true);
+      expect(component.isFileOpen('README.md')).toBe(true);
+    });
+
+    it('should return false for paths not present in openPaths', () => {
+      fixture.componentRef.setInput('openPaths', ['src/main.ts']);
+      expect(component.isFileOpen('README.md')).toBe(false);
+      expect(component.isFileOpen('src/app/app.ts')).toBe(false);
+    });
+
+    it('should return false when openPaths is empty', () => {
+      fixture.componentRef.setInput('openPaths', []);
+      expect(component.isFileOpen('src/main.ts')).toBe(false);
+    });
+
+    it('should default to an empty list when openPaths is not set', () => {
+      // No setInput call — openPaths should fall back to its default [].
+      expect(component.isFileOpen('src/main.ts')).toBe(false);
+    });
+  });
+
+  // ── 9) activePath / isActiveFile (multi-file tab highlighting) ─
+
+  describe('isActiveFile', () => {
+    it('should return true for the path matching activePath', () => {
+      fixture.componentRef.setInput('activePath', 'src/main.ts');
+      expect(component.isActiveFile('src/main.ts')).toBe(true);
+    });
+
+    it('should return false for paths other than activePath', () => {
+      fixture.componentRef.setInput('activePath', 'src/main.ts');
+      expect(component.isActiveFile('README.md')).toBe(false);
+      expect(component.isActiveFile('src/app/app.ts')).toBe(false);
+    });
+
+    it('should return false when activePath is null', () => {
+      fixture.componentRef.setInput('activePath', null);
+      expect(component.isActiveFile('src/main.ts')).toBe(false);
+    });
+
+    it('should default to null when activePath is not set', () => {
+      // No setInput call — activePath should fall back to its default null.
+      expect(component.isActiveFile('src/main.ts')).toBe(false);
+    });
+  });
 });

@@ -53,3 +53,10 @@ export interface FileWriteResponse {
   size_bytes: number;
   saved: boolean;
 }
+
+export interface OpenFileTab {
+  path: string;
+  name: string;
+  content: FileContentResponse | null;
+  dirty: boolean;
+}

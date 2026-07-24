@@ -29,6 +29,7 @@ import { WorkspaceService } from '../../services/workspace.service';
 import { FileTreeComponent } from '../../components/file-tree/file-tree.component';
 import { CodeViewerComponent } from '../../components/code-viewer/code-viewer.component';
 import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.component';
+import { FileTabsComponent } from '../../components/file-tabs/file-tabs.component';
 
 /**
  * Workspace viewer.
@@ -63,6 +64,7 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
     FileTreeComponent,
     CodeViewerComponent,
     DiffViewerComponent,
+    FileTabsComponent,
   ],
   template: `
     <div class="workspace-container">
@@ -74,6 +76,8 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
           </div>
           <app-file-tree
             [projectId]="projectId"
+            [openPaths]="workspace.openFiles().map(f => f.path)"
+            [activePath]="workspace.activeFilePath()"
             (fileSelected)="onFileSelected($event)"
           ></app-file-tree>
         </mat-sidenav>
@@ -133,6 +137,13 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
             </button>
           </mat-toolbar>
 
+          <app-file-tabs
+            [openFiles]="workspace.openFiles()"
+            [activePath]="workspace.activeFilePath()"
+            (tabClick)="onTabClick($event)"
+            (closeTab)="onTabClose($event)"
+          />
+
           <div class="viewer-content">
             @if (workspace.error(); as errorMessage) {
               <div class="error-banner" role="alert">
@@ -145,7 +156,14 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
               </div>
             }
             @if (viewMode() === 'code') {
-              <app-code-viewer></app-code-viewer>
+              @if (workspace.activeFilePath()) {
+                <app-code-viewer></app-code-viewer>
+              } @else {
+                <div class="empty-state" data-testid="workspace-empty-state">
+                  <mat-icon>description</mat-icon>
+                  <span>Select a file from the tree to view</span>
+                </div>
+              }
             } @else {
               <app-diff-viewer></app-diff-viewer>
             }
@@ -208,8 +226,13 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    */
   @Output() public readonly hide = new EventEmitter<void>();
 
-  public readonly selectedPath = this.workspace.selectedPath.asReadonly();
-  public readonly currentFile = this.workspace.currentFile.asReadonly();
+  // `selectedPath` and `currentFile` are computed signals on the
+  // service (derived from `_activeFilePath` and the per-path content
+  // cache). Computed signals are already readonly, so we re-expose them
+  // directly — calling `.asReadonly()` on them is a type error since
+  // `Signal<T>` does not have that method.
+  public readonly selectedPath = this.workspace.selectedPath;
+  public readonly currentFile = this.workspace.currentFile;
   public readonly viewMode = signal<'code' | 'diff'>('code');
 
   /**
@@ -245,12 +268,34 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
   onFileSelected(path: string): void {
     this.viewMode.set('code');
-    this.workspace
-      .getFileContent(this.projectId, path)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        error: () => undefined,
-      });
+    // `openFile` opens the tab AND fires the `getFileContent` HTTP
+    // fetch internally (the fetch populates the per-path content
+    // cache, which makes `currentFile` — computed from
+    // `_activeFilePath` + cache — update automatically). `openFile`
+    // also handles the failure path: on fetch error it closes the
+    // tab it just opened so the user doesn't see an empty editor
+    // pretending to be a valid open file. We therefore do NOT also
+    // call `getFileContent` here — that would fire a duplicate
+    // HTTP request.
+    this.workspace.openFile(this.projectId, path);
+  }
+
+  /**
+   * Switch the active tab. Driven by FileTabsComponent's `(tabClick)`
+   * output. `setActiveFile` is a no-op when the path is not open, so
+   * a stale reference cannot corrupt tab state.
+   */
+  onTabClick(path: string): void {
+    this.workspace.setActiveFile(path);
+  }
+
+  /**
+   * Close a tab. Driven by FileTabsComponent's `(closeTab)` output.
+   * The service handles active-tab rebalancing (preferring the right
+   * neighbour, then left, then null).
+   */
+  onTabClose(path: string): void {
+    this.workspace.closeFile(path);
   }
 
   onSelectCode(): void {
@@ -315,7 +360,11 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     if (this.saving()) {
       return false;
     }
-    if (!this.selectedPath()) {
+    // Read the active path through the tab API so the save flow stays
+    // in lock-step with whatever tab the user has focused. `selectedPath`
+    // is now a computed derived from `_activeFilePath`, so reading either
+    // works — `activeFilePath` is more explicit about intent.
+    if (!this.workspace.activeFilePath()) {
       return false;
     }
     if (this.viewMode() !== 'code') {
@@ -354,7 +403,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     if (!this.canSave()) {
       return;
     }
-    const path = this.selectedPath();
+    const path = this.workspace.activeFilePath();
     if (!path || !this.codeViewer) {
       return;
     }
@@ -497,13 +546,15 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
         // small and avoid stale-content risk; we refetch instead. Only
         // one fetch fires here — there is no `selectedPath`-watching
         // effect that would re-trigger.
-        if (restored.selectedPath) {
-          this.workspace
-            .getFileContent(projectId, restored.selectedPath)
-            .pipe(takeUntilDestroyed(this.destroyRef))
-            .subscribe({
-              error: () => undefined,
-            });
+        //
+        // With multi-file tabs, `restoreState` already repopulated the
+        // service's `_tabList` and `_activeFilePath`. Calling `openFile`
+        // for the active path re-asserts the active tab AND fires the
+        // `getFileContent` fetch internally; we must NOT also call
+        // `getFileContent` directly or we'd issue a duplicate request.
+        const restoredActivePath = restored.activeFilePath ?? restored.selectedPath;
+        if (restoredActivePath) {
+          this.workspace.openFile(projectId, restoredActivePath);
         }
 
         // SSE needs the new projectId targeted for file-change refresh.

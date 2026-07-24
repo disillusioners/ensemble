@@ -11,6 +11,7 @@ import {
   FileTreeResponse,
   FileWriteResponse,
   GitDiffResponse,
+  OpenFileTab,
 } from '../models/workspace.model';
 
 function makeTreeResponse(overrides: Partial<FileTreeResponse> = {}): FileTreeResponse {
@@ -404,7 +405,9 @@ describe('WorkspaceService', () => {
       );
       req.flush(response);
 
-      service.selectedPath.set('src/main.py');
+      // selectedPath is now a computed derived from the active tab.
+      // Drive it via the public tab API.
+      service.openTab('src/main.py');
       service.saveCurrentState('project-1', { viewMode: 'diff' });
 
       expect(service.hasCachedState('project-1')).toBe(true);
@@ -618,7 +621,7 @@ describe('WorkspaceService', () => {
         .expectOne((r) => r.url === '/api/workspace/project-1/tree')
         .flush(makeTreeResponse({ tree: [{ name: 'p1', path: '.', type: 'directory', size: null, children: null }] }));
 
-      service.selectedPath.set('src/p1.ts');
+      service.openTab('src/p1.ts');
 
       // Switch to project-2 — this should auto-save project-1.
       service.getFileTree('project-2').subscribe({ error: () => undefined });
@@ -644,7 +647,7 @@ describe('WorkspaceService', () => {
       httpTesting
         .expectOne((r) => r.url === '/api/workspace/project-a/tree')
         .flush(makeTreeResponse({ project_id: 'project-a' }));
-      service.selectedPath.set('src/main.py');
+      service.openTab('src/main.py');
       service.saveCurrentState('project-a', { viewMode: 'code' });
 
       // Pre-seed project-b's cache WITHOUT touching _currentProjectId.
@@ -700,11 +703,14 @@ describe('WorkspaceService', () => {
         .expectOne((r) => r.url === '/api/workspace/project-1/tree')
         .flush(makeTreeResponse());
 
-      service.selectedPath.set('src/main.py');
-      service.currentFile.set(makeFileContent());
+      // Open a tab and seed its content via the public tab API.
+      // selectedPath is now a computed derived from the active tab,
+      // so we drive it through openTab + cacheTabContent.
+      service.openTab('src/main.py');
+      service.cacheTabContent(makeFileContent());
       service.saveCurrentState('project-1', { viewMode: 'code' });
 
-      // currentFile is populated.
+      // currentFile is populated (derived from the active tab's content).
       expect(service.currentFile()).not.toBeNull();
 
       // Switching to a cached project must null currentFile regardless
@@ -715,6 +721,455 @@ describe('WorkspaceService', () => {
       expect(service.currentFile()).toBeNull();
       // selectedPath IS restored — it's part of the cached state.
       expect(service.selectedPath()).toBeNull();
+    });
+  });
+
+  // ── Multi-file tab state ──────────────────────────────────────────
+
+  describe('multi-file tabs', () => {
+    it('starts with no tabs and null selectedPath/currentFile', () => {
+      expect(service.openTabs()).toEqual([]);
+      expect(service.activeTabPath()).toBeNull();
+      expect(service.selectedPath()).toBeNull();
+      expect(service.currentFile()).toBeNull();
+      expect(service.hasUnsavedTabs()).toBe(false);
+    });
+
+    it('opens a tab and derives selectedPath from the active tab', () => {
+      service.openTab('src/main.py');
+
+      expect(service.openTabs()).toEqual([
+        { path: 'src/main.py', name: 'main.py', dirty: false },
+      ]);
+      expect(service.activeTabPath()).toBe('src/main.py');
+      expect(service.selectedPath()).toBe('src/main.py');
+    });
+
+    it('opens tabs in insertion order (left-to-right) and derives the basename', () => {
+      service.openTab('src/a.ts');
+      service.openTab('src/components/b.ts');
+      service.openTab('c.ts');
+
+      expect(service.openTabs().map((t) => t.path)).toEqual([
+        'src/a.ts',
+        'src/components/b.ts',
+        'c.ts',
+      ]);
+      expect(service.openTabs().map((t) => t.name)).toEqual([
+        'a.ts',
+        'b.ts',
+        'c.ts',
+      ]);
+      // Most recently opened becomes the active tab.
+      expect(service.activeTabPath()).toBe('c.ts');
+    });
+
+    it('reativates an existing tab without duplicating it', () => {
+      service.openTab('a.ts');
+      service.openTab('b.ts');
+      service.openTab('a.ts'); // re-activate
+
+      expect(service.openTabs().map((t) => t.path)).toEqual(['a.ts', 'b.ts']);
+      expect(service.activeTabPath()).toBe('a.ts');
+    });
+
+    it('setActiveTab is a no-op (returns false) when the path is not open', () => {
+      service.openTab('a.ts');
+      const result = service.setActiveTab('nope.ts');
+      expect(result).toBe(false);
+      expect(service.activeTabPath()).toBe('a.ts');
+    });
+
+    it('setActiveTab returns true and updates the active tab when the path is open', () => {
+      service.openTab('a.ts');
+      service.openTab('b.ts');
+      const result = service.setActiveTab('a.ts');
+      expect(result).toBe(true);
+      expect(service.activeTabPath()).toBe('a.ts');
+    });
+
+    it('isTabOpen reports open/closed state without side effects', () => {
+      expect(service.isTabOpen('a.ts')).toBe(false);
+      service.openTab('a.ts');
+      expect(service.isTabOpen('a.ts')).toBe(true);
+      service.closeTab('a.ts');
+      expect(service.isTabOpen('a.ts')).toBe(false);
+    });
+
+    it('closes the active tab and activates the right neighbour (preferred)', () => {
+      service.openTab('a.ts');
+      service.openTab('b.ts');
+      service.openTab('c.ts');
+      // Active is c.ts (last opened). Close it → b.ts should become active.
+      expect(service.closeTab('c.ts')).toBe('b.ts');
+      expect(service.openTabs().map((t) => t.path)).toEqual(['a.ts', 'b.ts']);
+      expect(service.activeTabPath()).toBe('b.ts');
+    });
+
+    it('closes a non-active tab without changing the active tab', () => {
+      service.openTab('a.ts');
+      service.openTab('b.ts');
+      service.openTab('c.ts');
+      service.setActiveTab('a.ts');
+      // Close b.ts (not active) — active should stay a.ts.
+      expect(service.closeTab('b.ts')).toBe('a.ts');
+      expect(service.openTabs().map((t) => t.path)).toEqual(['a.ts', 'c.ts']);
+      expect(service.activeTabPath()).toBe('a.ts');
+    });
+
+    it('closes the last remaining tab and clears activeTabPath', () => {
+      service.openTab('a.ts');
+      expect(service.closeTab('a.ts')).toBeNull();
+      expect(service.openTabs()).toEqual([]);
+      expect(service.activeTabPath()).toBeNull();
+      expect(service.selectedPath()).toBeNull();
+    });
+
+    it('when closing the active tab in a 2-tab list, falls back to the left neighbour', () => {
+      service.openTab('a.ts');
+      service.openTab('b.ts');
+      // Active is b.ts. Close it → only a.ts remains. The right-neighbour
+      // lookup at idx=1 clamps to next.length-1=0, so a.ts becomes active.
+      expect(service.closeTab('b.ts')).toBe('a.ts');
+      expect(service.activeTabPath()).toBe('a.ts');
+    });
+
+    it('closing a tab drops its content cache entry', () => {
+      service.openTab('a.ts');
+      service.cacheTabContent(makeFileContent({ path: 'a.ts', content: 'A' }));
+      service.openTab('b.ts');
+      service.cacheTabContent(makeFileContent({ path: 'b.ts', content: 'B' }));
+
+      service.setActiveTab('a.ts');
+      expect(service.currentFile()?.content).toBe('A');
+
+      service.closeTab('a.ts');
+      // a.ts is gone; switching back to b.ts still shows b.ts's content.
+      expect(service.currentFile()?.content).toBe('B');
+
+      // Re-opening a.ts starts with no cached content.
+      service.openTab('a.ts');
+      expect(service.currentFile()).toBeNull();
+    });
+
+    it('closeAllTabs clears the tab list, active path, content cache and dirty set', () => {
+      service.openTab('a.ts');
+      service.cacheTabContent(makeFileContent({ path: 'a.ts' }));
+      service.markTabDirty('a.ts');
+
+      service.closeAllTabs();
+
+      expect(service.openTabs()).toEqual([]);
+      expect(service.activeTabPath()).toBeNull();
+      expect(service.currentFile()).toBeNull();
+      expect(service.hasUnsavedTabs()).toBe(false);
+    });
+
+    it('markTabDirty / markTabClean update the dirty flag on openTabs', () => {
+      service.openTab('a.ts');
+      expect(service.openTabs()[0].dirty).toBe(false);
+
+      service.markTabDirty('a.ts');
+      expect(service.openTabs()[0].dirty).toBe(true);
+      expect(service.hasUnsavedTabs()).toBe(true);
+
+      service.markTabClean('a.ts');
+      expect(service.openTabs()[0].dirty).toBe(false);
+      expect(service.hasUnsavedTabs()).toBe(false);
+    });
+
+    it('markTabDirty is a no-op for a path that is not an open tab', () => {
+      service.openTab('a.ts');
+      service.markTabDirty('not-open.ts');
+      expect(service.hasUnsavedTabs()).toBe(false);
+      // The open tab's dirty flag is also untouched.
+      expect(service.openTabs()[0].dirty).toBe(false);
+    });
+
+    it('markTabClean is a no-op for a path that is not dirty', () => {
+      service.openTab('a.ts');
+      service.markTabClean('a.ts'); // never dirty
+      expect(service.openTabs()[0].dirty).toBe(false);
+    });
+
+    it('getFileContent opens a new tab and populates currentFile from the response', (done) => {
+      const response = makeFileContent({ path: 'src/main.py', content: 'hello' });
+
+      service.getFileContent('project-1', 'src/main.py').subscribe({
+        next: () => {
+          expect(service.openTabs().map((t) => t.path)).toEqual(['src/main.py']);
+          expect(service.activeTabPath()).toBe('src/main.py');
+          expect(service.selectedPath()).toBe('src/main.py');
+          expect(service.currentFile()).toEqual(response);
+          done();
+        },
+        error: done.fail,
+      });
+
+      httpTesting
+        .expectOne(
+          (r) => r.url === '/api/workspace/project-1/file' && r.params.get('path') === 'src/main.py'
+        )
+        .flush(response);
+    });
+
+    it('getFileContent on an already-open tab just refreshes the cached content', (done) => {
+      service.openTab('src/main.py');
+      service.openTab('src/other.py');
+      service.setActiveTab('src/main.py');
+
+      const response = makeFileContent({ path: 'src/main.py', content: 'fresh' });
+      service.getFileContent('project-1', 'src/main.py').subscribe({
+        next: () => {
+          // Tab list is unchanged (still two tabs, same order).
+          expect(service.openTabs().map((t) => t.path)).toEqual([
+            'src/main.py',
+            'src/other.py',
+          ]);
+          expect(service.currentFile()).toEqual(response);
+          done();
+        },
+        error: done.fail,
+      });
+
+      httpTesting
+        .expectOne(
+          (r) => r.url === '/api/workspace/project-1/file' && r.params.get('path') === 'src/main.py'
+        )
+        .flush(response);
+    });
+
+    it('saveFile does NOT mutate currentFile or clean the dirty flag (F2 contract preserved)', (done) => {
+      // Open a tab, seed content, mark dirty.
+      service.openTab('src/main.py');
+      service.cacheTabContent(makeFileContent({ path: 'src/main.py', content: 'old' }));
+      service.markTabDirty('src/main.py');
+
+      const saveResponse: FileWriteResponse = {
+        project_id: 'project-1',
+        path: 'src/main.py',
+        size_bytes: 3,
+        saved: true,
+      };
+
+      service.saveFile('project-1', 'src/main.py', 'new').subscribe({
+        next: () => {
+          // F2 — the service must NOT mutate the cached content.
+          expect(service.currentFile()?.content).toBe('old');
+          // F2 — the service does NOT clear dirty here; the component
+          // is responsible for calling markTabClean after a successful save.
+          expect(service.openTabs()[0].dirty).toBe(true);
+          done();
+        },
+        error: done.fail,
+      });
+
+      httpTesting
+        .expectOne((r) => r.method === 'PUT' && r.url === '/api/workspace/project-1/file')
+        .flush(saveResponse);
+    });
+
+    it('resetState clears all tab state', () => {
+      service.openTab('a.ts');
+      service.cacheTabContent(makeFileContent({ path: 'a.ts' }));
+      service.markTabDirty('a.ts');
+
+      service.resetState();
+
+      expect(service.openTabs()).toEqual([]);
+      expect(service.activeTabPath()).toBeNull();
+      expect(service.selectedPath()).toBeNull();
+      expect(service.currentFile()).toBeNull();
+      expect(service.hasUnsavedTabs()).toBe(false);
+    });
+
+    it('saveCurrentState captures openTabs and activeTabPath', () => {
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse());
+
+      service.openTab('src/a.ts');
+      service.openTab('src/b.ts');
+      service.setActiveTab('src/a.ts');
+      service.saveCurrentState('project-1');
+
+      const cached = service.peekCachedState('project-1');
+      expect(cached).not.toBeNull();
+      expect(cached!.openTabs.map((t) => t.path)).toEqual(['src/a.ts', 'src/b.ts']);
+      expect(cached!.openTabs.map((t) => t.name)).toEqual(['a.ts', 'b.ts']);
+      expect(cached!.activeTabPath).toBe('src/a.ts');
+      expect(cached!.selectedPath).toBe('src/a.ts');
+    });
+
+    it('restoreState restores the tab list and active path but keeps tabs clean', () => {
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse());
+
+      service.openTab('src/a.ts');
+      service.openTab('src/b.ts');
+      service.setActiveTab('src/a.ts');
+      service.markTabDirty('src/a.ts');
+      service.saveCurrentState('project-1');
+
+      // Switch to another project and back.
+      service.restoreState('project-1');
+      expect(service.openTabs().map((t) => t.path)).toEqual(['src/a.ts', 'src/b.ts']);
+      expect(service.openTabs().map((t) => t.name)).toEqual(['a.ts', 'b.ts']);
+      expect(service.activeTabPath()).toBe('src/a.ts');
+      // Dirty is transient and is NOT persisted.
+      expect(service.openTabs().every((t) => !t.dirty)).toBe(true);
+      // Content is also NOT restored (Bug 1 contract).
+      expect(service.currentFile()).toBeNull();
+    });
+
+    it('selectedPath and currentFile are readonly signals (cannot be set directly)', () => {
+      // The TS compiler rejects `.set()` on computed signals — this is a
+      // runtime safeguard that throws via Proxy so a misbehaving caller
+      // gets a clear error instead of a silent no-op.
+      expect(() => (service.selectedPath as unknown as { set: (v: unknown) => void }).set('x')).toThrow();
+      expect(() =>
+        (service.currentFile as unknown as { set: (v: unknown) => void }).set(null)
+      ).toThrow();
+    });
+
+    it('activeTabPath exposes asReadonly so consumers can subscribe without writing', () => {
+      // activeTabPath is a readonly view of a writable signal. It exposes
+      // a function-call API but not `.set()`, so external callers can't
+      // mutate it directly — they must go through openTab/setActiveTab.
+      expect(typeof service.activeTabPath).toBe('function');
+      service.openTab('a.ts');
+      expect(service.activeTabPath()).toBe('a.ts');
+      expect(() =>
+        (service.activeTabPath as unknown as { set: (v: unknown) => void }).set('b.ts')
+      ).toThrow();
+    });
+
+    // ── SSE file_changed + dirty-state guard ─────────────────────────
+    //
+    // The `handleFileChange` method is the SSE-side handler for
+    // `file_changed` events. With multi-file tabs it must refetch any
+    // matching open tab, but it must also SKIP the refresh when the tab
+    // has unsaved edits — otherwise the SSE-driven cache overwrite would
+    // clobber the user's in-flight edits (both for the active tab and
+    // for an inactive background tab whose cached content would surface
+    // over the user's edits on the next activation).
+
+    it('refetches an open tab on SSE file_changed when the tab is clean', () => {
+      // Setup: load project so _currentProjectId is set, then open a tab
+      // and seed its cached content.
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse());
+
+      service.openTab('src/main.py');
+      service.cacheTabContent(
+        makeFileContent({ path: 'src/main.py', content: 'old', size_bytes: 3 })
+      );
+      expect(service.currentFile()?.content).toBe('old');
+      expect(service.openTabs()[0].dirty).toBe(false);
+
+      // Simulate an SSE file_changed arriving for this path. The handler
+      // is private — invoke it directly via the test escape hatch that
+      // the rest of this file already uses for `saveCurrentState` /
+      // `restoreState` edge cases.
+      (service as unknown as { handleFileChange: (p: string) => void }).handleFileChange(
+        'src/main.py',
+      );
+
+      // A refetch must have been issued for the matching path.
+      const req = httpTesting.expectOne(
+        (r) =>
+          r.method === 'GET' &&
+          r.url === '/api/workspace/project-1/file' &&
+          r.params.get('path') === 'src/main.py',
+      );
+      req.flush(
+        makeFileContent({ path: 'src/main.py', content: 'fresh', size_bytes: 5 }),
+      );
+
+      // The cached content reflects the fresh on-disk version.
+      expect(service.currentFile()?.content).toBe('fresh');
+      expect(service.currentFile()?.size_bytes).toBe(5);
+    });
+
+    it('does NOT refetch an open tab on SSE file_changed when the tab has unsaved edits', () => {
+      // Setup: load project, open a tab, seed cached content, mark dirty.
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse());
+
+      service.openTab('src/main.py');
+      service.cacheTabContent(
+        makeFileContent({ path: 'src/main.py', content: 'old', size_bytes: 3 })
+      );
+      service.markTabDirty('src/main.py');
+      expect(service.openTabs()[0].dirty).toBe(true);
+
+      // SSE file_changed for the dirty path.
+      (service as unknown as { handleFileChange: (p: string) => void }).handleFileChange(
+        'src/main.py',
+      );
+
+      // NO HTTP call should be made — the dirty tab's edits must not be
+      // overwritten by an SSE-driven refetch. httpTesting.expectNone
+      // fails if any matching request was issued; httpTesting.verify()
+      // in afterEach is the belt-and-suspenders backstop.
+      httpTesting.expectNone(
+        (r) =>
+          r.method === 'GET' &&
+          r.url === '/api/workspace/project-1/file' &&
+          r.params.get('path') === 'src/main.py',
+      );
+
+      // Cached content is preserved verbatim.
+      expect(service.currentFile()?.content).toBe('old');
+      expect(service.currentFile()?.size_bytes).toBe(3);
+      // Tab is still dirty.
+      expect(service.openTabs()[0].dirty).toBe(true);
+    });
+
+    it('does NOT refetch a non-active dirty tab on SSE file_changed', () => {
+      // Setup: load project, open two tabs, switch focus, mark the
+      // INACTIVE tab dirty.
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse());
+
+      service.openTab('src/main.py');
+      service.openTab('src/other.py');
+      service.setActiveTab('src/main.py'); // src/other.py is now inactive
+      service.cacheTabContent(
+        makeFileContent({ path: 'src/other.py', content: 'unsaved edits' }),
+      );
+      service.markTabDirty('src/other.py');
+
+      // SSE file_changed for the inactive dirty tab.
+      (service as unknown as { handleFileChange: (p: string) => void }).handleFileChange(
+        'src/other.py',
+      );
+
+      // No refetch for the dirty inactive path.
+      httpTesting.expectNone(
+        (r) =>
+          r.method === 'GET' &&
+          r.url === '/api/workspace/project-1/file' &&
+          r.params.get('path') === 'src/other.py',
+      );
+
+      // The dirty tab's cached content and dirty flag are preserved. This
+      // matters because the user might switch to this tab shortly — the
+      // service must serve the in-memory edits, not a stale on-disk
+      // version, on that activation.
+      const other = service.openTabs().find((t) => t.path === 'src/other.py');
+      expect(other).toBeDefined();
+      expect(other!.dirty).toBe(true);
+      expect(other!.name).toBe('other.py');
     });
   });
 });

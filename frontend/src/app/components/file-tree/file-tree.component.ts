@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, Output, effect, inject } from '@angular/core';
+import { Component, EventEmitter, Input, Output, effect, inject, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatTreeFlatDataSource, MatTreeFlattener, MatTreeModule } from '@angular/material/tree';
 import { FlatTreeControl } from '@angular/cdk/tree';
@@ -25,7 +25,9 @@ interface FlatNode {
   imports: [CommonModule, MatTreeModule, MatIconModule, MatButtonModule, MatProgressSpinnerModule],
   template: `
     <mat-tree [dataSource]="dataSource" [treeControl]="treeControl">
-      <mat-tree-node *matTreeNodeDef="let node" matTreeNodePadding>
+      <mat-tree-node *matTreeNodeDef="let node" matTreeNodePadding
+                     [class.file-open]="isFileOpen(node.path)"
+                     [class.file-active]="isActiveFile(node.path)">
         <button mat-icon-button disabled></button>
         <mat-icon class="file-icon">{{ getFileIcon(node.type, node.name) }}</mat-icon>
         <span class="filename" (click)="selectFile(node)">{{ node.name }}</span>
@@ -46,6 +48,12 @@ interface FlatNode {
 export class FileTreeComponent {
   @Input() public projectId = '';
   @Output() public readonly fileSelected = new EventEmitter<string>();
+
+  /** Paths of files that have open tabs in the workspace editor. */
+  readonly openPaths = input<string[]>([]);
+
+  /** Path of the currently focused/active file in the workspace editor. */
+  readonly activePath = input<string | null>(null);
 
   private readonly workspace = inject(WorkspaceService);
 
@@ -156,6 +164,16 @@ export class FileTreeComponent {
       sql: 'storage', sh: 'terminal', yaml: 'settings',
     };
     return iconMap[ext || ''] || 'insert_drive_file';
+  }
+
+  /** True if the file at `path` has an open tab in the workspace editor. */
+  isFileOpen(path: string): boolean {
+    return this.openPaths().includes(path);
+  }
+
+  /** True if `path` matches the currently focused/active file. */
+  isActiveFile(path: string): boolean {
+    return this.activePath() === path;
   }
 
   refreshAffectedNode(changedPath: string): void {

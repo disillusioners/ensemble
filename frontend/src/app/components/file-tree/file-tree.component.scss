@@ -54,3 +54,15 @@ button[mat-icon-button] {
 .dirname {
   font-weight: 500;
 }
+
+// Highlight files that have an open tab in the workspace editor.
+.file-open {
+  color: #61afef; /* OneDark blue — indicates file has an open tab */
+}
+
+// Stronger highlight for the currently active/focused file.
+.file-active {
+  background-color: rgba(97, 175, 239, 0.12); /* subtle blue tint */
+  color: #61afef;
+  font-weight: 500;
+}

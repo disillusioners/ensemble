@@ -1,0 +1,138 @@
+// Theme colors from app.scss — match the workspace dark theme.
+$bg-tab-bar: #21252b;
+$bg-tab-hover: rgba(255, 255, 255, 0.06);
+$bg-tab-active: #334155;
+$text-secondary: #9da5b4;
+$text-primary: #d7dae0;
+$text-muted: #6b7280;
+$border-color: rgba(255, 255, 255, 0.12);
+$accent-yellow: #e0af68;
+
+:host {
+  display: block;
+  flex-shrink: 0;
+  background-color: $bg-tab-bar;
+  border-bottom: 1px solid $border-color;
+}
+
+.file-tab-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 4px;
+  min-height: 36px;
+  // Hide scrollbar visually but keep functionality.
+  scrollbar-width: thin;
+
+  &::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 2px;
+  }
+}
+
+.file-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  min-width: 80px;
+  max-width: 220px;
+  padding: 0 8px 0 12px;
+  margin-right: 2px;
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: $text-secondary;
+  background-color: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+  position: relative;
+
+  &:hover {
+    color: $text-primary;
+    background-color: $bg-tab-hover;
+  }
+
+  &.active {
+    color: $text-primary;
+    background-color: $bg-tab-active;
+    border-bottom-color: #1e8e3e;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #10a7f7;
+    outline-offset: -2px;
+  }
+}
+
+.file-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+}
+
+.dirty-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: $accent-yellow;
+  flex-shrink: 0;
+}
+
+.close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+  padding: 0;
+  color: $text-muted;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+    line-height: 14px;
+  }
+
+  &:hover {
+    color: $text-primary;
+    background-color: rgba(255, 255, 255, 0.12);
+  }
+
+  &:focus-visible {
+    opacity: 1;
+    outline: 2px solid #10a7f7;
+    outline-offset: -1px;
+  }
+}
+
+.file-tab:hover .close-btn,
+.file-tab.active .close-btn {
+  opacity: 0.7;
+}
+
+.file-tab .close-btn:hover {
+  opacity: 1;
+}

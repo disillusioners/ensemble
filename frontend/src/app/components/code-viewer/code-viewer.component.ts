@@ -3,6 +3,56 @@ import { CommonModule } from '@angular/common';
 import { WorkspaceService } from '../../services/workspace.service';
 import { CodemirrorDirective } from './codemirror.directive';
 
+/**
+ * Per-path edit state stored in the map when a file is not the active
+ * tab. Switching tabs preserves unsaved edits because the editor's
+ * signals are saved to the map under the outgoing path and re-loaded
+ * from the map when the user re-activates that tab.
+ */
+interface EditState {
+  original: string;
+  edited: string;
+  baseline: string;
+}
+
+/**
+ * Code viewer — multi-file aware.
+ *
+ * The viewer holds THREE active-file signals (`originalContent`,
+ * `editedContent`, `savedBaseline`) that mirror the editor buffer for
+ * the currently active tab. A per-path `editStateMap` keeps the buffer
+ * state for every OTHER open tab, so switching tabs preserves unsaved
+ * edits and round-trips back to the original after a save.
+ *
+ * The effect below reacts to `workspace.currentFile()` (which is now a
+ * computed derived from `_activeFilePath`). When the path changes:
+ *
+ *   1. If a previous file is active, snapshot its `{original, edited,
+ *      baseline}` triple into the map under the previous path.
+ *   2. Load the new path's state from the map. If absent, seed it from
+ *      `file.content` and record the seed in the map so a future
+ *      switch-back sees the clean baseline.
+ *   3. On a SAME-path reload (SSE push, save response), the
+ *      `savedBaseline`-gate decides whether to accept the new content
+ *      or leave the user's edits untouched (F1/F2).
+ *
+ * The effect MUST read `currentFilePath()` unconditionally before any
+ * if-branch — see the "Angular Effect Dependency Tracking Hazard"
+ * project-history note: an effect that only reads signals inside some
+ * branches can lose subscriptions on paths that skip the read.
+ *
+ * All signal writes in this effect are guarded with equality checks
+ * (`if (signal() !== newValue) signal.set(newValue)`). Without the
+ * guards, an effect that writes to a signal schedules itself to
+ * re-run on the next microtask, which then writes the same value
+ * again, ad infinitum — a silent infinite loop that hangs the
+ * scheduler until test timeout.
+ *
+ * Binary and truncated files get a separate guard layer (F3/F4): the
+ * effect clears the buffer to '' so a stray Save cannot write the
+ * previous text file's content over a binary or truncated file. The
+ * `canSave()` belt-and-suspenders guard lives in WorkspaceComponent.
+ */
 @Component({
   selector: 'app-code-viewer',
   standalone: true,
@@ -34,45 +84,66 @@ import { CodemirrorDirective } from './codemirror.directive';
 export class CodeViewerComponent {
   private readonly workspace = inject(WorkspaceService);
   private readonly originalContent = signal<string>('');
-  public readonly file = this.workspace.currentFile.asReadonly();
+  // `currentFile` is now a computed signal on the service (derived
+  // from `_activeFilePath` + the per-path content cache). Computed
+  // signals are already readonly, so we re-expose it directly —
+  // calling `.asReadonly()` on `Signal<T>` is a type error.
+  public readonly file = this.workspace.currentFile;
   public readonly editedContent = signal<string>('');
   public readonly isDirty = computed(() => this.editedContent() !== this.originalContent());
   public readonly currentContent = this.editedContent.asReadonly();
 
   /**
-   * The path of the file currently bound to `editedContent`. Used by the
-   * effect to distinguish a SAME-FILE reload (SSE push or save response)
-   * from a DIFFERENT-FILE load. Without this, switching to another file
-   * would clobber unsaved edits because the effect cannot tell the two
-   * cases apart from `currentFile` alone.
+   * The path of the file currently bound to the active signals. Tracked
+   * by the effect so subsequent changes to `file()` can be classified as
+   * "same path" (SSE round-trip / save response) or "different path"
+   * (tab switch). Without this, switching to another tab would clobber
+   * unsaved edits because the effect cannot tell the two cases apart
+   * from `currentFile` alone.
    */
   private readonly currentFilePath = signal<string | null>(null);
 
   /**
-   * The content the editor last agreed was "on disk" — either the freshly
-   * loaded file content or the content of the last successful save. The
-   * effect compares `editedContent` against this baseline before deciding
-   * whether to apply an incoming reload; if the user has unsaved edits
-   * (`editedContent !== savedBaseline`), the incoming reload is ignored
-   * to preserve keystrokes that arrived after Save but before the SSE
-   * push or save response.
+   * The content the editor last agreed was "on disk" — either the
+   * freshly loaded file content or the content of the last successful
+   * save. Compared against `editedContent` to decide whether a same-path
+   * reload is safe to apply: if the user has unsaved edits, the
+   * incoming reload is ignored to preserve keystrokes that arrived
+   * after Save but before the SSE push or save response.
    */
   private readonly savedBaseline = signal<string>('');
+
+  /**
+   * Per-path edit-state store for INACTIVE tabs. Entries are written
+   * when a tab loses focus and read when a tab regains focus. The map
+   * only grows — paths are kept across the session so a long-running
+   * workflow can edit many files in turn without losing state.
+   */
+  private readonly editStateMap = new Map<string, EditState>();
 
   constructor() {
     effect(() => {
       const file = this.file();
 
+      // ── Dependency-tracking hazard guard ────────────────────────
+      // Read `currentFilePath()` UNCONDITIONALLY before any if-branch
+      // so the effect always subscribes to it. Skipping this read in
+      // some branches (e.g. when `file` is null) has been a recurring
+      // source of "the workspace appears stuck after visiting the All
+      // tab" bugs in this codebase.
+      const previousPath = this.currentFilePath();
+
       // ── Guard 1: no file selected ────────────────────────────────
       // The viewer renders nothing when `file()` is null (template @if
       // skips the block), but we still want every signal to be in a
-      // well-defined empty state so stale content never bleeds across
-      // selections.
+      // well-defined empty state and the map cleared so stale edits
+      // never bleed across selections.
       if (!file) {
-        this.originalContent.set('');
-        this.editedContent.set('');
-        this.savedBaseline.set('');
-        this.currentFilePath.set(null);
+        this.editStateMap.clear();
+        this.setOriginal('');
+        this.setEdited('');
+        this.setBaseline('');
+        this.setCurrentPath(null);
         return;
       }
 
@@ -85,24 +156,23 @@ export class CodeViewerComponent {
       // slice. Both branches leave the editor buffer empty and
       // `isDirty` false so `canSave()` cannot accidentally fire.
       if (file.binary || file.truncated) {
-        this.originalContent.set('');
-        this.editedContent.set('');
-        this.savedBaseline.set('');
-        this.currentFilePath.set(file.path);
+        this.setOriginal('');
+        this.setEdited('');
+        this.setBaseline('');
+        this.setCurrentPath(file.path);
+        // Binary/truncated files have no editable content so they can
+        // never be dirty. The dirty flag will be cleared on the next
+        // user-driven onContentChange/markSaved cycle (which never
+        // fires for read-only files), or on the next effect run for
+        // a different file. We deliberately do NOT call
+        // `workspace.setFileDirty` here because writing to a service
+        // signal from inside an effect schedules the effect to re-run
+        // via the microtask scheduler — see the "infinite effect loop"
+        // note in the constructor docstring.
         return;
       }
 
-      // ── Different file: full reset ───────────────────────────────
       const incomingPath = file.path;
-      const currentPath = this.currentFilePath();
-
-      if (incomingPath !== currentPath) {
-        this.currentFilePath.set(incomingPath);
-        this.originalContent.set(file.content);
-        this.editedContent.set(file.content);
-        this.savedBaseline.set(file.content);
-        return;
-      }
 
       // ── Same-file reload (SSE or save response) ──────────────────
       // The user has the file open and is editing. If they have no
@@ -119,16 +189,103 @@ export class CodeViewerComponent {
       // schedule an infinite re-run. We want the effect to react ONLY
       // to `file` (and `currentFilePath`, set only on file switches) —
       // user typing must never trigger the reset.
-      if (untracked(() => this.editedContent() === this.savedBaseline())) {
-        this.originalContent.set(file.content);
-        this.editedContent.set(file.content);
-        this.savedBaseline.set(file.content);
+      if (incomingPath === previousPath) {
+        if (untracked(() => this.editedContent() === this.savedBaseline())) {
+          this.setOriginal(file.content);
+          this.setEdited(file.content);
+          this.setBaseline(file.content);
+          this.editStateMap.set(incomingPath, {
+            original: file.content,
+            edited: file.content,
+            baseline: file.content,
+          });
+          // Fresh content is by definition clean. The dirty flag will
+          // be cleared by markSaved() / onContentChange() — calling
+          // `workspace.setFileDirty` from the effect would schedule
+          // the effect to re-run on the next microtask, causing an
+          // infinite loop. See the "infinite effect loop" note in
+          // the constructor docstring.
+        }
+        return;
       }
+
+      // ── Different file: snapshot outgoing, load incoming ────────
+      // Save the currently-active file's state to the map under the
+      // outgoing path so a switch back preserves unsaved edits. Read
+      // via `untracked` to avoid re-subscribing the effect to the
+      // active signals (those writes below would otherwise cause an
+      // infinite re-run).
+      if (previousPath && previousPath !== incomingPath) {
+        const outgoing = untracked<EditState>(() => ({
+          original: this.originalContent(),
+          edited: this.editedContent(),
+          baseline: this.savedBaseline(),
+        }));
+        this.editStateMap.set(previousPath, outgoing);
+      }
+
+      const stored = this.editStateMap.get(incomingPath);
+      if (stored) {
+        this.setOriginal(stored.original);
+        this.setEdited(stored.edited);
+        this.setBaseline(stored.baseline);
+      } else {
+        this.setOriginal(file.content);
+        this.setEdited(file.content);
+        this.setBaseline(file.content);
+        this.editStateMap.set(incomingPath, {
+          original: file.content,
+          edited: file.content,
+          baseline: file.content,
+        });
+        // A freshly-loaded file is clean by definition. The dirty
+        // flag will be cleared by markSaved() / onContentChange() —
+        // calling `workspace.setFileDirty` from the effect would
+        // schedule the effect to re-run on the next microtask,
+        // causing an infinite loop. See the "infinite effect loop"
+        // note in the constructor docstring.
+      }
+
+      this.setCurrentPath(incomingPath);
     });
   }
 
+  /**
+   * Internal write helpers — each guards against writing the same
+   * value back, since effects that write to signals schedule
+   * themselves to re-run. Without these guards, the effect re-runs
+   * every microtask with the same data, producing a silent infinite
+   * loop that only surfaces as a test timeout.
+   */
+  private setOriginal(value: string): void {
+    if (this.originalContent() !== value) this.originalContent.set(value);
+  }
+  private setEdited(value: string): void {
+    if (this.editedContent() !== value) this.editedContent.set(value);
+  }
+  private setBaseline(value: string): void {
+    if (this.savedBaseline() !== value) this.savedBaseline.set(value);
+  }
+  private setCurrentPath(value: string | null): void {
+    if (this.currentFilePath() !== value) this.currentFilePath.set(value);
+  }
+
   onContentChange(content: string): void {
-    this.editedContent.set(content);
+    this.setEdited(content);
+    // Update the map so a tab switch preserves the edit. The map
+    // mirrors the active signals for the current path; on switch-back
+    // we restore from the map.
+    const path = untracked(() => this.currentFilePath());
+    if (!path) return;
+    const baseline = untracked(() => this.savedBaseline());
+    const original = untracked(() => this.originalContent());
+    this.editStateMap.set(path, { original, edited: content, baseline });
+    // Mirror dirty state to the service so the tab indicator updates.
+    // Dirty means `content !== original` (the pristine on-disk version),
+    // NOT `content !== savedBaseline` — we want the dirty dot to
+    // appear the moment the user diverges from the file's loaded
+    // content, not only after an explicit "mark clean" boundary.
+    this.workspace.setFileDirty(path, content !== original);
   }
 
   /**
@@ -136,12 +293,22 @@ export class CodeViewerComponent {
    * successfully. Aligns the saved-state baseline with the content
    * that was just written so that `isDirty()` returns false and a
    * follow-up SSE push of the same file is allowed to refresh the
-   * editor (the round-trip of our own save).
+   * editor (the round-trip of our own save). Also mirrors the new
+   * clean state to the service so the tab's dirty dot clears.
    */
   markSaved(): void {
     const content = this.editedContent();
-    this.savedBaseline.set(content);
-    this.originalContent.set(content);
+    this.setBaseline(content);
+    this.setOriginal(content);
+    const path = this.currentFilePath();
+    if (path) {
+      this.editStateMap.set(path, {
+        original: content,
+        edited: content,
+        baseline: content,
+      });
+      this.workspace.setFileDirty(path, false);
+    }
   }
 
   formatSize(bytes: number): string {

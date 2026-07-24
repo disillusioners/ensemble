@@ -152,6 +152,31 @@ describe('WorkspaceComponent', () => {
   }
 
   /**
+   * Drive `selectedPath` (and the active file) to a specific value
+   * without firing an HTTP request. `selectedPath` is now a computed
+   * signal derived from the service's private `_activeFilePath`, so
+   * the only way to set it from outside is to reach the underlying
+   * writable signal. We use a type cast rather than expose the signal
+   * publicly just for tests.
+   */
+  function setSelectedPath(path: string | null): void {
+    (workspaceService as unknown as { _activeFilePath: { set: (v: string | null) => void } })
+      ._activeFilePath.set(path);
+  }
+
+  /**
+   * Drive `currentFile` to a specific `FileContentResponse` without
+   * firing an HTTP request. `currentFile` is a computed over
+   * `_activeFilePath` + the per-path content cache; updating both
+   * makes the computed reflect the new value on the next read.
+   */
+  function setCurrentFile(file: FileContentResponse): void {
+    workspaceService.cacheTabContent(file);
+    setSelectedPath(file.path);
+    fixture.detectChanges();
+  }
+
+  /**
    * Locate the embedded CodeViewerComponent and mark it dirty by
    * diverging `editedContent` from `originalContent`. Returns the
    * viewer's component instance so callers can assert other state.
@@ -381,7 +406,7 @@ describe('WorkspaceComponent', () => {
     });
 
     it('should fire getFileDiff via the real WorkspaceService when a path is selected', () => {
-      workspaceService.selectedPath.set('src/main.ts');
+      setSelectedPath('src/main.ts');
 
       component.onSelectDiff();
 
@@ -401,7 +426,7 @@ describe('WorkspaceComponent', () => {
         .spyOn(workspaceService, 'getFileDiff')
         .mockReturnValue(pending.asObservable());
 
-      workspaceService.selectedPath.set('src/main.ts');
+      setSelectedPath('src/main.ts');
       expect(component.viewMode()).toBe('code');
 
       component.onSelectDiff();
@@ -425,7 +450,7 @@ describe('WorkspaceComponent', () => {
         .spyOn(workspaceService, 'getFileDiff')
         .mockReturnValue(pending.asObservable());
 
-      workspaceService.selectedPath.set('src/main.ts');
+      setSelectedPath('src/main.ts');
 
       component.onSelectDiff();
 
@@ -437,7 +462,7 @@ describe('WorkspaceComponent', () => {
     });
 
     it('should still call the real HTTP service when no Subject spy is installed', () => {
-      workspaceService.selectedPath.set('src/main.ts');
+      setSelectedPath('src/main.ts');
 
       component.onSelectDiff();
 
@@ -462,10 +487,10 @@ describe('WorkspaceComponent', () => {
 
       expect(component.selectedPath()).toBeNull();
 
-      workspaceService.selectedPath.set('src/foo.py');
+      setSelectedPath('src/foo.py');
       expect(component.selectedPath()).toBe('src/foo.py');
 
-      workspaceService.selectedPath.set(null);
+      setSelectedPath(null);
       expect(component.selectedPath()).toBeNull();
     });
   });
@@ -580,7 +605,11 @@ describe('WorkspaceComponent', () => {
       // Bug 1 fix: a /file request IS expected — `currentFile` is
       // deliberately not cached, so the component must refetch the
       // previously-selected file's content after restore.
-      localService.selectedPath.set('src/cached.ts');
+      // `selectedPath` is now a computed derived from `_activeFilePath`;
+      // set the underlying signal directly so the snapshot captures it
+      // before saveCurrentState reads live signal values.
+      (localService as unknown as { _activeFilePath: { set: (v: string | null) => void } })
+        ._activeFilePath.set('src/cached.ts');
       localService.saveCurrentState('cached-project', { viewMode: 'diff' });
 
       host.projectId = 'cached-project';
@@ -792,7 +821,7 @@ describe('WorkspaceComponent', () => {
         selectFile('image.png');
 
         // Drive the file signal directly to a binary record.
-        workspaceService.currentFile.set(
+        setCurrentFile(
           makeFileContent({
             path: 'image.png',
             content: '',
@@ -802,7 +831,6 @@ describe('WorkspaceComponent', () => {
             size_bytes: 1024,
           })
         );
-        fixture.detectChanges();
 
         // Bypass the editor's read-only guard and force isDirty=true to
         // prove canSave() refuses on the binary flag alone.
@@ -822,7 +850,7 @@ describe('WorkspaceComponent', () => {
         bootWithTree();
         selectFile('big.txt');
 
-        workspaceService.currentFile.set(
+        setCurrentFile(
           makeFileContent({
             path: 'big.txt',
             content: 'partial…',
@@ -832,7 +860,6 @@ describe('WorkspaceComponent', () => {
             size_bytes: 1_048_576,
           })
         );
-        fixture.detectChanges();
 
         const codeViewerDebug = fixture.debugElement.query(
           By.directive(CodeViewerComponent)
@@ -1227,9 +1254,105 @@ describe('WorkspaceComponent', () => {
         expect(saveFileSpy).not.toHaveBeenCalled();
       });
     });
+
+    // ── 10b) Multi-file tab integration ────────────────────────────
+    // The FileTabsComponent's (tabClick) and (closeTab) outputs wire
+    // into WorkspaceComponent.onTabClick / onTabClose, which delegate
+    // to WorkspaceService.setActiveFile / closeFile. onFileSelected
+    // routes through openFile so the file becomes a tab AND its
+    // content is fetched in one call. Defined inside the Save-button
+    // describe so it can reuse the `bootWithTree` helper.
+    describe('multi-file tab integration', () => {
+      it('onTabClick calls workspace.setActiveFile with the clicked path', () => {
+        bootWithTree();
+        selectFile('src/a.ts');
+        const spy = jest.spyOn(workspaceService, 'setActiveFile');
+
+        component.onTabClick('src/a.ts');
+
+        expect(spy).toHaveBeenCalledWith('src/a.ts');
+      });
+
+      it('onTabClose calls workspace.closeFile with the closed path', () => {
+        bootWithTree();
+        selectFile('src/a.ts');
+        const spy = jest.spyOn(workspaceService, 'closeFile');
+
+        component.onTabClose('src/a.ts');
+
+        expect(spy).toHaveBeenCalledWith('src/a.ts');
+      });
+
+      it('onFileSelected routes through workspace.openFile', () => {
+        bootWithTree();
+        const openFileSpy = jest.spyOn(workspaceService, 'openFile');
+
+        component.onFileSelected('src/new.ts');
+
+        // openFile is the tab-opening entry point. The component
+        // does NOT also call getFileContent directly (which would
+        // fire a duplicate HTTP request); openFile handles the
+        // content fetch internally.
+        expect(openFileSpy).toHaveBeenCalledWith(
+          'test-project-id',
+          'src/new.ts'
+        );
+
+        // Drain the openFile-driven HTTP request.
+        const req = httpMock.expectOne(
+          (r) => r.url === '/api/workspace/test-project-id/file'
+        );
+        req.flush(makeFileContent({ path: 'src/new.ts' }));
+      });
+
+      it('save flow PUTs the active tab path (not the previously selected file)', () => {
+        // Open two files in turn. The second becomes the active tab.
+        bootWithTree();
+        selectFile('src/first.ts');
+        markDirty();
+        selectFile('src/second.ts');
+        markDirty();
+
+        // Save — the PUT must target the second (active) file.
+        const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+        component.saveFile();
+
+        expect(saveFileSpy).toHaveBeenCalledWith(
+          'test-project-id',
+          'src/second.ts',
+          expect.any(String)
+        );
+
+        // Drain the PUT request.
+        const req = httpMock.expectOne(
+          (r) =>
+            r.url === '/api/workspace/test-project-id/file' &&
+            r.method === 'PUT'
+        );
+        req.flush(makeWriteResponse({ path: 'src/second.ts' }));
+      });
+
+      it('shows an empty state when no file is active and hides the code viewer', () => {
+        bootWithTree();
+        // No file selected — workspace.activeFilePath() is null.
+        expect(workspaceService.activeFilePath()).toBeNull();
+
+        // The code viewer must NOT be in the DOM.
+        const codeViewer = fixture.debugElement.query(
+          By.directive(CodeViewerComponent)
+        );
+        expect(codeViewer).toBeNull();
+
+        // The empty-state placeholder must be present.
+        const emptyState = fixture.debugElement.query(
+          By.css('[data-testid="workspace-empty-state"]')
+        );
+        expect(emptyState).not.toBeNull();
+      });
+    });
   });
 
-  // ── 10) Tab switch state preservation (Bug 1 + Bug 2 regression) ──
+  // ── 11) Tab switch state preservation (Bug 1 + Bug 2 regression) ──
   // Round-trip A → B → A must:
   //   - re-fetch the file content for A's previously-selected file
   //     (Bug 1 — currentFile is intentionally not cached; refetch only),
@@ -1475,4 +1598,8 @@ describe('WorkspaceComponent', () => {
       expect(fileTreeAfter.getExpandedPaths()).toEqual([]);
     });
   });
+
+  // ── 11) Multi-file tab integration ──────────────────────────────
+  // (Tests live in the Save-button describe block above so they can
+  // reuse the `bootWithTree` / `selectFile` / `markDirty` helpers.)
 });
