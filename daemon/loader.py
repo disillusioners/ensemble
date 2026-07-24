@@ -508,13 +508,21 @@ class PromptCache:
     def __init__(self) -> None:
         self._cache: dict[str, tuple[str, int, dict[str, float]]] = {}
     
-    def _make_key(self, agent_id: str, mcp_tool_names: list[str] | None) -> str:
-        """Create a cache key from agent_id and MCP tool names.
-        
+    def _make_key(self, agent_id: str, mcp_tool_names: list[str] | None, version_tag: str | None = None) -> str:
+        """Create a cache key from agent_id, version_tag, and MCP tool names.
+
+        D15: version_tag is included to prevent base/tagged cache collision.
+        Base "developer" and tagged "developer[v2]" get different keys.
+        When version_tag is None (or empty), the key format is identical to
+        the pre-D15 format ``f"{agent_id}::{normalized_mcp}"``, preserving
+        backward compatibility for existing cached entries.
+
         Args:
             agent_id: The agent identifier.
             mcp_tool_names: Optional list of MCP tool names.
-        
+            version_tag: Optional version tag (e.g., "v2") from agent metadata.
+                When set, the cache key becomes ``f"{agent_id}[{version_tag}]::{normalized_mcp}"``.
+
         Returns:
             Cache key string.
         """
@@ -523,57 +531,75 @@ class PromptCache:
             normalized_mcp = ",".join(sorted(mcp_tool_names))
         else:
             normalized_mcp = ""
-        return f"{agent_id}::{normalized_mcp}"
-    
-    def get(self, agent_id: str, mcp_tool_names: list[str] | None = None) -> tuple[str, int] | None:
+        # Include version_tag to prevent base/tagged cache collision (D15).
+        # Backward compat: when version_tag is falsy, omit the bracket suffix entirely.
+        tag_suffix = f"[{version_tag}]" if version_tag else ""
+        return f"{agent_id}{tag_suffix}::{normalized_mcp}"
+
+    def get(self, agent_id: str, mcp_tool_names: list[str] | None = None, version_tag: str | None = None) -> tuple[str, int] | None:
         """Get cached prompt for agent.
-        
+
         Args:
             agent_id: The agent identifier (e.g., "developer").
             mcp_tool_names: Optional list of MCP tool names.
-            
+            version_tag: Optional version tag (e.g., "v2") to distinguish tagged
+                versions from base (D15). Defaults to None for backward compat.
+
         Returns:
             Tuple of (compiled_prompt, token_count) or None if not cached.
         """
-        key = self._make_key(agent_id, mcp_tool_names)
+        key = self._make_key(agent_id, mcp_tool_names, version_tag)
         if key not in self._cache:
             return None
-        
+
         return (self._cache[key][0], self._cache[key][1])
-    
-    def set(self, agent_id: str, prompt: str, tokens: int, mtimes: dict[str, float], mcp_tool_names: list[str] | None = None) -> None:
+
+    def set(self, agent_id: str, prompt: str, tokens: int, mtimes: dict[str, float], mcp_tool_names: list[str] | None = None, version_tag: str | None = None) -> None:
         """Store prompt in cache.
-        
+
         Args:
             agent_id: The agent identifier (e.g., "developer").
             prompt: Compiled system prompt.
             tokens: Token count.
             mtimes: Dict of filename to modification time.
             mcp_tool_names: Optional list of MCP tool names.
+            version_tag: Optional version tag (e.g., "v2") to distinguish tagged
+                versions from base (D15). Defaults to None for backward compat.
         """
-        key = self._make_key(agent_id, mcp_tool_names)
+        key = self._make_key(agent_id, mcp_tool_names, version_tag)
         self._cache[key] = (prompt, tokens, mtimes)
-    
-    def invalidate(self, agent_id: str, mcp_tool_names: list[str] | None = None) -> None:
+
+    def invalidate(self, agent_id: str, mcp_tool_names: list[str] | None = None, version_tag: str | None = None) -> None:
         """Remove agent from cache.
-        
+
         Args:
             agent_id: The agent identifier (e.g., "developer").
             mcp_tool_names: Optional list of MCP tool names.
+            version_tag: Optional version tag (e.g., "v2") to distinguish tagged
+                versions from base (D15). Defaults to None for backward compat.
         """
-        key = self._make_key(agent_id, mcp_tool_names)
+        key = self._make_key(agent_id, mcp_tool_names, version_tag)
         self._cache.pop(key, None)
 
 
-def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mcp_tool_names: list[str] | None = None) -> tuple[str, int]:
+def load_and_cache_prompt(
+    agent_id: str,
+    agent_dir: Path,
+    cache: PromptCache,
+    mcp_tool_names: list[str] | None = None,
+    version_tag: str | None = None,
+) -> tuple[str, int]:
     """Load and cache agent prompts including multiple skills.
-    
+
     Args:
         agent_id: The agent identifier (e.g., "developer").
         agent_dir: Path to the agent directory.
         cache: PromptCache instance.
         mcp_tool_names: Optional list of MCP tool names for "mcp" category expansion.
-        
+        version_tag: Optional version tag (e.g., "v2") to distinguish tagged
+            versions from base in the cache key (D15). Defaults to None for
+            backward compatibility — existing callers do not need to thread it.
+
     Returns:
         Tuple of (system_prompt, token_count).
     """
@@ -641,18 +667,18 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mc
                 except (PermissionError, OSError):
                     pass  # Skip broken symlinks and permission issues
     
-    # Check cache (include mcp_tool_names in cache key)
-    cached = cache.get(agent_id, mcp_tool_names)
+    # Check cache (include mcp_tool_names and version_tag in cache key)
+    cached = cache.get(agent_id, mcp_tool_names, version_tag)
     if cached is not None:
         # Get stored mtimes from cache using the same key
-        cache_key = cache._make_key(agent_id, mcp_tool_names)
+        cache_key = cache._make_key(agent_id, mcp_tool_names, version_tag)
         stored_mtimes = cache._cache.get(cache_key, (None, None, {}))[2]
-        
+
         # Compare mtimes
         if stored_mtimes == current_mtimes:
-            logger.debug(f"Prompt cache hit for {agent_id} (mcp_tools={len(mcp_tool_names) if mcp_tool_names else 0})")
+            logger.debug(f"Prompt cache hit for {agent_id} (mcp_tools={len(mcp_tool_names) if mcp_tool_names else 0}, version_tag={version_tag})")
             return cached
-    
+
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir, meta)
@@ -662,8 +688,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mc
     shared_knowledge = load_shared_knowledge(no_force_explore=no_force_explore)
     system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories, shared_knowledge)
     tokens = estimate_tokens(system_prompt)
-    
-    # Update cache (include mcp_tool_names in cache key)
-    cache.set(agent_id, system_prompt, tokens, current_mtimes, mcp_tool_names)
-    
+
+    # Update cache (include mcp_tool_names and version_tag in cache key)
+    cache.set(agent_id, system_prompt, tokens, current_mtimes, mcp_tool_names, version_tag)
+
     return (system_prompt, tokens)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from daemon.registry import AgentMetadata, AgentRegistry, get_registry
+from daemon.registry import AgentMetadata, AgentRegistry, _parse_agent_dir_name, get_registry
 
 
 @pytest.fixture
@@ -388,6 +388,400 @@ class TestAgentMetadataPath:
             path=path,
         )
         assert meta.path is path
+
+
+class TestAgentVersioning:
+    """Regression tests for Phase 1 agent versioning.
+
+    Directory-name ``[tag]`` suffix support: tagged variants are stored in
+    a separate ``_versioned_agents`` dict keyed by composite
+    ``"{base}[{tag}]"`` strings. Base agents live in ``_agents`` with
+    plain keys. The D16 lookup family ignores tagged-only entries so
+    legacy callers cannot accidentally resolve a composite key.
+    """
+
+    # -------------------- _parse_agent_dir_name --------------------
+
+    @pytest.mark.parametrize(
+        "dir_name, expected_base, expected_tag",
+        [
+            ("developer", "developer", None),
+            ("developer[v2]", "developer", "v2"),
+            ("developer[test_version]", "developer", "test_version"),
+            ("developer[v-1]", "developer", "v-1"),
+            ("developer[V_2]", "developer", "V_2"),
+            ("a[1]", "a", "1"),
+        ],
+    )
+    def test_parse_agent_dir_name_valid_tags(
+        self, dir_name: str, expected_base: str, expected_tag: str | None
+    ) -> None:
+        assert _parse_agent_dir_name(dir_name) == (expected_base, expected_tag)
+
+    @pytest.mark.parametrize(
+        "dir_name",
+        [
+            "dev[[v2]]",     # nested brackets → no match
+            "dev[../etc]",   # path chars (slash) → no match
+            "dev[v2]/etc",   # path separator → no match
+            "dev[.v2]",      # dot char → no match
+            "dev[v2 ",       # missing closing bracket → no match
+            "dev v2]",       # missing opening bracket → no match
+            "dev[]",         # empty tag → no match
+        ],
+    )
+    def test_parse_agent_dir_name_rejects_path_and_nested_brackets(
+        self, dir_name: str
+    ) -> None:
+        base, tag = _parse_agent_dir_name(dir_name)
+        assert tag is None
+        assert base == dir_name
+
+    # -------------------- AgentMetadata default --------------------
+
+    def test_agent_metadata_version_tag_defaults_to_none(
+        self, temp_agents_dir: Path
+    ) -> None:
+        meta = AgentMetadata(
+            id="test",
+            name="Test",
+            path=temp_agents_dir / "test",
+        )
+        assert meta.version_tag is None
+
+    # -------------------- Storage layout --------------------
+
+    @staticmethod
+    def _create_agent_dir(agents_dir: Path, dir_name: str, meta: dict | None = None) -> Path:
+        """Create an agent directory with a (possibly tagged) name and meta.json."""
+        agent_dir = agents_dir / dir_name
+        agent_dir.mkdir()
+        payload = meta if meta is not None else {"id": dir_name, "name": dir_name}
+        with open(agent_dir / "meta.json", "w") as f:
+            json.dump(payload, f)
+        return agent_dir
+
+    def test_base_and_tagged_stored_in_separate_dicts(
+        self, temp_agents_dir: Path
+    ) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "reviewer", {"id": "reviewer"})
+        self._create_agent_dir(temp_agents_dir, "reviewer[v1]", {"id": "reviewer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        # _agents: plain keys only, never composite.
+        assert set(reg._agents.keys()) == {"developer", "reviewer"}
+        # _versioned_agents: composite keys only.
+        assert set(reg._versioned_agents.keys()) == {"developer[v2]", "reviewer[v1]"}
+        # The two dicts never overlap.
+        assert set(reg._agents.keys()) & set(reg._versioned_agents.keys()) == set()
+
+    def test_versions_dict_records_base_and_tags_deduplicated(
+        self, temp_agents_dir: Path
+    ) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v1]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        versions = reg._versions["developer"]
+        # All entries recorded once (no duplicates).
+        assert len(versions) == len(set(versions))
+        assert set(versions) == {None, "v1", "v2"}
+
+    # -------------------- get_version --------------------
+
+    def test_get_version_exact_tagged_lookup(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        v2 = reg.get_version("developer", "v2")
+        assert v2 is not None
+        assert v2.version_tag == "v2"
+
+    def test_get_version_missing_tag_returns_none_no_fallback(
+        self, temp_agents_dir: Path
+    ) -> None:
+        """Explicit tag lookup must NOT fall back to base or other tags."""
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        # None when the specific tag is unknown — no lexicographic fallback.
+        assert reg.get_version("developer", "v9") is None
+
+    def test_get_version_prefers_base_when_no_tag_given(
+        self, temp_agents_dir: Path
+    ) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        meta = reg.get_version("developer")
+        assert meta is not None
+        assert meta.version_tag is None
+
+    def test_get_version_tagged_only_fallback_is_lex_first(
+        self, temp_agents_dir: Path
+    ) -> None:
+        """When only tagged versions exist, lex-first tagged version is returned."""
+        # No base "developer" directory — only tagged variants.
+        self._create_agent_dir(temp_agents_dir, "developer[v9]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v10]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        meta = reg.get_version("developer")
+        assert meta is not None
+        # Lexicographically smallest tag is "v10" (v1 < v2 < v9).
+        assert meta.version_tag == "v10"
+
+    def test_get_version_unknown_base_returns_none(
+        self, temp_agents_dir: Path
+    ) -> None:
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.get_version("ghost") is None
+        assert reg.get_version("ghost", "v1") is None
+
+    # -------------------- list_versions --------------------
+
+    def test_list_versions_returns_base_and_tags(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v1]", {"id": "developer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        versions = reg.list_versions("developer")
+        # All versions present (None for base), no duplicates.
+        assert set(versions) == {None, "v1", "v2"}
+        assert len(versions) == 3
+
+    def test_list_versions_unknown_base_empty(self, temp_agents_dir: Path) -> None:
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.list_versions("ghost") == []
+
+    # -------------------- list_all_grouped --------------------
+
+    def test_list_all_grouped_groups_by_base_id(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v1]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "reviewer", {"id": "reviewer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        grouped = reg.list_all_grouped()
+        assert set(grouped.keys()) == {"developer", "reviewer"}
+        # All three developer variants are grouped under "developer".
+        dev_paths = {m.path.name for m in grouped["developer"]}
+        assert dev_paths == {"developer", "developer[v2]", "developer[v1]"}
+        assert len(grouped["reviewer"]) == 1
+        assert grouped["reviewer"][0].path.name == "reviewer"
+
+    # -------------------- D16 methods ignore tagged-only entries --------------------
+
+    def test_get_ignores_composite_key(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.get("developer[v2]") is None
+
+    def test_resolve_pure_id_ignores_composite_key(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.resolve_pure_id("developer[v2]") is None
+
+    def test_resolve_to_id_ignores_composite_key(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.resolve_to_id("developer[v2]") is None
+
+    def test_resolve_path_to_id_ignores_tagged_dir_path(
+        self, temp_agents_dir: Path
+    ) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        # Tagged dir should not be discoverable via D16 path lookups.
+        assert reg.resolve_path_to_id("./agents/developer[v2]") is None
+        assert reg.resolve_path_to_id("agents/developer[v2]") is None
+        assert reg.resolve_path_to_id(str(temp_agents_dir / "developer[v2]")) is None
+
+    def test_list_all_excludes_tagged_versions(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "reviewer", {"id": "reviewer"})
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        ids = {a.id for a in reg.list_all()}
+        assert ids == {"developer", "reviewer"}
+
+    def test_exists_ignores_composite_key(self, temp_agents_dir: Path) -> None:
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.exists("developer[v2]") is False
+
+    def test_d16_methods_return_for_base_when_tagged_present(
+        self, temp_agents_dir: Path
+    ) -> None:
+        """When base and tagged both exist, plain id still resolves to base."""
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+        assert reg.exists("developer") is True
+        assert reg.resolve_pure_id("developer") == "developer"
+        meta = reg.get("developer")
+        assert meta is not None
+        assert meta.version_tag is None
+
+    # -------------------- find_skill --------------------
+
+    def test_find_skill_returns_base_ids_for_tagged_versions(
+        self, temp_agents_dir: Path
+    ) -> None:
+        """find_skill must report base ids (never composite) and dedup."""
+        # Base developer with a skill.
+        self._create_agent_dir(temp_agents_dir, "developer", {"id": "developer"})
+        (temp_agents_dir / "developer" / "skills" / "coding").mkdir(parents=True)
+        (temp_agents_dir / "developer" / "skills" / "coding" / "skill.md").write_text("# coding")
+
+        # Tagged developer[v2] also has the same skill — should NOT duplicate.
+        self._create_agent_dir(temp_agents_dir, "developer[v2]", {"id": "developer"})
+        (temp_agents_dir / "developer[v2]" / "skills" / "coding").mkdir(parents=True)
+        (temp_agents_dir / "developer[v2]" / "skills" / "coding" / "skill.md").write_text("# coding")
+
+        # Tagged-only reviewer[v1] with the skill — must report base id "reviewer".
+        self._create_agent_dir(temp_agents_dir, "reviewer[v1]", {"id": "reviewer"})
+        (temp_agents_dir / "reviewer[v1]" / "skills" / "coding").mkdir(parents=True)
+        (temp_agents_dir / "reviewer[v1]" / "skills" / "coding" / "skill.md").write_text("# coding")
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        result = reg.find_skill("coding")
+        # Both base ids present, no duplicates, no composite keys.
+        assert result == ["developer", "reviewer"]
+        assert "developer[v2]" not in result
+        assert "reviewer[v1]" not in result
+
+    def test_find_skill_tagged_only_no_base_skill(self, temp_agents_dir: Path) -> None:
+        """Tagged-only agent with skill is surfaced via its base id."""
+        self._create_agent_dir(temp_agents_dir, "reviewer[v1]", {"id": "reviewer"})
+        (temp_agents_dir / "reviewer[v1]" / "skills" / "coding").mkdir(parents=True)
+        (temp_agents_dir / "reviewer[v1]" / "skills" / "coding" / "skill.md").write_text("# coding")
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        assert reg.find_skill("coding") == ["reviewer"]
+
+    # -------------------- validate_tool_configs with tagged version --------------------
+
+    @staticmethod
+    def _setup_mock_tools(monkeypatch) -> None:
+        """Seed a minimal tool registry for validate_tool_configs."""
+        from daemon.tools import _tool_registry
+
+        _tool_registry._tool_metadata.clear()
+        _tool_registry._tool_metadata.update({
+            "bash": {"category": "bash", "short_doc": "Run bash"},
+            "read_file": {"category": "filesystem", "short_doc": "Read file"},
+            "write_file": {"category": "filesystem", "short_doc": "Write file"},
+        })
+        _tool_registry._full_docs.clear()
+
+    def test_validate_tool_configs_tagged_version_with_distinct_invalid_meta_id(
+        self, temp_agents_dir: Path, monkeypatch
+    ) -> None:
+        """A tagged version with a distinct meta.id and invalid config emits
+        a warning that displays the meta.id (not a composite key)."""
+        self._setup_mock_tools(monkeypatch)
+
+        # Base "developer" with a valid config — no warning expected.
+        self._create_agent_dir(
+            temp_agents_dir, "developer",
+            {"id": "developer", "name": "Dev",
+             "tools": {"allow": ["bash"], "deny": []}},
+        )
+        # Tagged version "developer[v2]" with a distinct meta.id and an
+        # invalid config (references a non-existent tool).
+        self._create_agent_dir(
+            temp_agents_dir, "developer[v2]",
+            {"id": "developer_v2", "name": "Dev v2",
+             "tools": {"allow": ["nonexistent_tool"], "deny": []}},
+        )
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        warnings = reg.validate_tool_configs()
+        # Exactly one warning, for the tagged variant, displayed by meta.id.
+        assert len(warnings) == 1
+        msg = warnings[0]
+        assert "developer_v2" in msg
+        assert "nonexistent_tool" in msg
+        # The warning must NOT display a composite key or base name.
+        assert "developer[v2]" not in msg
+        assert "'developer'" not in msg
+
+    def test_validate_tool_configs_does_not_mask_tagged_with_shared_meta_id(
+        self, temp_agents_dir: Path, monkeypatch
+    ) -> None:
+        """A base agent with no tools config must NOT mask a tagged version
+        that shares the same meta.id but has an invalid allow entry.
+
+        Regression guard: a base ``tools is None`` entry must not silently
+        suppress validation of a tagged variant's tools config under the
+        same meta.id.
+        """
+        self._setup_mock_tools(monkeypatch)
+
+        # Base "developer" with no tools config (tools is None).
+        self._create_agent_dir(
+            temp_agents_dir, "developer",
+            {"id": "developer", "name": "Dev"},
+        )
+        # Tagged version sharing the SAME meta.id with an invalid allow entry.
+        self._create_agent_dir(
+            temp_agents_dir, "developer[v2]",
+            {"id": "developer", "name": "Dev v2",
+             "tools": {"allow": ["nonexistent_tool"], "deny": []}},
+        )
+
+        reg = AgentRegistry(temp_agents_dir)
+        reg.discover()
+
+        warnings = reg.validate_tool_configs()
+        # The tagged invalid entry must surface as a warning, even though
+        # the base shared the same meta.id with no tools config.
+        assert any(
+            "nonexistent_tool" in w and "Agent 'developer'" in w for w in warnings
+        ), warnings
 
 
 class TestRegistryIntegration:

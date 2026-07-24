@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any
@@ -21,6 +22,32 @@ SKIP_DIRS: frozenset[str] = frozenset({
     "_prompt_system",
     "_inner_soul",
 })
+
+# Directory-name suffix parser for tagged agent versions.
+# A directory named "developer[v2]" is parsed as base "developer" + tag "v2".
+# The tag must contain only letters, digits, underscores, or hyphens (no
+# path chars, no nested brackets). Names like "dev[[v2]]" or "dev[../etc]"
+# do NOT match and are treated as plain agent ids.
+_TAG_PATTERN = re.compile(r'^(.+?)\[([A-Za-z0-9_-]+)\]$')
+
+
+def _parse_agent_dir_name(dir_name: str) -> tuple[str, str | None]:
+    """Parse a directory name, extracting optional [tag] suffix.
+
+    Examples:
+        "developer" → ("developer", None)
+        "developer[v2]" → ("developer", "v2")
+        "developer[test_version]" → ("developer", "test_version")
+        "dev[[v2]]" → ("dev[[v2]]", None)  # no match, inner brackets
+        "dev[../etc]" → ("dev[../etc]", None)  # no match, path chars
+
+    Returns:
+        Tuple of (base_agent_id, version_tag or None)
+    """
+    match = _TAG_PATTERN.match(dir_name)
+    if match:
+        return match.group(1), match.group(2)
+    return dir_name, None
 
 # Backward-compatibility aliases for renamed agent IDs.
 # Maps old agent_id -> new canonical agent_id. Used by ``resolve_pure_id``
@@ -99,6 +126,10 @@ class AgentMetadata(BaseModel):
         default=False,
         description="Whether this agent should have dynamic skills injected into conversations.",
     )
+    version_tag: str | None = Field(
+        default=None,
+        description="Directory-name derived version tag (e.g., 'v2' for 'developer[v2]'). None = base.",
+    )
 
     model_config = ConfigDict(
         extra="ignore",
@@ -145,6 +176,14 @@ class AgentRegistry:
         """
         self._agents_dir = agents_dir
         self._agents = {}
+        # Tagged agent versions, keyed by composite "base[tag]" string.
+        # Plain (untagged) agents live in ``_agents`` only; tagged agents
+        # live in ``_versioned_agents`` only. The two dicts never overlap.
+        self._versioned_agents: dict[str, AgentMetadata] = {}
+        # Per-base-agent view of available versions. Each list contains
+        # ``None`` (for the base) and/or one or more tag strings, preserving
+        # discovery order without duplicates.
+        self._versions: dict[str, list[str | None]] = {}
 
     def discover(self) -> None:
         """Scan agents directory and populate registry."""
@@ -184,7 +223,13 @@ class AgentRegistry:
                 continue
 
             # Extract agent ID (use directory name as fallback)
-            agent_id = meta.get("id", agent_path.name)
+            # NOTE: Skip rules above already validated agent_path.name.
+            # Parse the directory name for an optional [tag] suffix BEFORE
+            # falling back to it as the agent id, so that a directory named
+            # "developer[v2]" registers as base="developer" with tag="v2"
+            # rather than id="developer[v2]".
+            base_agent_id, version_tag = _parse_agent_dir_name(agent_path.name)
+            agent_id = meta.get("id", base_agent_id)
 
             # Build AgentMetadata with defaults for missing fields
             tools_config = meta.get("tools")
@@ -194,7 +239,7 @@ class AgentRegistry:
                     tools_filter = ToolFilter.model_validate(tools_config)
                 except Exception as e:
                     logger.warning(f"Failed to parse tools config for {agent_path.name}: {e}")
-            
+
             try:
                 agent_meta = AgentMetadata(
                     id=agent_id,
@@ -212,8 +257,19 @@ class AgentRegistry:
                     llm_model=meta.get("llm_model"),
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
+                    version_tag=version_tag,
                 )
-                self._agents[agent_id] = agent_meta
+                # Split storage: untagged → _agents, tagged → _versioned_agents.
+                # _agents keys are NEVER composite keys.
+                if version_tag is None:
+                    self._agents[base_agent_id] = agent_meta
+                else:
+                    composite_key = f"{base_agent_id}[{version_tag}]"
+                    self._versioned_agents[composite_key] = agent_meta
+                # Record this version under its base id (dedup, preserve order)
+                self._versions.setdefault(base_agent_id, [])
+                if version_tag not in self._versions[base_agent_id]:
+                    self._versions[base_agent_id].append(version_tag)
             except Exception as e:
                 logger.warning(f"Failed to create AgentMetadata for {agent_path.name}: {e}")
 
@@ -362,11 +418,103 @@ class AgentRegistry:
         """
         return sorted(self._agents.values(), key=lambda a: a.id)
 
+    def get_version(self, agent_id: str, version_tag: str | None = None) -> AgentMetadata | None:
+        """Resolve an agent by id and optional version tag.
+
+        Resolution order:
+          1. If ``version_tag`` is provided, look up the composite key
+             ``"{agent_id}[{version_tag}]"`` in ``_versioned_agents``.
+          2. Otherwise, return the base (untagged) version if present.
+          3. If only tagged versions exist (no base), return the
+             lexicographically smallest tagged version as a fallback.
+
+        Args:
+            agent_id: Base agent identifier (never a composite key).
+            version_tag: Optional directory-name tag (e.g., ``"v2"``).
+
+        Returns:
+            The matching ``AgentMetadata``, or ``None`` if unknown.
+        """
+        if version_tag is not None:
+            composite_key = f"{agent_id}[{version_tag}]"
+            return self._versioned_agents.get(composite_key)
+        base_meta = self._agents.get(agent_id)
+        if base_meta is not None:
+            return base_meta
+        versions = self._versions.get(agent_id, [])
+        tagged_versions = sorted([v for v in versions if v is not None])
+        if tagged_versions:
+            composite_key = f"{agent_id}[{tagged_versions[0]}]"
+            return self._versioned_agents.get(composite_key)
+        return None
+
+    def list_versions(self, agent_id: str) -> list[str | None]:
+        """Return the known versions for a base agent id.
+
+        The first element is typically ``None`` (the untagged base) when
+        both base and tagged variants exist; ordering matches discovery.
+        Returns an empty list when the agent_id is unknown.
+
+        Args:
+            agent_id: Base agent identifier (never a composite key).
+
+        Returns:
+            List of version tags (``None`` for the base) preserving
+            discovery order with no duplicates.
+        """
+        return self._versions.get(agent_id, [])
+
+    def list_all_grouped(self) -> dict[str, list[AgentMetadata]]:
+        """List all agents grouped by base id (base + tagged versions).
+
+        Returns:
+            Dict mapping base agent_id to a list of ``AgentMetadata``
+            objects containing the base (if present) and all tagged
+            variants. Order within each group is unspecified.
+        """
+        grouped: dict[str, list[AgentMetadata]] = {}
+        for agent_id, meta in self._agents.items():
+            grouped.setdefault(agent_id, []).append(meta)
+        for composite_key, meta in self._versioned_agents.items():
+            base_id, _ = _parse_agent_dir_name(composite_key)
+            grouped.setdefault(base_id, []).append(meta)
+        return grouped
+
+    def _agent_has_skill(
+        self,
+        metadata: AgentMetadata,
+        skill_name: str,
+        innate_exists: bool,
+    ) -> bool:
+        """Return True when the given agent has ``skill_name``.
+
+        Two sources are checked:
+          - The centralized innate-skills registry, when present at
+            ``<agents_dir>/_prompt_system/innate-skills/<skill>/skill.md``
+            AND the agent's ``innate_skills`` list includes the name.
+          - The legacy per-agent ``skills/<skill>/skill.md`` file.
+
+        Args:
+            metadata: The agent metadata to inspect.
+            skill_name: Skill name to look up (already validated).
+            innate_exists: Whether the innate skill file exists on disk.
+
+        Returns:
+            ``True`` if the agent has the skill by either criterion.
+        """
+        if innate_exists and metadata.innate_skills and skill_name in metadata.innate_skills:
+            return True
+        skill_path = metadata.path / "skills" / skill_name / "skill.md"
+        return skill_path.exists()
+
     def find_skill(self, skill_name: str) -> list[str]:
         """Find all agents that have a specific skill.
 
         Checks both the centralized innate-skills registry (via AgentMetadata.innate_skills)
         and legacy per-agent skills/ directories (agents/<agent_id>/skills/<skill_name>/skill.md).
+
+        Tagged agent versions report their BASE id (no composite keys) and
+        are deduplicated against any base agent with the same id.
 
         Args:
             skill_name: The skill name to search for.
@@ -379,15 +527,16 @@ class AgentRegistry:
         agents_with_skill = []
         innate_skill_path = self._agents_dir / "_prompt_system" / "innate-skills" / skill_name / "skill.md"
         innate_exists = innate_skill_path.exists()
+        # Check base agents (untagged): report full agent_id.
         for agent_id, metadata in self._agents.items():
-            # Check innate-skills registry (via AgentMetadata.innate_skills)
-            if innate_exists and metadata.innate_skills and skill_name in metadata.innate_skills:
+            if self._agent_has_skill(metadata, skill_name, innate_exists):
                 agents_with_skill.append(agent_id)
-                continue
-            # Legacy fallback: check per-agent skills/ directory
-            skill_path = metadata.path / "skills" / skill_name / "skill.md"
-            if skill_path.exists():
-                agents_with_skill.append(agent_id)
+        # Check tagged versions: report BASE id only, dedup against base.
+        for composite_key, metadata in self._versioned_agents.items():
+            if self._agent_has_skill(metadata, skill_name, innate_exists):
+                base_id = _parse_agent_dir_name(composite_key)[0]
+                if base_id not in agents_with_skill:
+                    agents_with_skill.append(base_id)
         return agents_with_skill
 
     def validate_tool_configs(self) -> list[str]:
@@ -430,40 +579,48 @@ class AgentRegistry:
         # Known categories come from CATEGORY_MODULES (includes categories that may not have
         # tools registered yet, e.g., dynamically created tools)
         known_categories: set[str] = set(CATEGORY_MODULES.keys())
-        
-        for agent_id, agent_meta in self._agents.items():
-            if agent_meta.tools is None:
-                continue
-            
-            tools_filter = agent_meta.tools
-            
-            # Check allow entries (entry is valid if it's a known category or tool name)
-            if tools_filter.allow:
-                for entry in tools_filter.allow:
-                    if entry not in known_categories and entry not in all_tool_names:
-                        warnings.append(
-                            f"Agent '{agent_id}': allow entry '{entry}' is neither a known category nor a known tool"
-                        )
-            
-            # Check deny entries
-            if tools_filter.deny:
-                for entry in tools_filter.deny:
-                    if entry not in known_categories and entry not in all_tool_names:
-                        warnings.append(
-                            f"Agent '{agent_id}': deny entry '{entry}' is neither a known category nor a known tool"
-                        )
-            
-            # Check that agent ends up with at least 1 tool
-            allowed = resolve_tool_filter(
-                tools_filter.allow,
-                tools_filter.deny,
-                tool_categories=available_categories,
-            )
-            if allowed is not None and len(allowed) == 0:
-                warnings.append(
-                    f"Agent '{agent_id}': tool config results in ZERO available tools"
+
+        # Iterate both base agents and tagged versions. Every entry is
+        # validated independently — a tagged version is a distinct
+        # configuration even when it shares the same meta.id as the
+        # base (it may carry a different tools block in its own meta.json).
+        for _iter_dict in (self._agents, self._versioned_agents):
+            for _iter_key, agent_meta in _iter_dict.items():
+                if agent_meta.tools is None:
+                    continue
+
+                tools_filter = agent_meta.tools
+                # Display uses meta.id for both base and tagged variants
+                # so logs consistently reflect the canonical identifier.
+                display_id = agent_meta.id
+
+                # Check allow entries (entry is valid if it's a known category or tool name)
+                if tools_filter.allow:
+                    for entry in tools_filter.allow:
+                        if entry not in known_categories and entry not in all_tool_names:
+                            warnings.append(
+                                f"Agent '{display_id}': allow entry '{entry}' is neither a known category nor a known tool"
+                            )
+
+                # Check deny entries
+                if tools_filter.deny:
+                    for entry in tools_filter.deny:
+                        if entry not in known_categories and entry not in all_tool_names:
+                            warnings.append(
+                                f"Agent '{display_id}': deny entry '{entry}' is neither a known category nor a known tool"
+                            )
+
+                # Check that agent ends up with at least 1 tool
+                allowed = resolve_tool_filter(
+                    tools_filter.allow,
+                    tools_filter.deny,
+                    tool_categories=available_categories,
                 )
-        
+                if allowed is not None and len(allowed) == 0:
+                    warnings.append(
+                        f"Agent '{display_id}': tool config results in ZERO available tools"
+                    )
+
         return warnings
 
     def exists(self, agent_id: str) -> bool:

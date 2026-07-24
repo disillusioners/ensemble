@@ -1098,7 +1098,14 @@ class InstanceLifecycleService:
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(resolved_agent_dir)
-        system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
+        # D15: version_tag=None for Phase 1; Phase 2 will thread the actual tag from spawn args.
+        system_prompt, token_count = load_and_cache_prompt(
+            resolved_agent_id,
+            agent_path,
+            prompt_cache,
+            mcp_tool_names,
+            version_tag=None,
+        )
 
         # Apply the post-cache append chain for context, metadata, time,
         # language preference, and auto-loaded skills.
@@ -2431,7 +2438,14 @@ class InstanceLifecycleService:
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(agent_meta.path)
-        system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
+        # D15: version_tag=None for Phase 1; Phase 2 will thread the actual tag from meta.
+        system_prompt, token_count = load_and_cache_prompt(
+            resolved_agent_id,
+            agent_path,
+            prompt_cache,
+            mcp_tool_names,
+            version_tag=None,
+        )
 
         # Apply the post-cache append chain for context, metadata, time,
         # language preference, and auto-loaded skills.
