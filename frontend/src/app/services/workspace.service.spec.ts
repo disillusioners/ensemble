@@ -528,6 +528,88 @@ describe('WorkspaceService', () => {
       expect(service.hasCachedState('project-g')).toBe(true);
     });
 
+    it('restores project A after loading project B without caching B signals over A', () => {
+      const treeA: FileTreeNode[] = [
+        { name: 'a', path: 'a', type: 'directory', size: null, children: null },
+      ];
+      const treeB: FileTreeNode[] = [
+        { name: 'b', path: 'b', type: 'directory', size: null, children: null },
+      ];
+
+      service.getFileTree('project-a').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-a/tree')
+        .flush(makeTreeResponse({ project_id: 'project-a', tree: treeA }));
+
+      service.getFileTree('project-b').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-b/tree')
+        .flush(makeTreeResponse({ project_id: 'project-b', tree: treeB }));
+
+      expect(service.restoreState('project-a')?.tree).toEqual(treeA);
+      service.connectSSE('project-a');
+
+      expect(service.currentTree()).toEqual(treeA);
+      expect(service.restoreState('project-b')?.tree).toEqual(treeB);
+    });
+
+    it('does not cache a stale tree under the wrong project when a late HTTP response arrives after a switch (regression)', () => {
+      // Simulates the real-world race:
+      //   1. Load A — A's tree is in currentTree, ownership = 'project-a'.
+      //   2. Start loading B — request is in-flight (slow network).
+      //   3. User switches back to A while B's HTTP is still pending.
+      //      restoreState('project-a') saves B as null and applies A's
+      //      cached tree.
+      //   4. B's HTTP response finally arrives. The tap populates
+      //      currentTree with B's data even though the active project
+      //      is now A. The ownership tag is stamped as 'project-b'.
+      //   5. saveCurrentState('project-a') is called. With the old
+      //      blind-snapshot bug, B's tree would be cached under A.
+      //   6. A subsequent restoreState('project-a') would therefore
+      //      return B's tree instead of A's.
+      const treeA: FileTreeNode[] = [
+        { name: 'a-file', path: 'a-file', type: 'file', size: 1, children: null },
+      ];
+      const treeB: FileTreeNode[] = [
+        { name: 'b-file', path: 'b-file', type: 'file', size: 2, children: null },
+      ];
+
+      // 1. Load A.
+      service.getFileTree('project-a').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-a/tree')
+        .flush(makeTreeResponse({ project_id: 'project-a', tree: treeA }));
+
+      // 2. Start loading B — request stays pending.
+      service.getFileTree('project-b').subscribe({ error: () => undefined });
+
+      // 3. Switch back to A from cache while B is still in flight.
+      //    This saves B's (currently null) state and applies A's tree.
+      service.restoreState('project-a');
+      expect(service.currentTree()).toEqual(treeA);
+
+      // 4. B's HTTP response finally arrives — the tap populates
+      //    currentTree with B's data while A is the active project.
+      //    The ownership tag is stamped as 'project-b' (the project
+      //    that initiated the request).
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-b/tree')
+        .flush(makeTreeResponse({ project_id: 'project-b', tree: treeB }));
+
+      // 5. The critical saveCurrentState('project-a') call. With the
+      //    old blind-snapshot bug, currentTree (= B's tree) would be
+      //    cached under A, corrupting A's cache. With the fix, A's
+      //    previously cached tree is preserved because the live
+      //    signal's ownership tag ('project-b') does not match the
+      //    project being saved ('project-a').
+      service.saveCurrentState('project-a');
+
+      // 6. Restore A from cache — must still return A's tree, not B's.
+      const restoredA = service.restoreState('project-a');
+      expect(restoredA!.tree).toEqual(treeA);
+      expect(restoredA!.tree).not.toEqual(treeB);
+    });
+
     it('auto-saves the outgoing project state when switching via getFileTree', () => {
       // Load project-1, then switch to project-2. Switching should
       // snapshot project-1's state first.

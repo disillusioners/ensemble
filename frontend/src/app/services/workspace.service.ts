@@ -59,6 +59,21 @@ export class WorkspaceService implements OnDestroy {
   // Track current project ID for SSE auto-refresh callbacks
   private _currentProjectId: string | null = null;
 
+  /**
+   * Project ID that the `currentTree` signal's data belongs to. Updated
+   * whenever `currentTree` is populated (by `getFileTree`'s tap or by
+   * `restoreState`) and cleared by `resetState`.
+   *
+   * Used by `saveCurrentState` to detect cross-project races: during a
+   * project switch the live `currentTree`/`selectedPath` signals may
+   * still hold the OUTGOING project's data (or a late HTTP response from
+   * the outgoing project may have repopulated them after the switch).
+   * Snapshotting those signals blindly under `projectId` would corrupt
+   * the cache — A's tree would be cached under B and vice versa.
+   * Guarding on `_treeProjectId === projectId` prevents that.
+   */
+  private _treeProjectId: string | null = null;
+
   // ── LRU state cache ───────────────────────────────────────────────
   // Map preserves insertion order in JS, which we use as the LRU recency
   // list: most-recently-used entries are re-inserted at the tail; the
@@ -91,7 +106,17 @@ export class WorkspaceService implements OnDestroy {
     return this.http
       .get<FileTreeResponse>(`${this.API_BASE}/${encodeURIComponent(projectId)}/tree`, { params })
       .pipe(
-        tap((res) => this.currentTree.set(res.tree)),
+        tap((res) => {
+          this.currentTree.set(res.tree);
+          // Tag the tree data with the project that initiated this
+          // request. The response may arrive AFTER the user has switched
+          // projects (e.g. an SSE-triggered refetch or a slow network),
+          // so `_treeProjectId` here intentionally reflects the
+          // REQUESTING project, not whatever `_currentProjectId` is now.
+          // `saveCurrentState` uses this tag to refuse snapshotting
+          // stale data under the wrong projectId.
+          this._treeProjectId = projectId;
+        }),
         catchError((err) => {
           this.error.set(err.message || 'Failed to load file tree');
           return of({ project_id: projectId, path, tree: [], truncated: false });
@@ -247,6 +272,7 @@ export class WorkspaceService implements OnDestroy {
    */
   resetState(): void {
     this.currentTree.set(null);
+    this._treeProjectId = null;
     this.currentFile.set(null);
     this.selectedPath.set(null);
     this.currentDiff.set(null);
@@ -274,10 +300,37 @@ export class WorkspaceService implements OnDestroy {
     // Preserve any prior cached extras so a caller passing only viewMode
     // doesn't accidentally wipe previously-saved expandedPaths.
     const prior = this._stateCache.get(projectId);
+
+    // Only snapshot the live service signals when they actually belong to
+    // `projectId`. During a switch the live signals may still hold the
+    // outgoing project's data — and a late HTTP response from that
+    // outgoing project can repopulate them AFTER the switch has already
+    // updated `_currentProjectId`. Snapshotting blindly would cache the
+    // wrong tree under the wrong projectId (e.g. project B's tree
+    // getting cached under project A), corrupting the cache so a later
+    // `restoreState(A)` returns B's tree.
+    //
+    // When the live signals don't belong to this project, fall back to
+    // the prior cached entry so we don't wipe a good cached value with
+    // null just because we happened to be mid-switch.
+    //
+    // `_treeProjectId === null` is treated as "no tree loaded yet" — in
+    // that state `currentTree` was cleared by `resetState` so there is no
+    // tree to corrupt, and the caller is explicitly seeding the cache with
+    // live signal values (e.g. setting `selectedPath` before a manual
+    // `saveCurrentState`). This preserves the pre-fix behavior for the
+    // no-tree case while still blocking the cross-project race.
+    const liveSignalsBelongToProject =
+      this._treeProjectId === null || this._treeProjectId === projectId;
+
     const state: WorkspaceState = {
       projectId,
-      tree: this.currentTree(),
-      selectedPath: this.selectedPath(),
+      tree: liveSignalsBelongToProject
+        ? this.currentTree()
+        : prior?.tree ?? null,
+      selectedPath: liveSignalsBelongToProject
+        ? this.selectedPath()
+        : prior?.selectedPath ?? null,
       viewMode: uiExtras.viewMode ?? prior?.viewMode ?? 'code',
       expandedPaths: uiExtras.expandedPaths ?? prior?.expandedPaths ?? [],
       scrollTop: uiExtras.scrollTop ?? prior?.scrollTop ?? 0,
@@ -308,12 +361,22 @@ export class WorkspaceService implements OnDestroy {
    * fields (viewMode, expandedPaths, scrollTop) that the consuming
    * component is expected to apply to itself / its child components.
    *
-   * Does NOT change `_currentProjectId`; callers must do that themselves
-   * after deciding how to load the project (cache vs fresh fetch).
+   * When switching projects, snapshots the outgoing live signals before
+   * applying the cached state and updates the current project ID so subsequent
+   * SSE connection setup cannot cache the restored signals under the old ID.
    */
   restoreState(projectId: string): WorkspaceState | null {
     const state = this._stateCache.get(projectId);
     if (!state) return null;
+
+    // Snapshot the outgoing project before applying another project's cached
+    // signals. Otherwise connectSSE() sees the old project ID after restore
+    // and saves the restored tree under that old ID before resetting it.
+    if (this._currentProjectId && this._currentProjectId !== projectId) {
+      this.saveCurrentState(this._currentProjectId);
+      this.resetState();
+    }
+    this._currentProjectId = projectId;
 
     // Promote to MRU by re-inserting.
     this._stateCache.delete(projectId);
@@ -321,6 +384,11 @@ export class WorkspaceService implements OnDestroy {
 
     // Apply service-owned fields to live signals.
     this.currentTree.set(state.tree);
+    // Tag the restored tree with the project it belongs to so a
+    // subsequent `saveCurrentState` for THIS project will snapshot it.
+    // Even if `state.tree` is null (empty project / never loaded) we
+    // still tag ownership — we're now displaying this project's state.
+    this._treeProjectId = projectId;
     this.selectedPath.set(state.selectedPath);
     this.currentFile.set(null);
     this.currentDiff.set(null);
