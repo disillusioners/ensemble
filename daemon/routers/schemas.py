@@ -708,3 +708,82 @@ class LanguagePreferenceUpdate(BaseModel):
         pattern=r'^[A-Za-z\u00C0-\u017F \-()]+$',
         description="Preferred language name — letters, spaces, hyphens, and parentheses only",
     )
+
+
+# ==================== Editor Preference Schemas ====================
+
+
+class VSCodeStatus(BaseModel):
+    """Status block for the VS Code server returned by editor settings endpoints."""
+
+    available: bool = Field(
+        default=False,
+        description="Whether the code-server binary is resolvable on PATH",
+    )
+    binary_path: str | None = Field(
+        default=None,
+        description="Resolved path to the code-server binary, or null if not found",
+    )
+    status: str = Field(
+        default="stopped",
+        description="VSCodeServerState.status: stopped|starting|running|crashed|stopping",
+    )
+    port: int | None = Field(
+        default=None,
+        description="Bound port (only set when status == 'running')",
+    )
+    allow_remote: bool = Field(
+        default=False,
+        description="Whether the server is configured to allow remote access",
+    )
+    pid: int | None = Field(
+        default=None,
+        description="Process ID of the running code-server, or null if stopped",
+    )
+
+
+class EditorPreferenceResponse(BaseModel):
+    """Response for GET/PUT /api/settings/editor."""
+
+    editor: str = Field(
+        ...,
+        description="Current editor preference: 'builtin' or 'vscode'",
+    )
+    vscode: VSCodeStatus = Field(
+        default_factory=VSCodeStatus,
+        description="VS Code server status block",
+    )
+
+
+class EditorPreferenceUpdate(BaseModel):
+    """Request body for PUT /api/settings/editor."""
+
+    editor: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        description="Editor preference: 'builtin' or 'vscode'",
+    )
+
+    @field_validator("editor")
+    @classmethod
+    def _validate_editor(cls, v: str) -> str:
+        # Lazy import to avoid a hard daemon import at schema-load time.
+        from daemon import constants
+
+        if v not in constants.EDITOR_OPTIONS:
+            raise ValueError(
+                f"editor must be one of {constants.EDITOR_OPTIONS}, got '{v}'"
+            )
+        return v
+
+
+class VSCodeStatusResponse(BaseModel):
+    """Lightweight response for GET /api/settings/vscode/status."""
+
+    status: str = Field(
+        default="stopped",
+        description="VSCodeServerState.status: stopped|starting|running|crashed|stopping",
+    )
+    port: int | None = Field(default=None, description="Bound port if running")
+    pid: int | None = Field(default=None, description="Process ID if running")

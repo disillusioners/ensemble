@@ -581,7 +581,67 @@ async def lifespan(app: FastAPI):
     
     # Store job feedback observer for cleanup
     app.state._job_feedback_observer = job_feedback_observer
-    
+
+    # --- VS Code Server Manager (Phase 3: editor integration) ---
+    # Construct AFTER manager.initialize() but BEFORE router DI so
+    # the settings router can read it via app.state. Do NOT auto-start
+    # code-server — lazy start happens via PUT /api/settings/editor.
+    # Crash recovery: adopt a running code-server from a stale PID
+    # file if the daemon crashed and restarted.
+    from daemon.services.vscode_server_manager import VSCodeServerManager
+    from daemon.routers.vscode_proxy import create_vscode_proxy_app
+
+    vscode_manager = None
+    try:
+        vscode_manager = VSCodeServerManager(
+            config=config.vscode,
+            data_dir=str(data_dir),
+            workdir=None,
+        )
+        await vscode_manager.attach_existing()
+    except Exception as e:
+        logger.warning(f"VS Code manager initialization failed: {e}")
+        vscode_manager = None
+
+    if vscode_manager is not None:
+        app.state.vscode_manager = vscode_manager
+
+        # W3: Phase 3 owns the mount — mount the proxy sub-app here.
+        vscode_app = create_vscode_proxy_app(vscode_manager)
+        app.mount("/vscode", vscode_app)
+
+        # app.mount() appends to the end of app.routes, but the
+        # catch-all /{path:path} (registered in create_app()) would
+        # shadow the mount — every GET /vscode/* would be consumed
+        # by the SPA fallback before reaching the proxy. Move the
+        # mount to just before the catch-all so routing works.
+        _routes = app.router.routes
+        _vscode_idx = next(
+            (
+                i
+                for i, r in enumerate(_routes)
+                if getattr(r, "path", None) == "/vscode"
+            ),
+            None,
+        )
+        _catchall_idx = next(
+            (
+                i
+                for i, r in enumerate(_routes)
+                if getattr(r, "path", None) == "/{path:path}"
+            ),
+            None,
+        )
+        if (
+            _vscode_idx is not None
+            and _catchall_idx is not None
+            and _vscode_idx > _catchall_idx
+        ):
+            _mount = _routes.pop(_vscode_idx)
+            _routes.insert(_catchall_idx, _mount)
+
+        logger.info("VS Code proxy mounted at /vscode")
+
     # Store dead letter service for router injection
     from daemon.routers.dlq import set_dead_letter_service
     set_dead_letter_service(dead_letter_service)
@@ -738,6 +798,15 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Drift reconciler shutdown error: {e}")
         app.state.drift_reconciler_task = None
+
+    # --- VS Code Server shutdown ---
+    # Stop the code-server process BEFORE the manager shuts down
+    # (process cleanup before DB teardown).
+    if hasattr(app.state, "vscode_manager"):
+        try:
+            await app.state.vscode_manager.stop()
+        except Exception as e:
+            logger.warning(f"VS Code server shutdown failed: {e}")
 
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
@@ -1402,7 +1471,11 @@ def create_app() -> FastAPI:
     async def serve_ui_assets(path: str):
         """Serve frontend assets and SPA routing."""
         # Skip API routes
-        if path.startswith('api') or path.startswith('ws'):
+        # S1: 'vscode' prefix required — prevents /vscodefoo from
+        # hitting SPA fallback. Starlette mount prefix matching does
+        # NOT match /vscodefoo to the /vscode mount.
+        if (path.startswith('api') or path.startswith('ws')
+                or path.startswith('vscode')):
             return JSONResponse(
                 status_code=404,
                 content={"error": "Not found"}

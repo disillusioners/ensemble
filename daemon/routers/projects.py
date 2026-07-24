@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import urllib.parse
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
@@ -10,6 +11,7 @@ from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.project import HistoryEntryType
 from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
+from daemon.services.workspace_guard import WorkspaceGuard
 from .schemas import (
     ProjectResponse, ProjectListResponse, ProjectNotFoundResponse, ProjectCreateRequest,
     ProjectHistoryEntryResponse, ProjectHistoryListResponse, ProjectHistoryAddRequest, ProjectHistorySearchResponse,
@@ -287,6 +289,77 @@ async def get_project(
     recent_history = _get_recent_history_safe(repo, project_id)
     critical_notes = _get_critical_notes_safe(repo, project_id)
     return _project_to_response(project, recent_history=recent_history, critical_notes=critical_notes)
+
+
+@router.get(
+    "/{project_id}/vscode-folder",
+    status_code=200,
+    responses={
+        200: {"description": "Server-validated workspace folder path for VS Code"},
+        403: {"description": "Path is outside the allowed workspace root"},
+        404: {"description": "Project or main_directory not found"},
+    },
+)
+async def get_vscode_folder(
+    project_id: str,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> dict:
+    """Return a server-side validated folder path for VS Code.
+
+    C2/R3/N1: Uses ``WorkspaceGuard.resolve_strict()`` for containment
+    enforcement. The router NEVER exposes ``main_directory`` directly to the
+    client without validation — this is the dedicated endpoint that proxies
+    the validated path through to the VS Code server's ``?folder=`` query.
+
+    Security properties enforced by ``resolve_strict``:
+    - Rejects ``..`` traversal (canonicalization via ``Path.resolve()``).
+    - Rejects symlink escapes outside the workdir.
+    - Rejects paths outside the workdir (containment check).
+    - Rejects non-existent directories (caught at ``WorkspaceGuard.__init__``).
+    """
+    project = await asyncio.to_thread(repo.get, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ProjectNotFoundResponse(
+                error="Project not found",
+                project_id=project_id,
+            ).model_dump(),
+        )
+    if not project.main_directory:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Project has no main_directory configured", "project_id": project_id},
+        )
+
+    # R3/N1: Use WorkspaceGuard — NOT a custom validator.
+    # ``WorkspaceGuard.__init__`` raises ``ValueError`` if the workdir does
+    # not exist; map that to 404 so the front-end can show a clear message.
+    try:
+        guard = WorkspaceGuard(project.main_directory)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Workspace directory not found",
+                "project_id": project_id,
+                "main_directory": project.main_directory,
+            },
+        )
+
+    resolved, error = guard.resolve_strict(project.main_directory)
+    if error:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": f"Path outside allowed root: {error}", "project_id": project_id},
+        )
+
+    folder = str(resolved)
+    return {
+        "folder": folder,
+        "encoded": urllib.parse.quote(folder),
+        "project_id": project_id,
+    }
 
 
 @router.get(

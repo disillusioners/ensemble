@@ -112,3 +112,10 @@ VSCODE_DEFAULT_USER_DATA_DIR: str = "vscode-user-data"  # Subdir under data/ if 
 VSCODE_PID_FILENAME: str = "vscode-server.pid"  # PID file for crash recovery
 VSCODE_PORT_DETECTION_POLL_S: float = 0.2       # How often to poll stdout for port line
 VSCODE_HEALTH_TIMEOUT_S: int = 10            # Max seconds for a single health check HTTP request
+
+# ---------------------------------------------------------------------------
+# Editor Preference (VS Code Server)
+# ---------------------------------------------------------------------------
+EDITOR_METADATA_KEY = "editor_preference"     # metadata key in project_metadata_records
+EDITOR_DEFAULT = "builtin"                     # default when no preference set
+EDITOR_OPTIONS = ["builtin", "vscode"]         # valid editor values
