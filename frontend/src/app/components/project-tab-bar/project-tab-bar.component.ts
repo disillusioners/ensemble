@@ -54,12 +54,17 @@ export class ProjectTabBarComponent {
 
   /**
    * Handle clicking the workspace icon on a project tab.
-   * Stops propagation and default so the click does not also switch tabs,
-   * then emits the project ID to the parent.
+   * Switches the active tab to this project first (so the workspace
+   * syncs to the right project via the parent's tabWorkspaceEffect),
+   * then emits the toggle. `stopPropagation` prevents the tab click
+   * handler from also firing and double-switching.
    */
   protected onWorkspaceClick(event: Event, projectId: string): void {
     event.stopPropagation();
     event.preventDefault();
+    // Switch to the tab this icon belongs to
+    this.tabStateService.setActiveTab(projectId);
+    // Then emit the toggle
     this.workspaceToggle.emit(projectId);
   }
 }

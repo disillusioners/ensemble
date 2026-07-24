@@ -115,6 +115,36 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.instanceService.startPolling(projectId ?? undefined);
   });
 
+  /**
+   * Sync workspace overlay state with the active tab.
+   *
+   * - Switching to the "All" tab (null) hides the workspace and clears
+   *   workspaceProjectId.
+   * - Switching between project tabs while the workspace is OPEN follows
+   *   the workspace to the new project (updates workspaceProjectId only).
+   * - Switching tabs while the workspace is CLOSED does NOT auto-open it.
+   *
+   * Uses `allowSignalWrites: true` because the effect writes back to
+   * local signals (showWorkspace / workspaceProjectId), mirroring the
+   * pattern used by other write-emitting effects in this component.
+   */
+  private tabWorkspaceEffect = effect(() => {
+    const projectId = this.tabStateService.activeProjectId();
+
+    // Switching to "All" tab → hide workspace
+    if (projectId === null) {
+      this.showWorkspace.set(false);
+      this.workspaceProjectId.set(null);
+      return;
+    }
+
+    // For project tabs: only sync workspace if it's already open
+    // Do NOT auto-open workspace on plain tab switch
+    if (this.showWorkspace() && this.workspaceProjectId() !== projectId) {
+      this.workspaceProjectId.set(projectId);
+    }
+  }, { allowSignalWrites: true });
+
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
   readonly showToolCalls = signal(localStorage.getItem('ensemble-show-toolcalls') === 'true');

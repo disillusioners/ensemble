@@ -1,11 +1,41 @@
-import { signal } from '@angular/core';
+import { signal, computed, effect, Component, Inject } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import type { Agent, InstanceInfo } from '../../models';
+import { ProjectTab } from '../../models/tab.model';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
-// Mock TabStateService for testing
+// Mock TabStateService — mirrors production semantics: `activeProjectId`
+// is a computed that returns null when the active tab is the 'all'
+// pseudo-project, matching the real TabStateService. `setActiveTab(tabId)`
+// looks up the tab in openTabs and falls back to constructing a
+// project-type tab on the fly so tests that switch to non-existent
+// project ids still drive the computed.
 class MockTabStateService {
-  readonly activeProjectId = signal<string | null>(null);
+  readonly openTabs = signal<ProjectTab[]>([
+    { id: 'all', name: 'All', type: 'all' }
+  ]);
+  readonly activeTab = signal<ProjectTab>({ id: 'all', name: 'All', type: 'all' });
+
+  readonly activeProjectId = computed(() => {
+    const tab = this.activeTab();
+    return tab.type === 'project' ? tab.id : null;
+  });
+
+  setActiveTabCalls: string[] = [];
+  setActiveTab(tabId: string): void {
+    this.setActiveTabCalls.push(tabId);
+    const tab = this.openTabs().find((t) => t.id === tabId);
+    if (tab) {
+      this.activeTab.set(tab);
+      return;
+    }
+    // Tests may switch to a project id that hasn't been opened as a tab.
+    // Production would silently no-op, but the test mock synthesizes a
+    // project-type tab so the computed `activeProjectId` reflects the
+    // simulated switch.
+    this.activeTab.set({ id: tabId, name: tabId, type: 'project' });
+  }
 }
 
 // Mock ApiService for testing
@@ -68,6 +98,29 @@ class TestableChatComponent {
 
   constructor(tabStateService: MockTabStateService) {
     this.tabStateService = tabStateService;
+    // Run the tab→workspace sync once with the initial activeProjectId,
+    // mirroring the production `tabWorkspaceEffect` initial run.
+    this.runTabWorkspaceEffect();
+  }
+
+  /**
+   * Mirrors the production `tabWorkspaceEffect` in ChatComponent. In the
+   * real component, `effect()` creates a reactive subscription to
+   * `activeProjectId()`. Here we expose it as a plain method that tests
+   * invoke after mutating activeProjectId.
+   */
+  runTabWorkspaceEffect(): void {
+    const projectId = this.tabStateService.activeProjectId();
+
+    if (projectId === null) {
+      this.showWorkspace.set(false);
+      this.workspaceProjectId.set(null);
+      return;
+    }
+
+    if (this.showWorkspace() && this.workspaceProjectId() !== projectId) {
+      this.workspaceProjectId.set(projectId);
+    }
   }
 
   protected onSendMessage(payload: TestMessagePayload): void {
@@ -223,7 +276,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should navigate to /projects/all/instances/:instanceId when on All tab', () => {
-      tabStateService.activeProjectId.set(null);
+      tabStateService.setActiveTab('all');
       const instanceId = 'chat-inst-001';
       mockApiService.createInstance.mockReturnValue({
         subscribe: (handlers: any) => {
@@ -239,7 +292,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should navigate to /projects/:projectId/instances/:instanceId when project is selected', () => {
-      tabStateService.activeProjectId.set('chat-project');
+      tabStateService.setActiveTab('chat-project');
       const instanceId = 'chat-inst-002';
       mockApiService.createInstance.mockReturnValue({
         subscribe: (handlers: any) => {
@@ -256,7 +309,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
     it('should navigate to home when no agent is selected', () => {
       component.selectedAgent.set(null);
-      tabStateService.activeProjectId.set(null);
+      tabStateService.setActiveTab('all');
 
       component.onNewInstance();
 
@@ -265,7 +318,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should clear SSE state before navigation', () => {
-      tabStateService.activeProjectId.set('sse-project');
+      tabStateService.setActiveTab('sse-project');
       const instanceId = 'sse-clear-inst';
       mockApiService.createInstance.mockReturnValue({
         subscribe: (handlers: any) => {
@@ -283,7 +336,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
   describe('getNavigationPath() - Instance Navigation Helper', () => {
     it('should return /projects/all/instances/:instanceId when on All tab', () => {
-      tabStateService.activeProjectId.set(null);
+      tabStateService.setActiveTab('all');
 
       const path = component.getNavigationPath('helper-inst-001');
 
@@ -291,7 +344,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should return /projects/:projectId/instances/:instanceId when project is selected', () => {
-      tabStateService.activeProjectId.set('helper-project');
+      tabStateService.setActiveTab('helper-project');
 
       const path = component.getNavigationPath('helper-inst-002');
 
@@ -299,7 +352,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should preserve instance ID in navigation path', () => {
-      tabStateService.activeProjectId.set('preserve-project');
+      tabStateService.setActiveTab('preserve-project');
       const instanceId = 'preserve-inst-xyz';
 
       const path = component.getNavigationPath(instanceId);
@@ -310,7 +363,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
   describe('URL Pattern Verification', () => {
     it('should produce correct URL pattern for All tab', () => {
-      tabStateService.activeProjectId.set(null);
+      tabStateService.setActiveTab('all');
 
       const path = component.getNavigationPath('pattern-inst');
 
@@ -323,7 +376,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should produce correct URL pattern for specific project', () => {
-      tabStateService.activeProjectId.set('pattern-project-123');
+      tabStateService.setActiveTab('pattern-project-123');
 
       const path = component.getNavigationPath('pattern-inst');
 
@@ -338,7 +391,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       for (const projectId of projectIds) {
         component.navigateCalls = [];
-        tabStateService.activeProjectId.set(projectId);
+        tabStateService.setActiveTab(projectId);
 
         const path = component.getNavigationPath('test-inst');
 
@@ -491,25 +544,243 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should require a real project for the header toggle', () => {
-      tabStateService.activeProjectId.set(null);
+      tabStateService.setActiveTab('all');
       component.onHeaderWorkspaceToggle();
 
       expect(component.showWorkspace()).toBe(false);
     });
 
     it('should open the overlay from the header for the active project', () => {
-      tabStateService.activeProjectId.set('proj-header');
+      tabStateService.setActiveTab('proj-header');
       component.onHeaderWorkspaceToggle();
 
       expect(component.showWorkspace()).toBe(true);
       expect(component.workspaceProjectId()).toBe('proj-header');
     });
+  });
 
-    it('should not open for the all pseudo-project from the header', () => {
-      tabStateService.activeProjectId.set('all');
-      component.onHeaderWorkspaceToggle();
+  describe('Workspace ↔ tab sync (tabWorkspaceEffect)', () => {
+    it('should follow workspace to the newly active project when workspace is open', () => {
+      // Open workspace on proj-a
+      component.onWorkspaceToggle('proj-a');
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-a');
+
+      // Simulate user clicking the proj-b tab — activeProjectId changes
+      tabStateService.setActiveTab('proj-b');
+      component.runTabWorkspaceEffect();
+
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-b');
+    });
+
+    it('should NOT auto-open workspace when switching to a project tab while closed', () => {
+      // Workspace is closed by default
+      expect(component.showWorkspace()).toBe(false);
+
+      tabStateService.setActiveTab('proj-b');
+      component.runTabWorkspaceEffect();
 
       expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceProjectId()).toBeNull();
     });
+
+    it('should hide the workspace when switching to the All tab', () => {
+      // Open workspace on a project
+      component.onWorkspaceToggle('proj-a');
+      expect(component.showWorkspace()).toBe(true);
+
+      // Switch to All tab
+      tabStateService.setActiveTab('all');
+      component.runTabWorkspaceEffect();
+
+      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceProjectId()).toBeNull();
+    });
+
+    it('should be a no-op when switching to the same project that is already open', () => {
+      component.onWorkspaceToggle('proj-a');
+      tabStateService.setActiveTab('proj-a');
+      component.runTabWorkspaceEffect();
+
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-a');
+    });
+  });
+
+  describe('Workspace icon click flow (project-tab-bar → ChatComponent)', () => {
+    it('should switch the active tab AND open the workspace when icon is clicked on a different project', () => {
+      // Simulate: user is on proj-a, clicks workspace icon on proj-b
+      // ProjectTabBarComponent.onWorkspaceClick:
+      //   1. setActiveTab('proj-b')
+      //   2. emit workspaceToggle('proj-b')
+      // ChatComponent.onWorkspaceToggle handler runs:
+      //   since workspaceProjectId !== 'proj-b', workspaceProjectId = 'proj-b', showWorkspace = true
+      tabStateService.setActiveTab('proj-b');
+      component.onWorkspaceToggle('proj-b');
+      // Then the effect fires (it would have fired on setActiveTab too, but
+      // for proj-b the condition (showWorkspace && workspaceProjectId !== proj-b)
+      // would already be false since onWorkspaceToggle just set them equal).
+      component.runTabWorkspaceEffect();
+
+      expect(tabStateService.setActiveTabCalls).toContain('proj-b');
+      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceProjectId()).toBe('proj-b');
+    });
+
+    it('should switch the active tab AND close the workspace when icon is clicked on the same project', () => {
+      // Open workspace on proj-a while on proj-a tab
+      tabStateService.setActiveTab('proj-a');
+      component.onWorkspaceToggle('proj-a');
+      expect(component.showWorkspace()).toBe(true);
+
+      // Click the icon again — setActiveTab('proj-a') then toggle
+      tabStateService.setActiveTab('proj-a');
+      component.onWorkspaceToggle('proj-a');
+      component.runTabWorkspaceEffect();
+
+      expect(tabStateService.setActiveTabCalls).toContain('proj-a');
+      expect(component.showWorkspace()).toBe(false);
+    });
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Real Angular `effect()` integration test
+//
+// The unit tests above use `runTabWorkspaceEffect()` — a manual mirror of
+// the production effect. That keeps the sync logic itself testable in
+// isolation, but means deleting the `effect()` declaration in production
+// would NOT be caught. This block exercises the REAL Angular reactive
+// graph: a host component registers a real `effect()` inside its
+// constructor (in TestBed's injection context), and we assert that
+// mutating the active tab via a (mock) TabStateService drives the
+// effect's writes back into the local workspace signals.
+// ────────────────────────────────────────────────────────────────────────────
+
+@Component({
+  selector: 'app-tab-workspace-effect-host',
+  standalone: true,
+  template: '',
+})
+class TestTabWorkspaceEffectHostComponent {
+  readonly showWorkspace = signal(false);
+  readonly workspaceProjectId = signal<string | null>(null);
+
+  /**
+   * Tracks how many times the effect's body has run. We use this to
+   * confirm the real `effect()` is actually firing — not just that the
+   * sync logic, when manually invoked, produces the expected output.
+   */
+  effectRunCount = 0;
+
+  constructor(@Inject(MockTabStateService) private readonly tabState: MockTabStateService) {
+    // Mirror of the production `tabWorkspaceEffect` in ChatComponent.
+    // Lives inside TestBed's injection context so `effect()` has an
+    // injector to register against.
+    effect(() => {
+      this.effectRunCount++;
+      const projectId = this.tabState.activeProjectId();
+
+      // Switching to "All" tab → hide workspace
+      if (projectId === null) {
+        this.showWorkspace.set(false);
+        this.workspaceProjectId.set(null);
+        return;
+      }
+
+      // For project tabs: only sync workspace if it's already open.
+      // Do NOT auto-open on plain tab switch.
+      if (this.showWorkspace() && this.workspaceProjectId() !== projectId) {
+        this.workspaceProjectId.set(projectId);
+      }
+    }, { allowSignalWrites: true });
+  }
+}
+
+describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () => {
+  let fixture: ComponentFixture<TestTabWorkspaceEffectHostComponent>;
+  let host: TestTabWorkspaceEffectHostComponent;
+  let tabStateService: MockTabStateService;
+
+  beforeEach(async () => {
+    tabStateService = new MockTabStateService();
+
+    await TestBed.configureTestingModule({
+      imports: [TestTabWorkspaceEffectHostComponent],
+      providers: [
+        { provide: MockTabStateService, useValue: tabStateService },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(TestTabWorkspaceEffectHostComponent);
+    host = fixture.componentInstance;
+    // Initial detectChanges runs the effect once (initial pass).
+    fixture.detectChanges();
+  });
+
+  it('registers and runs the effect on initial render', () => {
+    expect(host.effectRunCount).toBeGreaterThanOrEqual(1);
+    expect(host.showWorkspace()).toBe(false);
+    expect(host.workspaceProjectId()).toBeNull();
+  });
+
+  it('re-runs the effect (reactive graph) when activeProjectId changes via setActiveTab', () => {
+    const beforeCount = host.effectRunCount;
+
+    // Switch from default All tab → project tab. With showWorkspace false
+    // and workspaceProjectId null, the effect should NOT auto-open the
+    // workspace. But it MUST run again — that's the wiring assertion.
+    tabStateService.setActiveTab('proj-a');
+    fixture.detectChanges();
+
+    expect(host.effectRunCount).toBeGreaterThan(beforeCount);
+    expect(host.showWorkspace()).toBe(false);
+    expect(host.workspaceProjectId()).toBeNull();
+  });
+
+  it('follows the open workspace to the newly active project via the real effect', () => {
+    // Switch to a project tab first so the effect starts tracking
+    // showWorkspace / workspaceProjectId (those reads only happen once
+    // activeProjectId is non-null).
+    tabStateService.setActiveTab('proj-a');
+    fixture.detectChanges();
+
+    // Open workspace on proj-a (mirrors user clicking the icon)
+    host.showWorkspace.set(true);
+    host.workspaceProjectId.set('proj-a');
+    fixture.detectChanges();
+    const beforeCount = host.effectRunCount;
+
+    // Switch to proj-b — effect should fire and update workspaceProjectId
+    tabStateService.setActiveTab('proj-b');
+    fixture.detectChanges();
+
+    expect(host.effectRunCount).toBeGreaterThan(beforeCount);
+    expect(host.showWorkspace()).toBe(true);
+    expect(host.workspaceProjectId()).toBe('proj-b');
+  });
+
+  it('hides the workspace via the real effect when switching to the All tab', () => {
+    // Switch to a project tab first so the effect starts tracking
+    // showWorkspace / workspaceProjectId. Without this, the effect only
+    // tracks activeProjectId (its null-branch never reads the workspace
+    // signals), and our manual setVisible(true) calls would be invisible.
+    tabStateService.setActiveTab('proj-a');
+    fixture.detectChanges();
+
+    // Open workspace on proj-a
+    host.showWorkspace.set(true);
+    host.workspaceProjectId.set('proj-a');
+    fixture.detectChanges();
+    const beforeCount = host.effectRunCount;
+
+    // Switch to All tab — effect should fire and clear workspace state
+    tabStateService.setActiveTab('all');
+    fixture.detectChanges();
+
+    expect(host.effectRunCount).toBeGreaterThan(beforeCount);
+    expect(host.showWorkspace()).toBe(false);
+    expect(host.workspaceProjectId()).toBeNull();
   });
 });

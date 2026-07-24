@@ -58,6 +58,9 @@ class TestableProjectTabBarComponent {
   protected onWorkspaceClick(event: Event, projectId: string): void {
     event.stopPropagation();
     event.preventDefault();
+    // Mirrors production: switch to the tab this icon belongs to first so
+    // the parent's tabWorkspaceEffect can sync the workspace overlay.
+    this.tabStateService.setActiveTab(projectId);
     this.workspaceToggle.emit(projectId);
   }
 }
@@ -176,6 +179,17 @@ describe('ProjectTabBarComponent', () => {
   });
 
   describe('workspace button', () => {
+    it('should call setActiveTab with the project ID on click', () => {
+      const mockEvent = {
+        stopPropagation: jest.fn(),
+        preventDefault: jest.fn(),
+      } as unknown as Event;
+
+      component.onWorkspaceClick(mockEvent, 'project-1');
+
+      expect(mockTabStateService.setActiveTab).toHaveBeenCalledWith('project-1');
+    });
+
     it('should emit workspaceToggle with project ID on click', () => {
       const emitSpy = jest.spyOn(component.workspaceToggle, 'emit');
       const mockEvent = {
@@ -186,6 +200,28 @@ describe('ProjectTabBarComponent', () => {
       component.onWorkspaceClick(mockEvent, 'project-1');
 
       expect(emitSpy).toHaveBeenCalledWith('project-1');
+    });
+
+    it('should call setActiveTab BEFORE emitting workspaceToggle (ordering matters)', () => {
+      const callOrder: string[] = [];
+      mockTabStateService.setActiveTab = jest.fn(() => {
+        callOrder.push('setActiveTab');
+      });
+      const emitSpy = jest
+        .spyOn(component.workspaceToggle, 'emit')
+        .mockImplementation(() => {
+          callOrder.push('emit');
+        });
+      const mockEvent = {
+        stopPropagation: jest.fn(),
+        preventDefault: jest.fn(),
+      } as unknown as Event;
+
+      component.onWorkspaceClick(mockEvent, 'project-1');
+
+      expect(mockTabStateService.setActiveTab).toHaveBeenCalledWith('project-1');
+      expect(emitSpy).toHaveBeenCalledWith('project-1');
+      expect(callOrder).toEqual(['setActiveTab', 'emit']);
     });
 
     it('should call stopPropagation and preventDefault on workspace click', () => {
