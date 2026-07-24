@@ -135,6 +135,40 @@ def test_versioned_resolution_uses_explicit_tag_for_spawn_and_restore() -> None:
     assert resolved is tagged_metadata
 
 
+def test_spawn_tagged_only_agent_persists_effective_tag(tmp_path: Path) -> None:
+    """F1 regression: a tagged-only fallback persists the effective tag."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    _write_agent(agents_dir, "developer[v2]")
+
+    registry = AgentRegistry(agents_dir)
+    registry.discover()
+
+    resolved = registry.get_version("developer", None)
+
+    assert resolved is not None
+    assert resolved.version_tag == "v2"
+    effective_version_tag = resolved.version_tag
+    assert effective_version_tag == "v2"
+
+
+def test_explicit_version_tag_resolves_to_same_tag(tmp_path: Path) -> None:
+    """An explicitly requested version tag remains the effective tag."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    _write_agent(agents_dir, "developer[v2]")
+
+    registry = AgentRegistry(agents_dir)
+    registry.discover()
+
+    resolved = registry.get_version("developer", "v2")
+
+    assert resolved is not None
+    assert resolved.version_tag == "v2"
+    effective_version_tag = resolved.version_tag
+    assert effective_version_tag == "v2"
+
+
 # ---------------------------------------------------------------------------
 # GET /api/agents integration contract
 # ---------------------------------------------------------------------------

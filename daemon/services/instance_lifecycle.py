@@ -1086,6 +1086,11 @@ class InstanceLifecycleService:
         if metadata is None:
             raise ValueError(f"Agent not found: {resolved_agent_id}")
         resolved_agent_dir = str(metadata.path)
+        # F1 fix: Use the ACTUAL resolved version_tag from metadata, not the
+        # input parameter. When version_tag=None and get_version falls back to
+        # a tagged dir (no base exists), the resolved metadata.version_tag is
+        # the real tag we must persist and cache under.
+        effective_version_tag = getattr(metadata, "version_tag", None)
 
         # Resolve and validate the spawn-time model override (silent fallback
         # to None if not in allowed_models — never raises).
@@ -1128,7 +1133,7 @@ class InstanceLifecycleService:
             agent_path,
             prompt_cache,
             mcp_tool_names,
-            version_tag=version_tag,
+            version_tag=effective_version_tag,
         )
 
         # Apply the post-cache append chain for context, metadata, time,
@@ -1268,7 +1273,7 @@ class InstanceLifecycleService:
             instance_id=instance_id,
             resolved_agent_id=resolved_agent_id,
             resolved_agent_dir=resolved_agent_dir,
-            version_tag=version_tag,
+            version_tag=effective_version_tag,
             agent_name=agent_name,
             parent_id=parent_id,
             project_id=project_id,
@@ -2465,7 +2470,31 @@ class InstanceLifecycleService:
             agent_meta = registry.get_resolved(meta.agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {meta.agent_id} (tag: {agent_tag})")
+
+        # F2 fix: If we fell back from a tagged version to base, update the
+        # in-memory meta so list_instances reports the correct path/tag.
+        if agent_tag is not None and agent_meta is not None:
+            if getattr(agent_meta, "version_tag", None) != agent_tag:
+                logger.info(
+                    f"Updating instance {instance_id[:8]} agent_tag from '{agent_tag}' to "
+                    f"'{getattr(agent_meta, 'version_tag', None)}' and agent_dir to '{agent_meta.path}'"
+                )
+                meta.agent_tag = getattr(agent_meta, "version_tag", None)
+                meta.agent_dir = str(agent_meta.path)
+                # Persist the fallback to DB so list_instances reports correct data.
+                try:
+                    instance_repository.update(
+                        instance_id,
+                        agent_tag=meta.agent_tag,
+                        agent_dir=meta.agent_dir,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to persist agent version fallback for instance "
+                        f"{instance_id[:8]}: {exc}"
+                    )
         resolved_agent_id = meta.agent_id
+        resolved_tag = getattr(agent_meta, "version_tag", None)
 
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
@@ -2476,7 +2505,7 @@ class InstanceLifecycleService:
             agent_path,
             prompt_cache,
             mcp_tool_names,
-            version_tag=agent_tag,
+            version_tag=resolved_tag,
         )
 
         # Apply the post-cache append chain for context, metadata, time,
