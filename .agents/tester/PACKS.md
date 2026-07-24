@@ -1,7 +1,7 @@
 # Test Packs
 
 ## Summary
-- Total: 181 packs
+- Total: 183 packs
 - Unit: 151 | Integration: 4 | Mock: 7 | E2E: 11 | Postgres: 3 | Manual: 1 | SharedContext: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
@@ -425,6 +425,8 @@ Workspace Viewer feature (feature/workspace-viewer branch) — read-only file br
 | workspace_frontend_unit_test | test/packs/workspace_frontend_unit_test.sh | Frontend workspace Jest: WorkspacePageComponent, WorkspaceService, CodeViewerComponent, CodemirrorDirective, DiffViewerComponent, FileTreeComponent | 5 min | 2026-07-24 | ✅ PASS (156/156 across 6 suites incl. binary/truncated guards, dirty-state preservation, saving guard, error dedup, feature/compact-workspace-toolbar @ 34b02a0b, ~4.3s runtime, 0 failures. Test count 163→156: toolbar refactor shifted metadata/badge tests CodeViewer→Workspace) |
 | workspace_frontend_build_test | frontend/ (npm run build) | Frontend production build — Angular ng build succeeds. | 5 min | 2026-07-24 | ✅ PASS (0 errors, ~13.5s, feature/compact-workspace-toolbar @ 34b02a0b. Pre-existing bundle budget warnings only) |
 | workspace_toolbar_compact_e2e_test | frontend/e2e/workspace-toolbar-compact.spec.ts | Browser E2E: 11 compact-toolbar UI checks (single toolbar row, file path once, save button visible/disabled/dirty, Code/Diff toggle, metadata display, binary badge, SSE indicator, hide button, Ctrl+S save). Playwright. | 5 min | 2026-07-24 | ✅ PASS (11/11 checks, feature/compact-workspace-toolbar @ c0d4eb2d) |
+| tab_workspace_sync_e2e_test | frontend/e2e/tab-workspace-sync.spec.ts | Browser E2E: 6 tab↔workspace sync scenarios (tab switch syncs workspace, closed stays closed, workspace icon on different project, toggle close, "All" tab hides workspace, reopen after All-tab roundtrip). Playwright + screenshots. | 5 min | 2026-07-24 | ✅ PASS (6/6 scenarios, feature/tab-workspace-sync @ 30af352a, ~43s runtime) |
+| frontend_full_unit_test | test/packs/frontend_full_unit_test.sh | Full frontend Jest suite: ALL Angular component/service/model specs (chat, tab-bar, workspace, tab-state, agent-switcher, home, instances, skills, etc.). Used for full regression checks on frontend-heavy features. | 5 min | 2026-07-24 | ✅ PASS (1652/1652 across 48 suites, ~8s runtime, feature/tab-workspace-sync @ 30af352a, 0 failures) |
 
 ## E2E Release Gate Packs (2026-07-22)
 
