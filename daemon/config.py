@@ -554,6 +554,17 @@ class LanguageConfig(BaseSettings):
     )
 
 
+class VSCodeConfig(BaseSettings):
+    """Configuration for the VS Code Server editor integration."""
+
+    model_config = SettingsConfigDict(env_prefix="VSCODE_")
+
+    allow_remote: bool = Field(default=False)  # C1: default to localhost-only binding
+    binary_path: str | None = Field(default=None)  # null = use PATH lookup (shutil.which)
+    user_data_dir: str | None = Field(default=None)  # null = data/vscode-user-data
+    extensions: list[str] = Field(default_factory=list)  # extensions to pre-install
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -572,6 +583,7 @@ class Config(BaseSettings):
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
+    vscode: VSCodeConfig = Field(default_factory=VSCodeConfig)
 
 
 def load_config(config_path: str | None = None) -> Config:
@@ -677,6 +689,8 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["skill_evolution"] = {
             k: v for k, v in se_raw.items() if v is not None
         }
+    if "vscode" in processed_config:
+        config_dict["vscode"] = processed_config["vscode"]
 
     # Create and validate config
     return Config(**config_dict)

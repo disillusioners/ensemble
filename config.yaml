@@ -174,3 +174,10 @@ skill_evolution:
   capture_min_iterations: 5
   capture_min_duration_seconds: 60
 
+# VS Code Server Editor Configuration
+vscode:
+  allow_remote: false        # C1: default to localhost-only (code-server binds 127.0.0.1)
+  binary_path: null           # null = auto-detect via PATH lookup (shutil.which)
+  user_data_dir: null         # null = uses data/vscode-user-data
+  extensions: []              # list of extension IDs to pre-install (e.g. ms-python.python)
+

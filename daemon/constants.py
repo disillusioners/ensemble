@@ -100,3 +100,15 @@ SCHEDULER_ERROR_RETRY_S = 5.0               # Brief pause before retry on errors
 SCHEDULER_DRAIN_CHECK_S = 0.5               # Polling interval for drain check
 SCHEDULER_DEFAULT_MAX_CONCURRENT = 1         # Default max concurrent executions
 SCHEDULER_DEFAULT_PRIORITY = 5              # Default execution priority
+
+# ---------------------------------------------------------------------------
+# VS Code Server
+# ---------------------------------------------------------------------------
+VSCODE_STARTUP_TIMEOUT_S: int = 30            # Max seconds to wait for code-server port detection
+VSCODE_HEALTH_CHECK_INTERVAL_S: int = 2       # How often to poll health endpoint
+VSCODE_LOG_BUFFER_LIMIT: int = 4 * 1024 * 1024  # 4 MB in-memory log buffer (mirror proc_tools.py)
+VSCODE_STOP_GRACE_S: int = 5                  # SIGTERM grace period before SIGKILL escalation
+VSCODE_DEFAULT_USER_DATA_DIR: str = "vscode-user-data"  # Subdir under data/ if not configured
+VSCODE_PID_FILENAME: str = "vscode-server.pid"  # PID file for crash recovery
+VSCODE_PORT_DETECTION_POLL_S: float = 0.2       # How often to poll stdout for port line
+VSCODE_HEALTH_TIMEOUT_S: int = 10            # Max seconds for a single health check HTTP request
