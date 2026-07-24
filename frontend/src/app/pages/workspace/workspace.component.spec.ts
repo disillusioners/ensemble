@@ -571,10 +571,15 @@ describe('WorkspaceComponent', () => {
       expect(wsInstance.projectId).toBe('second-project');
     });
 
-    it('skips HTTP when switching to a project that has cached state', () => {
+    it('skips the tree HTTP when switching to a project that has cached state, but refetches the selected file content', () => {
       // Seed the cache directly so we can verify the component avoids
-      // an HTTP fetch on switch. Set selectedPath BEFORE saving so the
-      // snapshot captures it (saveCurrentState reads live signal values).
+      // an HTTP /tree fetch on switch (Bug 2 fix: cache hit avoids
+      // re-listing). Set selectedPath BEFORE saving so the snapshot
+      // captures it (saveCurrentState reads live signal values).
+      //
+      // Bug 1 fix: a /file request IS expected — `currentFile` is
+      // deliberately not cached, so the component must refetch the
+      // previously-selected file's content after restore.
       localService.selectedPath.set('src/cached.ts');
       localService.saveCurrentState('cached-project', { viewMode: 'diff' });
 
@@ -589,6 +594,15 @@ describe('WorkspaceComponent', () => {
       // Cached state should have been applied to the component.
       expect(workspace.viewMode()).toBe('diff');
       expect(workspace.selectedPath()).toBe('src/cached.ts');
+
+      // Bug 1 — a /file GET must be in-flight to refetch the content.
+      const fileReq = localHttp.expectOne(
+        (r) =>
+          r.url === '/api/workspace/cached-project/file' &&
+          r.params.get('path') === 'src/cached.ts'
+      );
+      expect(fileReq.request.method).toBe('GET');
+      fileReq.flush(makeFileContent({ path: 'src/cached.ts' }));
     });
 
     it('does NOT regress to the route value when the input is set', () => {
@@ -1212,6 +1226,253 @@ describe('WorkspaceComponent', () => {
         expect(preventDefaultSpy).not.toHaveBeenCalled();
         expect(saveFileSpy).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  // ── 10) Tab switch state preservation (Bug 1 + Bug 2 regression) ──
+  // Round-trip A → B → A must:
+  //   - re-fetch the file content for A's previously-selected file
+  //     (Bug 1 — currentFile is intentionally not cached; refetch only),
+  //   - re-apply A's tree expansion state (Bug 2 — the component must
+  //     capture getExpandedPaths() before switching and pass them through
+  //     to restoreState as outgoingUiExtras).
+  describe('Tab switch state preservation (Bug 1 + Bug 2)', () => {
+    let hostFixture: ComponentFixture<WorkspaceHostComponent>;
+    let host: WorkspaceHostComponent;
+    let localHttp: HttpTestingController;
+    let localService: WorkspaceService;
+    let workspace: WorkspaceComponent;
+
+    beforeEach(async () => {
+      TestBed.resetTestingModule();
+      StubEventSource.instances = [];
+      await TestBed.configureTestingModule({
+        imports: [WorkspaceHostComponent],
+        providers: [
+          provideHttpClient(),
+          provideHttpClientTesting(),
+          provideNoopAnimations(),
+          WorkspaceService,
+          {
+            provide: ActivatedRoute,
+            useValue: { snapshot: { paramMap: { get: () => null } } },
+          },
+        ],
+      }).compileComponents();
+
+      hostFixture = TestBed.createComponent(WorkspaceHostComponent);
+      host = hostFixture.componentInstance;
+      localHttp = TestBed.inject(HttpTestingController);
+      localService = TestBed.inject(WorkspaceService);
+
+      workspace = hostFixture.debugElement
+        .query(By.directive(WorkspaceComponent))
+        .componentInstance as WorkspaceComponent;
+    });
+
+    afterEach(() => {
+      localHttp.verify();
+    });
+
+    /** Drain the pending /tree GET request for `projectId`. */
+    function flushTree(projectId: string, body?: FileTreeResponse): void {
+      const req = localHttp.expectOne(
+        (r) => r.url === `/api/workspace/${projectId}/tree`
+      );
+      req.flush(body ?? makeTreeResponse({ project_id: projectId }));
+    }
+
+    /** Drain the pending /file GET request for `projectId`. */
+    function flushFile(
+      projectId: string,
+      path: string,
+      body?: FileContentResponse
+    ): FileContentResponse {
+      const req = localHttp.expectOne(
+        (r) =>
+          r.url === `/api/workspace/${projectId}/file` &&
+          r.params.get('path') === path
+      );
+      const response = body ?? makeFileContent({ path, project_id: projectId });
+      req.flush(response);
+      return response;
+    }
+
+    function setProjectId(value: string): void {
+      // Drive the binding both ways — through the host property AND the
+      // child input setter — to mirror what Angular does on prop change.
+      host.projectId = value;
+      workspace.projectId = value;
+      hostFixture.detectChanges();
+    }
+
+    /**
+     * Bug 1 regression: switching projects A → B → A must re-fetch the
+     * file content for A's previously-selected file. Before the fix,
+     * `restoreState` set `currentFile` to null with no refetch, so the
+     * viewer showed an empty state after returning to A.
+     */
+    it('A → B → A: refetches file content for A after returning from B', () => {
+      // 1. Mount project A — flush initial tree, then select a file.
+      setProjectId('project-a');
+      flushTree('project-a');
+      workspace.onFileSelected('src/main.ts');
+      const initialContent = flushFile(
+        'project-a',
+        'src/main.ts',
+        makeFileContent({
+          path: 'src/main.ts',
+          project_id: 'project-a',
+          content: '// A file content',
+        })
+      );
+      expect(workspace.currentFile()).toEqual(initialContent);
+      expect(workspace.selectedPath()).toBe('src/main.ts');
+
+      // 2. Switch to project B (cache miss — fresh tree fetch).
+      setProjectId('project-b');
+      flushTree('project-b');
+      // A is now cached with selectedPath = 'src/main.ts' (from step 1)
+      // and currentFile intentionally NOT cached.
+      expect(localService.hasCachedState('project-a')).toBe(true);
+
+      // 3. Switch back to A (cache hit) — must fire getFileContent
+      //    because the LRU cache intentionally omits file content.
+      setProjectId('project-a');
+
+      // The refetch is async; expectOne drains the request from the
+      // queue, so we use it directly (match() also drains in Angular's
+      // HttpTestingController, so combining the two would lose the
+      // request between calls).
+      const refetched = flushFile(
+        'project-a',
+        'src/main.ts',
+        makeFileContent({
+          path: 'src/main.ts',
+          project_id: 'project-a',
+          content: '// A file content (fresh)',
+        })
+      );
+
+      // currentFile is now re-populated with the refetched content.
+      expect(workspace.currentFile()).toEqual(refetched);
+      expect(workspace.selectedPath()).toBe('src/main.ts');
+    });
+
+    /**
+     * Bug 1 defence-in-depth: when restoring a project that has no
+     * previously-selected file, the component must NOT fire a phantom
+     * `getFileContent` request. Without this guard, every project switch
+     * to a cached project would issue a spurious HTTP request.
+     */
+    it('A → B → A: does NOT refetch content when A had no file selected', () => {
+      // 1. Mount A. Select nothing.
+      setProjectId('project-a');
+      flushTree('project-a');
+      expect(workspace.selectedPath()).toBeNull();
+
+      // 2. Switch to B (cache miss).
+      setProjectId('project-b');
+      flushTree('project-b');
+
+      // 3. Switch back to A (cache hit) — must NOT fire getFileContent.
+      setProjectId('project-a');
+
+      localHttp.expectNone(
+        (r) => r.url === '/api/workspace/project-a/file'
+      );
+      expect(workspace.currentFile()).toBeNull();
+      expect(workspace.selectedPath()).toBeNull();
+    });
+
+    /**
+     * Bug 2 regression: switching projects A → B → A must preserve A's
+     * expanded tree paths. Before the fix, `getExpandedPaths()` was
+     * never threaded into the outgoing save on a cache miss, so the
+     * outgoing snapshot always had `expandedPaths: []` and the restore
+     * gate `if (restored.expandedPaths.length > 0)` never passed.
+     */
+    it('A → B → A: preserves A\'s expanded directories after returning from B', () => {
+      // 1. Mount A. Seed the FileTreeComponent's expanded set so
+      //    getExpandedPaths() returns the expected values.
+      setProjectId('project-a');
+      flushTree('project-a');
+
+      const fileTreeDebug = hostFixture.debugElement.query(
+        By.directive(FileTreeComponent)
+      );
+      const fileTreeA = fileTreeDebug.componentInstance as FileTreeComponent;
+      fileTreeA.restoreExpandedPaths(['src', 'src/components']);
+      expect(fileTreeA.getExpandedPaths()).toEqual([
+        'src',
+        'src/components',
+      ]);
+
+      // 2. Switch to B — this is a cache MISS for B, so the
+      //    WorkspaceComponent saves outgoing UI extras (A's expanded
+      //    paths + viewMode) via `saveCurrentState('project-a', …)`
+      //    BEFORE calling `getFileTree('project-b')`. That cache-miss
+      //    capture is what makes A's expansion survive the round-trip;
+      //    it is NOT captured by `restoreState` (the cache-hit path).
+      setProjectId('project-b');
+      flushTree('project-b');
+
+      // A's cached snapshot must now include the expanded paths the
+      // component captured right before getFileTree. `peekCachedState`
+      // is side-effect-free — no signals reset, no MRU reordering —
+      // so this is a pure assertion on what the cache currently holds.
+      expect(localService.peekCachedState('project-a')?.expandedPaths).toEqual([
+        'src',
+        'src/components',
+      ]);
+
+      // 3. Switch back to A (cache hit) — the workspace applies A's
+      //    cached tree via fileTree.setTree(), which (per the current
+      //    setTree contract) clears the live expanded set to [] before
+      //    assigning new data. The final non-empty expandedPaths below
+      //    can therefore ONLY come from `restoreExpandedPaths` being
+      //    called with A's cached paths after restore — i.e. from the
+      //    cached snapshot that the cache-miss capture above populated.
+      setProjectId('project-a');
+
+      // After restore, the workspace sets the tree and (because
+      // expandedPaths.length > 0) calls fileTree.restoreExpandedPaths.
+      const fileTreeDebugAfter = hostFixture.debugElement.query(
+        By.directive(FileTreeComponent)
+      );
+      const fileTreeAfter =
+        fileTreeDebugAfter.componentInstance as FileTreeComponent;
+      expect(fileTreeAfter.getExpandedPaths()).toEqual([
+        'src',
+        'src/components',
+      ]);
+    });
+
+    /**
+     * Bug 2 defence-in-depth: when the outgoing project has no
+     * expanded paths, the restore must not crash and the round-trip
+     * must still work. This is the "tree never expanded" baseline.
+     */
+    it('A → B → A: works when no directories are expanded (empty array)', () => {
+      setProjectId('project-a');
+      flushTree('project-a');
+
+      const fileTreeDebug = hostFixture.debugElement.query(
+        By.directive(FileTreeComponent)
+      );
+      const fileTreeA = fileTreeDebug.componentInstance as FileTreeComponent;
+      expect(fileTreeA.getExpandedPaths()).toEqual([]);
+
+      // Switch to B then back to A.
+      setProjectId('project-b');
+      flushTree('project-b');
+
+      setProjectId('project-a');
+
+      const fileTreeAfter = hostFixture.debugElement
+        .query(By.directive(FileTreeComponent))
+        .componentInstance as FileTreeComponent;
+      expect(fileTreeAfter.getExpandedPaths()).toEqual([]);
     });
   });
 });

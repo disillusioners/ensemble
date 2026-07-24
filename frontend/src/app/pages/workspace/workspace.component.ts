@@ -192,7 +192,12 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     // to the default ('') on construction must not trigger a load —
     // ngOnInit handles that case after the route fallback is applied.
     if (next !== previous && this._initialised && next !== '') {
-      this.loadProject(next);
+      // Pass the prior ID so `loadProject` can snapshot the outgoing
+      // project's component-owned UI state (FileTree expansions,
+      // viewMode) before the incoming project's data replaces it. The
+      // initial ngOnInit call passes no previous id, so the very first
+      // load never tries to save outgoing state.
+      this.loadProject(next, previous);
     }
   }
 
@@ -423,14 +428,61 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    * fired and the SSE stream is connected.
    *
    * No-op when `projectId` is empty.
+   *
+   * `previousProjectId` is the project ID we are switching away from.
+   * It is used in the cache-MISS branch to capture the outgoing
+   * project's component-owned UI state BEFORE the service's
+   * `getFileTree` runs (which will internally save the outgoing
+   * project's signals but has no reference to the FileTreeComponent or
+   * the component-owned viewMode). ngOnInit passes no previous id, so
+   * the very first load never tries to save outgoing state.
+   *
+   * Both branches handle outgoing UI capture:
+   *
+   *   - Cache-HIT: the component captures `outgoingUiExtras` and hands
+   *     them to `restoreState` (cache hit), which threads them into the
+   *     internal saveCurrentState call for the outgoing project.
+   *
+   *   - Cache-MISS: the component captures `outgoingUiExtras` and calls
+   *     `saveCurrentState(previousProjectId, outgoingUiExtras)`
+   *     directly. `getFileTree` is then allowed to save the service's
+   *     own signals for the outgoing project again; because `??`
+   *     fallbacks prefer caller-provided extras over the prior cache,
+   *     the just-captured expanded paths / viewMode survive both saves.
+   *
+   * Bug 1 (file content restoration): `currentFile` is deliberately not
+   * cached — it can be arbitrarily large and is cheap to refetch. After
+   * `restoreState` reapplies the cached `selectedPath`, we refetch the
+   * file content via `getFileContent`. `currentFile` is initially null
+   * during restore so the viewer shows a loading state until the
+   * response lands. We use `takeUntilDestroyed` so an in-flight fetch
+   * is cancelled if the component is destroyed mid-switch.
+   *
+   * Bug 2 (tree expansion restoration): `FileTreeComponent` owns the
+   * expanded-path set, so the service cannot read it. The component
+   * captures `getExpandedPaths()` from the outgoing project's tree
+   * BEFORE the service saves/clears the outgoing signals, then passes
+   * them through as `uiExtras` so the service's internal
+   * save-current-state includes them in the outgoing project's
+   * snapshot.
    */
-  private loadProject(projectId: string): void {
+  private loadProject(projectId: string, previousProjectId?: string): void {
     if (!projectId) {
       return;
     }
 
     if (this.workspace.hasCachedState(projectId)) {
-      const restored = this.workspace.restoreState(projectId);
+      // Capture outgoing-project UI state BEFORE restoreState resets the
+      // service signals. The FileTreeComponent still displays the
+      // outgoing project's tree, so its expanded paths belong to that
+      // project. Passing these into restoreState threads them through
+      // to the internal saveCurrentState() call for the outgoing id.
+      const outgoingUiExtras = {
+        expandedPaths: this.fileTree?.getExpandedPaths() ?? [],
+        viewMode: this.viewMode(),
+      };
+
+      const restored = this.workspace.restoreState(projectId, outgoingUiExtras);
       if (restored) {
         this.viewMode.set(restored.viewMode);
         if (restored.tree) {
@@ -439,10 +491,41 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
             this.fileTree.restoreExpandedPaths(restored.expandedPaths);
           }
         }
+
+        // Bug 1 — refetch the previously-selected file's content. The
+        // LRU cache intentionally omits `currentFile` to keep entries
+        // small and avoid stale-content risk; we refetch instead. Only
+        // one fetch fires here — there is no `selectedPath`-watching
+        // effect that would re-trigger.
+        if (restored.selectedPath) {
+          this.workspace
+            .getFileContent(projectId, restored.selectedPath)
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe({
+              error: () => undefined,
+            });
+        }
+
         // SSE needs the new projectId targeted for file-change refresh.
         this.workspace.connectSSE(projectId);
         return;
       }
+    }
+
+    // Cache-miss branch — capture outgoing UI state BEFORE the service's
+    // `getFileTree` runs. `getFileTree` internally calls
+    // `saveCurrentState(_currentProjectId)` with no extras when the
+    // project id changes, so we must thread the FileTreeComponent's
+    // expanded paths and the component-owned viewMode in here
+    // ourselves. The save is keyed on `previousProjectId` (the
+    // OUTGOING project), never on the incoming project, and is skipped
+    // on the initial load when `previousProjectId` is undefined.
+    if (previousProjectId) {
+      const outgoingUiExtras = {
+        expandedPaths: this.fileTree?.getExpandedPaths() ?? [],
+        viewMode: this.viewMode(),
+      };
+      this.workspace.saveCurrentState(previousProjectId, outgoingUiExtras);
     }
 
     this.workspace

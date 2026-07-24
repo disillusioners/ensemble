@@ -630,5 +630,91 @@ describe('WorkspaceService', () => {
       const cached = service.restoreState('project-1');
       expect(cached!.selectedPath).toBe('src/p1.ts');
     });
+
+    // Bug 2 — `restoreState(newId)` used to auto-save the outgoing project
+    // without any `uiExtras`, so the outgoing snapshot always had empty
+    // `expandedPaths` and the default `viewMode`. The component now
+    // passes caller-owned UI state through the optional second argument.
+    it('threads outgoingUiExtras into the saveCurrentState call for the outgoing project', () => {
+      // Setup: project-a is the "current" project. project-b has a
+      // pre-existing cache entry. When the component switches A→B it
+      // calls `restoreState('project-b', outgoingExtras)`; the extras
+      // belong to A (the outgoing project) and must end up in A's cache.
+      service.getFileTree('project-a').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-a/tree')
+        .flush(makeTreeResponse({ project_id: 'project-a' }));
+      service.selectedPath.set('src/main.py');
+      service.saveCurrentState('project-a', { viewMode: 'code' });
+
+      // Pre-seed project-b's cache WITHOUT touching _currentProjectId.
+      service.saveCurrentState('project-b', { viewMode: 'code' });
+
+      // Simulate the FileTreeComponent's expanded set for project-a.
+      const outgoingExpandedPaths = ['src', 'src/components'];
+
+      // The component switches A→B, passing A's outgoing uiExtras.
+      service.restoreState('project-b', {
+        expandedPaths: outgoingExpandedPaths,
+        viewMode: 'diff',
+      });
+
+      // Project-a's cached state must now include those extras.
+      const restoredA = service.restoreState('project-a');
+      expect(restoredA!.expandedPaths).toEqual(outgoingExpandedPaths);
+      expect(restoredA!.viewMode).toBe('diff');
+    });
+
+    it('treats a missing outgoingUiExtras argument as an empty object (back-compat)', () => {
+      // Pre-existing callers (and the service's own internal callers)
+      // pass only the projectId. The new parameter must default to an
+      // empty object so the outgoing snapshot uses the service's own
+      // fallback values (default viewMode, empty expandedPaths).
+      service.getFileTree('project-a').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-a/tree')
+        .flush(makeTreeResponse({ project_id: 'project-a' }));
+      service.saveCurrentState('project-a', { viewMode: 'code' });
+
+      // Pre-seed project-b's cache WITHOUT touching _currentProjectId.
+      service.saveCurrentState('project-b', { viewMode: 'code' });
+
+      // No second arg — should still work.
+      service.restoreState('project-b');
+
+      const restoredA = service.restoreState('project-a');
+      // No extras were passed, so the outgoing snapshot falls back to
+      // defaults (empty expandedPaths, default viewMode).
+      expect(restoredA!.expandedPaths).toEqual([]);
+      expect(restoredA!.viewMode).toBe('code');
+    });
+
+    // Bug 1 — `currentFile` is intentionally NOT cached. After a project
+    // switch, the consumer (component) is expected to refetch the file
+    // content. This test pins down the contract: restoreState must
+    // always null `currentFile` so the viewer shows a loading state
+    // until the refetch lands.
+    it('always sets currentFile to null on restore (Bug 1 contract: no file content in cache)', () => {
+      service.getFileTree('project-1').subscribe({ error: () => undefined });
+      httpTesting
+        .expectOne((r) => r.url === '/api/workspace/project-1/tree')
+        .flush(makeTreeResponse());
+
+      service.selectedPath.set('src/main.py');
+      service.currentFile.set(makeFileContent());
+      service.saveCurrentState('project-1', { viewMode: 'code' });
+
+      // currentFile is populated.
+      expect(service.currentFile()).not.toBeNull();
+
+      // Switching to a cached project must null currentFile regardless
+      // of the uiExtras argument — the cache schema does not include it.
+      service.saveCurrentState('project-2', { viewMode: 'code' });
+      service.restoreState('project-2');
+
+      expect(service.currentFile()).toBeNull();
+      // selectedPath IS restored — it's part of the cached state.
+      expect(service.selectedPath()).toBeNull();
+    });
   });
 });

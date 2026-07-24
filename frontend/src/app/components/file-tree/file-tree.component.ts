@@ -80,6 +80,7 @@ export class FileTreeComponent {
   });
 
   setTree(tree: FileTreeNode[]): void {
+    this._expandedPaths.clear();
     this._nestedTree = [...tree];
     this.dataSource.data = tree;
   }

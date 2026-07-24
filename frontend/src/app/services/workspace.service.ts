@@ -332,6 +332,10 @@ export class WorkspaceService implements OnDestroy {
         ? this.selectedPath()
         : prior?.selectedPath ?? null,
       viewMode: uiExtras.viewMode ?? prior?.viewMode ?? 'code',
+      // Explicit `[]` means "all directories collapsed" and is a valid
+      // caller-provided value — `??` intentionally preserves it rather
+      // than falling back to `prior`, so collapsing the tree on
+      // project A and switching to B correctly clears A's expandedPaths.
       expandedPaths: uiExtras.expandedPaths ?? prior?.expandedPaths ?? [],
       scrollTop: uiExtras.scrollTop ?? prior?.scrollTop ?? 0,
       capturedAt: Date.now(),
@@ -364,18 +368,37 @@ export class WorkspaceService implements OnDestroy {
    * When switching projects, snapshots the outgoing live signals before
    * applying the cached state and updates the current project ID so subsequent
    * SSE connection setup cannot cache the restored signals under the old ID.
+   *
+   * `outgoingUiExtras` are passed to the internal `saveCurrentState` call
+   * for the outgoing project. The component owns UI state that lives
+   * outside the service (e.g. FileTreeComponent's expanded paths and the
+   * component-owned viewMode signal), so it must capture them BEFORE the
+   * switch and hand them in here — the service has no reference to those
+   * components. Without this, the outgoing snapshot always has empty
+   * `expandedPaths` and the default `viewMode`, so a subsequent switch
+   * back loses the user's tree-expansion and view-mode state.
    */
-  restoreState(projectId: string): WorkspaceState | null {
+  restoreState(
+    projectId: string,
+    outgoingUiExtras: WorkspaceUiExtras = {}
+  ): WorkspaceState | null {
     const state = this._stateCache.get(projectId);
     if (!state) return null;
 
-    // Snapshot the outgoing project before applying another project's cached
-    // signals. Otherwise connectSSE() sees the old project ID after restore
-    // and saves the restored tree under that old ID before resetting it.
-    if (this._currentProjectId && this._currentProjectId !== projectId) {
-      this.saveCurrentState(this._currentProjectId);
-      this.resetState();
-    }
+    // The caller (typically WorkspaceComponent) owns UI state that lives
+    // outside the service — FileTreeComponent's expanded paths and the
+    // component-owned viewMode signal. Those must be saved against the
+    // ACTIVE/OUTGOING project BEFORE we reset the live signals and
+    // apply the incoming project's cached state, otherwise the outgoing
+    // snapshot only carries the service's own signals (empty expanded
+    // paths, default viewMode) and a return switch loses the user's UI
+    // state. `saveCurrentState` safely ignores an empty projectId, so
+    // passing `''` on the very first restore (no active project yet)
+    // is a no-op rather than an error.
+    const outgoingProjectId = this._currentProjectId ?? '';
+    this.saveCurrentState(outgoingProjectId, outgoingUiExtras);
+
+    this.resetState();
     this._currentProjectId = projectId;
 
     // Promote to MRU by re-inserting.
@@ -399,6 +422,18 @@ export class WorkspaceService implements OnDestroy {
   /** True when `projectId` has a cached snapshot. */
   hasCachedState(projectId: string): boolean {
     return this._stateCache.has(projectId);
+  }
+
+  /**
+   * Side-effect-free read of the cached snapshot for `projectId`.
+   * Returns the stored `WorkspaceState` without mutating any signal,
+   * applying state, or reordering the underlying Map / LRU recency
+   * list. Intended for assertions and diagnostics; production code
+   * should use `restoreState` so the cache entry is promoted to MRU
+   * and the live signals are updated.
+   */
+  peekCachedState(projectId: string): WorkspaceState | null {
+    return this._stateCache.get(projectId) ?? null;
   }
 
   /**

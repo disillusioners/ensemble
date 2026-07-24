@@ -183,4 +183,34 @@ describe('FileTreeComponent', () => {
       expect(component.projectId).toBe('project-42');
     });
   });
+
+  // ── 7) setTree clears live expansion; restoreExpandedPaths repopulates ──
+  // Contract: switching projects calls setTree() with the incoming
+  // tree (which clears the live expansion set to []), then calls
+  // restoreExpandedPaths() with the cached expansion paths. Verify
+  // both halves of that round-trip on the real component.
+  describe('setTree + restoreExpandedPaths round trip', () => {
+    it('clears the live expansion on setTree() and repopulates from restoreExpandedPaths()', () => {
+      // Seed the expansion set via restoreExpandedPaths — mirrors what
+      // the user accumulates by toggling directories open.
+      component.restoreExpandedPaths(['src', 'src/components']);
+      expect(component.getExpandedPaths()).toEqual([
+        'src',
+        'src/components',
+      ]);
+
+      // Incoming project data arrives via setTree(). Per the cache-hit
+      // contract, setTree clears the live expansion set before
+      // assigning the new tree data.
+      component.setTree([makeNode()]);
+      expect(component.getExpandedPaths()).toEqual([]);
+
+      // After restore, the workspace calls restoreExpandedPaths with
+      // the cached expansion paths for the incoming project. The set
+      // must be repopulated so the previously-expanded directories
+      // re-open in the new tree.
+      component.restoreExpandedPaths(['src']);
+      expect(component.getExpandedPaths()).toEqual(['src']);
+    });
+  });
 });
