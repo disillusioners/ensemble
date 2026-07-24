@@ -35,10 +35,9 @@ export class HomeComponent implements OnInit, OnDestroy {
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
-  /** Phase 3: tag to send when creating the next instance from the
-   *  AgentSelector's "Start new chat" button. Reset by the effect on
-   *  selectedAgent change. */
-  readonly selectedVersionTag = signal<string | null>(null);
+  /** Phase 3: the AgentSelector child owns the chosen version tag —
+   *  each create event carries the tag explicitly in its payload. The
+   *  parent does not need to mirror the tag as a separate signal. */
   readonly isLoading = signal(false);
 
   readonly hasInstances = computed(() => this.instances().length > 0);
@@ -105,8 +104,6 @@ export class HomeComponent implements OnInit, OnDestroy {
 
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);
-    // A new agent means a fresh version-tag selection.
-    this.selectedVersionTag.set(null);
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }
 
@@ -116,7 +113,9 @@ export class HomeComponent implements OnInit, OnDestroy {
 
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
-    const versionTag = payload?.versionTag ?? this.selectedVersionTag();
+    // The version tag is sourced entirely from the createInstance payload
+    // (the AgentSelector child owns the tag via its own version picker).
+    const versionTag = payload?.versionTag;
 
     this.api.createInstance(agentPath, undefined, undefined, versionTag ?? undefined).subscribe({
       next: (instance) => {
@@ -187,13 +186,15 @@ export class HomeComponent implements OnInit, OnDestroy {
     });
   }
 
-  protected onQuickCreateInstance(agent: Agent, versionTag?: string | null): void {
+  protected onQuickCreateInstance(payload: { agent: Agent; versionTag?: string | null }): void {
     this.isLoading.set(true);
-    const agentPath = `./agents/${agent.id}`;
-    // Prefer the explicitly forwarded tag; otherwise fall back to the
-    // tag carried on the emitted agent object (which is how the
-    // AgentSelector communicates the row's currently-selected version).
-    const tag = versionTag ?? (agent as { version_tag?: string | null }).version_tag ?? null;
+    const agentPath = `./agents/${payload.agent.id}`;
+    // The AgentSelector forwards the chosen version tag explicitly so the
+    // daemon picks the right agent version. No fallback to the agent
+    // object's own version_tag — that field is only the tag of the
+    // row that the user clicked, not the version they picked in the
+    // picker, and would silently create the wrong agent version.
+    const tag = payload.versionTag ?? null;
 
     this.api.createInstance(agentPath, undefined, undefined, tag ?? undefined).subscribe({
       next: (instance) => {

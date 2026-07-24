@@ -25,8 +25,9 @@ class TestableHomeComponent {
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
-  /** Phase 3: tag forwarded to api.createInstance. */
-  readonly selectedVersionTag = signal<string | null>(null);
+  /** Phase 3: the AgentSelector child owns the version tag — each create
+   *  event payload carries the tag explicitly. The parent does not
+   *  mirror the tag as a separate signal. */
   readonly isLoading = signal(false);
 
   // Navigation calls tracked for testing
@@ -42,7 +43,6 @@ class TestableHomeComponent {
 
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);
-    this.selectedVersionTag.set(null);
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }
 
@@ -52,7 +52,9 @@ class TestableHomeComponent {
 
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
-    const versionTag = payload?.versionTag ?? this.selectedVersionTag();
+    // The version tag is sourced entirely from the payload (the child
+    // AgentSelector owns the tag via its own version picker).
+    const versionTag = payload?.versionTag;
 
     this.api.createInstance(agentPath, undefined, undefined, versionTag ?? undefined).subscribe({
       next: (instance: InstanceInfo) => {
@@ -119,11 +121,14 @@ class TestableHomeComponent {
     });
   }
 
-  protected onQuickCreateInstance(agent: Agent, versionTag?: string | null): void {
+  protected onQuickCreateInstance(payload: { agent: Agent; versionTag?: string | null }): void {
     this.isLoading.set(true);
-    const agentPath = `./agents/${agent.id}`;
-    // Prefer explicit param; fall back to agent.version_tag; finally null.
-    const tag = versionTag ?? (agent as { version_tag?: string | null }).version_tag ?? null;
+    const agentPath = `./agents/${payload.agent.id}`;
+    // The child AgentSelector forwards the chosen version tag explicitly.
+    // No fallback to the agent object's own version_tag — that field is
+    // only the tag of the row the user clicked, not the version they
+    // picked in the picker, and would silently create the wrong version.
+    const tag = payload.versionTag ?? null;
 
     this.api.createInstance(agentPath, undefined, undefined, tag ?? undefined).subscribe({
       next: (instance: InstanceInfo) => {
@@ -307,9 +312,7 @@ describe('HomeComponent - Project-Aware Navigation', () => {
       );
     });
 
-    it('forwards null when the payload has no versionTag and selectedVersionTag is null', () => {
-      component.selectedVersionTag.set(null);
-
+    it('forwards undefined when the payload omits versionTag (W3: no parent fallback)', () => {
       component.onCreateInstance();
 
       expect(mockApiService.createInstance).toHaveBeenCalledWith(
@@ -320,22 +323,29 @@ describe('HomeComponent - Project-Aware Navigation', () => {
       );
     });
 
-    it('falls back to selectedVersionTag when payload omits versionTag', () => {
-      component.selectedVersionTag.set('exp');
-
-      component.onCreateInstance();
-
-      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+    it('forwards undefined when the payload omits versionTag even after a previous tag was picked', () => {
+      // W3: the parent no longer mirrors the version tag as a state
+      // signal, so a stale value cannot leak into the next create call.
+      component.onCreateInstance({ versionTag: 'v2' });
+      expect(mockApiService.createInstance).toHaveBeenLastCalledWith(
         './agents/my-agent',
         undefined,
         undefined,
-        'exp',
+        'v2',
+      );
+
+      component.onCreateInstance();
+      expect(mockApiService.createInstance).toHaveBeenLastCalledWith(
+        './agents/my-agent',
+        undefined,
+        undefined,
+        undefined,
       );
     });
   });
 
   describe('onQuickCreateInstance() - version_tag forwarding', () => {
-    it('forwards agent.version_tag when no explicit tag is provided', () => {
+    it('forwards the versionTag from the payload as the 4th arg to createInstance', () => {
       const agent = createMockAgent({ id: 'q-agent', version_tag: 'v3' } as Agent);
       mockApiService.createInstance.mockReturnValue({
         subscribe: (handlers: any) => {
@@ -344,26 +354,7 @@ describe('HomeComponent - Project-Aware Navigation', () => {
         }
       });
 
-      component.onQuickCreateInstance(agent);
-
-      expect(mockApiService.createInstance).toHaveBeenCalledWith(
-        './agents/q-agent',
-        undefined,
-        undefined,
-        'v3',
-      );
-    });
-
-    it('prefers explicit versionTag over agent.version_tag', () => {
-      const agent = createMockAgent({ id: 'q-agent', version_tag: 'v3' } as Agent);
-      mockApiService.createInstance.mockReturnValue({
-        subscribe: (handlers: any) => {
-          handlers.next(createMockInstance({ instance_id: 'q-inst' }));
-          return { unsubscribe: () => {} };
-        }
-      });
-
-      component.onQuickCreateInstance(agent, 'v2');
+      component.onQuickCreateInstance({ agent, versionTag: 'v2' });
 
       expect(mockApiService.createInstance).toHaveBeenCalledWith(
         './agents/q-agent',
@@ -373,7 +364,30 @@ describe('HomeComponent - Project-Aware Navigation', () => {
       );
     });
 
-    it('passes undefined when neither tag is set', () => {
+    it('ignores agent.version_tag — only the payload versionTag is forwarded (W1)', () => {
+      // W1: the original spec forwarded agent.version_tag as a fallback.
+      // The real AgentSelector child owns the version picker and emits
+      // the tag explicitly, so the row's own version_tag is no longer a
+      // source of truth. The parent must take the tag from the payload.
+      const agent = createMockAgent({ id: 'q-agent', version_tag: 'v3' } as Agent);
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: 'q-inst' }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onQuickCreateInstance({ agent });
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/q-agent',
+        undefined,
+        undefined,
+        undefined,
+      );
+    });
+
+    it('passes undefined when neither payload tag nor fallback is set', () => {
       const agent = createMockAgent({ id: 'q-agent' });
       mockApiService.createInstance.mockReturnValue({
         subscribe: (handlers: any) => {
@@ -382,7 +396,7 @@ describe('HomeComponent - Project-Aware Navigation', () => {
         }
       });
 
-      component.onQuickCreateInstance(agent);
+      component.onQuickCreateInstance({ agent });
 
       expect(mockApiService.createInstance).toHaveBeenCalledWith(
         './agents/q-agent',
@@ -393,16 +407,14 @@ describe('HomeComponent - Project-Aware Navigation', () => {
     });
   });
 
-  describe('onSelectAgent() - selectedVersionTag reset', () => {
-    it('clears selectedVersionTag when the agent changes (Phase 3)', () => {
+  describe('onSelectAgent() - selection update', () => {
+    it('updates selectedAgent and persists the new id; no version-tag state to reset (W3)', () => {
       const a = createMockAgent({ id: 'a' });
       const b = createMockAgent({ id: 'b' });
       component.selectedAgent.set(a);
-      component.selectedVersionTag.set('v2');
 
       component.onSelectAgent(b);
 
-      expect(component.selectedVersionTag()).toBeNull();
       expect(component.selectedAgent()).toBe(b);
     });
   });
@@ -509,7 +521,7 @@ describe('HomeComponent - Project-Aware Navigation', () => {
         }
       });
 
-      component.onQuickCreateInstance(agent);
+      component.onQuickCreateInstance({ agent });
 
       expect(component.navigateCalls).toHaveLength(1);
       expect(component.navigateCalls[0].path).toEqual(['/projects', 'all', 'instances', instanceId]);
@@ -527,7 +539,7 @@ describe('HomeComponent - Project-Aware Navigation', () => {
         }
       });
 
-      component.onQuickCreateInstance(agent);
+      component.onQuickCreateInstance({ agent });
 
       expect(component.navigateCalls).toHaveLength(1);
       expect(component.navigateCalls[0].path).toEqual(['/projects', 'quick-project', 'instances', instanceId]);

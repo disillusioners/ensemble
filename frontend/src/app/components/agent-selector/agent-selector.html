@@ -137,7 +137,7 @@
     </p>
   </section>
 
-  @if (selectedAgent() && shouldShowVersionPicker) {
+  @if (selectedAgent() && shouldShowVersionPicker()) {
     <div class="selected-version-bar" role="region" [attr.aria-label]="'Selected agent version'">
       <span class="selected-version-label">Version for new chat:</span>
       <app-version-picker

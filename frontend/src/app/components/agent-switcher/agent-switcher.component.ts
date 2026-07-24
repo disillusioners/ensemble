@@ -5,6 +5,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { Agent } from '../../models';
 import { VersionPickerComponent } from '../version-picker/version-picker.component';
+import { deduplicateAgentsById } from '../../utils/agent-dedup';
 
 const colorMap: Record<string, string> = {
   'accent-amber': '#f59e0b',
@@ -17,67 +18,6 @@ const colorMap: Record<string, string> = {
   'accent-indigo': '#6366f1',
   'accent-green': '#22c55e',
 };
-
-/**
- * Deduplicate agents by id (Phase 3, W8). Base version wins; when no base
- * exists, the alphabetically smaller tag wins. Merges `available_versions`
- * so the surviving entry advertises the union of all tags seen for that id.
- */
-function deduplicateAgentsById(agents: Agent[]): Agent[] {
-  const byId = new Map<string, Agent>();
-  for (const agent of agents) {
-    const existing = byId.get(agent.id);
-    if (!existing) {
-      byId.set(agent.id, { ...agent, available_versions: [...(agent.available_versions ?? [])] });
-      continue;
-    }
-    const existingIsBase =
-      existing.version_tag === null || existing.version_tag === undefined;
-    const agentIsBase =
-      agent.version_tag === null || agent.version_tag === undefined;
-    if (!existingIsBase && agentIsBase) {
-      byId.set(agent.id, {
-        ...agent,
-        available_versions: mergeVersionList(
-          agent.available_versions,
-          existing.version_tag,
-        ),
-      });
-    } else if (!existingIsBase && !agentIsBase) {
-      const next = (agent.version_tag ?? '') < (existing.version_tag ?? '')
-        ? agent
-        : existing;
-      byId.set(agent.id, {
-        ...next,
-        available_versions: mergeVersionList(
-          next.available_versions,
-          next === agent ? existing.version_tag : agent.version_tag,
-        ),
-      });
-    } else {
-      const merged = mergeVersionList(
-        existing.available_versions,
-        agent.version_tag,
-      );
-      if (merged.length !== (existing.available_versions?.length ?? 0)) {
-        byId.set(agent.id, { ...existing, available_versions: merged });
-      }
-    }
-  }
-  return Array.from(byId.values()).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-}
-
-function mergeVersionList(
-  current: (string | null)[] | null | undefined,
-  extra: string | null | undefined,
-): (string | null)[] {
-  const list = [...(current ?? [])];
-  if (extra === undefined) return list;
-  if (!list.includes(extra)) list.push(extra);
-  return list;
-}
 
 @Component({
   selector: 'app-agent-switcher',
@@ -214,13 +154,16 @@ export class AgentSwitcherComponent {
   }
 
   /** Show version picker only when the currently selected agent has more
-   *  than one available version. The picker sits in the dropdown footer. */
-  get shouldShowVersionPicker(): boolean {
+   *  than one available version. The picker sits in the dropdown footer.
+   *  Implemented as a ``computed`` so the template re-evaluates
+   *  automatically when the selected agent or its
+   *  ``available_versions`` change. */
+  readonly shouldShowVersionPicker = computed(() => {
     const sel = this.selectedAgent();
     if (!sel) return false;
     const versions = sel.available_versions ?? [];
     return versions.length > 1;
-  }
+  });
 
   closeDropdown(): void {
     this.isOpen.set(false);

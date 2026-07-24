@@ -197,12 +197,12 @@ describe('AgentSwitcherComponent', () => {
   describe('shouldShowVersionPicker', () => {
     it('returns false when no agent is selected', () => {
       fixture.componentRef.setInput('selectedAgent', null);
-      expect(component.shouldShowVersionPicker).toBe(false);
+      expect(component.shouldShowVersionPicker()).toBe(false);
     });
 
     it('returns false when the selected agent has no available_versions', () => {
       fixture.componentRef.setInput('selectedAgent', AGENTS[0]);
-      expect(component.shouldShowVersionPicker).toBe(false);
+      expect(component.shouldShowVersionPicker()).toBe(false);
     });
 
     it('returns false when the selected agent has exactly one version', () => {
@@ -210,7 +210,7 @@ describe('AgentSwitcherComponent', () => {
         ...AGENTS[0],
         available_versions: ['v1'],
       });
-      expect(component.shouldShowVersionPicker).toBe(false);
+      expect(component.shouldShowVersionPicker()).toBe(false);
     });
 
     it('returns true when the selected agent has multiple versions', () => {
@@ -218,7 +218,7 @@ describe('AgentSwitcherComponent', () => {
         ...AGENTS[0],
         available_versions: [null, 'v2'],
       });
-      expect(component.shouldShowVersionPicker).toBe(true);
+      expect(component.shouldShowVersionPicker()).toBe(true);
     });
   });
 

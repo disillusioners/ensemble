@@ -144,7 +144,25 @@ describe('AgentSelectorComponent', () => {
       component.onStartConversation(AGENTS[0]);
 
       expect(selected).toHaveBeenCalledWith(AGENTS[0]);
-      expect(started).toHaveBeenCalledWith(AGENTS[0]);
+      // W1: quickCreateInstance payload now carries the version tag so
+      // the parent can forward it to ApiService.createInstance().
+      expect(started).toHaveBeenCalledWith({ agent: AGENTS[0], versionTag: null });
+    });
+
+    it('emits quickCreateInstance with the currently selected version tag', () => {
+      const started = jest.fn();
+      component.quickCreateInstance.subscribe(started);
+      component.selectedVersionTag.set('v2');
+
+      component.onQuickCreate(AGENTS[0]);
+
+      expect(started).toHaveBeenCalledWith({ agent: AGENTS[0], versionTag: 'v2' });
+    });
+
+    it('clears the version tag when a new agent is selected (W2)', () => {
+      component.selectedVersionTag.set('v2');
+      component.onSelect(AGENTS[1]);
+      expect(component.selectedVersionTag()).toBeNull();
     });
 
     it('clears the query when Escape is pressed', () => {
@@ -407,7 +425,7 @@ describe('AgentSelectorComponent', () => {
 
     it('shouldShowVersionPicker is false when no agent is selected', () => {
       fixture.componentRef.setInput('selectedAgent', null);
-      expect(component.shouldShowVersionPicker).toBe(false);
+      expect(component.shouldShowVersionPicker()).toBe(false);
     });
 
     it('shouldShowVersionPicker is false for a single-version agent', () => {
@@ -415,7 +433,7 @@ describe('AgentSelectorComponent', () => {
         ...AGENTS[0],
         available_versions: ['v1'],
       });
-      expect(component.shouldShowVersionPicker).toBe(false);
+      expect(component.shouldShowVersionPicker()).toBe(false);
     });
 
     it('shouldShowVersionPicker is true when the selected agent has multiple versions', () => {
@@ -423,7 +441,7 @@ describe('AgentSelectorComponent', () => {
         ...AGENTS[0],
         available_versions: [null, 'v2'],
       });
-      expect(component.shouldShowVersionPicker).toBe(true);
+      expect(component.shouldShowVersionPicker()).toBe(true);
     });
   });
 

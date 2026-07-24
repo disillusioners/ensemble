@@ -14,6 +14,7 @@ import { MatDialogModule, MatDialog } from '@angular/material/dialog';
 import type { Agent, AgentCreate } from '../../models';
 import { AddAgentModalComponent } from '../add-agent-modal/add-agent-modal.component';
 import { VersionPickerComponent } from '../version-picker/version-picker.component';
+import { deduplicateAgentsById } from '../../utils/agent-dedup';
 
 const colorMap: Record<string, string> = {
   'accent-amber': '#f59e0b',
@@ -26,81 +27,6 @@ const colorMap: Record<string, string> = {
   'accent-green': '#22c55e',
   'accent-purple': '#a855f7',
 };
-
-/**
- * Deduplicate agents by id, keeping the base version (version_tag === null
- * or undefined) as the primary display entry. When two entries share an id,
- * also merge their `available_versions` so the primary entry advertises the
- * union of all tags (including `null` for the base).
- *
- * W8 tiebreaker: when no base exists, keep the alphabetically smaller tag.
- */
-function deduplicateAgentsById(agents: Agent[]): Agent[] {
-  const byId = new Map<string, Agent>();
-  for (const agent of agents) {
-    const existing = byId.get(agent.id);
-    if (!existing) {
-      // First entry for this id — keep a deep-ish copy so we can safely
-      // extend `available_versions` without mutating the input array.
-      byId.set(agent.id, { ...agent, available_versions: [...(agent.available_versions ?? [])] });
-      continue;
-    }
-
-    const existingIsBase =
-      existing.version_tag === null || existing.version_tag === undefined;
-    const agentIsBase =
-      agent.version_tag === null || agent.version_tag === undefined;
-
-    if (!existingIsBase && agentIsBase) {
-      // Tagged → base wins; carry over the tag union as available_versions.
-      byId.set(agent.id, {
-        ...agent,
-        available_versions: mergeVersionList(
-          agent.available_versions,
-          existing.version_tag,
-        ),
-      });
-    } else if (!existingIsBase && !agentIsBase) {
-      // W8: both tagged — keep alphabetically smaller tag.
-      const next = (agent.version_tag ?? '') < (existing.version_tag ?? '')
-        ? agent
-        : existing;
-      byId.set(agent.id, {
-        ...next,
-        available_versions: mergeVersionList(
-          next.available_versions,
-          // add the loser's tag to the winner's list
-          next === agent ? existing.version_tag : agent.version_tag,
-        ),
-      });
-    }
-    // else: existing is base and incoming is tagged — keep existing, but
-    // make sure the tag is included in available_versions.
-    else {
-      const merged = mergeVersionList(
-        existing.available_versions,
-        agent.version_tag,
-      );
-      if (merged.length !== (existing.available_versions?.length ?? 0)) {
-        byId.set(agent.id, { ...existing, available_versions: merged });
-      }
-    }
-  }
-  return Array.from(byId.values()).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-}
-
-/** Add a single tag to a version list (deduped, with null preserved). */
-function mergeVersionList(
-  current: (string | null)[] | null | undefined,
-  extra: string | null | undefined,
-): (string | null)[] {
-  const list = [...(current ?? [])];
-  if (extra === undefined) return list;
-  if (!list.includes(extra)) list.push(extra);
-  return list;
-}
 
 /**
  * Searchable agent picker.
@@ -133,7 +59,11 @@ export class AgentSelectorComponent {
   readonly addAgent = output<AgentCreate>();
   readonly deleteAgent = output<string>();
   readonly startMother = output<void>();
-  readonly quickCreateInstance = output<Agent>();
+  /** Emits the chosen agent plus the currently-selected version tag (or
+   *  null when no tag is picked). The parent uses `versionTag` to forward
+   *  to ``ApiService.createInstance()`` so the daemon picks the right
+   *  agent version. */
+  readonly quickCreateInstance = output<{ agent: Agent; versionTag?: string | null }>();
   readonly viewInstances = output<void>();
 
   @ViewChild('searchInput') searchInput!: ElementRef<HTMLInputElement>;
@@ -173,19 +103,9 @@ export class AgentSelectorComponent {
   });
 
   /** Reset the chosen version tag whenever the selected agent id changes so
-   *  a new agent never inherits the previous selection's tag. */
-  private readonly _selectedAgentResetEffect = effect(() => {
-    const sel = this.selectedAgent();
-    // Touch the id so the effect re-runs only when it changes (not on
-    // every signal tick of the agent object).
-    const id = sel?.id ?? null;
-    this.selectedVersionTag.set(null);
-    // Reference `id` so it's not flagged as unused; the effect's
-    // dependency tracking is what matters.
-    void id;
-  });
-
-  /** Keep focusedIndex within the bounds of the filtered list. */
+   *  a new agent never inherits the previous selection's tag. Performed
+   *  imperatively in `onSelect` (W2) so the reset has no chance of running
+   *  before the new agent value is committed. */
   private readonly _filterEffect = effect(() => {
     // Establish reactive dependencies.
     this.searchQuery();
@@ -341,8 +261,11 @@ export class AgentSelectorComponent {
     }
   }
 
-  /** Select an agent without starting a conversation. */
+  /** Select an agent without starting a conversation. The version tag is
+   *  reset imperatively (W2) so a new agent never inherits the previous
+   *  selection's tag. */
   onSelect(agent: Agent): void {
+    this.selectedVersionTag.set(null);
     this.selectAgent.emit(agent);
   }
 
@@ -357,7 +280,10 @@ export class AgentSelectorComponent {
 
   onQuickCreate(agent: Agent, event?: Event): void {
     event?.stopPropagation();
-    this.quickCreateInstance.emit(agent);
+    this.quickCreateInstance.emit({
+      agent,
+      versionTag: this.selectedVersionTag(),
+    });
   }
 
   /**
@@ -379,13 +305,15 @@ export class AgentSelectorComponent {
   }
 
   /** Convenience: does the selected agent actually have a version picker
-   *  to show? (more than one version available). */
-  get shouldShowVersionPicker(): boolean {
+   *  to show? (more than one version available). Implemented as a
+   *  ``computed`` so the template re-evaluates automatically when the
+   *  selected agent or its ``available_versions`` change. */
+  readonly shouldShowVersionPicker = computed(() => {
     const sel = this.selectedAgent();
     if (!sel) return false;
     const versions = sel.available_versions ?? [];
     return versions.length > 1;
-  }
+  });
 
   /**
    * Delete an agent. The agent-selector confirms with the user before
