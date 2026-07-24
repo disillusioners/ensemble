@@ -130,17 +130,16 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   private tabWorkspaceEffect = effect(() => {
     const projectId = this.tabStateService.activeProjectId();
+    const isOpen = this.showWorkspace();         // always read → always tracked
+    const currentId = this.workspaceProjectId(); // always read → always tracked
 
-    // Switching to "All" tab → hide workspace
     if (projectId === null) {
-      this.showWorkspace.set(false);
-      this.workspaceProjectId.set(null);
+      if (isOpen)    this.showWorkspace.set(false);
+      if (currentId) this.workspaceProjectId.set(null);
       return;
     }
 
-    // For project tabs: only sync workspace if it's already open
-    // Do NOT auto-open workspace on plain tab switch
-    if (this.showWorkspace() && this.workspaceProjectId() !== projectId) {
+    if (isOpen && currentId !== projectId) {
       this.workspaceProjectId.set(projectId);
     }
   }, { allowSignalWrites: true });

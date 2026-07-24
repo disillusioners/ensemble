@@ -678,20 +678,32 @@ class TestTabWorkspaceEffectHostComponent {
     // Mirror of the production `tabWorkspaceEffect` in ChatComponent.
     // Lives inside TestBed's injection context so `effect()` has an
     // injector to register against.
+    //
+    // CRITICAL: showWorkspace() and workspaceProjectId() MUST be read
+    // unconditionally at the top of the effect (not inside the non-null
+    // branch) so Angular's reactive graph keeps them as dependencies
+    // across every run. If we conditionally read them, then a run that
+    // hits the `projectId === null` branch will drop those deps, and
+    // subsequent mutations to those signals will not retrigger the
+    // effect. The production code at chat.component.ts:131-145 enforces
+    // this — we mirror it exactly here so this test host is a faithful
+    // double of production.
     effect(() => {
       this.effectRunCount++;
       const projectId = this.tabState.activeProjectId();
+      const isOpen = this.showWorkspace();         // always read → always tracked
+      const currentId = this.workspaceProjectId(); // always read → always tracked
 
       // Switching to "All" tab → hide workspace
       if (projectId === null) {
-        this.showWorkspace.set(false);
-        this.workspaceProjectId.set(null);
+        if (isOpen)    this.showWorkspace.set(false);
+        if (currentId) this.workspaceProjectId.set(null);
         return;
       }
 
       // For project tabs: only sync workspace if it's already open.
       // Do NOT auto-open on plain tab switch.
-      if (this.showWorkspace() && this.workspaceProjectId() !== projectId) {
+      if (isOpen && currentId !== projectId) {
         this.workspaceProjectId.set(projectId);
       }
     }, { allowSignalWrites: true });
@@ -782,5 +794,52 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     expect(host.effectRunCount).toBeGreaterThan(beforeCount);
     expect(host.showWorkspace()).toBe(false);
     expect(host.workspaceProjectId()).toBeNull();
+  });
+
+  it('keeps showWorkspace/workspaceProjectId tracked after All-tab dep-drop', () => {
+    // Regression for the dep-tracking hazard fixed at
+    // chat.component.ts:131-145. Visiting the All tab used to cause the
+    // buggy effect to drop its subscription to showWorkspace and
+    // workspaceProjectId, so external writes to those signals became
+    // invisible until the next non-All run re-established the dep set.
+    //
+    // The fix unconditionally reads both signals at the top of the
+    // effect body, so they remain tracked on every run.
+    //
+    // To prove the dep set is intact, this test must mutate a workspace
+    // signal AFTER the All-tab run WITHOUT going through a non-null
+    // branch in between (a non-null branch would re-read the workspace
+    // signals and mask the bug). Concretely: we leave the active tab on
+    // 'all' and write to showWorkspace, then assert the effect reran.
+
+    // 1. Start on a project tab with workspace open so the effect
+    //    initially sees the workspace signals in its dep set.
+    tabStateService.setActiveTab('proj-a');
+    fixture.detectChanges();
+    host.showWorkspace.set(true);
+    host.workspaceProjectId.set('proj-a');
+    fixture.detectChanges();
+
+    // 2. Switch to All tab. With the buggy effect, this run hits the
+    //    `projectId === null` branch, which never reads showWorkspace or
+    //    workspaceProjectId, so Angular drops them from the dep set.
+    tabStateService.setActiveTab('all');
+    fixture.detectChanges();
+    expect(host.showWorkspace()).toBe(false);
+    expect(host.workspaceProjectId()).toBeNull();
+    const countAfterAllTab = host.effectRunCount;
+
+    // 3. While the active tab is STILL 'all' (so a non-null run cannot
+    //    re-establish the dep set), mutate ONLY showWorkspace. With the
+    //    buggy effect this write is invisible to the effect (the dep
+    //    was dropped in step 2). With the fixed effect showWorkspace
+    //    is still tracked, so the effect reruns.
+    host.showWorkspace.set(true);
+    fixture.detectChanges();
+
+    // Core assertion: the effect must have rerun because showWorkspace
+    // is still tracked. This can only be true if the dep set survived
+    // the All-tab run in step 2.
+    expect(host.effectRunCount).toBeGreaterThan(countAfterAllTab);
   });
 });
