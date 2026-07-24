@@ -25,6 +25,8 @@ class TestableHomeComponent {
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  /** Phase 3: tag forwarded to api.createInstance. */
+  readonly selectedVersionTag = signal<string | null>(null);
   readonly isLoading = signal(false);
 
   // Navigation calls tracked for testing
@@ -40,17 +42,19 @@ class TestableHomeComponent {
 
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);
+    this.selectedVersionTag.set(null);
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }
 
-  protected onCreateInstance(): void {
+  protected onCreateInstance(payload?: { versionTag?: string | null }): void {
     const agent = this.selectedAgent();
     if (!agent) return;
 
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
+    const versionTag = payload?.versionTag ?? this.selectedVersionTag();
 
-    this.api.createInstance(agentPath).subscribe({
+    this.api.createInstance(agentPath, undefined, undefined, versionTag ?? undefined).subscribe({
       next: (instance: InstanceInfo) => {
         this.instances.update(prev => [instance, ...prev]);
         this.navigateCalls.push({
@@ -115,11 +119,13 @@ class TestableHomeComponent {
     });
   }
 
-  protected onQuickCreateInstance(agent: Agent): void {
+  protected onQuickCreateInstance(agent: Agent, versionTag?: string | null): void {
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
+    // Prefer explicit param; fall back to agent.version_tag; finally null.
+    const tag = versionTag ?? (agent as { version_tag?: string | null }).version_tag ?? null;
 
-    this.api.createInstance(agentPath).subscribe({
+    this.api.createInstance(agentPath, undefined, undefined, tag ?? undefined).subscribe({
       next: (instance: InstanceInfo) => {
         this.instances.update(prev => [instance, ...prev]);
         this.navigateCalls.push({
@@ -273,6 +279,131 @@ describe('HomeComponent - Project-Aware Navigation', () => {
       component.onCreateInstance();
 
       expect(component.navigateCalls).toHaveLength(0);
+    });
+  });
+
+  // ── Phase 3: version_tag threading (C3) ─────────────────────────────────
+  describe('onCreateInstance() - version_tag forwarding', () => {
+    beforeEach(() => {
+      const agent = createMockAgent({ id: 'my-agent' });
+      component.agents.set([agent]);
+      component.selectedAgent.set(agent);
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: 'inst' }));
+          return { unsubscribe: () => {} };
+        }
+      });
+    });
+
+    it('forwards the version_tag from the payload as the 4th arg to createInstance', () => {
+      component.onCreateInstance({ versionTag: 'v2' });
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/my-agent',
+        undefined,
+        undefined,
+        'v2',
+      );
+    });
+
+    it('forwards null when the payload has no versionTag and selectedVersionTag is null', () => {
+      component.selectedVersionTag.set(null);
+
+      component.onCreateInstance();
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/my-agent',
+        undefined,
+        undefined,
+        undefined,
+      );
+    });
+
+    it('falls back to selectedVersionTag when payload omits versionTag', () => {
+      component.selectedVersionTag.set('exp');
+
+      component.onCreateInstance();
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/my-agent',
+        undefined,
+        undefined,
+        'exp',
+      );
+    });
+  });
+
+  describe('onQuickCreateInstance() - version_tag forwarding', () => {
+    it('forwards agent.version_tag when no explicit tag is provided', () => {
+      const agent = createMockAgent({ id: 'q-agent', version_tag: 'v3' } as Agent);
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: 'q-inst' }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onQuickCreateInstance(agent);
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/q-agent',
+        undefined,
+        undefined,
+        'v3',
+      );
+    });
+
+    it('prefers explicit versionTag over agent.version_tag', () => {
+      const agent = createMockAgent({ id: 'q-agent', version_tag: 'v3' } as Agent);
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: 'q-inst' }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onQuickCreateInstance(agent, 'v2');
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/q-agent',
+        undefined,
+        undefined,
+        'v2',
+      );
+    });
+
+    it('passes undefined when neither tag is set', () => {
+      const agent = createMockAgent({ id: 'q-agent' });
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: 'q-inst' }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onQuickCreateInstance(agent);
+
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/q-agent',
+        undefined,
+        undefined,
+        undefined,
+      );
+    });
+  });
+
+  describe('onSelectAgent() - selectedVersionTag reset', () => {
+    it('clears selectedVersionTag when the agent changes (Phase 3)', () => {
+      const a = createMockAgent({ id: 'a' });
+      const b = createMockAgent({ id: 'b' });
+      component.selectedAgent.set(a);
+      component.selectedVersionTag.set('v2');
+
+      component.onSelectAgent(b);
+
+      expect(component.selectedVersionTag()).toBeNull();
+      expect(component.selectedAgent()).toBe(b);
     });
   });
 

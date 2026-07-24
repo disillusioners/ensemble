@@ -166,7 +166,7 @@ class TestableInstanceListComponent {
 // Helper to create mock instance
 function createMockInstance(overrides: Partial<InstanceInfo> = {}): InstanceInfo {
   return {
-    instance_id: `instance-${Math.random().toString(36).substr(2, 9)}`,
+    instance_id: 'instance-' + Math.random().toString(36).substr(2, 9),
     agent_id: 'test-agent',
     status: 'running',
     parent_id: null,
@@ -175,6 +175,9 @@ function createMockInstance(overrides: Partial<InstanceInfo> = {}): InstanceInfo
     created_at: new Date().toISOString(),
     updated_at: null,
     project_id: null,
+    // Phase 3: default agent_tag to null so unversioned instances behave
+    // like the legacy contract.
+    agent_tag: null,
     ...overrides,
   };
 }
@@ -288,6 +291,35 @@ describe('InstanceListComponent', () => {
 
       mockService.showKb.set(false);
       expect(component.instanceService.showKb()).toBe(false);
+    });
+  });
+
+  // ── Phase 3: agent_tag exposure (instance list version badge) ──────────
+  describe('agent_tag pass-through (Phase 3)', () => {
+    it('surfaces agent_tag on InstanceInfo so the template can render a badge', () => {
+      const tagged = createMockInstance({
+        instance_id: 'tagged-1',
+        agent_id: 'dev',
+        agent_tag: 'v2',
+      });
+
+      component.instances.set([tagged]);
+
+      const tree = component.instanceTree();
+      expect(tree).toHaveLength(1);
+      expect(tree[0].instance.agent_tag).toBe('v2');
+    });
+
+    it('keeps agent_tag null for base / unversioned instances', () => {
+      const base = createMockInstance({
+        instance_id: 'base-1',
+        agent_id: 'dev',
+      });
+
+      component.instances.set([base]);
+
+      const tree = component.instanceTree();
+      expect(tree[0].instance.agent_tag).toBeNull();
     });
   });
 

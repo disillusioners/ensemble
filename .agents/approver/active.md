@@ -1,5 +1,5 @@
-Current Plan: Workspace Viewer (Read-Only with Git Diff)
-Tracking File: workspace-viewer-read-only-with-git-diff-tracking.md
+Current Plan: Agent Versioning / Tagging System
+Tracking File: agent-versioning-tagging-system-tracking.md
 Iteration: 002
 Status: APPROVED
-Last Updated: 2026-07-22 19:55
+Last Updated: 2026-07-24 02:10

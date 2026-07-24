@@ -165,6 +165,110 @@ describe('AgentSwitcherComponent', () => {
     });
   });
 
+  // ── selectedVersionTag reset on selectAgent (Phase 3) ──────────────────
+  describe('version tag reset on selectAgent', () => {
+    it('selectAgent() clears selectedVersionTag so the next session starts fresh', () => {
+      component.selectedVersionTag.set('v2');
+      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
+      component.selectAgent(planner);
+      expect(component.selectedVersionTag()).toBeNull();
+    });
+
+    it('selectAgent() emits the chosen version tag in the agentChange payload', () => {
+      component.selectedVersionTag.set('v2');
+      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
+      const emitted = jest.fn();
+      component.agentChange.subscribe(emitted);
+      component.selectAgent(planner);
+      expect(emitted).toHaveBeenCalledWith({ agent: planner, versionTag: 'v2' });
+    });
+
+    it('selectAgent() emits null versionTag when none was picked', () => {
+      component.selectedVersionTag.set(null);
+      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
+      const emitted = jest.fn();
+      component.agentChange.subscribe(emitted);
+      component.selectAgent(planner);
+      expect(emitted).toHaveBeenCalledWith({ agent: planner, versionTag: null });
+    });
+  });
+
+  // ── shouldShowVersionPicker (Phase 3) ──────────────────────────────────
+  describe('shouldShowVersionPicker', () => {
+    it('returns false when no agent is selected', () => {
+      fixture.componentRef.setInput('selectedAgent', null);
+      expect(component.shouldShowVersionPicker).toBe(false);
+    });
+
+    it('returns false when the selected agent has no available_versions', () => {
+      fixture.componentRef.setInput('selectedAgent', AGENTS[0]);
+      expect(component.shouldShowVersionPicker).toBe(false);
+    });
+
+    it('returns false when the selected agent has exactly one version', () => {
+      fixture.componentRef.setInput('selectedAgent', {
+        ...AGENTS[0],
+        available_versions: ['v1'],
+      });
+      expect(component.shouldShowVersionPicker).toBe(false);
+    });
+
+    it('returns true when the selected agent has multiple versions', () => {
+      fixture.componentRef.setInput('selectedAgent', {
+        ...AGENTS[0],
+        available_versions: [null, 'v2'],
+      });
+      expect(component.shouldShowVersionPicker).toBe(true);
+    });
+  });
+
+  // ── Deduplication (Phase 3 W8) ─────────────────────────────────────────
+  describe('deduplicatedAgents (W8)', () => {
+    it('deduplicates entries with the same id, keeping the base version', () => {
+      fixture.componentRef.setInput('agents', [
+        { id: 'dev', agent_id: 'dev', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'v2' },
+        { id: 'dev', agent_id: 'dev', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: null },
+      ]);
+      fixture.detectChanges();
+      const result = component.deduplicatedAgents();
+      expect(result.length).toBe(1);
+      expect(result[0].version_tag).toBeNull();
+    });
+
+    it('merges available_versions across same-id entries (including null for base)', () => {
+      fixture.componentRef.setInput('agents', [
+        { id: 'dev', agent_id: 'dev', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: null, available_versions: [null, 'v2'] },
+        { id: 'dev', agent_id: 'dev', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'experimental', available_versions: ['experimental'] },
+      ]);
+      fixture.detectChanges();
+      const result = component.deduplicatedAgents();
+      expect(result.length).toBe(1);
+      expect(result[0].version_tag).toBeNull();
+      expect(result[0].available_versions).toEqual(
+        expect.arrayContaining([null, 'v2', 'experimental']),
+      );
+    });
+
+    it('uses alphabetical tiebreaker when no base exists (W8)', () => {
+      fixture.componentRef.setInput('agents', [
+        { id: 'dev', agent_id: 'dev', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'zeta' },
+        { id: 'dev', agent_id: 'dev', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'alpha' },
+      ]);
+      fixture.detectChanges();
+      const result = component.deduplicatedAgents();
+      expect(result.length).toBe(1);
+      expect(result[0].version_tag).toBe('alpha');
+    });
+
+    it('keeps entries with unique ids untouched', () => {
+      fixture.componentRef.setInput('agents', AGENTS);
+      fixture.detectChanges();
+      const ids = component.deduplicatedAgents().map(a => a.id);
+      // Phase 3: dedup sorts by name → Developer, Planner, Tester.
+      expect(ids).toEqual(['dev', 'planner', 'tester']);
+    });
+  });
+
   // ── empty / no-match search behavior ────────────────────────────────────
   describe('empty and no-match search', () => {
     it('empty searchQuery shows all selectable agents', () => {

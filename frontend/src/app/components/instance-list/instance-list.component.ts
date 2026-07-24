@@ -85,7 +85,10 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
   // Output EventEmitters
   @Output() terminateInstance = new EventEmitter<string>();
   @Output() newInstance = new EventEmitter<void>();
-  @Output() agentChange = new EventEmitter<Agent>();
+  /** Phase 3: emits both the chosen agent and the version tag the user
+   *  picked in the AgentSwitcher's dropdown so the parent page can
+   *  forward it to createInstance. */
+  @Output() agentChange = new EventEmitter<{ agent: Agent; versionTag?: string | null }>();
   @Output() loadMore = new EventEmitter<void>();
   @Output() pauseInstance = new EventEmitter<string>();
   @Output() resumeInstance = new EventEmitter<string>();
@@ -275,8 +278,8 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     this.newInstance.emit();
   }
 
-  onAgentChange(agent: Agent): void {
-    this.agentChange.emit(agent);
+  onAgentChange(payload: { agent: Agent; versionTag?: string | null }): void {
+    this.agentChange.emit(payload);
   }
 
   getInstanceIdShort(instanceId: string): string {

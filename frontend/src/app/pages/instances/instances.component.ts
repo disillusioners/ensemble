@@ -34,6 +34,9 @@ export class InstancesComponent implements OnInit, OnDestroy {
 
   readonly agents = signal<Agent[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  /** Phase 3: tag picked in the AgentSwitcher dropdown. Read by
+   *  ``onNewInstance`` and forwarded to ``api.createInstance``. */
+  readonly selectedVersionTag = signal<string | null>(null);
 
   private tabEffect = effect(() => {
     const projectId = this.tabStateService.activeProjectId();
@@ -97,7 +100,10 @@ export class InstancesComponent implements OnInit, OnDestroy {
     const agentPath = `./agents/${agent.id}`;
     const projectId = this.getProjectContext();
     const actualProjectId = projectId === 'all' ? undefined : projectId;
-    this.api.createInstance(agentPath, undefined, actualProjectId).subscribe({
+    // Phase 3: forward the chosen version tag (null when none picked —
+    // backend falls back to base).
+    const versionTag = this.selectedVersionTag() ?? undefined;
+    this.api.createInstance(agentPath, undefined, actualProjectId, versionTag).subscribe({
       next: (instance) => {
         this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
@@ -114,8 +120,9 @@ export class InstancesComponent implements OnInit, OnDestroy {
     });
   }
 
-  protected onAgentChange(agent: Agent): void {
-    this.selectedAgent.set(agent);
-    localStorage.setItem('ensemble-next-instance-agent', agent.id);
+  protected onAgentChange(payload: { agent: Agent; versionTag?: string | null }): void {
+    this.selectedAgent.set(payload.agent);
+    this.selectedVersionTag.set(payload.versionTag ?? null);
+    localStorage.setItem('ensemble-next-instance-agent', payload.agent.id);
   }
 }

@@ -406,6 +406,24 @@ kbd {
   flex-wrap: wrap;
 }
 
+// Small bar that shows the version picker once an agent is selected.
+// Hidden entirely when the selected agent has 0 or 1 versions.
+.selected-version-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid #334155;
+  border-radius: 0.6rem;
+}
+
+.selected-version-label {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
 .continue-action,
 .create-action {
   display: inline-flex;

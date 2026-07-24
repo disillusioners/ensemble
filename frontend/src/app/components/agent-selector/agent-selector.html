@@ -137,6 +137,17 @@
     </p>
   </section>
 
+  @if (selectedAgent() && shouldShowVersionPicker) {
+    <div class="selected-version-bar" role="region" [attr.aria-label]="'Selected agent version'">
+      <span class="selected-version-label">Version for new chat:</span>
+      <app-version-picker
+        [availableVersions]="selectedAgent()?.available_versions ?? []"
+        [selectedTag]="selectedVersionTag()"
+        (tagChange)="onVersionTagChange($event)"
+      ></app-version-picker>
+    </div>
+  }
+
   <div class="primary-actions">
     @if (hasInstances()) {
       <button

@@ -709,3 +709,21 @@
     transform: rotate(360deg);
   }
 }
+
+// Phase 3: small inline version badge that surfaces the agent_tag for
+// instances created against a tagged agent. Uses the accent cyan and
+// sits between the agent name and the status dot in the same row.
+.agent-version-badge {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0.3rem;
+  padding: 0.05rem 0.4rem;
+  color: #0f172a;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: #10a7f7;
+  border-radius: 0.35rem;
+  vertical-align: middle;
+  user-select: none;
+}

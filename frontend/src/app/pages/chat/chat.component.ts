@@ -83,6 +83,10 @@ export class ChatComponent implements OnInit, OnDestroy {
   });
   readonly messages = signal<Message[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  /** Phase 3: tag picked in the AgentSwitcher dropdown. Persisted across
+   *  navigation in the page session so the next createInstance can
+   *  forward it. Reset when the user picks a different agent. */
+  readonly selectedVersionTag = signal<string | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
   readonly instanceNotFound = signal<string | null>(null);
@@ -390,8 +394,11 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     const agentPath = `./agents/${agent.id}`;
     const projectId = this.tabStateService.activeProjectId() ?? undefined;
+    // Phase 3: forward the version tag the user picked in the switcher
+    // dropdown (or null when none was picked — backend falls back to base).
+    const versionTag = this.selectedVersionTag() ?? undefined;
 
-    this.api.createInstance(agentPath, undefined, projectId).subscribe({
+    this.api.createInstance(agentPath, undefined, projectId, versionTag).subscribe({
       next: (instance) => {
         // Instance will appear in instanceService via polling
         const projectContext = this.tabStateService.activeProjectId() ?? 'all';
@@ -403,9 +410,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  protected onAgentChange(agent: Agent): void {
-    this.selectedAgent.set(agent);
-    localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
+  protected onAgentChange(payload: { agent: Agent; versionTag?: string | null }): void {
+    this.selectedAgent.set(payload.agent);
+    this.selectedVersionTag.set(payload.versionTag ?? null);
+    localStorage.setItem(NEXT_AGENT_STORAGE_KEY, payload.agent.id);
   }
 
   protected onSendMessage(payload: MessagePayload): void {

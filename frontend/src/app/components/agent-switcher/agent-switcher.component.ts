@@ -4,6 +4,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { Agent } from '../../models';
+import { VersionPickerComponent } from '../version-picker/version-picker.component';
 
 const colorMap: Record<string, string> = {
   'accent-amber': '#f59e0b',
@@ -17,17 +18,81 @@ const colorMap: Record<string, string> = {
   'accent-green': '#22c55e',
 };
 
+/**
+ * Deduplicate agents by id (Phase 3, W8). Base version wins; when no base
+ * exists, the alphabetically smaller tag wins. Merges `available_versions`
+ * so the surviving entry advertises the union of all tags seen for that id.
+ */
+function deduplicateAgentsById(agents: Agent[]): Agent[] {
+  const byId = new Map<string, Agent>();
+  for (const agent of agents) {
+    const existing = byId.get(agent.id);
+    if (!existing) {
+      byId.set(agent.id, { ...agent, available_versions: [...(agent.available_versions ?? [])] });
+      continue;
+    }
+    const existingIsBase =
+      existing.version_tag === null || existing.version_tag === undefined;
+    const agentIsBase =
+      agent.version_tag === null || agent.version_tag === undefined;
+    if (!existingIsBase && agentIsBase) {
+      byId.set(agent.id, {
+        ...agent,
+        available_versions: mergeVersionList(
+          agent.available_versions,
+          existing.version_tag,
+        ),
+      });
+    } else if (!existingIsBase && !agentIsBase) {
+      const next = (agent.version_tag ?? '') < (existing.version_tag ?? '')
+        ? agent
+        : existing;
+      byId.set(agent.id, {
+        ...next,
+        available_versions: mergeVersionList(
+          next.available_versions,
+          next === agent ? existing.version_tag : agent.version_tag,
+        ),
+      });
+    } else {
+      const merged = mergeVersionList(
+        existing.available_versions,
+        agent.version_tag,
+      );
+      if (merged.length !== (existing.available_versions?.length ?? 0)) {
+        byId.set(agent.id, { ...existing, available_versions: merged });
+      }
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+}
+
+function mergeVersionList(
+  current: (string | null)[] | null | undefined,
+  extra: string | null | undefined,
+): (string | null)[] {
+  const list = [...(current ?? [])];
+  if (extra === undefined) return list;
+  if (!list.includes(extra)) list.push(extra);
+  return list;
+}
+
 @Component({
   selector: 'app-agent-switcher',
   standalone: true,
-  imports: [CommonModule, MatButtonModule, MatIconModule, MatMenuModule],
+  imports: [CommonModule, MatButtonModule, MatIconModule, MatMenuModule, VersionPickerComponent],
   templateUrl: './agent-switcher.html',
   styleUrl: './agent-switcher.scss'
 })
 export class AgentSwitcherComponent {
   readonly agents = input<Agent[]>([]);
   readonly selectedAgent = input<Agent | null>(null);
-  readonly agentChange = output<Agent>();
+  /** Emits the chosen agent plus an optional version tag for the next
+   *  instance creation. Phase 3: ``versionTag`` is ``null``/undefined when
+   *  the user hasn't picked a tag (use base). */
+  readonly agentChange = output<{ agent: Agent; versionTag?: string | null }>();
 
   @ViewChild('triggerButton') triggerButton!: ElementRef<HTMLButtonElement>;
   @ViewChild('dropdownMenu') dropdownMenu!: ElementRef<HTMLDivElement>;
@@ -38,15 +103,25 @@ export class AgentSwitcherComponent {
   focusedIndex = signal(-1);
   searchQuery = signal('');
 
+  /** Phase 3: version tag the user picked in the dropdown. Reset to null
+   *  whenever the dropdown opens so the new selection doesn't inherit a
+   *  stale tag from a previous session. */
+  selectedVersionTag = signal<string | null>(null);
+
   // Filter out system agents from selection
   readonly selectableAgents = computed(() =>
     this.agents().filter(agent => !agent.system)
   );
 
+  // Phase 3 (W8): deduplicate by id, base wins, alphabetical tiebreaker.
+  readonly deduplicatedAgents = computed(() =>
+    deduplicateAgentsById(this.selectableAgents()),
+  );
+
   // Further filter by search query (case-insensitive, matches name OR description)
   readonly filteredAgents = computed(() => {
     const query = this.searchQuery().trim().toLowerCase();
-    const base = this.selectableAgents();
+    const base = this.deduplicatedAgents();
     if (!query) return base;
     return base.filter(agent => {
       const name = (agent.name ?? '').toLowerCase();
@@ -126,10 +201,25 @@ export class AgentSwitcherComponent {
   }
 
   selectAgent(agent: Agent): void {
-    this.agentChange.emit(agent);
+    this.agentChange.emit({ agent, versionTag: this.selectedVersionTag() });
     this.isOpen.set(false);
     this.focusedIndex.set(-1);
     this.searchQuery.set('');
+    this.selectedVersionTag.set(null);
+  }
+
+  /** Phase 3: track version tag selection from the picker. */
+  onVersionTagChange(tag: string | null): void {
+    this.selectedVersionTag.set(tag);
+  }
+
+  /** Show version picker only when the currently selected agent has more
+   *  than one available version. The picker sits in the dropdown footer. */
+  get shouldShowVersionPicker(): boolean {
+    const sel = this.selectedAgent();
+    if (!sel) return false;
+    const versions = sel.available_versions ?? [];
+    return versions.length > 1;
   }
 
   closeDropdown(): void {

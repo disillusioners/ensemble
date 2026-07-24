@@ -64,10 +64,11 @@ describe('AgentSelectorComponent', () => {
 
   describe('filteredAgents', () => {
     it('returns all selectable agents when the query is empty', () => {
+      // Phase 3: dedup sorts by name → Developer, Planner, Tester.
       expect(component.filteredAgents().map(agent => agent.id)).toEqual([
         'developer',
-        'tester',
         'planner',
+        'tester',
       ]);
     });
 
@@ -122,11 +123,16 @@ describe('AgentSelectorComponent', () => {
     it('selects the highlighted agent when Enter is pressed in the search field', () => {
       const selected = jest.fn();
       component.selectAgent.subscribe(selected);
+      // Phase 3: filteredAgents is sorted by name → [developer, planner, tester].
+      // Index 1 maps to AGENTS[2] (planner). Use objectContaining because
+      // dedup adds an `available_versions` field to every emitted agent.
       component.focusedIndex.set(1);
 
       component.onSearchKeydown(new KeyboardEvent('keydown', { key: 'Enter' }));
 
-      expect(selected).toHaveBeenCalledWith(AGENTS[1]);
+      expect(selected).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'planner', name: 'Planner' }),
+      );
     });
 
     it('emits selection and start events for a conversation action', () => {
@@ -368,13 +374,112 @@ describe('AgentSelectorComponent', () => {
 
       expect(created).toHaveBeenCalledTimes(1);
     });
+
+    it('emits createInstance with the currently selected version tag', () => {
+      const created = jest.fn();
+      component.createInstance.subscribe(created);
+      component.selectedVersionTag.set('v2');
+
+      component.onCreateInstance();
+
+      expect(created).toHaveBeenCalledWith({ versionTag: 'v2' });
+    });
+
+    it('emits createInstance with null versionTag by default', () => {
+      const created = jest.fn();
+      component.createInstance.subscribe(created);
+
+      component.onCreateInstance();
+
+      expect(created).toHaveBeenCalledWith({ versionTag: null });
+    });
+  });
+
+  // ── Version picker state (Phase 3) ─────────────────────────────────────
+  describe('version picker state', () => {
+    it('onVersionTagChange updates selectedVersionTag', () => {
+      component.onVersionTagChange('v2');
+      expect(component.selectedVersionTag()).toBe('v2');
+
+      component.onVersionTagChange(null);
+      expect(component.selectedVersionTag()).toBeNull();
+    });
+
+    it('shouldShowVersionPicker is false when no agent is selected', () => {
+      fixture.componentRef.setInput('selectedAgent', null);
+      expect(component.shouldShowVersionPicker).toBe(false);
+    });
+
+    it('shouldShowVersionPicker is false for a single-version agent', () => {
+      fixture.componentRef.setInput('selectedAgent', {
+        ...AGENTS[0],
+        available_versions: ['v1'],
+      });
+      expect(component.shouldShowVersionPicker).toBe(false);
+    });
+
+    it('shouldShowVersionPicker is true when the selected agent has multiple versions', () => {
+      fixture.componentRef.setInput('selectedAgent', {
+        ...AGENTS[0],
+        available_versions: [null, 'v2'],
+      });
+      expect(component.shouldShowVersionPicker).toBe(true);
+    });
+  });
+
+  // ── Deduplication (Phase 3 W8) ─────────────────────────────────────────
+  describe('deduplicatedAgents (W8)', () => {
+    it('keeps the base version when both base and tagged entries share an id', () => {
+      fixture.componentRef.setInput('agents', [
+        { id: 'developer', agent_id: 'developer', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'v2' },
+        { id: 'developer', agent_id: 'developer', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: null },
+      ]);
+      fixture.detectChanges();
+      const result = component.deduplicatedAgents();
+      expect(result.length).toBe(1);
+      expect(result[0].version_tag).toBeNull();
+    });
+
+    it('uses alphabetical tiebreaker when no base version exists (W8)', () => {
+      fixture.componentRef.setInput('agents', [
+        { id: 'developer', agent_id: 'developer', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'zeta' },
+        { id: 'developer', agent_id: 'developer', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'alpha' },
+      ]);
+      fixture.detectChanges();
+      const result = component.deduplicatedAgents();
+      expect(result.length).toBe(1);
+      expect(result[0].version_tag).toBe('alpha');
+    });
+
+    it('merges available_versions across same-id entries', () => {
+      fixture.componentRef.setInput('agents', [
+        { id: 'developer', agent_id: 'developer', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: null, available_versions: [null, 'v2'] },
+        { id: 'developer', agent_id: 'developer', name: 'Developer', description: 'a', icon: 'code', color: 'accent-blue', version_tag: 'experimental', available_versions: ['experimental'] },
+      ]);
+      fixture.detectChanges();
+      const result = component.deduplicatedAgents();
+      expect(result.length).toBe(1);
+      expect(result[0].available_versions).toEqual(
+        expect.arrayContaining([null, 'v2', 'experimental']),
+      );
+    });
+
+    it('keeps unique-id entries untouched (sorted by name)', () => {
+      // AGENTS fixture (in the test setup) has unique ids and no version tags.
+      const ids = component.deduplicatedAgents().map(a => a.id);
+      // Mother is a system agent — must be excluded by selectableAgents filter.
+      // Phase 3: dedup sorts by name → Developer, Planner, Tester.
+      expect(ids).toEqual(['developer', 'planner', 'tester']);
+    });
   });
 
   describe('aria-activedescendant tracking', () => {
     it('returns the id of the currently focused option', () => {
       component.focusedIndex.set(1);
 
-      expect(component.activeDescendant).toBe('agent-item-tester');
+      // Phase 3: filteredAgents is sorted by name → [developer, planner, tester].
+      // Index 1 = planner.
+      expect(component.activeDescendant).toBe('agent-item-planner');
     });
 
     it('returns an empty string when no agent is focused', () => {

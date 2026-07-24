@@ -112,6 +112,14 @@
         <div class="instance-details">
           <p class="agent-name">
             {{ agent?.name || 'Agent' }}
+            <!-- Phase 3: small version badge for tagged instances. Hidden
+                 when agent_tag is null/empty so unversioned agents stay quiet. -->
+            @if (instance.agent_tag) {
+              <span
+                class="agent-version-badge"
+                [title]="'Version ' + instance.agent_tag"
+              >[{{ instance.agent_tag }}]</span>
+            }
             <span
               class="status-dot"
               [style.background-color]="getStatusStyle(instance.status).color"

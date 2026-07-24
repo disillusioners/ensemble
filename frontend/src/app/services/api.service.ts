@@ -55,15 +55,20 @@ export class ApiService {
   }
 
   // Instances
-  createInstance(agentId: string, instanceId?: string, projectId?: string): Observable<InstanceInfo> {
-    const body: Record<string, string> = { 
-      agent_id: agentId, 
+  createInstance(agentId: string, instanceId?: string, projectId?: string, versionTag?: string): Observable<InstanceInfo> {
+    const body: Record<string, string> = {
+      agent_id: agentId,
     };
     if (instanceId) {
       body['instance_id'] = instanceId;
     }
     if (projectId) {
       body['project_id'] = projectId;
+    }
+    // Backend Phase 2 — only include version_tag when explicitly provided.
+    // Empty string would round-trip as a "version_tag=''" entry in the DB.
+    if (versionTag) {
+      body['version_tag'] = versionTag;
     }
     return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, body);
   }

@@ -35,6 +35,10 @@ export class HomeComponent implements OnInit, OnDestroy {
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  /** Phase 3: tag to send when creating the next instance from the
+   *  AgentSelector's "Start new chat" button. Reset by the effect on
+   *  selectedAgent change. */
+  readonly selectedVersionTag = signal<string | null>(null);
   readonly isLoading = signal(false);
 
   readonly hasInstances = computed(() => this.instances().length > 0);
@@ -101,17 +105,20 @@ export class HomeComponent implements OnInit, OnDestroy {
 
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);
+    // A new agent means a fresh version-tag selection.
+    this.selectedVersionTag.set(null);
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }
 
-  protected onCreateInstance(): void {
+  protected onCreateInstance(payload?: { versionTag?: string | null }): void {
     const agent = this.selectedAgent();
     if (!agent) return;
 
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
-    
-    this.api.createInstance(agentPath).subscribe({
+    const versionTag = payload?.versionTag ?? this.selectedVersionTag();
+
+    this.api.createInstance(agentPath, undefined, undefined, versionTag ?? undefined).subscribe({
       next: (instance) => {
         this.instances.update(prev => [instance, ...prev]);
         this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
@@ -180,11 +187,15 @@ export class HomeComponent implements OnInit, OnDestroy {
     });
   }
 
-  protected onQuickCreateInstance(agent: Agent): void {
+  protected onQuickCreateInstance(agent: Agent, versionTag?: string | null): void {
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
-    
-    this.api.createInstance(agentPath).subscribe({
+    // Prefer the explicitly forwarded tag; otherwise fall back to the
+    // tag carried on the emitted agent object (which is how the
+    // AgentSelector communicates the row's currently-selected version).
+    const tag = versionTag ?? (agent as { version_tag?: string | null }).version_tag ?? null;
+
+    this.api.createInstance(agentPath, undefined, undefined, tag ?? undefined).subscribe({
       next: (instance) => {
         this.instances.update(prev => [instance, ...prev]);
         this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);

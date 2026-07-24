@@ -250,3 +250,21 @@
     margin: 0;
   }
 }
+
+// Phase 3: version picker sits between the menu list and the footer hint.
+// Kept subtle — same small inline shape as the agent-selector's bar.
+.menu-version-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 8px 12px;
+  background-color: rgba(15, 23, 42, 0.5);
+  border-top: 1px solid #334155;
+  flex: 0 0 auto;
+}
+
+.menu-version-label {
+  color: #94a3b8;
+  font-size: 12px;
+}

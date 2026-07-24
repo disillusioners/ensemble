@@ -1,0 +1,23 @@
+@if (hasMultipleVersions()) {
+  <div class="version-picker" role="group" [attr.aria-label]="'Agent version picker'">
+    <label class="version-picker-label" for="version-picker-select">
+      Version
+    </label>
+    <select
+      id="version-picker-select"
+      class="version-picker-select"
+      [value]="selectedTag() ?? ''"
+      (change)="onSelect($any($event.target).value === '' ? null : $any($event.target).value)"
+      [attr.aria-label]="'Select agent version'"
+    >
+      @for (tag of sortedVersions(); track trackByTag($index, tag)) {
+        <option
+          [value]="tag ?? ''"
+          [selected]="isSelected(tag)"
+        >
+          {{ getDisplayLabel(tag) }}
+        </option>
+      }
+    </select>
+  </div>
+}

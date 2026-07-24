@@ -25,6 +25,10 @@ export interface InstanceInfo {
   color_tag?: string | null;
   icon_tag?: string | null;  // Material Icon name
   pinned_at?: string | null;
+  /** Backend Phase 2 S9 — the version tag the instance was created with
+   *  (null for base / unversioned agents). Surfaced in the UI as a small
+   *  badge next to the instance title when truthy. */
+  agent_tag?: string | null;
 }
 
 export interface InstanceListResponse {
@@ -116,6 +120,12 @@ export interface Agent {
   version?: string;
   agent_id: string;
   system?: boolean;
+  /** Backend Phase 2 — version tag for this specific agent entry (null for base). */
+  version_tag?: string | null;
+  /** Backend Phase 2 — list of all available version tags for this agent id,
+   *  including `null` for the base version when one exists. Empty/null for
+   *  single-version agents. */
+  available_versions?: (string | null)[] | null;
 }
 
 export interface AgentListResponse {
