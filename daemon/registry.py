@@ -28,7 +28,7 @@ SKIP_DIRS: frozenset[str] = frozenset({
 # The tag must contain only letters, digits, underscores, or hyphens (no
 # path chars, no nested brackets). Names like "dev[[v2]]" or "dev[../etc]"
 # do NOT match and are treated as plain agent ids.
-_TAG_PATTERN = re.compile(r'^(.+?)\[([A-Za-z0-9_-]+)\]$')
+_TAG_PATTERN = re.compile(r'^([^\[\]]+)\[([A-Za-z0-9_-]+)\]$')
 
 
 def _parse_agent_dir_name(dir_name: str) -> tuple[str, str | None]:

@@ -59,6 +59,14 @@ async def mock_manager():
         "processing_count": 0,
         "oldest_message_age_seconds": None
     })
+    # Mock UI prefs repo: routers call either manager._instance_ui_prefs_repo.get_all(...)
+    # (list endpoint) or manager._instance_ui_prefs_repo.get(instance_id) (single GET).
+    # Without this, Mock auto-attributes produce child Mock objects (e.g. prefs.pinned)
+    # that fail Pydantic validation. Return an empty dict / None so the merge falls
+    # back to None for all pref fields.
+    manager._instance_ui_prefs_repo = Mock()
+    manager._instance_ui_prefs_repo.get_all = Mock(return_value={})
+    manager._instance_ui_prefs_repo.get = Mock(return_value=None)
     # Mock async enqueue_message_job (Phase 5 cutover: router uses job path)
     manager.enqueue_message = AsyncMock(return_value=Mock(
         message_id="test-message-id",
@@ -238,6 +246,7 @@ async def test_create_instance_success(client, mock_manager):
         agent_id="coder",
         instance_id="550e8400-e29b-41d4-a716-446655440000",
         project_id=None,
+        version_tag=None,
     )
 
 
@@ -292,7 +301,7 @@ async def test_project_id_roundtrip(client, mock_manager):
     # Configure mock to echo back the project_id from spawn call
     created_instance_id = None
     
-    def mock_spawn(agent_id, instance_id, project_id):
+    def mock_spawn(agent_id, instance_id, project_id, version_tag=None):
         nonlocal created_instance_id
         created_instance_id = instance_id or "generated-instance-id"
         return created_instance_id

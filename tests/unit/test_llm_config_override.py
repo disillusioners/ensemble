@@ -175,6 +175,11 @@ class TestSpawnInstanceLLMOverride:
         mock_registry = MagicMock()
         mock_registry.resolve_to_id.return_value = "custom_agent"
         mock_registry.get.return_value = mock_metadata
+        # ``spawn_instance`` calls ``registry.get_version(resolved_id, None)``
+        # before falling back to ``registry.get``. Without this stub the mock
+        # returns a MagicMock chain (``get_version().llm_model.strip()``)
+        # which breaks ``_build_llm_config`` downstream.
+        mock_registry.get_version.return_value = mock_metadata
 
         # Track what gets passed to build_instance_graph
         captured_llm_config = {}
@@ -232,6 +237,11 @@ class TestSpawnInstanceLLMOverride:
         mock_registry = MagicMock()
         mock_registry.resolve_to_id.return_value = "standard_agent"
         mock_registry.get.return_value = mock_metadata
+        # ``spawn_instance`` calls ``registry.get_version(resolved_id, None)``
+        # before falling back to ``registry.get``. Without this stub the mock
+        # returns a MagicMock chain (``get_version().llm_model.strip()``)
+        # which breaks ``_build_llm_config`` downstream.
+        mock_registry.get_version.return_value = mock_metadata
 
         captured_llm_config = {}
 
@@ -545,6 +555,11 @@ def _patch_restore_dependencies(agent_meta: AgentMetadata, captured: dict):
     mock_registry = MagicMock()
     mock_registry.get_resolved.return_value = agent_meta
     mock_registry.resolve_pure_id.return_value = agent_meta.id
+    # ``_restore_instance`` calls ``registry.get_version(meta.agent_id, agent_tag)``
+    # as the primary lookup (versioning-aware path). Without this stub the mock
+    # returns a MagicMock chain (``get_version().llm_model.strip()``) which
+    # breaks ``_build_llm_config`` downstream.
+    mock_registry.get_version.return_value = agent_meta
 
     with patch(
         "daemon.services.instance_lifecycle.get_registry",

@@ -421,13 +421,14 @@ class TestAgentVersioning:
     @pytest.mark.parametrize(
         "dir_name",
         [
-            "dev[[v2]]",     # nested brackets → no match
-            "dev[../etc]",   # path chars (slash) → no match
-            "dev[v2]/etc",   # path separator → no match
-            "dev[.v2]",      # dot char → no match
-            "dev[v2 ",       # missing closing bracket → no match
-            "dev v2]",       # missing opening bracket → no match
-            "dev[]",         # empty tag → no match
+            "dev[[v2]]",            # nested brackets → no match
+            "developer[v2][v3]",    # chained brackets → no match (regression)
+            "dev[../etc]",          # path chars (slash) → no match
+            "dev[v2]/etc",          # path separator → no match
+            "dev[.v2]",             # dot char → no match
+            "dev[v2 ",              # missing closing bracket → no match
+            "dev v2]",              # missing opening bracket → no match
+            "dev[]",                # empty tag → no match
         ],
     )
     def test_parse_agent_dir_name_rejects_path_and_nested_brackets(
