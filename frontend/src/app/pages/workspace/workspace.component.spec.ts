@@ -680,33 +680,32 @@ describe('WorkspaceComponent', () => {
     });
   });
 
-  // ── 9) File > Save menu — menubar, canSave, saveFile, snackbar ───
+  // ── 9) Save button — canSave, saveFile, snackbar, Ctrl+S ───────
 
-  describe('File > Save menu', () => {
+  describe('Save button', () => {
     /** Flush the initial tree request fired by ngOnInit. */
     function bootWithTree(): void {
       fixture.detectChanges();
       flushInitialTree();
     }
 
-    it('hides the editor menubar when no file is selected', () => {
+    it('hides the save button when no file is selected', () => {
       bootWithTree();
 
       const trigger = fixture.debugElement.query(
-        By.css('[data-testid="file-menu-trigger"]')
+        By.css('[data-testid="save-button"]')
       );
       expect(trigger).toBeNull();
     });
 
-    it('renders the editor menubar after a file is selected', () => {
+    it('renders the save button after a file is selected', () => {
       bootWithTree();
       selectFile();
 
       const trigger = fixture.debugElement.query(
-        By.css('[data-testid="file-menu-trigger"]')
+        By.css('[data-testid="save-button"]')
       );
       expect(trigger).not.toBeNull();
-      expect(trigger.nativeElement.textContent.trim()).toBe('File');
     });
 
     it('does not render the dirty indicator when content is clean', () => {
@@ -761,8 +760,8 @@ describe('WorkspaceComponent', () => {
         markDirty();
 
         // Simulate switching to diff view — the code viewer is still
-        // dirty in the background, but the menubar should never enable
-        // save against a diff view.
+        // dirty in the background, but the save button should never
+        // enable save against a diff view.
         component.viewMode.set('diff');
         fixture.detectChanges();
 
@@ -1039,7 +1038,7 @@ describe('WorkspaceComponent', () => {
         expect(component.canSave()).toBe(true); // still dirty, can retry
       });
 
-      it('exposes the saving signal for the menu item binding (F7)', () => {
+      it('exposes the saving signal for the save button binding (F7)', () => {
         bootWithTree();
         selectFile();
         markDirty();
@@ -1049,9 +1048,9 @@ describe('WorkspaceComponent', () => {
           .spyOn(workspaceService, 'saveFile')
           .mockReturnValue(pending.asObservable());
 
-        // The menu item's `<span>{{ saving() ? 'Saving…' : 'Save' }}</span>`
-        // binding reads this signal — assert the signal flips correctly
-        // so the template binding renders the expected text.
+        // The save button's `@if (saving()) { … } @else { … }` binding
+        // reads this signal — assert the signal flips correctly so the
+        // template binding renders the expected icon.
         expect(component.saving()).toBe(false);
 
         component.saveFile();

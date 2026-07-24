@@ -39,7 +39,7 @@
 }
 
 .content-toolbar {
-  min-height: 56px;
+  min-height: 48px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   color: #d7dae0;
   background: #21252b;
@@ -52,6 +52,42 @@
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-meta {
+  margin-left: 8px;
+  color: #9da5b4;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.badge {
+  margin-left: 4px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-binary {
+  color: #f3c969;
+  background: rgba(243, 201, 105, 0.15);
+}
+
+.badge-truncated {
+  color: #e5a8ff;
+  background: rgba(229, 168, 255, 0.15);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .spacer {
@@ -70,31 +106,6 @@ mat-button-toggle mat-icon {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-}
-
-.editor-menubar {
-  display: flex;
-  align-items: center;
-  min-height: 36px;
-  padding: 0 4px;
-  background: #21252b;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  color: #d7dae0;
-  flex-shrink: 0;
-}
-
-.editor-menubar .file-menu-trigger {
-  color: #d7dae0;
-  font-size: 13px;
-  letter-spacing: 0.02em;
-}
-
-.editor-menubar .shortcut {
-  margin-left: auto;
-  padding-left: 16px;
-  font-size: 11px;
-  color: #9aa0a6;
-  letter-spacing: 0.04em;
 }
 
 .dirty-indicator {

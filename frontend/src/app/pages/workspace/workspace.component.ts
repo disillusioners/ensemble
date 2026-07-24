@@ -21,7 +21,7 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
-import { MatMenuModule } from '@angular/material/menu';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
@@ -57,7 +57,7 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
     MatButtonToggleModule,
     MatIconModule,
     MatButtonModule,
-    MatMenuModule,
+    MatTooltipModule,
     MatSnackBarModule,
     MatProgressSpinnerModule,
     FileTreeComponent,
@@ -91,6 +91,11 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
                 >*</span>
               }
             </span>
+            @if (currentFile()) {
+              <span class="file-meta">{{ currentFile()?.total_lines }} lines · {{ formatSize(currentFile()?.size_bytes) }}</span>
+              @if (currentFile()?.binary) { <span class="badge badge-binary">BIN</span> }
+              @if (currentFile()?.truncated) { <span class="badge badge-truncated">TRUNC</span> }
+            }
             <span class="spacer"></span>
             @if (selectedPath()) {
               <mat-button-toggle-group [value]="viewMode()">
@@ -101,6 +106,12 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
                   <mat-icon>compare_arrows</mat-icon> Diff
                 </mat-button-toggle>
               </mat-button-toggle-group>
+            }
+            @if (selectedPath()) {
+              <button mat-icon-button data-testid="save-button" aria-label="Save" [disabled]="!canSave()" (click)="saveFile()" matTooltip="Save (Ctrl+S)">
+                @if (saving()) { <mat-icon class="spin">hourglass_empty</mat-icon> }
+                @else { <mat-icon>save</mat-icon> }
+              </button>
             }
             <span
               class="sse-indicator"
@@ -121,33 +132,6 @@ import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.co
               <mat-icon>visibility_off</mat-icon>
             </button>
           </mat-toolbar>
-
-          @if (selectedPath()) {
-            <div class="editor-menubar">
-              <button
-                mat-button
-                type="button"
-                class="file-menu-trigger"
-                data-testid="file-menu-trigger"
-                aria-label="File menu"
-                [matMenuTriggerFor]="fileMenu"
-              >
-                File
-              </button>
-              <mat-menu #fileMenu="matMenu">
-                <button
-                  mat-menu-item
-                  type="button"
-                  data-testid="save-menu-item"
-                  [disabled]="!canSave()"
-                  (click)="saveFile()"
-                >
-                  <span>{{ saving() ? 'Saving…' : 'Save' }}</span>
-                  <span class="shortcut">Ctrl+S</span>
-                </button>
-              </mat-menu>
-            </div>
-          }
 
           <div class="viewer-content">
             @if (workspace.error(); as errorMessage) {
@@ -220,13 +204,14 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   @Output() public readonly hide = new EventEmitter<void>();
 
   public readonly selectedPath = this.workspace.selectedPath.asReadonly();
+  public readonly currentFile = this.workspace.currentFile.asReadonly();
   public readonly viewMode = signal<'code' | 'diff'>('code');
 
   /**
    * F7 — in-flight save guard. Set true at the start of `saveFile()`,
    * cleared in a `finalize` callback so both success and error paths
-   * reset the flag. `canSave()` consults this to disable the Save menu
-   * item and block Ctrl+S spam from firing concurrent PUTs.
+   * reset the flag. `canSave()` consults this to disable the Save button
+   * and block Ctrl+S spam from firing concurrent PUTs.
    */
   public readonly saving = signal(false);
 
@@ -287,6 +272,18 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Human-readable byte size for the toolbar meta line. Accepts
+   * `undefined` / `null` so the template can call it on
+   * `currentFile()?.size_bytes` without a guard.
+   */
+  formatSize(bytes?: number | null): string {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  /**
    * Whether the open file has unsaved edits. Reads the code viewer's
    * computed `isDirty` signal. Returns false when no file is selected,
    * when the view mode is `diff`, or when the code viewer's view child
@@ -297,7 +294,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Whether the Save menu item should be enabled. Save is allowed only
+   * Whether the Save button should be enabled. Save is allowed only
    * when ALL of the following hold:
    *   - No save is currently in flight (F7)
    *   - A file is selected
@@ -405,8 +402,8 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
   /**
    * Ctrl/Cmd+S — trigger save. Prevented from the browser default so
-   * the page does not try to save as HTML. Active only when the menu
-   * bar is logically visible (a file is selected).
+   * the page does not try to save as HTML. Active only when the Save
+   * button is logically visible (a file is selected).
    */
   @HostListener('window:keydown', ['$event'])
   onSaveKeydown(event: KeyboardEvent): void {

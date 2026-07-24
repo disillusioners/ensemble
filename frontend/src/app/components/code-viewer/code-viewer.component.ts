@@ -10,16 +10,6 @@ import { CodemirrorDirective } from './codemirror.directive';
   template: `
     @if (file(); as f) {
       <div class="code-viewer">
-        <div class="code-header">
-          <span class="filepath">{{ f.path }}</span>
-          <span class="meta">{{ f.total_lines }} lines · {{ formatSize(f.size_bytes) }}</span>
-          @if (f.binary) {
-            <span class="badge binary">Binary</span>
-          }
-          @if (f.truncated) {
-            <span class="badge truncated">Truncated</span>
-          }
-        </div>
         @if (f.binary) {
           <div class="binary-placeholder">
             This file is binary and cannot be edited ({{ formatSize(f.size_bytes) }})

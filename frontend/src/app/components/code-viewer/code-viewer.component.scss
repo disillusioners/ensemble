@@ -11,51 +11,6 @@
   background: #282c34;
 }
 
-.code-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  padding: 0 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  color: #d7dae0;
-  background: #21252b;
-}
-
-.filepath {
-  min-width: 0;
-  overflow: hidden;
-  font-family: monospace;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.meta {
-  margin-left: auto;
-  color: #9da5b4;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.badge {
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-
-  &.binary {
-    color: #f3c969;
-    background: rgba(243, 201, 105, 0.16);
-  }
-
-  &.truncated {
-    color: #e5a8ff;
-    background: rgba(229, 168, 255, 0.16);
-  }
-}
-
 .code-content {
   flex: 1;
   min-height: 0;

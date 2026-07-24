@@ -14,7 +14,11 @@ import type { FileContentResponse } from '../../models/workspace.model';
  *   - formatSize (pure method on the REAL component)
  *   - DOM rendering for text files (with the live CodeMirror directive)
  *   - DOM rendering for binary files
- *   - Badge visibility (Binary / Truncated)
+ *   - DOM rendering for truncated files
+ *
+ * Note: badges (Binary / Truncated) and file metadata moved to the
+ * workspace toolbar in the unified-toolbar refactor, so their rendering
+ * is verified at the workspace level instead.
  */
 describe('CodeViewerComponent', () => {
   let fixture: ComponentFixture<CodeViewerComponent>;
@@ -107,49 +111,15 @@ describe('CodeViewerComponent', () => {
       fixture.detectChanges();
     });
 
-    it('should render the file path in the header', () => {
-      const header = fixture.nativeElement.querySelector('.filepath') as HTMLElement | null;
-      expect(header?.textContent).toContain('test.py');
-    });
-
-    it('should render the file size and line count in the meta line', () => {
-      const meta = fixture.nativeElement.querySelector('.meta') as HTMLElement | null;
-      expect(meta?.textContent).toContain('1 lines');
-      expect(meta?.textContent).toContain('16 B');
-    });
-
     it('should render the code content area when file is not binary', () => {
       expect(fixture.nativeElement.querySelector('.code-content')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('.binary-placeholder')).toBeNull();
-    });
-
-    it('should NOT show the Binary badge for text files', () => {
-      expect(fixture.nativeElement.querySelector('.badge.binary')).toBeNull();
-    });
-
-    it('should NOT show the Truncated badge when the file is fully loaded', () => {
-      expect(fixture.nativeElement.querySelector('.badge.truncated')).toBeNull();
     });
   });
 
   // ── 4) DOM rendering: binary file ──────────────────────────────
 
   describe('DOM rendering (binary file)', () => {
-    it('should show the Binary badge', () => {
-      mockWorkspace.currentFile.set(makeFile({
-        path: 'image.png',
-        content: '',
-        language: null,
-        total_lines: 0,
-        binary: true,
-        size_bytes: 1024,
-      }));
-      fixture.detectChanges();
-
-      const badge = fixture.nativeElement.querySelector('.badge.binary') as HTMLElement | null;
-      expect(badge?.textContent).toContain('Binary');
-    });
-
     it('should render the binary placeholder instead of the code area', () => {
       mockWorkspace.currentFile.set(makeFile({
         path: 'image.png',
@@ -184,21 +154,6 @@ describe('CodeViewerComponent', () => {
   // ── 5) DOM rendering: truncated file ───────────────────────────
 
   describe('DOM rendering (truncated file)', () => {
-    it('should show the Truncated badge', () => {
-      mockWorkspace.currentFile.set(makeFile({
-        path: 'big.txt',
-        content: 'partial contents…',
-        language: null,
-        total_lines: 1000,
-        truncated: true,
-        size_bytes: 1_048_576,
-      }));
-      fixture.detectChanges();
-
-      const badge = fixture.nativeElement.querySelector('.badge.truncated') as HTMLElement | null;
-      expect(badge?.textContent).toContain('Truncated');
-    });
-
     it('should render the truncated placeholder instead of the code editor (F4)', () => {
       // F4 — a truncated preview is never editable; the editor must
       // show a read-only placeholder so the user cannot accidentally
@@ -437,23 +392,6 @@ describe('CodeViewerComponent', () => {
 
       expect(fixture.nativeElement.querySelector('.truncated-placeholder')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('.code-content')).toBeNull();
-    });
-
-    it('should render the Truncated badge', () => {
-      mockWorkspace.currentFile.set(
-        makeFile({
-          path: 'big.txt',
-          content: 'partial contents…',
-          language: null,
-          total_lines: 1000,
-          truncated: true,
-          size_bytes: 1_048_576,
-        })
-      );
-      fixture.detectChanges();
-
-      const badge = fixture.nativeElement.querySelector('.badge.truncated') as HTMLElement | null;
-      expect(badge?.textContent).toContain('Truncated');
     });
   });
 });
