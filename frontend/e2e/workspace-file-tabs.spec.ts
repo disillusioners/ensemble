@@ -3,9 +3,9 @@ import { test, expect, type Page } from '@playwright/test';
 /**
  * E2E: Workspace Multi-File Tabs (VS Code style)
  *
- * Branch: feature/workspace-file-tabs (commit 37d2039f)
+ * Branch: feature/workspace-file-tabs (commit 2032dc9b)
  *
- * Verifies 13 scenarios for the FileTabsComponent + WorkspaceComponent
+ * Verifies 18 scenarios for the FileTabsComponent + WorkspaceComponent
  * multi-file tab interaction:
  *   1.  Click file in tree → opens as new tab
  *   2.  Click another file → opens as second tab
@@ -20,6 +20,11 @@ import { test, expect, type Page } from '@playwright/test';
  *   11. Save works on active tab
  *   12. Switch between project tabs → file tabs preserved (LRU cache)
  *   13. SSE file change refreshes open tab content (if not dirty)
+ *   14. [C1 Fix] Close dirty tab, reopen → content is fresh from disk
+ *   15. [C2 Fix] Rapid A→B switch → B shows its OWN content (no race)
+ *   16. [W2 Fix] Save then immediately type → dirty indicator reappears
+ *   17. [W3 Fix] Cached tab click → content loads (not blank)
+ *   18. [W4 Fix] Close dirty tab → confirm dialog appears
  *
  * Uses dev DB project ID: 39ed737e-f106-4b1a-beb4-667c1c887918 (agents-ensemble)
  *
@@ -103,6 +108,23 @@ async function closeTabByPath(page: Page, path: string): Promise<void> {
   await page.waitForTimeout(800);
 }
 
+/**
+ * Dismiss a confirmation dialog if one is visible (e.g. the W4
+ * unsaved-changes prompt). Clicks "Discard" / the confirm button.
+ * No-op when no dialog is present.
+ */
+async function dismissConfirmDialogIfPresent(page: Page): Promise<void> {
+  const visible = await page
+    .waitForSelector('app-confirm-dialog button:has-text("Discard")', { state: 'visible', timeout: 1000 })
+    .then(() => true)
+    .catch(() => false);
+  if (visible) {
+    await page.locator('app-confirm-dialog button:has-text("Discard")').first().click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    console.log('[Helper] Dismissed confirm dialog (Discard)');
+  }
+}
+
 /** Close all open tabs to reset state for the next test. */
 async function closeAllTabs(page: Page): Promise<void> {
   let safety = 10;
@@ -112,6 +134,8 @@ async function closeAllTabs(page: Page): Promise<void> {
     const path = testid?.replace(/^file-tab-/, '');
     if (!path) break;
     await closeTabByPath(page, path);
+    // A dirty tab may trigger the W4 confirm dialog — dismiss it.
+    await dismissConfirmDialogIfPresent(page);
   }
 }
 
@@ -680,5 +704,353 @@ test.describe('Workspace Multi-File Tabs', () => {
     test.skip(true, 'SSE refresh cycle requires backend file watcher — skipped to avoid flakiness');
 
     await closeAllTabs(page);
+  });
+
+  // ── Scenario 14: [C1 Fix] Close dirty tab, reopen → fresh content ────
+  test('14. [C1] Close dirty tab, reopen → content is fresh from disk', async () => {
+    test.setTimeout(60000);
+    await page.goto(WORKSPACE_URL);
+    await page.waitForTimeout(3000);
+
+    await expandTesterDir(page);
+    await clickFile(page, FILE_A_NAME);
+    await page.waitForTimeout(1500);
+
+    // Capture original content
+    const originalContent = await editorText(page);
+    const originalSnippet = originalContent.slice(0, 80);
+    console.log(`[S14] Original content snippet: "${originalSnippet}..."`);
+
+    // Type an edit marker (make dirty)
+    const EDIT_MARKER = `// C1-REOPEN-TEST-${Date.now()}`;
+    const editor = page.locator('.cm-content').first();
+    await expect(editor).toBeVisible({ timeout: 10000 });
+    await editor.click();
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(EDIT_MARKER);
+    await page.waitForTimeout(800);
+
+    // Verify dirty
+    const dirtyDot = page.locator('.file-tab.active .dirty-dot');
+    await expect(dirtyDot).toBeVisible({ timeout: 5000 });
+    console.log('[S14] Dirty after edit ✓');
+
+    // Switch to tab B first (to have another tab open)
+    await clickFile(page, FILE_B_NAME);
+    await page.waitForTimeout(1000);
+
+    // Now close tab A (dirty) — confirm dialog should appear
+    await closeTabByPath(page, FILE_A_TREE_PATH);
+    await page.waitForTimeout(500);
+
+    // Handle the confirm dialog (click Discard)
+    const discardBtn = page.locator('app-confirm-dialog button:has-text("Discard")').first();
+    const dialogVisible = await discardBtn.isVisible({ timeout: 3000 }).catch(() => false);
+    if (dialogVisible) {
+      await discardBtn.click();
+      await page.waitForTimeout(1000);
+      console.log('[S14] Discarded unsaved changes via dialog ✓');
+    } else {
+      // Some implementations may auto-close dirty tabs; check if tab is already gone
+      console.log('[S14] No confirm dialog — tab may have closed directly');
+    }
+
+    await page.waitForTimeout(500);
+
+    // Re-open file A from the file tree
+    await clickFile(page, FILE_A_NAME);
+    await page.waitForTimeout(2000);
+
+    // Verify content is the ORIGINAL disk content, NOT the stale edited content
+    const reopenedContent = await editorText(page);
+    const hasStaleEdit = reopenedContent.includes(EDIT_MARKER);
+    console.log(`[S14] Reopened content contains stale edit marker: ${hasStaleEdit}`);
+
+    if (hasStaleEdit) {
+      console.log('[S14] FAIL — stale edit marker found in reopened content!');
+      await screenshot(page, 's14-stale-edit');
+    } else {
+      console.log('[S14] PASS — reopened content is fresh from disk ✓');
+    }
+
+    // HARD ASSERT: stale edit must NOT be present after close+reopen
+    expect(reopenedContent).not.toContain(EDIT_MARKER);
+
+    await closeAllTabs(page);
+  });
+
+  // ── Scenario 15: [C2 Fix] Rapid A→B switch → B shows its OWN content ─
+  test('15. [C2] Rapid A→B switch → B shows its OWN content (no race)', async () => {
+    test.setTimeout(60000);
+    await page.goto(WORKSPACE_URL);
+    await page.waitForTimeout(3000);
+
+    await expandTesterDir(page);
+    await clickFile(page, FILE_A_NAME);
+    await page.waitForTimeout(2000);
+
+    // Capture content of A
+    const contentA = await editorText(page);
+    const snippetA = contentA.slice(0, 100);
+    console.log(`[S15] File A snippet: "${snippetA}..."`);
+
+    // Rapidly open B — the race condition is that B's viewer might show A's content
+    await clickFile(page, FILE_B_NAME);
+    // Check content immediately (don't wait the full 2s in clickFile)
+    await page.waitForTimeout(500);
+
+    const contentBRapid = await editorText(page);
+    const snippetBRapid = contentBRapid.slice(0, 100);
+    console.log(`[S15] File B (rapid) snippet: "${snippetBRapid}..."`);
+
+    // Wait a bit more and check again
+    await page.waitForTimeout(2000);
+    const contentBSettled = await editorText(page);
+    const snippetBSettled = contentBSettled.slice(0, 100);
+    console.log(`[S15] File B (settled) snippet: "${snippetBSettled}..."`);
+
+    // Verify B has its own content (different from A)
+    let raceDetected = false;
+    if (contentA.length > 0 && contentBRapid.length > 0) {
+      if (contentA === contentBRapid) {
+        console.log('[S15] WARN — B rapid content matches A content (possible race)');
+        raceDetected = true;
+      } else {
+        console.log('[S15] PASS (rapid) — B has its own content, no race ✓');
+      }
+    }
+
+    // After settling, B must definitely have its own content
+    if (contentA.length > 0 && contentBSettled.length > 0) {
+      expect(contentBSettled).not.toEqual(contentA);
+      console.log('[S15] PASS (settled) — B content differs from A ✓');
+    }
+
+    if (raceDetected) {
+      await screenshot(page, 's15-race-detected');
+    }
+
+    await closeAllTabs(page);
+  });
+
+  // ── Scenario 16: [W2 Fix] Save then type → dirty reappears ───────────
+  test('16. [W2] Save then immediately type → dirty indicator reappears', async () => {
+    test.setTimeout(60000);
+    await page.goto(WORKSPACE_URL);
+    await page.waitForTimeout(3000);
+
+    await expandTesterDir(page);
+    await clickFile(page, FILE_A_NAME);
+    await page.waitForTimeout(1500);
+
+    // Edit: type some text (make dirty)
+    const editor = page.locator('.cm-content').first();
+    await expect(editor).toBeVisible({ timeout: 10000 });
+    await editor.click();
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(' // w2-save-test');
+    await page.waitForTimeout(500);
+
+    // Verify dirty before save
+    const dirtyBeforeSave = page.locator('.file-tab.active .dirty-dot');
+    await expect(dirtyBeforeSave).toBeVisible({ timeout: 5000 });
+    console.log('[S16] Dirty before save ✓');
+
+    // Click the Save button
+    const saveBtn = page.locator('[data-testid="save-button"]');
+    await expect(saveBtn).toBeVisible({ timeout: 5000 });
+    await saveBtn.click();
+    console.log('[S16] Save button clicked');
+
+    // Immediately type more text — re-focus the editor first since
+    // the save button click moved focus away from CodeMirror.
+    await page.waitForTimeout(300); // Brief wait for save to start
+    await editor.click(); // Re-focus CodeMirror editor
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(' // post-save-edit');
+    await page.waitForTimeout(1000);
+
+    // Verify dirty indicator REAPPEARS after post-save edit
+    const dirtyAfterPostSaveEdit = page.locator('.file-tab.active .dirty-dot');
+    const dirtyVisible = await dirtyAfterPostSaveEdit.isVisible().catch(() => false);
+
+    const toolbarDirty = page.locator('[data-testid="dirty-indicator"]');
+    const toolbarDirtyVisible = await toolbarDirty.isVisible().catch(() => false);
+
+    console.log(`[S16] Dirty-dot after post-save edit: ${dirtyVisible ? 'visible (PASS)' : 'NOT visible (FAIL)'}`);
+    console.log(`[S16] Toolbar dirty after post-save edit: ${toolbarDirtyVisible ? 'visible (PASS)' : 'NOT visible (FAIL)'}`);
+
+    if (!dirtyVisible && !toolbarDirtyVisible) {
+      await screenshot(page, 's16-no-dirty-after-save');
+    }
+
+    // At least one dirty indicator should be visible
+    expect(dirtyVisible || toolbarDirtyVisible).toBe(true);
+    console.log('[S16] PASS — file correctly marked dirty after post-save edit ✓');
+
+    // Cleanup: revert the file to remove our test markers
+    await closeAllTabs(page);
+    try {
+      const res = await page.request.get(
+        `http://localhost:8079/api/workspace/${PROJECT_ID}/file?path=${encodeURIComponent(FILE_A_TREE_PATH)}`
+      );
+      const body = await res.json();
+      const cleanContent = (body.content as string)
+        .replace(/\s*\/\/ w2-save-test\s*$/, '')
+        .replace(/\s*\/\/ post-save-edit\s*$/, '');
+      await page.request.put(
+        `http://localhost:8079/api/workspace/${PROJECT_ID}/file`,
+        { data: { path: FILE_A_TREE_PATH, content: cleanContent } }
+      );
+      console.log('[S16] Cleanup: removed test markers from README.md ✓');
+    } catch (e) {
+      console.log(`[S16] Cleanup failed: ${(e as Error).message}`);
+    }
+  });
+
+  // ── Scenario 17: [W3 Fix] Cached tab click → content loads ───────────
+  test('17. [W3] Cached tab click → content loads (not blank)', async () => {
+    test.setTimeout(60000);
+    await page.goto(WORKSPACE_URL);
+    await page.waitForTimeout(3000);
+
+    // Open 3 files
+    await expandTesterDir(page);
+    await clickFile(page, FILE_A_NAME);
+    await page.waitForTimeout(500);
+    await clickFile(page, FILE_B_NAME);
+    await page.waitForTimeout(500);
+    await clickFile(page, '.DS_Store');
+    await page.waitForTimeout(1500);
+
+    expect(await tabCount(page)).toBe(3);
+    console.log('[S17] 3 tabs open ✓');
+
+    // Capture content of A for later comparison
+    await clickTab(page, FILE_A_NAME);
+    await page.waitForTimeout(1000);
+    const contentA = await editorText(page);
+    const snippetA = contentA.slice(0, 60);
+    console.log(`[S17] Tab A content: "${snippetA}..."`);
+
+    // Now click through all tabs and verify content loads each time
+    // Click tab B
+    await clickTab(page, FILE_B_NAME);
+    await page.waitForTimeout(1000);
+    const contentB = await editorText(page);
+    const snippetB = contentB.slice(0, 60);
+    console.log(`[S17] Tab B content: "${snippetB}..."`);
+    expect(contentB.length).toBeGreaterThan(0);
+    console.log('[S17] Tab B content loaded ✓');
+
+    // Click tab .DS_Store
+    await clickTab(page, '.DS_Store');
+    await page.waitForTimeout(1000);
+    const contentDS = await editorText(page);
+    console.log(`[S17] Tab .DS_Store content length: ${contentDS.length}`);
+
+    // Click back to tab A (this is the key W3 test — cached tab must show content)
+    await clickTab(page, FILE_A_NAME);
+    await page.waitForTimeout(1500);
+    const contentAReloaded = await editorText(page);
+    const snippetAReloaded = contentAReloaded.slice(0, 60);
+    console.log(`[S17] Tab A re-selected content: "${snippetAReloaded}..."`);
+
+    // HARD ASSERT: content must NOT be blank
+    expect(contentAReloaded.length).toBeGreaterThan(0);
+    console.log('[S17] PASS — cached tab A shows content (not blank) ✓');
+
+    // Content should match the original (same file)
+    if (contentA.length > 0 && contentAReloaded.length > 0) {
+      expect(contentAReloaded).toEqual(contentA);
+      console.log('[S17] PASS — content matches original ✓');
+    }
+
+    await screenshot(page, 's17-cached-tab-content');
+    await closeAllTabs(page);
+  });
+
+  // ── Scenario 18: [W4 Fix] Close dirty tab → confirm dialog ────────────
+  test('18. [W4] Close dirty tab → confirm dialog appears', async () => {
+    test.setTimeout(60000);
+    await page.goto(WORKSPACE_URL);
+    await page.waitForTimeout(3000);
+
+    await expandTesterDir(page);
+    await clickFile(page, FILE_A_NAME);
+    await page.waitForTimeout(1500);
+
+    // Edit the file (make dirty)
+    const editor = page.locator('.cm-content').first();
+    await expect(editor).toBeVisible({ timeout: 10000 });
+    await editor.click();
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(' // w4-dialog-test');
+    await page.waitForTimeout(800);
+
+    // Verify dirty
+    const dirtyDot = page.locator('.file-tab.active .dirty-dot');
+    await expect(dirtyDot).toBeVisible({ timeout: 5000 });
+    console.log('[S18] File is dirty ✓');
+
+    // Click the close button on the dirty tab
+    const tab = page.locator(`[data-testid="file-tab-${FILE_A_TREE_PATH}"]`).first();
+    await tab.hover();
+    await page.waitForTimeout(300);
+    const closeBtn = page.locator(`[data-testid="file-tab-close-${FILE_A_TREE_PATH}"]`).first();
+    await closeBtn.click({ timeout: 5000 });
+    console.log('[S18] Close button clicked on dirty tab');
+
+    // Verify the confirmation dialog appears — use waitForSelector for
+    // reliable timeout-based waiting (isVisible() returns immediately).
+    const dialogVisible = await page
+      .waitForSelector('app-confirm-dialog', { state: 'visible', timeout: 5000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (dialogVisible) {
+      console.log('[S18] PASS — confirmation dialog appeared ✓');
+      await screenshot(page, 's18-confirm-dialog');
+
+      // Check for dialog content mentioning unsaved/discard
+      const dialogEl = page.locator('app-confirm-dialog');
+      const dialogText = (await dialogEl.textContent()) ?? '';
+      const mentionsUnsaved = /unsaved|discard/i.test(dialogText);
+      console.log(`[S18] Dialog mentions unsaved/discard: ${mentionsUnsaved}`);
+      console.log(`[S18] Dialog text: "${dialogText.trim().slice(0, 120)}"`);
+
+      // Click Discard to close the dialog and proceed
+      const discardBtn = page.locator('app-confirm-dialog button:has-text("Discard")').first();
+      await discardBtn.click();
+      await page.waitForTimeout(1000);
+      console.log('[S18] Clicked Discard — tab should be closed now');
+    } else {
+      console.log('[S18] FAIL — no confirmation dialog appeared for dirty tab close!');
+      await screenshot(page, 's18-no-dialog');
+
+      // The tab may have closed without a dialog — try to clean up
+      await closeAllTabs(page);
+    }
+
+    // HARD ASSERT: dialog must appear for dirty tab close
+    expect(dialogVisible).toBe(true);
+
+    // Cleanup: revert any test markers if they got saved somehow
+    try {
+      const res = await page.request.get(
+        `http://localhost:8079/api/workspace/${PROJECT_ID}/file?path=${encodeURIComponent(FILE_A_TREE_PATH)}`
+      );
+      const body = await res.json();
+      if ((body.content as string).includes('w4-dialog-test')) {
+        const cleanContent = (body.content as string).replace(/\s*\/\/ w4-dialog-test\s*$/, '');
+        await page.request.put(
+          `http://localhost:8079/api/workspace/${PROJECT_ID}/file`,
+          { data: { path: FILE_A_TREE_PATH, content: cleanContent } }
+        );
+        console.log('[S18] Cleanup: removed w4-dialog-test marker from README.md ✓');
+      }
+    } catch (e) {
+      console.log(`[S18] Cleanup failed: ${(e as Error).message}`);
+    }
   });
 });

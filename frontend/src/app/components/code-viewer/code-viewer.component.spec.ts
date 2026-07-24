@@ -34,7 +34,15 @@ describe('CodeViewerComponent', () => {
     setFileDirty: jest.Mock;
     setActiveFile: jest.Mock;
     openFile: jest.Mock;
+    isTabOpen: jest.Mock;
   };
+
+  /**
+   * Backing array for `mockWorkspace.isTabOpen`. Tests that need to
+   * simulate tab-close / tab-open transitions mutate this array in
+   * place — `isTabOpen` reads it on every call.
+   */
+  let openTabs: string[];
 
   function makeFile(overrides: Partial<FileContentResponse> = {}): FileContentResponse {
     return {
@@ -64,6 +72,7 @@ describe('CodeViewerComponent', () => {
   }
 
   beforeEach(async () => {
+    openTabs = [];
     mockWorkspace = {
       currentFile: signal<FileContentResponse | null>(null),
       activeFilePath: signal<string | null>(null),
@@ -73,6 +82,10 @@ describe('CodeViewerComponent', () => {
       setFileDirty: jest.fn(),
       setActiveFile: jest.fn().mockReturnValue(true),
       openFile: jest.fn(),
+      // `isTabOpen(path)` reads the test-owned `openTabs` array so
+      // close-active-tab scenarios can flip the membership without
+      // re-creating the component.
+      isTabOpen: jest.fn((path: string) => openTabs.includes(path)),
     };
 
     await TestBed.configureTestingModule({
@@ -438,6 +451,9 @@ describe('CodeViewerComponent', () => {
       const file = makeFile({ path, content });
       mockWorkspace.currentFile.set(file);
       mockWorkspace.activeFilePath.set(path);
+      // Keep the mock tab list in sync with the active file so the
+      // component's `isTabOpen` calls return true for open tabs.
+      if (!openTabs.includes(path)) openTabs.push(path);
       fixture.detectChanges();
     }
 
@@ -603,6 +619,65 @@ describe('CodeViewerComponent', () => {
       expect(component.editedContent()).toBe('a-first-edit-and-more');
       expect(component.isDirty()).toBe(true);
       expect(mockWorkspace.setFileDirty).toHaveBeenLastCalledWith('a.ts', true);
+    });
+
+    // ── C1 residual: closing the ACTIVE tab must not let the tab-
+    //    switch effect re-add the closed path's stale edits to the
+    //    edit-state map. Without the `isTabOpen` guard in the snapshot
+    //    branch, forgetTab() is followed by an effect run that writes
+    //    the stale buffer back, and reopening shows the stale content.
+    it('close active tab then reopen: shows fresh content, not stale edits', () => {
+      // Open A and dirty it.
+      switchTo('a.ts', 'a-original');
+      component.onContentChange('a-modified');
+      expect(component.isDirty()).toBe(true);
+      expect(component.editedContent()).toBe('a-modified');
+
+      // Simulate closing A while it is the ACTIVE tab. The real
+      // WorkspaceService removes the path from the tab list and
+      // sets the active file to null (no neighbour). We mirror that
+      // here: drop A from `openTabs`, null out currentFile, then
+      // forgetTab(A) clears the map entry.
+      const idx = openTabs.indexOf('a.ts');
+      if (idx >= 0) openTabs.splice(idx, 1);
+      mockWorkspace.currentFile.set(null);
+      mockWorkspace.activeFilePath.set(null);
+      component.forgetTab('a.ts');
+      fixture.detectChanges();
+
+      // Reopen A. The effect must NOT re-add A's stale state to the
+      // map (because A is not open at the moment of the snapshot),
+      // so the editor loads the fresh disk content and is clean.
+      switchTo('a.ts', 'a-original');
+      expect(component.editedContent()).toBe('a-original');
+      expect(component.isDirty()).toBe(false);
+    });
+
+    // ── W2 residual: markSaved() must unconditionally align
+    //    `originalContent` to the PUT body. If the user types during
+    //    the PUT and then undoes back to a pre-save revision, the file
+    //    is dirty: disk holds the saved body, editor holds an older
+    //    revision.
+    it('markSaved with concurrent edit: undo back to pre-save shows dirty', () => {
+      switchTo('a.ts', 'v1');
+      component.onContentChange('v2');
+      // PUT departs with 'v2' — markSaved aligns the baseline.
+      component.markSaved('v2');
+      expect(component.isDirty()).toBe(false);
+
+      // Simulate typing during the in-flight PUT: editedContent
+      // diverges from the saved body. With original=v2 and edited=v3,
+      // isDirty must be true.
+      component.onContentChange('v3');
+      expect(component.editedContent()).toBe('v3');
+      expect(component.isDirty()).toBe(true);
+
+      // Simulate the user undoing back to the pre-save revision.
+      // The disk still holds v2 (the PUT body), so the editor at v1
+      // is diverging from disk and must remain dirty.
+      component.onContentChange('v1');
+      expect(component.editedContent()).toBe('v1');
+      expect(component.isDirty()).toBe(true);
     });
 
     it('clears all edit state when switching to no file (null)', () => {

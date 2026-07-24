@@ -216,12 +216,20 @@ export class CodeViewerComponent {
       // active signals (those writes below would otherwise cause an
       // infinite re-run).
       if (previousPath && previousPath !== incomingPath) {
-        const outgoing = untracked<EditState>(() => ({
-          original: this.originalContent(),
-          edited: this.editedContent(),
-          baseline: this.savedBaseline(),
-        }));
-        this.editStateMap.set(previousPath, outgoing);
+        // Guard: skip the snapshot if `previousPath` is no longer an
+        // open tab. When the active tab is closed, `forgetTab(path)`
+        // removes its entry from the map before the tab-switch effect
+        // runs; without this guard, the effect would unconditionally
+        // re-add the entry under the closed path, defeating the
+        // forget and leaving stale edits to be restored on reopen.
+        if (this.workspace.isTabOpen(previousPath)) {
+          const outgoing = untracked<EditState>(() => ({
+            original: this.originalContent(),
+            edited: this.editedContent(),
+            baseline: this.savedBaseline(),
+          }));
+          this.editStateMap.set(previousPath, outgoing);
+        }
       }
 
       const stored = this.editStateMap.get(incomingPath);
@@ -310,15 +318,14 @@ export class CodeViewerComponent {
     const path = untracked(() => this.currentFilePath());
     this.setBaseline(savedContent);
 
-    // Only update originalContent if the edited content still matches
-    // what was saved. If the user typed more after the PUT departed,
-    // editedContent !== savedContent, so the file remains correctly
-    // dirty.
-    if (untracked(() => this.editedContent()) === savedContent) {
-      this.setOriginal(savedContent);
-    }
-    // If editedContent !== savedContent, the original stays as the
-    // pre-save version, so isDirty remains true — correct behavior.
+    // Always align `originalContent` to the PUT body. `originalContent`
+    // tracks "last successful save", NOT "user's current typing". If
+    // the user typed more after the PUT departed, `editedContent !==
+    // savedContent` and isDirty stays true (edited !== original). If
+    // the user later undoes back to a pre-save revision, `editedContent
+    // !== originalContent` still correctly signals dirty — the disk
+    // holds the saved body, the editor holds the older revision.
+    this.setOriginal(savedContent);
 
     if (path) {
       // Update the map entry.
