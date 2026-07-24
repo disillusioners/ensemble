@@ -107,7 +107,9 @@ export class CodemirrorDirective implements OnChanges, OnDestroy {
             // change (typing, paste, drop, IME composition). It is
             // false for dispatches we issue programmatically because
             // those do not carry a userEvent annotation.
-            if (update.docChanged && update.transactions.some((t) => t.isUserEvent('input'))) {
+            if (update.docChanged && update.transactions.some((t) =>
+              t.isUserEvent('input') || t.isUserEvent('undo') || t.isUserEvent('redo')
+            )) {
               this.contentChange.emit(update.state.doc.toString());
             }
           }),
