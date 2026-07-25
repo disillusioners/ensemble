@@ -103,3 +103,117 @@ $accent-cyan: #10a7f7;
   --mdc-snackbar-container-color: #4caf50;
   --mdc-snackbar-supporting-text-color: white;
 }
+
+// Editor section — radio cards styled to match the dark theme. The wrapping
+// label element acts as the click target so the radio + label area both
+// toggle together.
+.editor-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 480px;
+}
+
+.editor-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.875rem 1rem;
+  background: $bg-primary;
+  border: 1px solid $border-color;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+
+  &:hover {
+    border-color: lighten($border-color, 8%);
+  }
+
+  &.selected {
+    border-color: $accent-cyan;
+    background-color: rgba(16, 167, 247, 0.08);
+  }
+
+  input[type='radio'] {
+    margin-right: 0.5rem;
+    vertical-align: middle;
+    accent-color: $accent-cyan;
+  }
+
+  .editor-option-label {
+    font-weight: 600;
+    color: $text-primary;
+  }
+
+  .editor-option-hint {
+    font-size: 0.8125rem;
+    color: $text-secondary;
+    margin-left: 1.5rem;
+  }
+}
+
+.vscode-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.625rem;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  background: rgba(148, 163, 184, 0.12);
+  color: $text-secondary;
+  border: 1px solid transparent;
+
+  .status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  &.running {
+    background: rgba(34, 197, 94, 0.12);
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.3);
+  }
+
+  &.stopped {
+    background: rgba(148, 163, 184, 0.12);
+    color: $text-secondary;
+    border-color: rgba(148, 163, 184, 0.3);
+  }
+
+  &.starting {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+}
+
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+}
+
+.apply-spinner {
+  display: inline-block;
+}
+
+.dirty-hint {
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  font-style: italic;
+}

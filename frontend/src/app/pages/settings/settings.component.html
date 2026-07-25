@@ -43,4 +43,73 @@
       <span class="saving-indicator">Saving...</span>
     }
   </section>
+
+  <section class="setting-section editor-section">
+    <h2>Editor</h2>
+    <p class="setting-description">
+      Choose which editor to use when opening files. Built-in Editor runs in the browser
+      via CodeMirror. VS Code launches a remote code-server instance you can connect to
+      from your local VS Code client.
+    </p>
+
+    <div class="editor-options" role="radiogroup" aria-label="Editor preference">
+      <label class="editor-option" [class.selected]="selectedEditor() === 'builtin'">
+        <input
+          type="radio"
+          name="editor-preference"
+          value="builtin"
+          [checked]="selectedEditor() === 'builtin'"
+          (change)="onEditorSelectionChange('builtin')"
+          [disabled]="applyingEditor()"
+        />
+        <span class="editor-option-label">Built-in Editor</span>
+        <span class="editor-option-hint">In-browser editor (CodeMirror).</span>
+      </label>
+
+      <label class="editor-option" [class.selected]="selectedEditor() === 'vscode'">
+        <input
+          type="radio"
+          name="editor-preference"
+          value="vscode"
+          [checked]="selectedEditor() === 'vscode'"
+          (change)="onEditorSelectionChange('vscode')"
+          [disabled]="applyingEditor()"
+        />
+        <span class="editor-option-label">VS Code</span>
+        <span class="editor-option-hint">Remote code-server instance.</span>
+      </label>
+    </div>
+
+    @if (selectedEditor() === 'vscode' && vscodeStatus()) {
+      <div class="vscode-status-row">
+        <span class="status-badge" [ngClass]="vscodeStatusClass()">
+          <span class="status-dot"></span>
+          {{ vscodeStatusLabel() }}
+        </span>
+      </div>
+    }
+
+    <div class="editor-actions">
+      <button
+        mat-raised-button
+        color="primary"
+        (click)="saveEditor()"
+        [disabled]="!editorDirty() || applyingEditor()"
+      >
+        @if (applyingEditor()) {
+          <mat-progress-spinner
+            diameter="18"
+            mode="indeterminate"
+            class="apply-spinner"
+          ></mat-progress-spinner>
+          <span>Applying...</span>
+        } @else {
+          <span>Apply</span>
+        }
+      </button>
+      @if (editorDirty() && !applyingEditor()) {
+        <span class="dirty-hint">Unsaved changes</span>
+      }
+    </div>
+  </section>
 </div>

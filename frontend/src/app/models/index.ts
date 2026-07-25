@@ -407,3 +407,12 @@ export interface MigrationLogEntry {
   message: string;
   timestamp: string;
 }
+
+// Editor settings types
+export interface VSCodeStatus {
+  running: boolean;
+  port: number | null;
+  allow_remote: boolean;
+}
+
+export type EditorType = 'builtin' | 'vscode';

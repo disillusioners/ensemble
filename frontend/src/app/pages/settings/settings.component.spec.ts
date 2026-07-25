@@ -3,6 +3,7 @@ import { of, throwError } from 'rxjs';
 
 // Storage key matching the component
 const STORAGE_KEY = 'settings-language-preference';
+const EDITOR_STORAGE_KEY = 'settings-editor-preference';
 const CUSTOM_OPTION_VALUE = 'Other (custom)';
 const PREDEFINED_LANGUAGES = [
   'Auto',
@@ -21,6 +22,15 @@ const PREDEFINED_LANGUAGES = [
   'Dutch',
   'Hindi',
 ];
+const STATUS_POLL_INTERVAL_MS = 2000;
+const DEFAULT_EDITOR: EditorType = 'builtin';
+type EditorType = 'builtin' | 'vscode';
+
+interface VSCodeStatus {
+  running: boolean;
+  port: number | null;
+  allow_remote: boolean;
+}
 
 // localStorage mock helpers
 let localStorageData: Record<string, string> = {};
@@ -85,6 +95,11 @@ class MockMatSnackBar {
 class MockSettingsService {
   getLanguagePreference = jest.fn();
   setLanguagePreference = jest.fn();
+  getEditorPreference = jest.fn();
+  setEditorPreference = jest.fn();
+  getVscodeStatus = jest.fn();
+  startVscodeServer = jest.fn();
+  stopVscodeServer = jest.fn();
 }
 
 // Testable SettingsComponent (mirrors actual component for testing)
@@ -96,6 +111,15 @@ class TestableSettingsComponent {
   readonly isCustom = signal<boolean>(false);
   readonly saving = signal<boolean>(false);
 
+  // Editor preference state — public readonly to match production signal exposure
+  readonly selectedEditor = signal<EditorType>(DEFAULT_EDITOR);
+  readonly savedEditor = signal<EditorType>(DEFAULT_EDITOR);
+  readonly applyingEditor = signal<boolean>(false);
+  readonly vscodeStatus = signal<VSCodeStatus | null>(null);
+  readonly editorDirty = signal<boolean>(false);
+
+  private statusPollTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(
     private settingsService: MockSettingsService,
     private snackBar: MockMatSnackBar,
@@ -104,6 +128,11 @@ class TestableSettingsComponent {
   ngOnInit(): void {
     this.loadFromStorage();
     this.loadFromApi();
+    this.loadEditorPreference();
+  }
+
+  ngOnDestroy(): void {
+    this.stopStatusPolling();
   }
 
   private loadFromStorage(): void {
@@ -145,6 +174,157 @@ class TestableSettingsComponent {
         });
       },
     });
+  }
+
+  private loadEditorPreference(): void {
+    let cached: string | null = null;
+    try {
+      cached = localStorage.getItem(EDITOR_STORAGE_KEY);
+    } catch {
+      cached = null;
+    }
+
+    const cachedEditor = this.coerceEditorType(cached);
+    if (cachedEditor) {
+      this.selectedEditor.set(cachedEditor);
+      this.savedEditor.set(cachedEditor);
+    }
+
+    let hadCached = cached !== null;
+    this.settingsService.getEditorPreference().subscribe({
+      next: (resp: { editor: string }) => {
+        const editor = this.coerceEditorType(resp?.editor);
+        if (editor) {
+          this.selectedEditor.set(editor);
+          this.savedEditor.set(editor);
+          this.editorDirty.set(false);
+          this.persistEditorToStorage(editor);
+          if (editor === 'vscode') {
+            this.startStatusPolling();
+          }
+        }
+      },
+      error: () => {
+        if (!hadCached) {
+          this.selectedEditor.set(DEFAULT_EDITOR);
+          this.savedEditor.set(DEFAULT_EDITOR);
+        }
+        this.snackBar.open('Failed to load editor preference', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  private coerceEditorType(value: string | null | undefined): EditorType | null {
+    if (value === 'builtin' || value === 'vscode') {
+      return value;
+    }
+    return null;
+  }
+
+  onEditorSelectionChange(editor: EditorType): void {
+    this.selectedEditor.set(editor);
+    this.editorDirty.set(editor !== this.savedEditor());
+  }
+
+  saveEditor(): void {
+    const target = this.selectedEditor();
+    this.applyingEditor.set(true);
+    this.settingsService.setEditorPreference(target).subscribe({
+      next: (resp: { editor: string }) => {
+        const confirmed = this.coerceEditorType(resp?.editor) ?? target;
+        this.savedEditor.set(confirmed);
+        this.editorDirty.set(false);
+        this.persistEditorToStorage(confirmed);
+        this.applyingEditor.set(false);
+        this.snackBar.open(`Editor preference set to ${this.editorLabel(confirmed)}`, 'Close', {
+          duration: 3000,
+          panelClass: 'success-snackbar',
+        });
+        if (confirmed === 'vscode') {
+          this.startStatusPolling();
+        } else {
+          this.stopStatusPolling();
+          this.vscodeStatus.set(null);
+        }
+      },
+      error: (err: { status?: number }) => {
+        this.applyingEditor.set(false);
+        const isUnavailable = err?.status === 503;
+        const message = isUnavailable
+          ? 'VS Code editor is not installed. Install code-server and try again.'
+          : 'Failed to save editor preference';
+        this.snackBar.open(message, 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  private startStatusPolling(): void {
+    this.stopStatusPolling();
+    this.pollStatus();
+    this.statusPollTimer = setInterval(() => this.pollStatus(), STATUS_POLL_INTERVAL_MS);
+  }
+
+  private stopStatusPolling(): void {
+    if (this.statusPollTimer !== null) {
+      clearInterval(this.statusPollTimer);
+      this.statusPollTimer = null;
+    }
+  }
+
+  private pollStatus(): void {
+    this.settingsService.getVscodeStatus().subscribe({
+      next: (status: VSCodeStatus) => {
+        this.vscodeStatus.set(status);
+        if (status?.running) {
+          this.stopStatusPolling();
+        }
+      },
+      error: () => {
+        this.vscodeStatus.set({ running: false, port: null, allow_remote: false });
+      },
+    });
+  }
+
+  vscodeStatusLabel(): string {
+    const status = this.vscodeStatus();
+    if (!status) {
+      return '';
+    }
+    if (status.running) {
+      return status.port !== null ? `Running on port ${status.port}` : 'Running';
+    }
+    const isStarting = this.statusPollTimer !== null && !status.running;
+    return isStarting ? 'Starting' : 'Stopped';
+  }
+
+  vscodeStatusClass(): string {
+    const status = this.vscodeStatus();
+    if (!status) {
+      return '';
+    }
+    if (status.running) {
+      return 'running';
+    }
+    const isStarting = this.statusPollTimer !== null && !status.running;
+    return isStarting ? 'starting' : 'stopped';
+  }
+
+  editorLabel(editor: EditorType): string {
+    return editor === 'vscode' ? 'VS Code' : 'Built-in Editor';
+  }
+
+  private persistEditorToStorage(editor: EditorType): void {
+    try {
+      localStorage.setItem(EDITOR_STORAGE_KEY, editor);
+    } catch {
+      // silently ignore
+    }
   }
 
   private applyPreference(language: string): void {
@@ -226,6 +406,14 @@ describe('SettingsComponent', () => {
     snackBar = new MockMatSnackBar();
     MockMatSnackBar.reset();
     jest.clearAllMocks();
+    // Safe defaults so the editor section doesn't break the legacy language
+    // tests that don't care about editor preference. Tests that care about
+    // editor behavior override these mocks explicitly.
+    service.getEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
+    service.getVscodeStatus.mockReturnValue(
+      of({ running: false, port: null, allow_remote: false }),
+    );
+    service.setEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
   });
 
   describe('initialization', () => {
@@ -589,6 +777,337 @@ describe('SettingsComponent', () => {
       const event = { target: { value: 'Klingon' } } as unknown as Event;
       component.onCustomLanguageChange(event);
       expect(component.customLanguage()).toBe('Klingon');
+    });
+  });
+
+  describe('editor preference — initialization', () => {
+    it('should default to builtin with no API and no localStorage', () => {
+      service.getLanguagePreference.mockReturnValue(throwError(() => new Error('Network error')));
+      service.getEditorPreference.mockReturnValue(throwError(() => new Error('Network error')));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      expect(component.selectedEditor()).toBe('builtin');
+      expect(component.savedEditor()).toBe('builtin');
+      expect(component.editorDirty()).toBe(false);
+    });
+
+    it('should call getEditorPreference on ngOnInit', () => {
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      expect(service.getEditorPreference).toHaveBeenCalledTimes(1);
+    });
+
+    it('should populate signals from API response', () => {
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      expect(component.selectedEditor()).toBe('vscode');
+      expect(component.savedEditor()).toBe('vscode');
+      expect(component.editorDirty()).toBe(false);
+    });
+
+    it('should persist loaded editor to localStorage', () => {
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      expect(localStorageData[EDITOR_STORAGE_KEY]).toBe('vscode');
+    });
+
+    it('should seed from localStorage when API is pending', () => {
+      localStorageData[EDITOR_STORAGE_KEY] = 'vscode';
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      // Deferred observable — never emits synchronously
+      service.getEditorPreference.mockReturnValue({
+        subscribe: (_observer: unknown) => {
+          // intentionally never emits
+        },
+      });
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      // Cached value is used as both selected and saved so the UI starts non-dirty
+      expect(component.selectedEditor()).toBe('vscode');
+      expect(component.savedEditor()).toBe('vscode');
+    });
+
+    it('should ignore invalid cached editor values', () => {
+      localStorageData[EDITOR_STORAGE_KEY] = 'not-a-valid-editor';
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(throwError(() => new Error('Network')));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      // Invalid cache value is treated as no cache — fallback to default on API error
+      expect(component.selectedEditor()).toBe('builtin');
+      expect(component.savedEditor()).toBe('builtin');
+    });
+
+    it('should fall back to default when API fails and no cache exists', () => {
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(throwError(() => new Error('Network')));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      expect(component.selectedEditor()).toBe('builtin');
+      expect(component.savedEditor()).toBe('builtin');
+    });
+
+    it('should preserve cached value when API fails', () => {
+      localStorageData[EDITOR_STORAGE_KEY] = 'vscode';
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(throwError(() => new Error('Network')));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      expect(component.selectedEditor()).toBe('vscode');
+      expect(component.savedEditor()).toBe('vscode');
+    });
+
+    it('should start polling status when loaded editor is vscode', () => {
+      jest.useFakeTimers();
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      service.getVscodeStatus.mockReturnValue(
+        of({ running: false, port: null, allow_remote: false }),
+      );
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      // First immediate poll fires on subscribe
+      expect(service.getVscodeStatus).toHaveBeenCalledTimes(1);
+      // Advance timer to trigger interval-based poll
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(service.getVscodeStatus).toHaveBeenCalledTimes(2);
+      jest.useRealTimers();
+    });
+
+    it('should not poll status when loaded editor is builtin', () => {
+      jest.useFakeTimers();
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 5);
+      expect(service.getVscodeStatus).not.toHaveBeenCalled();
+      jest.useRealTimers();
+    });
+  });
+
+  describe('editor preference — dirty tracking', () => {
+    beforeEach(() => {
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      jest.clearAllMocks();
+    });
+
+    it('should set editorDirty=true when selecting a different editor', () => {
+      component.onEditorSelectionChange('vscode');
+      expect(component.editorDirty()).toBe(true);
+      expect(component.selectedEditor()).toBe('vscode');
+      expect(component.savedEditor()).toBe('builtin');
+    });
+
+    it('should set editorDirty=false when selecting the same editor as saved', () => {
+      // First dirty it
+      component.onEditorSelectionChange('vscode');
+      expect(component.editorDirty()).toBe(true);
+      // Now toggle back
+      component.onEditorSelectionChange('builtin');
+      expect(component.editorDirty()).toBe(false);
+    });
+  });
+
+  describe('editor preference — save flow', () => {
+    beforeEach(() => {
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      MockMatSnackBar.reset();
+      jest.clearAllMocks();
+    });
+
+    it('should call setEditorPreference with the working selection', () => {
+      service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(service.setEditorPreference).toHaveBeenCalledWith('vscode');
+    });
+
+    it('should set applyingEditor=true during save', () => {
+      let capturedApplyingDuringEmit: boolean | null = null;
+      service.setEditorPreference.mockImplementation(() => ({
+        subscribe: (observer: { next: (v: { editor: string }) => void }) => {
+          capturedApplyingDuringEmit = component.applyingEditor();
+          observer.next({ editor: 'vscode' });
+        },
+      }));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(capturedApplyingDuringEmit).toBe(true);
+      expect(component.applyingEditor()).toBe(false);
+    });
+
+    it('should update savedEditor on success', () => {
+      service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(component.savedEditor()).toBe('vscode');
+      expect(component.editorDirty()).toBe(false);
+    });
+
+    it('should persist saved editor to localStorage on success', () => {
+      service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(localStorageData[EDITOR_STORAGE_KEY]).toBe('vscode');
+    });
+
+    it('should show success snackbar on save', () => {
+      service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen).toEqual({
+        message: 'Editor preference set to VS Code',
+        action: 'Close',
+        options: { duration: 3000, panelClass: 'success-snackbar' },
+      });
+    });
+
+    it('should NOT update savedEditor on error', () => {
+      service.setEditorPreference.mockReturnValue(throwError(() => new Error('Save failed')));
+      component.onEditorSelectionChange('vscode');
+      const previousSaved = component.savedEditor();
+      component.saveEditor();
+      expect(component.savedEditor()).toBe(previousSaved);
+      expect(component.savedEditor()).toBe('builtin');
+      expect(component.editorDirty()).toBe(true);
+    });
+
+    it('should set applyingEditor=false after error', () => {
+      service.setEditorPreference.mockReturnValue(throwError(() => new Error('Save failed')));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(component.applyingEditor()).toBe(false);
+    });
+
+    it('should show install hint snackbar on 503 error', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({ status: 503, message: 'Service Unavailable' })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code editor is not installed. Install code-server and try again.',
+      );
+    });
+
+    it('should show generic error snackbar on non-503 error', () => {
+      service.setEditorPreference.mockReturnValue(throwError(() => ({ status: 500 })));
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe('Failed to save editor preference');
+    });
+
+    it('should start status polling after saving vscode preference', () => {
+      jest.useFakeTimers();
+      service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      service.getVscodeStatus.mockReturnValue(
+        of({ running: false, port: null, allow_remote: false }),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      // Immediate poll fires on save success
+      expect(service.getVscodeStatus).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(service.getVscodeStatus).toHaveBeenCalledTimes(2);
+      jest.useRealTimers();
+    });
+
+    it('should stop status polling and clear status when switching to builtin', () => {
+      jest.useFakeTimers();
+      // Start in vscode state with active polling
+      service.getVscodeStatus.mockReturnValue(
+        of({ running: false, port: null, allow_remote: false }),
+      );
+      service.setEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
+      component.onEditorSelectionChange('builtin');
+      component.saveEditor();
+      // Polling was never started (builtin initially), so status should be null
+      expect(component.vscodeStatus()).toBeNull();
+      // No polling timer should be active
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 5);
+      jest.useRealTimers();
+    });
+  });
+
+  describe('editor preference — status polling', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
+      service.getEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+      component = new TestableSettingsComponent(service, snackBar);
+      component.ngOnInit();
+      jest.clearAllMocks();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('should populate vscodeStatus from a poll response', () => {
+      service.getVscodeStatus.mockReturnValue(
+        of({ running: false, port: null, allow_remote: false }),
+      );
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(component.vscodeStatus()).toEqual({
+        running: false,
+        port: null,
+        allow_remote: false,
+      });
+      expect(component.vscodeStatusClass()).toBe('starting');
+    });
+
+    it('should mark status as running and stop polling when status.running=true', () => {
+      service.getVscodeStatus.mockReturnValue(
+        of({ running: true, port: 8080, allow_remote: true }),
+      );
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(component.vscodeStatus()).toEqual({
+        running: true,
+        port: 8080,
+        allow_remote: true,
+      });
+      expect(component.vscodeStatusLabel()).toBe('Running on port 8080');
+      expect(component.vscodeStatusClass()).toBe('running');
+      // Polling stopped — advancing the timer should not trigger another call
+      const callsBefore = service.getVscodeStatus.mock.calls.length;
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 5);
+      expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore);
+    });
+
+    it('should fall back to stopped status on poll error', () => {
+      service.getVscodeStatus.mockReturnValue(throwError(() => new Error('Status failed')));
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(component.vscodeStatus()).toEqual({
+        running: false,
+        port: null,
+        allow_remote: false,
+      });
+    });
+
+    it('should clear polling interval on ngOnDestroy', () => {
+      service.getVscodeStatus.mockReturnValue(
+        of({ running: false, port: null, allow_remote: false }),
+      );
+      // Confirm polling is active
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      const callsBefore = service.getVscodeStatus.mock.calls.length;
+      component.ngOnDestroy();
+      // Advance timer — no new polls should fire because the interval was cleared
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 5);
+      expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore);
     });
   });
 });

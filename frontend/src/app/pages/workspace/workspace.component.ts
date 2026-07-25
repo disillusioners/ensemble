@@ -14,7 +14,7 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { finalize } from 'rxjs';
 import { CommonModule } from '@angular/common';
-import { HttpErrorResponse } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { ActivatedRoute } from '@angular/router';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
@@ -31,6 +31,7 @@ import { FileTreeComponent } from '../../components/file-tree/file-tree.componen
 import { CodeViewerComponent } from '../../components/code-viewer/code-viewer.component';
 import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.component';
 import { FileTabsComponent } from '../../components/file-tabs/file-tabs.component';
+import { VsCodeViewerComponent } from '../../components/vscode-viewer/vscode-viewer.component';
 import {
   ConfirmDialogComponent,
   ConfirmDialogData,
@@ -71,6 +72,7 @@ import {
     CodeViewerComponent,
     DiffViewerComponent,
     FileTabsComponent,
+    VsCodeViewerComponent,
   ],
   template: `
     <div class="workspace-container">
@@ -161,17 +163,27 @@ import {
                 </button>
               </div>
             }
-            @if (viewMode() === 'code') {
-              @if (workspace.activeFilePath()) {
-                <app-code-viewer></app-code-viewer>
-              } @else {
-                <div class="empty-state" data-testid="workspace-empty-state">
-                  <mat-icon>description</mat-icon>
-                  <span>Select a file from the tree to view</span>
-                </div>
+            @switch (editorMode()) {
+              @case ('builtin') {
+                @if (viewMode() === 'code') {
+                  @if (workspace.activeFilePath()) {
+                    <app-code-viewer></app-code-viewer>
+                  } @else {
+                    <div class="empty-state" data-testid="workspace-empty-state">
+                      <mat-icon>description</mat-icon>
+                      <span>Select a file from the tree to view</span>
+                    </div>
+                  }
+                } @else {
+                  <app-diff-viewer></app-diff-viewer>
+                }
               }
-            } @else {
-              <app-diff-viewer></app-diff-viewer>
+              @case ('vscode') {
+                <app-vscode-viewer
+                  [projectId]="projectId"
+                  [workdir]="validatedWorkdir()"
+                ></app-vscode-viewer>
+              }
             }
           </div>
         </mat-sidenav-content>
@@ -192,6 +204,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly http = inject(HttpClient);
 
   @ViewChild(FileTreeComponent, { static: true }) private fileTree!: FileTreeComponent;
   @ViewChild(CodeViewerComponent) codeViewer?: CodeViewerComponent;
@@ -243,6 +256,23 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   public readonly viewMode = signal<'code' | 'diff'>('code');
 
   /**
+   * Re-export the editor-mode signal from the workspace service so the
+   * template can read it without going through the service. The signal
+   * is hydrated from `/api/settings/editor` in the service constructor.
+   */
+  public readonly editorMode = this.workspace.editorMode;
+
+  /**
+   * C2 — folder path returned by the dedicated
+   * `/api/projects/{id}/vscode-folder` endpoint. The endpoint enforces
+   * path containment server-side; we never read
+   * `project.main_directory` directly because the user-controlled
+   * project registry cannot be trusted to keep that path safe to
+   * mount inside code-server.
+   */
+  public readonly validatedWorkdir = signal<string>('');
+
+  /**
    * F7 — in-flight save guard. Set true at the start of `saveFile()`,
    * cleared in a `finalize` callback so both success and error paths
    * reset the flag. `canSave()` consults this to disable the Save button
@@ -271,6 +301,27 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.workspace.disconnectSSE();
+  }
+
+  /**
+   * C2 — fetch the pre-validated folder path for `projectId` from the
+   * dedicated endpoint. Never use `project.main_directory` directly:
+   * the endpoint enforces path containment server-side so a malicious
+   * or misconfigured project cannot escape into `/etc` or another
+   * tenant's home directory.
+   *
+   * No-op when `projectId` is empty. On error, the workdir signal is
+   * cleared so the iframe falls back to the base `/vscode/` URL
+   * (no folder) rather than opening an unvalidated path.
+   */
+  loadValidatedWorkdir(projectId: string): void {
+    if (!projectId) return;
+    this.http
+      .get<{ folder: string }>(`/api/projects/${projectId}/vscode-folder`)
+      .subscribe({
+        next: (resp) => this.validatedWorkdir.set(resp.folder),
+        error: () => this.validatedWorkdir.set(''),
+      });
   }
 
   onFileSelected(path: string): void {
@@ -624,6 +675,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
         // SSE needs the new projectId targeted for file-change refresh.
         this.workspace.connectSSE(projectId);
+        this.loadValidatedWorkdir(projectId);
         return;
       }
     }
@@ -649,5 +701,6 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((res) => this.fileTree.setTree(res.tree));
     this.workspace.connectSSE(projectId);
+    this.loadValidatedWorkdir(projectId);
   }
 }

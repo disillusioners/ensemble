@@ -73,6 +73,12 @@ describe('WorkspaceService', () => {
     });
     service = TestBed.inject(WorkspaceService);
     httpTesting = TestBed.inject(HttpTestingController);
+    // Drain the editor-preference request fired by the WorkspaceService
+    // constructor (`getEditorPreference`). Without this, every test
+    // fails `httpTesting.verify()` because the request is left open.
+    // Default response is `builtin` so the signal stays at its default.
+    const editorReq = httpTesting.expectOne('/api/settings/editor');
+    editorReq.flush({ editor: 'builtin' });
   });
 
   afterEach(() => {

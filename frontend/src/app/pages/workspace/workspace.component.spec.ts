@@ -205,12 +205,43 @@ describe('WorkspaceComponent', () => {
    * Flush the initial `getFileTree` request that ngOnInit fires.
    * Tests that need a non-empty tree can override the response before
    * calling this helper.
+   *
+   * Also drains the `loadValidatedWorkdir` request that `loadProject`
+   * fires alongside the tree fetch — both must be drained before
+   * `httpMock.verify()` runs.
    */
   function flushInitialTree(): void {
     const req = httpMock.expectOne(
       (r) => r.url === '/api/workspace/test-project-id/tree' && r.params.get('path') === '.'
     );
     req.flush(makeTreeResponse());
+    flushValidatedWorkdir('test-project-id');
+  }
+
+  /**
+   * Drain the `GET /api/settings/editor` request that the
+   * WorkspaceService constructor fires when the service is
+   * instantiated. Without this the `httpMock.verify()` call in the
+   * outer `afterEach` fails because the editor-preference request is
+   * left open. Default response is `{ editor: 'builtin' }` so the
+   * signal stays at its default; tests that need a different value can
+   * flush the request manually before calling this helper.
+   */
+  function flushEditorPreference(): void {
+    const req = httpMock.expectOne('/api/settings/editor');
+    req.flush({ editor: 'builtin' });
+  }
+
+  /**
+   * Drain the C2 `GET /api/projects/{id}/vscode-folder` request that
+   * `loadValidatedWorkdir` fires when `loadProject` is called. The
+   * default response is an empty folder so the iframe URL stays at
+   * `/vscode/`; tests that need a specific folder can flush the
+   * request manually before calling this helper.
+   */
+  function flushValidatedWorkdir(projectId: string = 'test-project-id'): void {
+    const req = httpMock.expectOne(`/api/projects/${projectId}/vscode-folder`);
+    req.flush({ folder: '' });
   }
 
   // ── TestBed setup ──────────────────────────────────────────────
@@ -243,6 +274,11 @@ describe('WorkspaceComponent', () => {
     component = fixture.componentInstance;
     httpMock = TestBed.inject(HttpTestingController);
     workspaceService = TestBed.inject(WorkspaceService);
+    // Drain the editor-preference request that the WorkspaceService
+    // constructor fires the moment it is injected. Without this the
+    // outer `afterEach(() => httpMock.verify())` fails because the
+    // request is left open.
+    flushEditorPreference();
   });
 
   afterEach(() => {
@@ -273,6 +309,7 @@ describe('WorkspaceComponent', () => {
       );
       expect(req.request.method).toBe('GET');
       req.flush(makeTreeResponse());
+      flushValidatedWorkdir('test-project-id');
     });
 
     it('should populate the embedded FileTreeComponent via setTree', () => {
@@ -293,6 +330,9 @@ describe('WorkspaceComponent', () => {
           ],
         })
       );
+      // Drain the validated-workdir request that fires on the
+      // cache-miss path so the iframe can open the right folder.
+      flushValidatedWorkdir('test-project-id');
 
       // Reach the embedded FileTreeComponent via the DOM to verify the
       // component really did setTree() — its `fileTree` viewchild is
@@ -328,6 +368,9 @@ describe('WorkspaceComponent', () => {
       component = fixture.componentInstance;
       httpMock = TestBed.inject(HttpTestingController);
       workspaceService = TestBed.inject(WorkspaceService);
+      // Drain the editor-preference request that fires when the
+      // service is constructed.
+      flushEditorPreference();
     });
 
     it('should set projectId to empty and skip the tree load', () => {
@@ -543,6 +586,13 @@ describe('WorkspaceComponent', () => {
       localHttp = TestBed.inject(HttpTestingController);
       localService = TestBed.inject(WorkspaceService);
 
+      // Drain the editor-preference request fired by the
+      // WorkspaceService constructor.
+      {
+        const editorReq = localHttp.expectOne('/api/settings/editor');
+        editorReq.flush({ editor: 'builtin' });
+      }
+
       // Reach into the projected <app-workspace>.
       workspace = hostFixture.debugElement
         .query(By.directive(WorkspaceComponent))
@@ -553,6 +603,11 @@ describe('WorkspaceComponent', () => {
       localHttp.verify();
     });
 
+    function flushValidatedWorkdirLocal(projectId: string, folder: string = ''): void {
+      const req = localHttp.expectOne(`/api/projects/${projectId}/vscode-folder`);
+      req.flush({ folder });
+    }
+
     function flushTree(projectId: string, body?: FileTreeResponse): void {
       const req = localHttp.expectOne(
         (r) => r.url === `/api/workspace/${projectId}/tree`
@@ -560,6 +615,7 @@ describe('WorkspaceComponent', () => {
       req.flush(
         body ?? makeTreeResponse({ project_id: projectId })
       );
+      flushValidatedWorkdirLocal(projectId);
     }
 
     it('uses the @Input() value when no route param is present', () => {
@@ -581,6 +637,7 @@ describe('WorkspaceComponent', () => {
       );
       expect(req.request.method).toBe('GET');
       req.flush(makeTreeResponse({ project_id: 'input-project' }));
+      flushValidatedWorkdirLocal('input-project');
     });
 
     it('reacts to a projectId change with a fresh HTTP fetch (cache miss)', () => {
@@ -609,6 +666,8 @@ describe('WorkspaceComponent', () => {
       );
 
       pending[0].flush(makeTreeResponse({ project_id: 'second-project' }));
+      // Drain the validated-workdir request for the second project.
+      flushValidatedWorkdirLocal('second-project');
       expect(wsInstance.projectId).toBe('second-project');
     });
 
@@ -648,6 +707,10 @@ describe('WorkspaceComponent', () => {
       );
       expect(fileReq.request.method).toBe('GET');
       fileReq.flush(makeFileContent({ path: 'src/cached.ts' }));
+
+      // The validated-workdir request still fires on the cache-hit
+      // path so the VS Code iframe can open the right folder.
+      flushValidatedWorkdirLocal('cached-project');
     });
 
     it('does NOT regress to the route value when the input is set', () => {
@@ -688,6 +751,11 @@ describe('WorkspaceComponent', () => {
       host = hostFixture.componentInstance;
       localHttp = TestBed.inject(HttpTestingController);
 
+      // Drain the editor-preference request fired by the
+      // WorkspaceService constructor.
+      const editorReq = localHttp.expectOne('/api/settings/editor');
+      editorReq.flush({ editor: 'builtin' });
+
       host.projectId = 'route-project';
       hostFixture.detectChanges();
 
@@ -696,6 +764,12 @@ describe('WorkspaceComponent', () => {
         (r) => r.url === '/api/workspace/route-project/tree'
       );
       req.flush(makeTreeResponse({ project_id: 'route-project' }));
+
+      // Drain the validated-workdir request for the route project.
+      const workdirReq = localHttp.expectOne(
+        '/api/projects/route-project/vscode-folder'
+      );
+      workdirReq.flush({ folder: '' });
     });
 
     afterEach(() => {
@@ -1509,6 +1583,11 @@ describe('WorkspaceComponent', () => {
       localHttp = TestBed.inject(HttpTestingController);
       localService = TestBed.inject(WorkspaceService);
 
+      // Drain the editor-preference request fired by the
+      // WorkspaceService constructor.
+      const editorReq = localHttp.expectOne('/api/settings/editor');
+      editorReq.flush({ editor: 'builtin' });
+
       workspace = hostFixture.debugElement
         .query(By.directive(WorkspaceComponent))
         .componentInstance as WorkspaceComponent;
@@ -1524,6 +1603,18 @@ describe('WorkspaceComponent', () => {
         (r) => r.url === `/api/workspace/${projectId}/tree`
       );
       req.flush(body ?? makeTreeResponse({ project_id: projectId }));
+      // Drain the validated-workdir request fired alongside the tree
+      // fetch by `loadValidatedWorkdir`.
+      flushValidatedWorkdirLocal(projectId);
+    }
+
+    /**
+     * Drain the C2 `GET /api/projects/{id}/vscode-folder` request that
+     * `loadValidatedWorkdir` fires when `loadProject` is called.
+     */
+    function flushValidatedWorkdirLocal(projectId: string, folder: string = ''): void {
+      const req = localHttp.expectOne(`/api/projects/${projectId}/vscode-folder`);
+      req.flush({ folder });
     }
 
     /** Drain the pending /file GET request for `projectId`. */
@@ -1598,6 +1689,10 @@ describe('WorkspaceComponent', () => {
         })
       );
 
+      // Drain the validated-workdir request that fires on the
+      // cache-hit path so the iframe can open the right folder.
+      flushValidatedWorkdirLocal('project-a');
+
       // currentFile is now re-populated with the refetched content.
       expect(workspace.currentFile()).toEqual(refetched);
       expect(workspace.selectedPath()).toBe('src/main.ts');
@@ -1625,6 +1720,9 @@ describe('WorkspaceComponent', () => {
       localHttp.expectNone(
         (r) => r.url === '/api/workspace/project-a/file'
       );
+      // The validated-workdir request still fires on the cache-hit
+      // path so the iframe can open the right folder.
+      flushValidatedWorkdirLocal('project-a');
       expect(workspace.currentFile()).toBeNull();
       expect(workspace.selectedPath()).toBeNull();
     });
@@ -1679,6 +1777,10 @@ describe('WorkspaceComponent', () => {
       //    cached snapshot that the cache-miss capture above populated.
       setProjectId('project-a');
 
+      // Drain the validated-workdir request that fires on the
+      // cache-hit path so the iframe can open the right folder.
+      flushValidatedWorkdirLocal('project-a');
+
       // After restore, the workspace sets the tree and (because
       // expandedPaths.length > 0) calls fileTree.restoreExpandedPaths.
       const fileTreeDebugAfter = hostFixture.debugElement.query(
@@ -1712,6 +1814,9 @@ describe('WorkspaceComponent', () => {
       flushTree('project-b');
 
       setProjectId('project-a');
+      // Drain the validated-workdir request that fires on the
+      // cache-hit path so the iframe can open the right folder.
+      flushValidatedWorkdirLocal('project-a');
 
       const fileTreeAfter = hostFixture.debugElement
         .query(By.directive(FileTreeComponent))
@@ -1723,4 +1828,206 @@ describe('WorkspaceComponent', () => {
   // ── 11) Multi-file tab integration ──────────────────────────────
   // (Tests live in the Save-button describe block above so they can
   // reuse the `bootWithTree` / `selectFile` / `markDirty` helpers.)
+
+  // ── 12) Editor switching (Phase 5) ─────────────────────────────
+  // The `@switch (editorMode())` block in the template renders either
+  // the built-in CodeMirror viewer or the VS Code Server iframe. The
+  // signal is owned by `WorkspaceService` and hydrated from
+  // `/api/settings/editor` in the service constructor; the workspace
+  // template forwards the validated workdir to the VS Code viewer.
+  describe('editor switching', () => {
+    beforeEach(() => {
+      // Prime the editor mode BEFORE creating the component so the
+      // initial template render reflects the requested mode. The
+      // service's constructor fires `getEditorPreference`; this
+      // helper rebuilds the TestBed with a controlled response.
+    });
+
+    function setupWithEditorMode(mode: 'builtin' | 'vscode'): void {
+      // Reset and reconfigure TestBed so the WorkspaceService
+      // constructor sees the response we want for the editor mode.
+      const editorResponse = { editor: mode };
+      const workdir = '/Users/test/projects/foo';
+      TestBed.resetTestingModule();
+      StubEventSource.instances = [];
+      TestBed.configureTestingModule({
+        imports: [WorkspaceComponent],
+        providers: [
+          provideHttpClient(),
+          provideHttpClientTesting(),
+          provideNoopAnimations(),
+          WorkspaceService,
+          {
+            provide: ActivatedRoute,
+            useValue: {
+              snapshot: { paramMap: { get: () => 'test-project-id' } },
+            },
+          },
+        ],
+      });
+      fixture = TestBed.createComponent(WorkspaceComponent);
+      dialogOpenSpy = jest
+        .spyOn(fixture.debugElement.injector.get(MatDialog), 'open')
+        .mockReturnValue({
+          afterClosed: () => of(nextDialogResult),
+        } as any);
+      component = fixture.componentInstance;
+      httpMock = TestBed.inject(HttpTestingController);
+      workspaceService = TestBed.inject(WorkspaceService);
+
+      // Drain the editor-preference request with the desired mode.
+      const editorReq = httpMock.expectOne('/api/settings/editor');
+      editorReq.flush(editorResponse);
+
+      // Prime the validated workdir so the VS Code viewer (if present)
+      // sees a stable path.
+      (workspaceService as unknown as {
+        editorMode: { set: (v: 'builtin' | 'vscode') => void };
+      }).editorMode.set(mode);
+      if (mode === 'vscode') {
+        // The signal is exposed via the component — prime it directly.
+        component.validatedWorkdir.set(workdir);
+      }
+    }
+
+    it('editorMode="builtin" does NOT render the VsCodeViewerComponent', () => {
+      setupWithEditorMode('builtin');
+      fixture.detectChanges();
+      // Drain the tree and workdir requests.
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      workdirReq.flush({ folder: '/Users/test/projects/foo' });
+      fixture.detectChanges();
+
+      // VS Code viewer must NOT be in the DOM in builtin mode.
+      const vsCodeViewer = fixture.debugElement.query(
+        By.css('app-vscode-viewer')
+      );
+      expect(vsCodeViewer).toBeNull();
+      // The CodeMirror viewer is only rendered when a file is selected
+      // (empty state otherwise). With no file selected, the empty-state
+      // placeholder is rendered instead — assert that the @switch
+      // case took the builtin branch.
+      const emptyState = fixture.debugElement.query(
+        By.css('[data-testid="workspace-empty-state"]')
+      );
+      expect(emptyState).not.toBeNull();
+    });
+
+    it('editorMode="builtin" renders the CodeViewerComponent when a file is selected', () => {
+      setupWithEditorMode('builtin');
+      fixture.detectChanges();
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      workdirReq.flush({ folder: '/Users/test/projects/foo' });
+
+      // Select a file so the CodeViewer is rendered.
+      component.onFileSelected('src/main.ts');
+      const fileReq = httpMock.expectOne(
+        (r) =>
+          r.url === '/api/workspace/test-project-id/file' &&
+          r.params.get('path') === 'src/main.ts'
+      );
+      fileReq.flush(makeFileContent({ path: 'src/main.ts' }));
+      fixture.detectChanges();
+
+      const codeViewer = fixture.debugElement.query(
+        By.directive(CodeViewerComponent)
+      );
+      expect(codeViewer).not.toBeNull();
+      const vsCodeViewer = fixture.debugElement.query(
+        By.css('app-vscode-viewer')
+      );
+      expect(vsCodeViewer).toBeNull();
+    });
+
+    it('editorMode="vscode" renders the VsCodeViewerComponent', () => {
+      setupWithEditorMode('vscode');
+      fixture.detectChanges();
+      // Drain the tree and workdir requests.
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      workdirReq.flush({ folder: '/Users/test/projects/foo' });
+      fixture.detectChanges();
+
+      // VS Code viewer must be in the DOM.
+      const vsCodeViewer = fixture.debugElement.query(
+        By.css('app-vscode-viewer')
+      );
+      expect(vsCodeViewer).not.toBeNull();
+      // CodeMirror viewer must NOT be in the DOM.
+      const codeViewer = fixture.debugElement.query(
+        By.directive(CodeViewerComponent)
+      );
+      expect(codeViewer).toBeNull();
+    });
+
+    it('loadValidatedWorkdir fetches the validated folder endpoint', () => {
+      setupWithEditorMode('vscode');
+      fixture.detectChanges();
+      // Drain the tree request.
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+
+      // The validated workdir request uses the exact URL pattern
+      // documented as the source of truth for the iframe folder.
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      expect(workdirReq.request.method).toBe('GET');
+      workdirReq.flush({ folder: '/Users/test/projects/foo' });
+    });
+
+    it('loadValidatedWorkdir sets validatedWorkdir signal on success', () => {
+      setupWithEditorMode('vscode');
+      fixture.detectChanges();
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      workdirReq.flush({ folder: '/Users/test/projects/foo' });
+
+      expect(component.validatedWorkdir()).toBe('/Users/test/projects/foo');
+    });
+
+    it('loadValidatedWorkdir clears validatedWorkdir signal on error', () => {
+      setupWithEditorMode('vscode');
+      fixture.detectChanges();
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+
+      // Seed an initial value so we can prove the error path clears it.
+      component.validatedWorkdir.set('/some/prior/value');
+
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      workdirReq.flush('boom', { status: 500, statusText: 'Server Error' });
+
+      expect(component.validatedWorkdir()).toBe('');
+    });
+  });
 });

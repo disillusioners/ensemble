@@ -11,6 +11,8 @@ import {
   GitDiffResponse,
   OpenFileTab,
 } from '../models/workspace.model';
+import { SettingsService } from './settings.service';
+import type { EditorType } from '../models';
 
 /** Maximum number of projects kept in the LRU state cache. */
 const MAX_CACHED_PROJECTS = 5;
@@ -63,6 +65,7 @@ export type WorkspaceUiExtras = Partial<
 export class WorkspaceService implements OnDestroy {
   private readonly http = inject(HttpClient);
   private readonly ngZone = inject(NgZone);
+  private readonly settingsService = inject(SettingsService);
   private readonly API_BASE = '/api/workspace';
   private eventSource: EventSource | null = null;
 
@@ -122,6 +125,14 @@ export class WorkspaceService implements OnDestroy {
   readonly currentDiff = signal<GitDiffResponse | null>(null);
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
+
+  /**
+   * Active editor mode — drives the workspace overlay's renderer
+   * switch between the built-in CodeMirror viewer and the VS Code
+   * Server iframe viewer. Defaults to `'builtin'` and is hydrated
+   * from `/api/settings/editor` in the constructor.
+   */
+  readonly editorMode = signal<EditorType>('builtin');
 
   /**
    * Open file tabs in display order, with live `dirty` flags merged in
@@ -369,6 +380,23 @@ export class WorkspaceService implements OnDestroy {
 
   ngOnDestroy(): void {
     this.disconnectSSE();
+  }
+
+  // ── Constructor ─────────────────────────────────────────────────
+
+  /**
+   * Hydrate the editor-mode preference from the settings API. The
+   * default is `'builtin'`; if the API returns `'vscode'`, the
+   * workspace overlay will render the VS Code Server iframe instead
+   * of the CodeMirror viewer. Falls back to `'builtin'` on error so a
+   * misconfigured backend never strands the user without an editor.
+   */
+  constructor() {
+    this.settingsService.getEditorPreference().subscribe({
+      next: (resp) =>
+        this.editorMode.set(resp.editor === 'vscode' ? 'vscode' : 'builtin'),
+      error: () => this.editorMode.set('builtin'),
+    });
   }
 
   // ── Multi-file tab API ────────────────────────────────────────────
