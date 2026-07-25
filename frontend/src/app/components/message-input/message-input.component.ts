@@ -113,7 +113,7 @@ export class MessageInputComponent {
     effect(() => {
       const projectId = this.projectId();
       this.queues.set([]);
-      this.selectedQueueId.set(projectId ? localStorage.getItem(`ensemble-queue-select-${projectId}`) || 'system_parallel_queue' : null);
+      this.selectedQueueId.set(projectId ? localStorage.getItem(`ensemble-queue-select-${projectId}`) : null);
       if (!projectId) return;
       const requestProjectId = projectId;
       this.apiService.getQueues(requestProjectId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
@@ -121,9 +121,9 @@ export class MessageInputComponent {
           if (this.projectId() !== requestProjectId) return;
           this.queues.set(response.queues);
           const stored = this.selectedQueueId();
-          const selected = response.queues.some(q => q.queue_id === stored)
+          const selected = (stored && response.queues.some(q => q.queue_id === stored))
             ? stored
-            : response.queues.find(q => q.queue_id === 'system_parallel_queue')?.queue_id ?? response.queues[0]?.queue_id ?? null;
+            : response.queues.find(q => q.queue_name === 'system_parallel_queue')?.queue_id ?? response.queues[0]?.queue_id ?? null;
           this.selectedQueueId.set(selected);
         },
         error: () => {
