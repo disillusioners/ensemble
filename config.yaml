@@ -29,13 +29,8 @@ llm:
   # Default: common OpenAI models. Set to empty list to disable restriction.
   # Exact model names only — this is NOT a prefix or substring match.
   allowed_models:
-    - gpt-4
-    - gpt-4o
-    - gpt-4o-mini
-    - gpt-4-turbo
-    - gpt-3.5-turbo
-    - o1-mini
-    - o1-preview
+    - agentic
+    - coding
 
 # Server Configuration  
 daemon:
