@@ -246,8 +246,14 @@ class TestTeamMembersAuthorization:
                 f"spawn of '{target}'; got: {result!r}"
             )
             assert "not allowed to spawn" in result
-            assert "Allowed team members: ['explorer']" in result, (
-                f"developer.team_members must be shown as ['explorer']; "
+            # After auto-derivation: developer has team_members=['explorer']
+            # (explicit) AND tools.allow includes 'image' and 'knowledge',
+            # which imply 'explorer', 'kb-writer', and 'image-reader'.
+            # The merged, canonicalized, sorted set is
+            # ['explorer', 'image-reader', 'kb-writer'].
+            assert "Allowed team members: ['explorer', 'image-reader', 'kb-writer']" in result, (
+                f"developer auto-derived allow-set must be "
+                f"['explorer', 'image-reader', 'kb-writer']; "
                 f"got: {result!r}"
             )
             manager2.spawn_instance.assert_not_called()
@@ -270,7 +276,19 @@ class TestTeamMembersAuthorization:
         assert isinstance(result, str)
         assert result.startswith("ERROR")
         assert "not allowed to spawn" in result
-        assert "Allowed team members: ['explorer', 'worker']" in result
+        # After auto-derivation: tester has team_members=['explorer', 'worker']
+        # (explicit) AND tools.allow includes 'image' and 'knowledge',
+        # which imply 'explorer', 'kb-writer', and 'image-reader'.
+        # The merged, canonicalized, sorted set is
+        # ['explorer', 'image-reader', 'kb-writer', 'worker'].
+        assert (
+            "Allowed team members: ['explorer', 'image-reader', 'kb-writer', 'worker']"
+            in result
+        ), (
+            f"tester auto-derived allow-set must be "
+            f"['explorer', 'image-reader', 'kb-writer', 'worker']; "
+            f"got: {result!r}"
+        )
         manager.spawn_instance.assert_not_called()
 
     async def test_unknown_caller_agent_is_denied(self):
@@ -499,8 +517,14 @@ class TestCheckTeamMembershipUnit:
         err = _check_team_membership("developer", "leader")
         assert err is not None
         assert "not allowed to spawn" in err
-        assert "Allowed team members: ['explorer']" in err, (
-            f"developer.team_members should be rendered as ['explorer']; "
+        # After auto-derivation: developer has team_members=['explorer']
+        # (explicit) AND tools.allow includes 'image' and 'knowledge',
+        # which imply 'explorer', 'kb-writer', and 'image-reader'.
+        # The merged, canonicalized, sorted set is
+        # ['explorer', 'image-reader', 'kb-writer'].
+        assert "Allowed team members: ['explorer', 'image-reader', 'kb-writer']" in err, (
+            f"developer auto-derived allow-set must be "
+            f"['explorer', 'image-reader', 'kb-writer']; "
             f"got: {err!r}"
         )
 
@@ -677,3 +701,472 @@ class TestCheckTeamMembershipUnit:
         err = _check_team_membership("leader", "developer ")
         assert err is not None
         assert "not allowed to spawn" in err, f"Got: {err!r}"
+
+
+# =============================================================================
+# Auto-derivation of implied team_members from tools.allow
+# =============================================================================
+#
+# The ``_check_team_membership`` helper in ``daemon/tools/_auth.py`` now
+# expands the caller's ``tools.allow`` categories through
+# ``TOOL_REQUIRED_AGENTS`` to derive implied team members. This makes
+# ``tools.allow`` the single source of truth — the caller no longer
+# needs to ALSO duplicate the backing agent in ``team_members``.
+#
+# These tests pin the auto-derivation contract directly against
+# ``_check_team_membership`` (independent of the ``spawn_instance``
+# tool wiring) so refactors of the tool layer don't lose coverage.
+
+
+def _install_synthetic_caller(monkeypatch, agent_id, *, team_members,
+                               tools_allow, tools_deny=None):
+    """Install a synthetic AgentMetadata into the registry for one test.
+
+    Patches ``registry.get_resolved`` to return our synthetic metadata
+    for the supplied ``agent_id``; other ids pass through to the real
+    registry so ``resolve_pure_id`` keeps working normally.
+
+    The synthetic caller carries:
+      * ``team_members`` — explicit allow-set (raw, not yet canonicalized).
+      * ``tools.allow`` — the list of category strings the helper
+        auto-expands via :data:`TOOL_REQUIRED_AGENTS`.
+      * ``tools.deny`` — optional list mirroring
+        ``ToolFilter.deny`` for the F1 deny-subtraction tests.
+        ``None`` (default) omits the deny field entirely.
+
+    Returns the synthetic ``AgentMetadata`` so the test can assert
+    against its rendered ``.id`` / ``.team_members`` directly.
+    """
+    from pathlib import Path
+
+    from daemon.registry import AgentMetadata, get_registry
+
+    registry = get_registry()
+
+    tools_filter = None
+    if tools_allow is not None:
+        # Use a real ``ToolFilter`` so the helper reads
+        # ``caller_meta.tools.allow`` (a real list, not a MagicMock).
+        from daemon.registry import ToolFilter
+        deny_list = list(tools_deny) if tools_deny else None
+        tools_filter = ToolFilter(allow=list(tools_allow), deny=deny_list)
+
+    synthetic = AgentMetadata(
+        id=agent_id,
+        name=agent_id,
+        description=f"Synthetic caller for auto-derivation test ({agent_id})",
+        path=Path(f"/tmp/{agent_id}"),
+        team_members=list(team_members),
+        tools=tools_filter,
+    )
+
+    original_get_resolved = registry.get_resolved
+
+    def patched_get_resolved(query_id: str):
+        if query_id == agent_id:
+            return synthetic
+        return original_get_resolved(query_id)
+
+    monkeypatch.setattr(registry, "get_resolved", patched_get_resolved)
+    return synthetic
+
+
+class TestAutoDerivationOfImpliedTeamMembers:
+    """Pin the auto-derivation contract of ``_check_team_membership``.
+
+    The helper now reads the caller's ``tools.allow`` and merges
+    :data:`TOOL_REQUIRED_AGENTS`-implied agents into the effective
+    allow-set, alongside any explicit ``team_members`` declarations.
+    Explicit team_members remain honored (union semantics). The
+    tests below cover all branches of the new contract.
+    """
+
+    def test_auto_derive_knowledge_implies_explorer_and_kb_writer(self, monkeypatch):
+        """An agent with ``tools.allow=['knowledge']`` but no explicit
+        ``explorer``/``kb-writer`` in ``team_members`` → both are
+        implicitly allowed (auto-derived from the ``knowledge``
+        category).
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_knowledge_only_caller",
+            team_members=[],  # explicit list is empty
+            tools_allow=["knowledge"],
+        )
+
+        # Both required_agents for the "knowledge" category are
+        # implicitly allowed.
+        assert _check_team_membership("synthetic_knowledge_only_caller", "explorer") is None
+        assert _check_team_membership("synthetic_knowledge_only_caller", "kb-writer") is None
+
+    def test_auto_derive_multiple_categories_all_implied_allowed(self, monkeypatch):
+        """An agent with ``tools.allow=['knowledge', 'image', 'chart']`` →
+        ``explorer``, ``kb-writer``, ``image-reader``, and ``charter``
+        are all implicitly allowed.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_multi_category_caller",
+            team_members=[],
+            tools_allow=["knowledge", "image", "chart"],
+        )
+
+        # Every required agent for every declared category must pass.
+        assert _check_team_membership("synthetic_multi_category_caller", "explorer") is None
+        assert _check_team_membership("synthetic_multi_category_caller", "kb-writer") is None
+        assert _check_team_membership("synthetic_multi_category_caller", "image-reader") is None
+        assert _check_team_membership("synthetic_multi_category_caller", "charter") is None
+
+    def test_explicit_team_members_still_allow_when_tools_allow_empty(self, monkeypatch):
+        """Backward compatibility: an agent with explicit
+        ``team_members=['developer']`` and empty ``tools.allow`` →
+        ``_check_team_membership`` allows ``developer`` and denies others.
+        Explicit declarations still work after the auto-derivation change.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_explicit_only_caller",
+            team_members=["developer"],
+            tools_allow=[],  # no category → no auto-derivation
+        )
+
+        # Explicit member is allowed.
+        assert _check_team_membership("synthetic_explicit_only_caller", "developer") is None
+        # Any other agent is denied (no auto-derivation can rescue it).
+        err = _check_team_membership("synthetic_explicit_only_caller", "explorer")
+        assert err is not None
+        assert "not allowed to spawn" in err
+        # The allowed set is just the explicit declaration.
+        assert "Allowed team members: ['developer']" in err, (
+            f"Explicit-only caller must show ['developer']; got: {err!r}"
+        )
+
+    def test_empty_tools_and_empty_team_members_denies_everything(self, monkeypatch):
+        """Deny-by-default: an agent with empty ``tools.allow`` AND empty
+        ``team_members`` denies ALL spawns. Returns an error string (not
+        None) — pinning the foundational security guarantee that
+        post-W1 callers with no authority whatsoever are rejected.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_deny_default_caller",
+            team_members=[],
+            tools_allow=[],
+        )
+
+        err = _check_team_membership("synthetic_deny_default_caller", "developer")
+        assert err is not None, "Deny-by-default: empty allow-set must produce an error"
+        assert "not allowed to spawn" in err
+        assert "Allowed team members: []" in err, (
+            f"Empty allow-set must render as []; got: {err!r}"
+        )
+
+    def test_non_matching_category_does_not_imply_other_categories(self, monkeypatch):
+        """An agent with ``tools.allow=['chart']`` only →
+        ``_check_team_membership`` ALLOWS ``charter`` (chart's
+        required agent) but DENIES ``explorer`` (knowledge-implied)
+        and ``image-reader`` (image-implied). Only the categories
+        actually present in ``tools.allow`` grant their required
+        agents — no transitive cross-category grants.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_chart_only_caller",
+            team_members=[],
+            tools_allow=["chart"],  # ONLY chart, no knowledge / image
+        )
+
+        # Charter IS allowed (chart's required agent).
+        assert _check_team_membership("synthetic_chart_only_caller", "charter") is None
+
+        # Explorer and image-reader are NOT allowed (knowledge and
+        # image categories are absent → no cross-category grants).
+        err_explorer = _check_team_membership("synthetic_chart_only_caller", "explorer")
+        assert err_explorer is not None, "chart-only caller must NOT allow 'explorer'"
+        assert "not allowed to spawn" in err_explorer
+        assert "Allowed team members: ['charter']" in err_explorer, (
+            f"chart-only allow-set must be exactly ['charter']; "
+            f"got: {err_explorer!r}"
+        )
+
+        err_image = _check_team_membership("synthetic_chart_only_caller", "image-reader")
+        assert err_image is not None, "chart-only caller must NOT allow 'image-reader'"
+        assert "not allowed to spawn" in err_image
+
+        err_kb = _check_team_membership("synthetic_chart_only_caller", "kb-writer")
+        assert err_kb is not None, "chart-only caller must NOT allow 'kb-writer'"
+        assert "not allowed to spawn" in err_kb
+
+    def test_non_agent_backed_category_implies_nothing(self, monkeypatch):
+        """An agent with ``tools.allow=['bash']`` (a non-agent-backed
+        category — NOT present in :data:`TOOL_REQUIRED_AGENTS`) and empty
+        ``team_members`` → no agents are implied, so spawning
+        ``explorer`` (or any agent) FAILS. This is distinct from the
+        ``chart``-only case: ``chart`` IS in the map (implies ``charter``),
+        while ``bash`` grants zero implied members. The allow-set
+        renders as ``[]``.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_bash_only_caller",
+            team_members=[],
+            tools_allow=["bash"],  # not in TOOL_REQUIRED_AGENTS
+        )
+
+        # explorer is NOT allowed (knowledge-implied; bash grants nothing).
+        err = _check_team_membership("synthetic_bash_only_caller", "explorer")
+        assert err is not None, "bash-only caller must NOT allow 'explorer'"
+        assert "not allowed to spawn" in err
+        assert "Allowed team members: []" in err, (
+            f"bash-only allow-set must be exactly [] (no implied members); "
+            f"got: {err!r}"
+        )
+
+    def test_canonicalization_preserved_for_implied_members(self, monkeypatch):
+        """Canonicalization: if an implied id has an alias, the helper
+        resolves it through the registry and the auto-derived set
+        matches the canonical id. We exercise this by registering a
+        synthetic ALIAS → required_agent mapping in
+        ``AGENT_ID_ALIASES`` and verifying the helper still allows
+        the canonical id (and the alias form).
+        """
+        from daemon.tools.instance import _check_team_membership
+        from daemon.registry import AGENT_ID_ALIASES, get_registry
+
+        registry = get_registry()
+
+        # Pick a real required agent we can alias without colliding
+        # with any existing alias. ``charter`` is the simplest target
+        # (single required agent for the "chart" category, no existing
+        # alias in the empty-AGENT_ID_ALIASES baseline).
+        # The test adds "chartist" → "charter" so the synthetic
+        # caller's tools.allow=['chart'] yields an implied member
+        # whose canonical form resolves cleanly.
+        AGENT_ID_ALIASES["chartist"] = "charter"
+        try:
+            _install_synthetic_caller(
+                monkeypatch,
+                "synthetic_alias_caller",
+                team_members=[],
+                tools_allow=["chart"],
+            )
+
+            # The canonical form ("charter") is allowed.
+            assert _check_team_membership("synthetic_alias_caller", "charter") is None
+            # The aliased form ("chartist") is also allowed — the
+            # helper resolves the requested id through
+            # ``registry.resolve_pure_id`` before comparison, so an
+            # alias on the REQUEST side also canonicalizes correctly.
+            assert _check_team_membership("synthetic_alias_caller", "chartist") is None
+        finally:
+            # Clean up the alias so other tests see a pristine registry.
+            AGENT_ID_ALIASES.pop("chartist", None)
+
+    # ------------------------------------------------------------------
+    # F1 / F5 / F7-F9 — security fixes and regression guards
+    # ------------------------------------------------------------------
+    # These tests pin the security guarantee added by the F1 review
+    # (deny-subtraction must mirror ``resolve_tool_filter``), the
+    # intentional F5 contract (CATEGORY-ONLY matching in tools.allow),
+    # and three regression guards (unknown category, tools=None, deny
+    # category). The deny/category tests are the security-critical
+    # surface — keeping them as independent cases makes a future
+    # refactor that accidentally weakens the gate loudly visible.
+
+    def test_bare_tool_name_does_not_imply_team_member(self, monkeypatch):
+        """F5 pinning test — CATEGORY-ONLY contract.
+
+        A bare tool name in ``tools.allow`` (e.g. ``"explore"``) is
+        NOT a key in :data:`TOOL_REQUIRED_AGENTS`, so it implies NO
+        backing agents. This is the documented intentional contract
+        (see ``daemon/tools/_auth.py`` — the auth gate is simpler than
+        ``resolve_tool_filter``, which expands both categories and
+        tool names).
+
+        Practical impact is minimal: the only known agent with a bare
+        tool name like ``"explore"`` in its allow list is
+        ``wanderer``; wanderer never spawns ``explorer`` via
+        ``spawn_instance`` — its ``explore()`` tool bypasses the gate
+        via ``invoke_agent_and_wait``. The asymmetry is harmless.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_bare_tool_caller",
+            team_members=[],
+            tools_allow=["explore"],  # bare tool name, NOT a category
+        )
+
+        # ``explorer`` is NOT implied — "explore" is not in the map.
+        err = _check_team_membership("synthetic_bare_tool_caller", "explorer")
+        assert err is not None, (
+            "Bare tool name in tools.allow must NOT imply 'explorer' "
+            "(category-only contract)."
+        )
+        assert "not allowed to spawn" in err
+        assert "Allowed team members: []" in err, (
+            f"Bare-tool-name allow-set must be exactly []; got: {err!r}"
+        )
+
+        # And neither is ``kb-writer`` (knowledge is not in allow).
+        err_kb = _check_team_membership("synthetic_bare_tool_caller", "kb-writer")
+        assert err_kb is not None
+        assert "Allowed team members: []" in err_kb
+
+    def test_denied_category_drops_implied_members(self, monkeypatch):
+        """F1 security fix — deny of a category subtracts its implied members.
+
+        Without deny-subtraction, a caller that denies ``knowledge`` at
+        the tool layer could still spawn ``explorer`` and
+        ``kb-writer`` directly via ``spawn_instance`` — a spawn-gate
+        bypass. This test pins the F1 fix: when a category appears in
+        BOTH ``tools.allow`` and ``tools.deny``, ALL of its
+        ``TOOL_REQUIRED_AGENTS`` entries are dropped from the implied
+        set (mirroring ``resolve_tool_filter``'s "deny wins" semantics).
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_deny_knowledge_caller",
+            team_members=[],
+            tools_allow=["knowledge"],
+            tools_deny=["knowledge"],  # deny wins
+        )
+
+        # Both knowledge-implied agents MUST be denied.
+        err_explorer = _check_team_membership(
+            "synthetic_deny_knowledge_caller", "explorer"
+        )
+        assert err_explorer is not None, (
+            "deny=['knowledge'] must drop 'explorer' from implied set"
+        )
+        assert "Allowed team members: []" in err_explorer, (
+            f"deny=['knowledge'] must yield []; got: {err_explorer!r}"
+        )
+
+        err_kb = _check_team_membership(
+            "synthetic_deny_knowledge_caller", "kb-writer"
+        )
+        assert err_kb is not None, (
+            "deny=['knowledge'] must drop 'kb-writer' from implied set"
+        )
+        assert "Allowed team members: []" in err_kb, (
+            f"deny=['knowledge'] must yield []; got: {err_kb!r}"
+        )
+
+    def test_partial_deny_only_blocks_denied_category(self, monkeypatch):
+        """F1 partial-deny case — deny of one category does not affect others.
+
+        ``allow=['knowledge', 'image']`` + ``deny=['knowledge']``
+        → ``explorer`` and ``kb-writer`` are dropped from the implied
+        set, but ``image-reader`` survives. Confirms the deny
+        subtraction is scoped to the denied category ONLY.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_partial_deny_caller",
+            team_members=[],
+            tools_allow=["knowledge", "image"],
+            tools_deny=["knowledge"],  # partial: deny knowledge only
+        )
+
+        # image-reader survives (image is in allow and NOT in deny).
+        assert _check_team_membership(
+            "synthetic_partial_deny_caller", "image-reader"
+        ) is None, (
+            "image-reader must survive a deny=['knowledge'] filter"
+        )
+
+        # explorer + kb-writer are dropped (knowledge is denied).
+        for denied_agent in ("explorer", "kb-writer"):
+            err = _check_team_membership(
+                "synthetic_partial_deny_caller", denied_agent
+            )
+            assert err is not None, (
+                f"deny=['knowledge'] must drop '{denied_agent}'"
+            )
+            assert "Allowed team members: ['image-reader']" in err, (
+                f"Partial-deny allow-set must be ['image-reader']; "
+                f"got: {err!r}"
+            )
+
+    def test_unknown_category_implies_nothing(self, monkeypatch):
+        """F8 regression guard — TOOL_REQUIRED_AGENTS is the boundary.
+
+        ``tools.allow=['rag']`` (a category NOT in
+        :data:`TOOL_REQUIRED_AGENTS`) implies no backing agents. The
+        map IS the boundary — anything outside the map's keys has no
+        effect on the allow-set, regardless of what it means at the
+        tool layer.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_unknown_category_caller",
+            team_members=[],
+            tools_allow=["rag"],  # NOT in TOOL_REQUIRED_AGENTS
+        )
+
+        # No backing agent is implied (rag is outside the map).
+        for denied_agent in ("explorer", "kb-writer", "image-reader",
+                             "charter", "governor"):
+            err = _check_team_membership(
+                "synthetic_unknown_category_caller", denied_agent
+            )
+            assert err is not None, (
+                f"tools.allow=['rag'] must NOT imply '{denied_agent}'"
+            )
+            assert "Allowed team members: []" in err, (
+                f"Unknown-category allow-set must be []; got: {err!r}"
+            )
+
+    def test_caller_with_tools_none_denies_unknown_spawns(self, monkeypatch):
+        """F9 regression guard — None-safety on ``caller_meta.tools``.
+
+        A caller whose ``AgentMetadata`` has ``tools=None`` (the
+        default) denies ALL spawns that are not in
+        ``team_members``. Pins the helper's defensive checks on
+        ``caller_meta.tools`` and ``.allow`` / ``.deny`` accessors —
+        they must NOT dereference ``None``.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_none_tools_caller",
+            team_members=["developer"],  # explicit list still works
+            tools_allow=None,             # tools_allow=None → tools=None
+        )
+
+        # Explicit team_members still allow the team member.
+        assert _check_team_membership(
+            "synthetic_none_tools_caller", "developer"
+        ) is None
+
+        # Anything not in team_members is denied — no crash on tools=None,
+        # no implied members from an absent tools block.
+        err = _check_team_membership(
+            "synthetic_none_tools_caller", "explorer"
+        )
+        assert err is not None
+        assert "Allowed team members: ['developer']" in err, (
+            f"tools=None with team_members=['developer'] must render "
+            f"as ['developer']; got: {err!r}"
+        )
