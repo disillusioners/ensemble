@@ -61,6 +61,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   @Input() instanceId: string | null = null;
   @Input() showThinking = true;
   @Input() showToolCalls = true;
+  @Input() showSystemPrompt = false;
 
   private readonly mermaidActions = inject(MermaidActionsService);
   private readonly ngZone = inject(NgZone);
@@ -283,6 +284,14 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   hasVisibleContent(message: Message): boolean {
     // User messages are always shown
     if (message.role === 'user') return true;
+
+    // System messages are only shown when the system-prompt toggle is on.
+    // When the toggle is off, the system row is hidden entirely (mirrors
+    // how thinking-only / tool-only messages vanish when their toggles are
+    // off, so the user can fully opt out of seeing system-prompt chatter).
+    if (message.role === 'system') {
+      return this.showSystemPrompt && this.hasMeaningfulContent(message);
+    }
 
     // For assistant messages, check if there's anything to display
     const hasContent = this.hasMeaningfulContent(message);

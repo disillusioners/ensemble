@@ -214,6 +214,35 @@ $cyan: #06b6d4;
   }
 }
 
+// System prompt block
+.system-prompt-block {
+  margin-bottom: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 1rem;
+  border-radius: 0.75rem;
+  background-color: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+
+  .system-prompt-header {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.375rem;
+    color: #10b981;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .system-prompt-content {
+    color: $text-secondary;
+    font-size: 0.75rem;
+    font-family: monospace;
+    white-space: pre-wrap;
+    overflow-x: auto;
+    margin: 0;
+  }
+}
+
 // Tool calls
 .tool-calls {
   margin-bottom: 0.5rem;

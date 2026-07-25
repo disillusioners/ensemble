@@ -32,8 +32,8 @@
       <!-- Messages list -->
       @for (message of messages; track trackByMessageId($index, message)) {
         @if (hasVisibleContent(message)) {
-          <div class="message-row" [class.user-message]="message.role === 'user'" [class.assistant-message]="message.role === 'assistant'">
-          
+          <div class="message-row" [class.user-message]="message.role === 'user'" [class.assistant-message]="message.role === 'assistant'" [class.system-message]="message.role === 'system'">
+
           <!-- Avatar -->
           <div class="avatar" [style.backgroundColor]="message.role === 'user' ? '#343541' : agentColor + '20'">
             @if (message.role === 'user') {
@@ -47,7 +47,18 @@
 
           <!-- Message content -->
           <div class="message-content" [class.align-right]="message.role === 'user'">
-            
+
+            <!-- System prompt block -->
+            @if (message.role === 'system' && showSystemPrompt) {
+              <div class="system-prompt-block">
+                <div class="system-prompt-header">
+                  <span>📋</span>
+                  <span>System Prompt</span>
+                </div>
+                <pre class="system-prompt-content">{{ message.content }}</pre>
+              </div>
+            }
+
             <!-- Thinking block -->
             @if (message.role === 'assistant' && getThinkingContent(message) && showThinking) {
               <div class="thinking-block">
@@ -86,7 +97,7 @@
             }
 
               <!-- Main message bubble - hide when only tool calls and no meaningful content -->
-              @if (hasMeaningfulContent(message) || !message.tool_calls || message.tool_calls.length === 0) {
+              @if (message.role !== 'system' && (hasMeaningfulContent(message) || !message.tool_calls || message.tool_calls.length === 0)) {
                 <div
                   class="message-bubble"
                   [attr.data-message-id]="message.message_id"

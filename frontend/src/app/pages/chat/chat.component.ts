@@ -147,6 +147,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
   readonly showToolCalls = signal(localStorage.getItem('ensemble-show-toolcalls') === 'true');
+  readonly showSystemPrompt = signal(localStorage.getItem('ensemble-show-system-prompt') === 'true');
 
   @ViewChild(MessageInputComponent) messageInputRef!: MessageInputComponent;
 
@@ -166,6 +167,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to persist showToolCalls preference
     effect(() => {
       localStorage.setItem('ensemble-show-toolcalls', String(this.showToolCalls()));
+    });
+
+    // Effect to persist showSystemPrompt preference
+    effect(() => {
+      localStorage.setItem('ensemble-show-system-prompt', String(this.showSystemPrompt()));
     });
 
     // SSE messages drive the message list. Re-merge on every signal change
@@ -500,6 +506,10 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   protected onToggleToolCalls(): void {
     this.showToolCalls.update(v => !v);
+  }
+
+  protected onToggleSystemPrompt(): void {
+    this.showSystemPrompt.update(v => !v);
   }
 
   protected onBackToHome(): void {
