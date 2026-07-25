@@ -868,6 +868,172 @@ class TestCouncilManifestContracts:
             AllowedModelsBlock(models=[], mode="bogus", status="ok")
 
 
+# =============================================================================
+# TestNonGovernorFiltering — S3 (non-governor agents stripped of council tools)
+# =============================================================================
+
+
+class TestNonGovernorFiltering:
+    """S3 — the REAL ``_apply_tool_filter`` must strip council tools from
+    non-governor agents and keep them on the governor.
+
+    Same regression family as C5, but exercises the *negative* direction: the
+    filter is permissive for governor (``tools.allow`` includes ``"council"``)
+    and restrictive for everyone else (no ``"council"`` in their allow list).
+    This catches:
+      * accidentally global-registering the council tools so every agent
+        sees them,
+      * a regression where ``resolve_tool_filter`` no longer strips a
+        category that is absent from ``allow``,
+      * a wiring bug that grants ``spawn_councilor`` outside the governor.
+
+    Builds the patch list explicitly so the real ``_apply_instance_tools``
+    filter path runs against a freshly discovered ``AgentRegistry``
+    (the file's existing ``_patch_heavy_helpers_no_filter`` helper is
+    broken — its ``str(patch_object)`` exclusion check does not match the
+    real target substring, so the filter patch is not actually removed).
+    """
+
+    def _build_filtered_tools_for_agent(self, agent_id: str, instance_id: str) -> list:
+        """Build the REAL-filtered tool list for ``agent_id``.
+
+        The default `_patch_heavy_helpers` patches out
+        ``scan_tools_for_full_docs`` and ``_apply_tool_filter`` — both of
+        which we need to be REAL for this test to exercise the filter:
+
+          * ``scan_tools_for_full_docs`` populates the global
+            ``_tool_metadata`` registry with the freshly-built tools
+            (categorized as ``instance`` / ``council``). Without it, the
+            filter's category expansion is empty and the filter over-strips
+            (only single-token names like ``time`` survive).
+          * ``_apply_tool_filter`` is the genuine filter. Its passthrough
+            mock would short-circuit the test.
+
+        The ``_patch_heavy_helpers_no_filter`` helper is meant to drop the
+        filter patch but its exclusion check is broken
+        (``str(patch_object)`` is ``<unittest.mock._patch object at 0x…>``
+        with no target substring). So we build the patch list ourselves:
+        identical to ``_patch_heavy_helpers`` but excluding the two
+        patches above.
+
+        We patch everything else (RAG, MCP, project, job, etc.) so the
+        factory runs quickly without DB/MCP/RAG wiring.
+        """
+        from daemon.registry import AgentRegistry
+        from daemon.tools.instance import create_instance_tools, _apply_tool_filter
+
+        # Fresh registry with real agent metadata loaded from disk.
+        registry = AgentRegistry(Path("agents"))
+        registry.discover()
+
+        manager = _make_manager()
+
+        # Heavy helper patches — identical to ``_patch_heavy_helpers`` BUT
+        # excluding (a) ``scan_tools_for_full_docs`` so tools are registered
+        # into ``_tool_metadata`` and the filter can resolve categories, and
+        # (b) ``_apply_tool_filter`` so the genuine filter runs.
+        patches = [
+            patch("daemon.tools.instance.is_rag_enabled", return_value=False),
+            patch("daemon.tools.instance.create_rag_tools", return_value=[]),
+            patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
+            patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
+            patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
+            patch("daemon.tools.instance.create_project_tools", return_value=[]),
+            patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
+            patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+            patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+            patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+            patch("daemon.tools.instance.create_db_tools", return_value=[]),
+            patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+            patch("daemon.tools.instance.create_context_tools", return_value=[]),
+            patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+            patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
+            # NOTE: scan_tools_for_full_docs is INTENTIONALLY NOT patched —
+            # we need the real tool registration so the filter can resolve
+            # the "council" / "instance" categories.
+            # NOTE: _apply_tool_filter is INTENTIONALLY NOT patched —
+            # we want the real filter to run.
+        ]
+        for p in patches:
+            p.start()
+        try:
+            with patch("daemon.registry.get_registry", return_value=registry):
+                filtered_tools = create_instance_tools(manager, instance_id, agent_id)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        return filtered_tools
+
+    def _tool_names(self, tools: list) -> set[str]:
+        """Return the set of tool names (strings only) from the tool list.
+
+        Some tool objects returned by the factory may be MagicMock instances
+        (e.g. when ``create_inner_soul_tool`` is patched); their ``name``
+        attribute is itself a MagicMock which is truthy but not a string.
+        We filter to strings so the assertion messages are sortable.
+        """
+        return {
+            n for n in (getattr(t, "name", None) for t in tools)
+            if isinstance(n, str)
+        }
+
+    def test_leader_no_council_tools(self):
+        """S3: leader must NOT have spawn_councilor or clear_councilor_errors.
+
+        The leader's ``tools.allow`` does not include ``"council"``, so the
+        real filter must strip the council tools from its tool list.
+        """
+        tools = self._build_filtered_tools_for_agent("leader", "test-leader")
+        tool_names = self._tool_names(tools)
+        assert "spawn_councilor" not in tool_names, (
+            f"S3 REGRESSION: leader must not have spawn_councilor; "
+            f"got: {sorted(tool_names)}"
+        )
+        assert "clear_councilor_errors" not in tool_names, (
+            f"S3 REGRESSION: leader must not have clear_councilor_errors; "
+            f"got: {sorted(tool_names)}"
+        )
+
+    def test_developer_no_council_tools(self):
+        """S3: developer must NOT have spawn_councilor or clear_councilor_errors.
+
+        The developer's ``tools.allow`` does not include ``"council"``, so the
+        real filter must strip the council tools from its tool list.
+        """
+        tools = self._build_filtered_tools_for_agent("developer", "test-dev")
+        tool_names = self._tool_names(tools)
+        assert "spawn_councilor" not in tool_names, (
+            f"S3 REGRESSION: developer must not have spawn_councilor; "
+            f"got: {sorted(tool_names)}"
+        )
+        assert "clear_councilor_errors" not in tool_names, (
+            f"S3 REGRESSION: developer must not have clear_councilor_errors; "
+            f"got: {sorted(tool_names)}"
+        )
+
+    def test_governor_has_council_tools(self):
+        """S3 (positive control): governor MUST have spawn_councilor and clear_councilor_errors.
+
+        The governor's ``tools.allow`` includes ``"council"``, so the real
+        filter must keep the council tools. This is the positive control
+        that confirms the filter is actually running — if the filter were
+        accidentally bypassed, the governor would still show the tools,
+        but the leader/developer tests would also wrongly show them.
+        """
+        tools = self._build_filtered_tools_for_agent("governor", "test-gov")
+        tool_names = self._tool_names(tools)
+        assert "spawn_councilor" in tool_names, (
+            f"S3 REGRESSION: governor must have spawn_councilor; "
+            f"got: {sorted(tool_names)}"
+        )
+        assert "clear_councilor_errors" in tool_names, (
+            f"S3 REGRESSION: governor must have clear_councilor_errors; "
+            f"got: {sorted(tool_names)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # D9 + E2E A-G Coverage Note
 # ---------------------------------------------------------------------------
