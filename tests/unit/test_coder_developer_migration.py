@@ -666,6 +666,7 @@ class TestRestoreInstanceWithCoderAgentId:
         mock_meta.instance_id = "stale-instance-001"
         mock_meta.agent_id = "coder"           # ← standalone coder agent
         mock_meta.agent_dir = "/agents/coder"  # ← coder's on-disk path
+        mock_meta.agent_tag = None             # ← base version (no tag) on restore
         mock_meta.parent_id = None
         mock_meta.instance_metadata = {"mcp_tool_names": []}
 
@@ -677,10 +678,14 @@ class TestRestoreInstanceWithCoderAgentId:
             patch("daemon.manager.build_instance_graph") as mock_build_graph,
             patch("daemon.manager.create_instance_tools") as mock_create_tools,
         ):
-            # Configure the mock registry: with the alias map empty,
-            # ``get_resolved('coder')`` returns coder's metadata directly
-            # (no alias hop, no separate ``resolve_pure_id`` call).
+            # Configure the mock registry: ``_restore_instance`` now calls
+            # ``get_version(agent_id, agent_tag)`` first and only falls back
+            # to ``get_resolved`` when that returns None (base-version case).
+            # We stub ``get_version`` → None so the test exercises the
+            # ``get_resolved`` fallback, which returns coder's metadata
+            # directly (no alias hop, no separate ``resolve_pure_id`` call).
             mock_registry = MagicMock()
+            mock_registry.get_version.return_value = None
 
             # get_resolved('coder') returns coder's metadata directly.
             mock_coder_meta = MagicMock()
@@ -722,6 +727,7 @@ class TestRestoreInstanceWithCoderAgentId:
         mock_meta.instance_id = "fresh-instance-002"
         mock_meta.agent_id = "developer"  # ← already canonical
         mock_meta.agent_dir = "/agents/developer"
+        mock_meta.agent_tag = None         # ← base version (no tag) on restore
         mock_meta.parent_id = None
         mock_meta.instance_metadata = {"mcp_tool_names": []}
 
@@ -732,10 +738,11 @@ class TestRestoreInstanceWithCoderAgentId:
             patch("daemon.manager.build_instance_graph") as mock_build_graph,
             patch("daemon.manager.create_instance_tools") as mock_create_tools,
         ):
-            # Configure the mock registry: with the alias map empty,
-            # ``get_resolved('developer')`` returns developer's metadata
-            # directly.
+            # ``_restore_instance`` calls ``get_version`` first and falls
+            # back to ``get_resolved`` when it returns None. Stub the
+            # base-version lookup to None so the fallback is exercised.
             mock_registry = MagicMock()
+            mock_registry.get_version.return_value = None
             mock_developer_meta = MagicMock()
             mock_developer_meta.path = Path("/agents/developer")
             mock_developer_meta.llm_model = None
