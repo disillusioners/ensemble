@@ -1,5 +1,6 @@
-import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed, input, effect, inject } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed, input, effect, inject, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import type { InstanceStatus, JobQueue } from '../../models';
 import { ApiService } from '../../services/api.service';
 
@@ -25,6 +26,7 @@ interface FilePreview {
 })
 export class MessageInputComponent {
   private readonly apiService = inject(ApiService);
+  private readonly destroyRef = inject(DestroyRef);
 
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
   @ViewChild('fileInput') fileInputRef!: ElementRef<HTMLInputElement>;
@@ -114,7 +116,7 @@ export class MessageInputComponent {
       this.selectedQueueId.set(projectId ? localStorage.getItem(`ensemble-queue-select-${projectId}`) || 'system_parallel_queue' : null);
       if (!projectId) return;
       const requestProjectId = projectId;
-      this.apiService.getQueues(requestProjectId).subscribe({
+      this.apiService.getQueues(requestProjectId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
         next: response => {
           if (this.projectId() !== requestProjectId) return;
           this.queues.set(response.queues);
@@ -134,7 +136,12 @@ export class MessageInputComponent {
   onQueueChange(queueId: string): void {
     this.selectedQueueId.set(queueId);
     const projectId = this.projectId();
-    if (projectId) localStorage.setItem(`ensemble-queue-select-${projectId}`, queueId);
+    if (!projectId) return;
+    try {
+      localStorage.setItem(`ensemble-queue-select-${projectId}`, queueId);
+    } catch {
+      // Ignore — private browsing / quota exceeded; non-critical
+    }
   }
 
   handleSubmit(): void {

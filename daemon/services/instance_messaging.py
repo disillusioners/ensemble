@@ -1430,16 +1430,37 @@ class InstanceMessagingService:
                         self._manager._instance_repository.get, instance_id
                     )
                     if instance_meta is not None:
-                        raw_project_id = (
-                            instance_meta.project_id
-                            or instance_meta.instance_metadata.get("project_id")
-                        )
+                        # W1 (security): drop the
+                        # ``instance_metadata.get("project_id")`` fallback.
+                        # ``instance_metadata`` is written by
+                        # ``spawn_instance`` from prompts/inputs an LLM can
+                        # influence, so it is not a trustworthy source of
+                        # project identity. The DB column
+                        # ``instances.project_id`` — set by the
+                        # authoritative ``InstanceLifecycleService`` — is
+                        # the only source we accept here.
+                        raw_project_id = instance_meta.project_id
                         project_id_for_job = normalize_project_id(raw_project_id)
                 except Exception as project_err:
                     logger.debug(
                         f"enqueue_message_job: failed to resolve project_id "
                         f"for instance {instance_id[:8]}...: "
                         f"{type(project_err).__name__}: {project_err}"
+                    )
+
+                if project_id_for_job is None:
+                    # Either the instance row was missing, the lookup
+                    # raised (DEBUG-logged above), or the instance has
+                    # no project_id stamped. None of those is a valid
+                    # state for queue routing — the JobItem mirror will
+                    # fall back to the default queue. WARNING so
+                    # operators can spot instances whose project_id is
+                    # not set (would silently lose cross-project
+                    # isolation previously masked by the metadata
+                    # fallback).
+                    logger.warning(
+                        "Instance %s has no project_id; queue routing will use default",
+                        instance_id,
                     )
 
                 # Resolve the JobQueue id the message JobItem mirror is

@@ -35,6 +35,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from daemon.manager import InstanceManager
 from daemon.services.instance_messaging import (
@@ -535,3 +537,173 @@ class TestEnqueueMessageJobQueueIdResolution:
             is_background=False,
             queue_id="queue-abc",
         )
+
+
+# ============================================================
+# C1: HTTP router wiring verification
+# ============================================================
+#
+# The four scenarios above exercise the service layer directly. They
+# prove that ``enqueue_message_job`` resolves the right ``queue_id`` for
+# the JobItem mirror, but they do NOT prove that the FastAPI route at
+# ``daemon/routers/messages.py`` actually forwards the
+# ``message.queue_id`` field from the request body into the service
+# call. A typo in the route (``queue_id=message.id``) or a missing
+# Pydantic field on ``MessageCreate`` would silently break the feature
+# for the entire HTTP surface while the service-layer tests still pass.
+#
+# This test follows the established router-test pattern from
+# ``tests/unit/routers/test_message_status_endpoint.py`` (FastAPI app +
+# router-include + middleware-injected manager + ``TestClient``) — no
+# real DB, no real manager, no real LLM. The single point under test
+# is the one-line wiring at
+# ``daemon/routers/messages.py`` ~line 321:
+#     ``queue_id=message.queue_id``
+# which must thread the caller-supplied queue_id from the JSON body
+# into the service call.
+
+
+_SENTINEL_QUEUE_ID = "queue-test-123"
+_SENTINEL_INSTANCE_ID = "inst-idle-001"
+_SENTINEL_MESSAGE_ID = "msg-router-001"
+
+
+def _make_idle_manager(*, enqueue_side_effect: AsyncMock) -> MagicMock:
+    """Build a minimal manager mock that drives ``send_message`` down
+    the NORMAL (IDLE / terminal) branch.
+
+    Required surface for the route:
+
+    * ``is_write_paused`` — a property returning ``False`` so the
+      503 guard is skipped.
+    * ``get_instance_info(instance_id)`` — returns a dict with a
+      ``status`` key that is NOT in ``_INJECTION_ELIGIBLE_STATUSES``
+      and NOT ``"paused"`` so the route falls through to the NORMAL
+      branch and calls ``enqueue_message_job``.
+    * ``enqueue_message_job`` — ``AsyncMock`` the test asserts on.
+    * ``config.llm.model_vision`` — only read when the body has
+      ``images``; harmless to leave as a plain attribute since the
+      request body sends no images.
+    """
+    manager = MagicMock()
+
+    # is_write_paused is a property on the real manager; setting it as
+    # a plain attribute on the MagicMock is sufficient because the
+    # route reads it via simple attribute access (no descriptor).
+    manager.is_write_paused = False
+
+    # IDLE branch — anything that is not RUNNING / WAITING_CHILDREN /
+    # PAUSED falls through to the NORMAL path which is the only path
+    # that forwards ``queue_id``.
+    manager.get_instance_info = MagicMock(
+        return_value={"status": "idle", "instance_id": _SENTINEL_INSTANCE_ID}
+    )
+
+    # The single observable side effect under test.
+    manager.enqueue_message_job = enqueue_side_effect
+
+    return manager
+
+
+@pytest.fixture
+def router_client_with_manager():
+    """Provide a TestClient + manager-slot for the messages router.
+
+    Mirrors the ``client_with_manager`` fixture in
+    ``tests/unit/routers/test_message_status_endpoint.py`` — the same
+    FastAPI + middleware pattern the project already uses for router
+    tests. The middleware reads ``state["manager"]`` and writes it
+    onto ``request.app.state.manager`` so the route's
+    ``_get_manager(request)`` helper can find it.
+    """
+    from daemon.routers.messages import router
+
+    app = FastAPI()
+    app.include_router(router)
+    state: dict = {"manager": None}
+
+    @app.middleware("http")
+    async def _inject_manager(request, call_next):
+        request.app.state.manager = state["manager"]
+        return await call_next(request)
+
+    client = TestClient(app)
+    return client, state
+
+
+class TestMessageRouteQueueIdForwarding:
+    """HTTP router wiring verification for the optional ``queue_id``
+    field on ``POST /instances/{instance_id}/messages``.
+
+    The service-layer tests above already cover the resolution
+    contract. This class proves the FastAPI route at
+    ``daemon/routers/messages.py`` actually forwards the
+    ``message.queue_id`` field into the manager call. Without this
+    test the ``queue_id`` parameter could be silently dropped at the
+    router boundary and the production HTTP surface would lose the
+    feature while service tests still pass.
+    """
+
+    def test_router_forwards_queue_id_to_enqueue_message_job(
+        self, router_client_with_manager
+    ) -> None:
+        """``POST /instances/{instance_id}/messages`` with a body
+        containing ``queue_id`` must invoke
+        ``manager.enqueue_message_job`` with the same ``queue_id``
+        value.
+
+        Test mechanics:
+
+        * The instance is set to IDLE so the request flows through the
+          NORMAL branch (the only branch that calls
+          ``enqueue_message_job``).
+        * ``manager.enqueue_message_job`` is patched as an AsyncMock
+          that returns a stub ``AsyncMessageResult`` carrying a
+          ``message_id`` so the route's response-shape code does not
+          blow up.
+        * The HTTP response is asserted to be 200 — the NORMAL
+          branch's success code. (The 202 status is reserved for the
+          INJECTION branch used by RUNNING / WAITING_CHILDREN; an
+          IDLE instance cannot trigger it.)
+        * The AsyncMock is asserted to have been awaited exactly once
+          with ``queue_id=<the sentinel value>`` — the wiring
+          contract under test.
+        """
+        client, state = router_client_with_manager
+
+        # The route reads ``result.message_id`` and ``result.job_id``
+        # from the AsyncMessageResult returned by enqueue_message_job,
+        # so the stub must expose those two attributes.
+        stub_result = SimpleNamespace(
+            message_id=_SENTINEL_MESSAGE_ID,
+            job_id="job-router-001",
+        )
+        enqueue_mock = AsyncMock(return_value=stub_result)
+        state["manager"] = _make_idle_manager(enqueue_side_effect=enqueue_mock)
+
+        resp = client.post(
+            f"/instances/{_SENTINEL_INSTANCE_ID}/messages",
+            json={"content": "hi", "queue_id": _SENTINEL_QUEUE_ID},
+        )
+
+        # The NORMAL branch returns 200 (the 202 path is the
+        # INJECTION branch, which only fires for RUNNING /
+        # WAITING_CHILDREN — not reachable from an IDLE instance).
+        assert resp.status_code == 200, resp.text
+
+        # The wiring under test: the HTTP body's ``queue_id`` flowed
+        # through to the service call as the ``queue_id`` kwarg.
+        enqueue_mock.assert_awaited_once()
+        _, kwargs = enqueue_mock.call_args
+        assert kwargs.get("queue_id") == _SENTINEL_QUEUE_ID, (
+            f"Router did not forward queue_id to enqueue_message_job: "
+            f"expected {_SENTINEL_QUEUE_ID!r}, got kwargs={kwargs!r}"
+        )
+        # And the message body itself was forwarded as ``message``.
+        assert kwargs.get("message") == "hi"
+        assert kwargs.get("instance_id") == _SENTINEL_INSTANCE_ID
+
+        # The response carries the message_id from the service stub
+        # so downstream callers can correlate the queued job.
+        body = resp.json()
+        assert body["message_id"] == _SENTINEL_MESSAGE_ID
