@@ -127,7 +127,6 @@ from .system import create_system_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
-from ._auth import _check_team_membership
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
 from daemon.constants import DEFAULT_PAGE_LIMIT

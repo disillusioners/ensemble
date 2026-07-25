@@ -3526,10 +3526,17 @@ class TestPhase3DeferJobPredicateInvariants:
         assert repository.has_active_non_background_work(None) is False
 
     def test_defer_blocked_by_non_defer_work_on_fifo_queue(self, engine, repository):
-        """Invariant: queued FIFO work counts as non-defer work."""
+        """Invariant: active FIFO work counts as non-defer work.
+
+        Post-45c068f9 contract: only ``admission_state='active'`` counts
+        as non-defer work (``'queued'`` was excluded to break the
+        defer↔background deadlock). See the canonical sibling
+        ``test_queued_job_does_not_count_as_active`` in
+        ``test_defer_idle_gate_phase2.py``.
+        """
         _insert_instance(engine, "inst-fifo", "proj-fifo", "waiting_children")
         _insert_queue(engine, "queue-fifo-test", "proj-fifo", "fifo")
-        _insert_job_item(engine, job_id="job-fifo", instance_id="inst-fifo", project_id="proj-fifo", queue_id="queue-fifo-test", admission_state="queued")
+        _insert_job_item(engine, job_id="job-fifo", instance_id="inst-fifo", project_id="proj-fifo", queue_id="queue-fifo-test", admission_state="active")
         assert repository.has_active_non_deferred_work("proj-fifo") is True
 
     def test_defer_blocked_by_non_defer_work_on_parallel_queue(self, engine, repository):
@@ -3596,12 +3603,19 @@ class TestPhase3DeferJobPredicateInvariants:
             _insert_instance(engine, f"inst-all-idle-{index}", "proj-all-idle", "idle")
         assert repository.has_active_non_deferred_work("proj-all-idle") is False
 
-    def test_queued_admission_state_blocks_defer_predicate(self, engine, repository):
-        """Invariant: queued admission state counts as busy."""
+    def test_queued_admission_state_does_not_block_defer_predicate(self, engine, repository):
+        """Invariant: queued admission state does not count as busy.
+
+        Post-45c068f9 contract: a ``queued`` (not-yet-dispatched) job
+        must NOT block the defer queue — this is what breaks the
+        defer↔background deadlock. Mirrors the canonical
+        ``test_queued_job_does_not_count_as_active`` in
+        ``test_defer_idle_gate_phase2.py``.
+        """
         _insert_instance(engine, "inst-q", "proj-q", "waiting_children")
         _insert_queue(engine, "queue-q", "proj-q", "fifo")
         _insert_job_item(engine, job_id="job-q", instance_id="inst-q", project_id="proj-q", queue_id="queue-q", admission_state="queued")
-        assert repository.has_active_non_deferred_work("proj-q") is True
+        assert repository.has_active_non_deferred_work("proj-q") is False
 
     def test_terminal_admission_state_does_not_block(self, engine, repository):
         """Invariant: done admission state does not count as active work."""

@@ -112,11 +112,49 @@ def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str
     # caller no longer needs to ALSO duplicate the backing agent in
     # team_members. Explicit team_members declarations are still honored
     # below; we just merge in the implied ones before canonicalizing.
+    #
+    # CATEGORY-ONLY MATCHING (intentional contract): auto-derive matches
+    # category names in tools.allow against TOOL_REQUIRED_AGENTS only.
+    # Individual tool names (e.g. ``"explore"`` as a bare name) do NOT
+    # imply any team members. The tool-layer ``resolve_tool_filter``
+    # expands both category and tool names, but this auth gate does not —
+    # simpler, and the practical impact is minimal: the only known agent
+    # with a bare tool name like ``"explore"`` in its allow list is
+    # ``wanderer``, which never spawns the ``explorer`` agent via
+    # ``spawn_instance`` (it uses the ``explore()`` tool, which bypasses
+    # the gate via ``invoke_agent_and_wait``).
     implied_members: list[str] = []
     if caller_meta.tools and caller_meta.tools.allow:
         for category, required_agents in TOOL_REQUIRED_AGENTS.items():
             if category in caller_meta.tools.allow:
                 implied_members.extend(required_agents)
+    # ---
+
+    # Honor ``tools.deny`` — "deny wins over allow" (matches
+    # ``resolve_tool_filter`` semantics). A category in deny drops its
+    # implied backing agents from ``implied_members``; a deny entry that
+    # is NOT a ``TOOL_REQUIRED_AGENTS`` key is treated as a literal tool
+    # name (no-op at this layer — the tool layer handles literal names).
+    # This closes the spawn-gate bypass where a caller could deny a
+    # category at the tool layer yet still spawn its backing agent
+    # directly via ``spawn_instance``.
+    if implied_members and caller_meta.tools and caller_meta.tools.deny:
+        denied_implied: set[str] = set()
+        for category, required_agents in TOOL_REQUIRED_AGENTS.items():
+            if category in caller_meta.tools.deny:
+                denied_implied.update(required_agents)
+        if denied_implied:
+            # Canonicalize denied entries the same way we canonicalize
+            # the allowed set below, so renamed agents compare
+            # consistently on both sides of the filter.
+            denied_canonical = {
+                registry.resolve_pure_id(m) for m in denied_implied
+                if registry.resolve_pure_id(m) is not None
+            }
+            implied_members = [
+                m for m in implied_members
+                if registry.resolve_pure_id(m) not in denied_canonical
+            ]
     # ---
 
     # Canonicalize each member (raw + implied) so a renamed team member
