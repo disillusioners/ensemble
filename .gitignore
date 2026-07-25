@@ -69,3 +69,4 @@ test-screenshots/*
 
 # E2E test screenshots (binary artifacts)
 frontend/tests/e2e-shots/
+e2e-shots/
