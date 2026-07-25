@@ -1,5 +1,5 @@
-Current Plan: Agent Versioning / Tagging System
-Tracking File: agent-versioning-tagging-system-tracking.md
-Iteration: 002
+Current Plan: Governor — Council-Manager Agent
+Tracking File: governor-council-manager-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-07-24 02:10
+Last Updated: 2026-07-25 12:00
