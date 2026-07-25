@@ -121,7 +121,7 @@
   </div>
   
   <p class="input-hint">
-    @if (isIdle() && queues().length > 0) {
+    @if (isQueueSelectorVisible() && queues().length > 0) {
       <label class="queue-selector">Queue
         <select (change)="onQueueChange($any($event.target).value)">
           @for (q of queues(); track q.queue_id) {

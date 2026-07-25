@@ -109,6 +109,22 @@ export class MessageInputComponent {
     return status === null || status === 'idle';
   });
 
+  /**
+   * Returns true when the queue selector dropdown should be visible.
+   *
+   * The backend routes messages for non-active states (idle, completed, error,
+   * failed, terminated, waiting, null/undefined) through the NORMAL queue-routing
+   * branch, so the caller can choose a queue. Active states (running,
+   * waiting_children, paused) and the queued state do NOT use queue routing
+   * (injection / resume / already-queued paths), so the selector is hidden.
+   */
+  readonly isQueueSelectorVisible = computed(() => {
+    const status = this.instanceStatus();
+    if (!status) return true;
+    const hiddenStates = ['running', 'waiting_children', 'paused', 'queued'];
+    return !hiddenStates.includes(status);
+  });
+
   constructor() {
     effect(() => {
       const projectId = this.projectId();
@@ -151,7 +167,7 @@ export class MessageInputComponent {
     const payload: MessagePayload = {
       content: trimmedMessage,
       images: this.images().map(img => img.dataUrl),
-      queue_id: this.isIdle() ? this.selectedQueueId() : null
+      queue_id: this.isQueueSelectorVisible() ? this.selectedQueueId() : null
     };
 
     this.sendMessage.emit(payload);
