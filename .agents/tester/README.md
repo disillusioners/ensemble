@@ -19,5 +19,5 @@
 
 ## ensure.md
 - Status: ✅ ACTIVE — `.agents/tester/rules/ensure.md` exists with Core + Release Gate requirements
-- E2E Release Gate (4 tests): last run 2026-07-22, all PASS
+- E2E Release Gate (4 tests): last run 2026-07-25, all PASS (happy_path 98s, pause+resume 43s, terminate+revive 93s, 3-level cascade 131s)
 - Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)
