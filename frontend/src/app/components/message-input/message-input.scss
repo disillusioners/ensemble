@@ -121,7 +121,30 @@ $border-color: #374151;
   height: 1.25rem;
 }
 
+.queue-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-right: 0.5rem;
+  color: $text-secondary;
+
+  select {
+    max-width: 12rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid $border-color;
+    border-radius: 0.3rem;
+    background: $bg-secondary;
+    color: $text-primary;
+    font-size: 0.75rem;
+  }
+}
+
 .input-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
   text-align: center;
   color: $text-muted;
   font-size: 0.75rem;

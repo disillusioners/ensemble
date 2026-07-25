@@ -323,6 +323,7 @@ async def send_message(
             message=message.content,
             source="api",
             images=message.images,
+            queue_id=message.queue_id,
         )
     except Exception as e:
         raise HTTPException(

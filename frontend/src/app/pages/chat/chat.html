@@ -160,6 +160,7 @@
           [disabled]="isSending()"
           [agentColor]="instanceAgent()?.id || 'developer'"
           [instanceStatus]="currentInstance()?.status ?? null"
+          [projectId]="projectId"
           (pauseInstance)="onPauseInstance()"
           (resumeInstance)="onResumeInstance($event)"
         ></app-message-input>

@@ -13,6 +13,15 @@ class MessageCreate(BaseModel):
 
     content: str = Field(..., description="Message content to send to the agent")
     images: list[str] | None = Field(default=None, description="Base64-encoded images (data URI format)")
+    queue_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional JobQueue ``queue_id`` to route the message JobItem mirror to. "
+            "When omitted (or empty) the default ``system_parallel_queue`` is used. "
+            "Invalid IDs and IDs belonging to a different project fall back to the "
+            "default queue with a WARNING log — graceful degradation by design."
+        ),
+    )
 
     @field_validator("images")
     @classmethod
@@ -56,7 +65,8 @@ class MessageCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "content": "Hello, agent!"
+                "content": "Hello, agent!",
+                "queue_id": None,
             }
         }
     )

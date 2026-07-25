@@ -1283,6 +1283,7 @@ class InstanceMessagingService:
         *,
         is_deferred: bool = False,
         is_background: bool = False,
+        queue_id: str | None = None,
     ) -> "AsyncMessageResult":
         """POC variant of :meth:`enqueue_message` that also creates a JobItem.
 
@@ -1441,21 +1442,28 @@ class InstanceMessagingService:
                         f"{type(project_err).__name__}: {project_err}"
                     )
 
-                # Resolve the project's ``system_parallel_queue`` so the
-                # message JobItem is queue-scoped. Without this the
-                # JobItem is stored with ``queue_id=None`` and disappears
-                # from queue-scoped counts (``GET /queues`` returns
-                # ``active_jobs``/``pending_jobs`` per queue, derived
-                # from ``JobItem.queue_id``). Routing message mirrors
-                # through the parallel queue lets the UI surface
-                # in-flight message dispatch without affecting the poll
-                # loop — ``list_pending_by_queue`` retains the
-                # ``job_type != 'message'`` filter so message mirrors
-                # are never picked up as Tasks — and lets concurrent
-                # messages across instances share the queue's
-                # concurrency_limit (=5) instead of serializing behind
-                # the FIFO queue's concurrency_limit=1.
+                # Resolve the JobQueue id the message JobItem mirror is
+                # stamped with. Resolution order:
+                #   1. Caller-supplied ``queue_id`` — validated for
+                #      existence (via ``queue_repo.get``) and project
+                #      ownership. A repo error, an unknown id, or an id
+                #      belonging to a different project all fall back to
+                #      the default with a WARNING — graceful degradation,
+                #      never a 4xx.
+                #   2. Default ``system_parallel_queue`` for the resolved
+                #      project — the pre-existing behaviour when no
+                #      ``queue_id`` is supplied. Preserves backward
+                #      compatibility for every caller that does not pass
+                #      the new field.
+                #
+                # The two lookups share a single try/except so a transient
+                # DB error from either is logged at DEBUG, but the
+                # individual steps are NOT short-circuited by each
+                # other: a ``get`` failure must not skip the
+                # ``get_by_name`` fallback, and vice versa. The spec
+                # requires the default to win on any per-lookup error.
                 queue_id_for_job: str | None = None
+                queue_id_supplied = bool(queue_id and queue_id.strip())
                 if project_id_for_job is not None:
                     # ``JobQueueService`` exposes ``_queue_repo``
                     # (``JobQueueRepository``) for queue metadata;
@@ -1472,17 +1480,82 @@ class InstanceMessagingService:
                     )
                     if queue_repo is not None:
                         try:
-                            queue = await asyncio.to_thread(
-                                queue_repo.get_by_name,
-                                project_id_for_job,
-                                "system_parallel_queue",
-                            )
-                            if queue is not None:
-                                queue_id_for_job = queue.queue_id
+                            if queue_id_supplied:
+                                # Validate the caller-supplied id
+                                # against the repository. ``get`` returns
+                                # ``None`` for unknown ids; any exception
+                                # (DB outage, typed error) is folded into
+                                # the same fallback path.
+                                try:
+                                    requested = await asyncio.to_thread(
+                                        queue_repo.get, queue_id
+                                    )
+                                except Exception as get_err:
+                                    logger.warning(
+                                        "enqueue_message_job: queue_repo.get "
+                                        f"failed for queue_id={queue_id!r} "
+                                        f"on project {project_id_for_job}: "
+                                        f"{type(get_err).__name__}: {get_err}; "
+                                        "falling back to default "
+                                        "system_parallel_queue"
+                                    )
+                                    requested = None
+                                if (
+                                    requested is not None
+                                    and getattr(requested, "project_id", None)
+                                    == project_id_for_job
+                                ):
+                                    queue_id_for_job = requested.queue_id
+                                else:
+                                    # Wrong project, or id not found, or
+                                    # lookup errored — log + fall back to
+                                    # the default. The two error
+                                    # conditions are distinct log
+                                    # messages so operators can tell
+                                    # "bad caller" from "broken repo".
+                                    if requested is None:
+                                        mismatch_reason = "not_found_or_repo_error"
+                                    else:
+                                        mismatch_reason = "wrong_project"
+                                    logger.warning(
+                                        "enqueue_message_job: caller-supplied "
+                                        f"queue_id={queue_id!r} is invalid "
+                                        f"({mismatch_reason}) for project "
+                                        f"{project_id_for_job}; falling back "
+                                        "to default system_parallel_queue"
+                                    )
+                            if queue_id_for_job is None:
+                                # Default resolution — either the caller
+                                # did not supply a queue_id, or the
+                                # supplied one failed validation above.
+                                try:
+                                    queue = await asyncio.to_thread(
+                                        queue_repo.get_by_name,
+                                        project_id_for_job,
+                                        "system_parallel_queue",
+                                    )
+                                except Exception as by_name_err:
+                                    logger.warning(
+                                        "enqueue_message_job: queue_repo."
+                                        "get_by_name failed for project "
+                                        f"{project_id_for_job}: "
+                                        f"{type(by_name_err).__name__}: "
+                                        f"{by_name_err}; leaving queue_id "
+                                        "unset on the JobItem mirror"
+                                    )
+                                    queue = None
+                                if queue is not None:
+                                    queue_id_for_job = queue.queue_id
                         except Exception as queue_lookup_err:
+                            # Catch-all for any unexpected error outside
+                            # the two guarded lookups (e.g. the
+                            # ``getattr`` chain). The per-lookup guards
+                            # above already cover the documented failure
+                            # modes; this branch is purely defensive
+                            # against future regressions.
                             logger.debug(
-                                f"enqueue_message_job: failed to resolve "
-                                f"system_parallel_queue for project "
+                                f"enqueue_message_job: unexpected error "
+                                f"resolving queue_id for project "
                                 f"{project_id_for_job}: "
                                 f"{type(queue_lookup_err).__name__}: "
                                 f"{queue_lookup_err}"

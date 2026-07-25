@@ -25,7 +25,8 @@ import type {
   InstanceMappingListResponse,
   DeleteResponse,
   PauseResponse,
-  ResumeResponse
+  ResumeResponse,
+  JobQueueListResponse
 } from '../models';
 
 @Injectable({
@@ -145,9 +146,15 @@ export class ApiService {
   }
 
   // Messages
-  sendMessage(instanceId: string, content: string, images?: string[]): Observable<MessageResponse> {
-    const body = images?.length ? { content, images } : { content };
+  sendMessage(instanceId: string, content: string, images?: string[], queueId?: string | null): Observable<MessageResponse> {
+    const body: { content: string; images?: string[]; queue_id?: string } = { content };
+    if (images?.length) body.images = images;
+    if (queueId) body.queue_id = queueId;
     return this.http.post<MessageResponse>(`${this.API_BASE}/instances/${instanceId}/messages`, body);
+  }
+
+  getQueues(projectId: string): Observable<JobQueueListResponse> {
+    return this.http.get<JobQueueListResponse>(`${this.API_BASE}/projects/${projectId}/queues`);
   }
 
   getMessages(instanceId: string): Observable<Message[]> {

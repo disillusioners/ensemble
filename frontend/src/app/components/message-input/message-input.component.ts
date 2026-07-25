@@ -1,10 +1,12 @@
-import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed, input } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed, input, effect, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import type { InstanceStatus } from '../../models';
+import type { InstanceStatus, JobQueue } from '../../models';
+import { ApiService } from '../../services/api.service';
 
 export interface MessagePayload {
   content: string;
   images?: string[];  // optional, not required
+  queue_id?: string | null;
 }
 
 interface FilePreview {
@@ -22,6 +24,8 @@ interface FilePreview {
   styleUrls: ['./message-input.scss']
 })
 export class MessageInputComponent {
+  private readonly apiService = inject(ApiService);
+
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
   @ViewChild('fileInput') fileInputRef!: ElementRef<HTMLInputElement>;
 
@@ -29,6 +33,7 @@ export class MessageInputComponent {
   readonly disabled = input(false);
   readonly agentColor = input('developer');
   readonly instanceStatus = input<InstanceStatus | null>(null);
+  readonly projectId = input<string | null>(null);
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() pauseInstance = new EventEmitter<void>();
   @Output() resumeInstance = new EventEmitter<string>();  // emits message text (or empty string for default)
@@ -94,13 +99,52 @@ export class MessageInputComponent {
     return (!!this.message().trim() || this.images().length > 0) && !this.disabled();
   });
 
+  queues = signal<JobQueue[]>([]);
+  selectedQueueId = signal<string | null>(null);
+
+  readonly isIdle = computed(() => {
+    const status = this.instanceStatus();
+    return status === null || status === 'idle';
+  });
+
+  constructor() {
+    effect(() => {
+      const projectId = this.projectId();
+      this.queues.set([]);
+      this.selectedQueueId.set(projectId ? localStorage.getItem(`ensemble-queue-select-${projectId}`) || 'system_parallel_queue' : null);
+      if (!projectId) return;
+      const requestProjectId = projectId;
+      this.apiService.getQueues(requestProjectId).subscribe({
+        next: response => {
+          if (this.projectId() !== requestProjectId) return;
+          this.queues.set(response.queues);
+          const stored = this.selectedQueueId();
+          const selected = response.queues.some(q => q.queue_id === stored)
+            ? stored
+            : response.queues.find(q => q.queue_id === 'system_parallel_queue')?.queue_id ?? response.queues[0]?.queue_id ?? null;
+          this.selectedQueueId.set(selected);
+        },
+        error: () => {
+          if (this.projectId() === requestProjectId) this.queues.set([]);
+        }
+      });
+    });
+  }
+
+  onQueueChange(queueId: string): void {
+    this.selectedQueueId.set(queueId);
+    const projectId = this.projectId();
+    if (projectId) localStorage.setItem(`ensemble-queue-select-${projectId}`, queueId);
+  }
+
   handleSubmit(): void {
     const trimmedMessage = this.message().trim();
     if ((!trimmedMessage && this.images().length === 0) || this.disabled()) return;
 
     const payload: MessagePayload = {
       content: trimmedMessage,
-      images: this.images().map(img => img.dataUrl)
+      images: this.images().map(img => img.dataUrl),
+      queue_id: this.isIdle() ? this.selectedQueueId() : null
     };
 
     this.sendMessage.emit(payload);

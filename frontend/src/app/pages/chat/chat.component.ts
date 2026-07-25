@@ -476,7 +476,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sendError.set(null);
     this.isSending.set(true);
     
-    this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
+    this.api.sendMessage(instance.instance_id, payload.content, payload.images, payload.queue_id).subscribe({
       // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
       // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
       // default in Angular's HttpClient. We treat both as success from the

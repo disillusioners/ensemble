@@ -121,6 +121,15 @@
   </div>
   
   <p class="input-hint">
+    @if (isIdle() && queues().length > 0) {
+      <label class="queue-selector">Queue
+        <select [value]="selectedQueueId()" (change)="onQueueChange($any($event.target).value)">
+          @for (q of queues(); track q.queue_id) {
+            <option [value]="q.queue_id">{{ q.queue_name }}</option>
+          }
+        </select>
+      </label>
+    }
     Press <kbd class="kbd">Enter</kbd> to send, 
     <kbd class="kbd">Shift + Enter</kbd> for new line
   </p>

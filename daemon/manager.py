@@ -4309,6 +4309,7 @@ class InstanceManager:
         *,
         is_deferred: bool = False,
         is_background: bool = False,
+        queue_id: str | None = None,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
@@ -4345,6 +4346,7 @@ class InstanceManager:
             metadata=metadata,
             is_deferred=is_deferred,
             is_background=is_background,
+            queue_id=queue_id,
         )
 
     async def _process_message_with_tracking(
