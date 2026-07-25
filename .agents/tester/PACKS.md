@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 195 packs
-- Unit: 156 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
+- Total: 196 packs
+- Unit: 157 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -476,3 +476,11 @@ VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c
 | vscode_routing_e2e_test | tests/integration/test_vscode_routing_e2e.py | **NEW** Real proxy routing E2E: C3 mount isolation, API works, SPA catch-all serves index.html. LIVE dev server (localhost:8079) with ASGI fallback. | 5 min | 2026-07-25 | ✅ PASS (8/8 in 1.11s warm, NEW test file, commit 303d9605, 0 failures. Ran against LIVE dev server) |
 | vscode_frontend_unit_test | frontend/ (`npx jest vscode-viewer.component.spec.ts settings.component.spec.ts settings.service.spec.ts`) | Frontend VS Code specs: VsCodeViewerComponent (postMessage origin, debounce, cleanup), SettingsComponent (editor section, Apply dirty/loading), SettingsService (PUT/GET editor API). **Jest + jest-preset-angular** (NOT Karma). | 5 min | 2026-07-25 | ✅ PASS (84/84 in 1.36s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
 | vscode_frontend_integration_test | frontend/ (`npx jest vscode-viewer.integration.spec.ts`) | **NEW** Frontend integration: onIframeLoad direct postMessage (bypasses debounce) with window.location.origin, loading signal flip, empty workdir guard, rapid-change last-value-wins debounce, timer cleanup no stale leak. | 5 min | 2026-07-25 | ✅ PASS (7/7 in 1.08s, NEW test file, commit 399ad76b, 0 failures) |
+
+## Tool Authorization Auto-Derive Packs (2026-07-25)
+
+`feature/tool-authz-auto-derive` @ `3b94ba85`. New `daemon/tools/_auth.py` centralizes spawn authorization: `_check_team_membership()` auto-derives implied `team_members` from caller's `tools.allow` via `TOOL_REQUIRED_AGENTS` (knowledge→explorer/kb-writer, chart→charter, image→image-reader, council→governor). Removes "double authorization" requirement.
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| authz_auto_derive_unit_test | test/packs/authz_auto_derive_unit_test.sh | Spawn/team-member authorization: `_check_team_membership` auto-derive (knowledge→explorer, non-matching category→deny, deny-by-default), ari no-spawn contract (empty team_members + no instance tool). 3 core claim scenarios covered. | 2 min | 2026-07-25 | ✅ PASS (72/72 in ~2s, feature/tool-authz-auto-derive @ b81e455d, 0 failures. +1 NEW test `test_non_agent_backed_category_implies_nothing`. Pack script NEW commit b81e455d) |
