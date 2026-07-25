@@ -27,7 +27,7 @@ Critical assertions (per Phase 2 plan):
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -149,6 +149,149 @@ def _get_council_tools(
             f"got {[getattr(t, 'name', None) for t in tools]}"
         )
     return spawn_councilor, clear_errors
+
+
+def _get_tool(
+    manager: MagicMock,
+    tool_name: str,
+    caller_agent_id: str = "leader",
+):
+    """Build instance tools and return one named tool."""
+    from daemon.tools.instance import create_instance_tools
+
+    patches = _patch_heavy_helpers()
+    for p in patches:
+        p.start()
+    try:
+        tools = create_instance_tools(
+            manager,
+            "parent-instance-id",
+            caller_agent_id,
+        )
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    matching_tool = next(
+        (tool for tool in tools if getattr(tool, "name", None) == tool_name),
+        None,
+    )
+    if matching_tool is None:
+        raise RuntimeError(
+            f"{tool_name} tool not found in create_instance_tools output; "
+            f"got {[getattr(tool, 'name', None) for tool in tools]}"
+        )
+    return matching_tool
+
+
+class TestConveneCouncil:
+    """Behavior of the non-blocking council convening tool."""
+
+    async def test_convene_council_happy_path(self):
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        convene_council = _get_tool(manager, "convene_council")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            result = await convene_council.coroutine(
+                councilor_agent_id="developer",
+                request="Refactor X",
+            )
+
+        manager.spawn_instance.assert_called_once_with(
+            agent_id="governor",
+            parent_id="parent-instance-id",
+            instance_name=None,
+        )
+        manager.enqueue_message.assert_awaited_once()
+        enqueue_kwargs = manager.enqueue_message.await_args.kwargs
+        assert enqueue_kwargs["instance_id"] == "governor-instance-id"
+        assert 'councilor_agent_id="developer"' in enqueue_kwargs["message"]
+        assert "Request: Refactor X" in enqueue_kwargs["message"]
+        assert "all available" in enqueue_kwargs["message"]
+        assert "governor decides" in enqueue_kwargs["message"]
+        assert result["status"] == "convened"
+        assert result["governor_instance_id"] == "governor-instance-id"
+        assert result["hint"]
+
+    async def test_convene_council_non_blocking(self):
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        convene_council = _get_tool(manager, "convene_council")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            result = await convene_council.coroutine(
+                councilor_agent_id="developer",
+                request="Refactor X",
+            )
+
+        assert result["status"] == "convened"
+        manager.spawn_instance.assert_called_once()
+        manager.enqueue_message.assert_awaited_once()
+        assert not any(
+            name.startswith(("wait_for_", "await_"))
+            for name, _args, _kwargs in manager.mock_calls
+        )
+
+    async def test_convene_council_invalid_councilor_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene_council = _get_tool(manager, "convene_council")
+
+        with patch(
+            "daemon.registry.AgentRegistry.resolve_to_id",
+            return_value=None,
+        ):
+            with pytest.raises(ValueError, match="bad-councilor"):
+                await convene_council.coroutine(
+                    councilor_agent_id="bad-councilor",
+                    request="Refactor X",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_convene_council_no_team_membership_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene_council = _get_tool(manager, "convene_council")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value="caller cannot spawn governor",
+            ),
+        ):
+            with pytest.raises(ValueError, match="caller cannot spawn governor"):
+                await convene_council.coroutine(
+                    councilor_agent_id="developer",
+                    request="Refactor X",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
 
 
 # =============================================================================
