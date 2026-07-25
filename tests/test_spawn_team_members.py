@@ -903,6 +903,33 @@ class TestAutoDerivationOfImpliedTeamMembers:
         assert err_kb is not None, "chart-only caller must NOT allow 'kb-writer'"
         assert "not allowed to spawn" in err_kb
 
+    def test_non_agent_backed_category_implies_nothing(self, monkeypatch):
+        """An agent with ``tools.allow=['bash']`` (a non-agent-backed
+        category — NOT present in :data:`TOOL_REQUIRED_AGENTS`) and empty
+        ``team_members`` → no agents are implied, so spawning
+        ``explorer`` (or any agent) FAILS. This is distinct from the
+        ``chart``-only case: ``chart`` IS in the map (implies ``charter``),
+        while ``bash`` grants zero implied members. The allow-set
+        renders as ``[]``.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_bash_only_caller",
+            team_members=[],
+            tools_allow=["bash"],  # not in TOOL_REQUIRED_AGENTS
+        )
+
+        # explorer is NOT allowed (knowledge-implied; bash grants nothing).
+        err = _check_team_membership("synthetic_bash_only_caller", "explorer")
+        assert err is not None, "bash-only caller must NOT allow 'explorer'"
+        assert "not allowed to spawn" in err
+        assert "Allowed team members: []" in err, (
+            f"bash-only allow-set must be exactly [] (no implied members); "
+            f"got: {err!r}"
+        )
+
     def test_canonicalization_preserved_for_implied_members(self, monkeypatch):
         """Canonicalization: if an implied id has an alias, the helper
         resolves it through the registry and the auto-derived set
