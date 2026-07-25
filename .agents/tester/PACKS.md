@@ -2,7 +2,7 @@
 
 ## Summary
 - Total: 195 packs
-- Unit: 156 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 2
+- Unit: 156 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -430,6 +430,9 @@ Workspace Viewer feature (feature/workspace-viewer branch) — read-only file br
 | workspace_state_preserve_e2e_test | frontend/e2e/workspace-state-preserve.spec.ts | Browser E2E: 7 workspace state preservation scenarios (open+expand+file, switch shows diff tree, file content restored on return, expanded dirs preserved, 3× repeat consistency, B's expansion doesn't affect A, B's file doesn't affect A). Tests the exact original bug from commit 2fd787aa. Playwright + screenshots. | 5 min | 2026-07-24 | ✅ PASS (7/7 steps, feature/workspace-state-preserve @ 2fd787aa, ~50.5s runtime, servers auto-started) |
 | frontend_full_unit_test | test/packs/frontend_full_unit_test.sh | Full frontend Jest suite: ALL Angular component/service/model specs (chat, tab-bar, workspace, tab-state, agent-switcher, home, instances, skills, **file-tabs**, etc.). Used for full regression checks on frontend-heavy features. | 5 min | 2026-07-24 | ✅ PASS (1742/1742 across 49 suites, ~5.6s runtime, feature/workspace-file-tabs @ 3a3943df, 0 failures) |
 | workspace_file_tabs_e2e_test | frontend/e2e/workspace-file-tabs.spec.ts | Browser E2E: 17 VS Code-style multi-file tab scenarios (Part A: click→tab, second tab, switch content, edit preservation, close button, close active→adjacent, close last→empty, dirty dot, tree highlight, save clears dirty, LRU cache; Part B: C1 close dirty+reopen→fresh, C2 rapid switch no phantom tabs, W2 save+type+undo→dirty/clean, W3 cached tab content loads, W4 close dirty→confirm dialog, LRU project switch). Playwright + screenshots. Quick fix: undo/redo userEvent propagation in codemirror.directive.ts. | 5 min | 2026-07-24 | ✅ PASS (15/17 passed, 0 failed, 2 skipped [LRU cache=full page reload resets in-memory session], feature/workspace-file-tabs @ 3a3943df) |
+| system_prompt_toggle_build_test | frontend/ (npm run build) | Frontend production build for system-prompt toggle feature (Angular strictTemplates). 0 TS/template errors. Artifact dist/frontend/browser/index.html. | 3 min | 2026-07-25 | ✅ PASS (exit 0 in 9.74s, feature/fe-toggle-system-prompt @ df56403b, pre-existing bundle budget warnings only) |
+| system_prompt_toggle_unit_test | frontend/ (`npx jest --ci`) | Frontend Jest regression for system-prompt toggle feature. Full suite (1798 tests / 51 suites). New showSystemPrompt signal + @Input did NOT break any ChatComponent/ChatInterfaceComponent specs. | 2 min | 2026-07-25 | ✅ PASS (1798/1798 in 8.3s, feature/fe-toggle-system-prompt @ df56403b, 0 failures) |
+| system_prompt_toggle_e2e_test | frontend/ (Playwright headless browser automation) | Browser E2E: 📋 System toggle in chat header — button present next to 💭 Think + 🔧 Tools, click toggles `.system-btn`↔`.system-btn active` (green bg), localStorage `ensemble-show-system-prompt` persists `"true"` across reload, Think/Tools toggles still work (no regression). Step 6 show/hide of system msgs SKIP (no live agent run producing role:system msgs). 0 page errors. | 3 min | 2026-07-25 | ✅ PASS (7/8 steps PASS, 1 expected SKIP, feature/fe-toggle-system-prompt @ df56403b, ~11s) |
 
 ## E2E Release Gate Packs (2026-07-22)
 
