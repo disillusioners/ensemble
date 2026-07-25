@@ -131,6 +131,7 @@ from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
 from daemon.constants import DEFAULT_PAGE_LIMIT
 from daemon.rag.config import is_rag_enabled
+from daemon.governor.contracts import SpawnCouncilorInput  # Phase 2: council tool schema (Phase 0 frozen)
 
 
 def _load_mcp_tools(manager: Any, instance_id: str) -> list[Any]:
@@ -809,7 +810,148 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 return f"ERROR: {error_msg}"
         except Exception as e:
             return f"ERROR: Failed to spawn instance: {str(e)}"
-    
+
+    # ─── Phase 2: council tools ──────────────────────────────────────────
+    # spawn_councilor / clear_councilor_errors are defined as closures INSIDE
+    # create_instance_tools() (C5 fix). They capture manager, caller_agent_id,
+    # and current_instance_id from the outer scope. Per the Phase 2 plan:
+    #   - C3: _check_team_membership returns str|None — check return value.
+    #   - C4: resolve_to_id returns str|None — check for None.
+    #   - W6: pass canonical_model to manager.spawn_instance() (not raw).
+    #   - W7: normalize model to canonical form via case-insensitive lookup.
+    #   - C2: use manager.config.llm.allowed_models (not manager._config).
+    # These tools are bound only to the governor's tools.allow=["council",...]
+    # via the "council" category in CATEGORY_MODULES.
+    @register_tool_category("council")
+    @tool(args_schema=SpawnCouncilorInput)
+    async def spawn_councilor(
+        councilor_agent_id: Annotated[str, Field(description="REQUIRED. Agent to spawn as councilor. Must be in governor's team_members.")],
+        model: Annotated[str, Field(description="REQUIRED. LLM model. Must be in <allowed_models>. RAISES on invalid — no fallback.")],
+        initial_message: Annotated[str, Field(description="REQUIRED. The request/message to forward to this councilor. Used in the returned instructions.")],
+        instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'councilor-gpt4o').")] = None,
+        version_tag: Annotated[str | None, Field(default=None, description="Optional agent version tag.")] = None,
+    ) -> str:
+        """Spawn a councilor instance with a REQUIRED, validated model.
+
+        Unlike ``spawn_instance``: REQUIRES both ``councilor_agent_id`` and
+        ``model`` parameters, RAISES on invalid model (no silent fallback),
+        and RAISES on invalid agent_id (no fallback to the membership gate).
+        The model is normalized to the canonical name from
+        ``config.llm.allowed_models`` before spawn (W7) so different
+        capitalizations of the same model do not produce duplicate councilors.
+
+        Returns:
+            A string containing the new ``instance_id``, the canonical model
+            name used, and instructions to forward the request via
+            ``send_message``.
+        """
+        # ─── STEP 1: Validate councilor_agent_id (C4: resolve_to_id returns None, never raises) ───
+        # Lazy import to avoid circular import (registry imports utils indirectly).
+        from ..registry import get_registry
+
+        registry = get_registry()
+        resolved_agent_id = registry.resolve_to_id(councilor_agent_id)
+        if resolved_agent_id is None:  # C4 FIX: check for None, not exception
+            raise ValueError(
+                f"councilor_agent_id '{councilor_agent_id}' is not a valid agent in the registry."
+            )
+
+        # ─── STEP 2: Validate team membership (C3: _check_team_membership returns str|None, never raises) ───
+        err = _check_team_membership(caller_agent_id, resolved_agent_id)
+        if err is not None:  # C3 FIX: check return value, not rely on exception
+            raise ValueError(err)
+
+        # ─── STEP 3: Validate model STRICTLY (raise, do not fallback) ───
+        # Lifecycle's _resolve_model_override silently returns None when the
+        # model is not in allowed_models. spawn_councilor inverts this — a
+        # None result is an error, not a silent fallback.
+        # C2 FIX: read manager.config.llm.allowed_models (NOT manager._config).
+        # Define `allowed` at outer scope so the W7 canonical-name normalization
+        # below can use it on the success path too.
+        allowed = getattr(manager.config.llm, "allowed_models", None) or []
+        lifecycle = manager._lifecycle_service
+        validated_model = lifecycle._resolve_model_override(model)
+        if validated_model is None:
+            if not allowed:
+                # Unrestricted — _resolve_model_override returned None only when
+                # the input was None/empty/whitespace, which Pydantic min_length=1
+                # should have rejected. If we reach here, something is off.
+                raise ValueError(
+                    f"Model '{model}' was rejected despite no allowed_models "
+                    f"restriction. Unexpected — report to user."
+                )
+            raise ValueError(
+                f"Model '{model}' is NOT in allowed_models. Valid models: {allowed}. "
+                f"No fallback — correct the model and retry."
+            )
+
+        # ─── STEP 3b: W7 — Normalize to canonical model name ───
+        # _resolve_model_override returns the caller's spelling (the candidate),
+        # not the canonical form from allowed_models. Normalize so 'gpt-4o'
+        # and 'GPT-4O' collapse to the same canonical entry (W7) — preventing
+        # duplicate councilors with different capitalizations of the same model.
+        canonical_model = next(
+            (m for m in allowed if m.lower() == validated_model.lower()),
+            validated_model,  # fallback to caller spelling if unrestricted
+        )
+
+        # ─── STEP 4: Delegate to lifecycle (W6: pass canonical, not raw) ───
+        # Passing canonical_model (not the raw caller-supplied model) closes
+        # the TOCTOU window: lifecycle's spawn_instance would otherwise re-run
+        # _resolve_model_override on the raw value, which could disagree with
+        # the validation already performed above under a mid-flight
+        # allowed_models mutation.
+        new_instance_id, _returned_model = manager.spawn_instance(
+            agent_id=resolved_agent_id,
+            instance_id=None,
+            parent_id=current_instance_id,
+            project_id=None,
+            instance_name=instance_name,
+            model=canonical_model,
+            version_tag=version_tag,
+        )
+
+        # ─── STEP 5: Return success ───
+        return (
+            f"Successfully spawned councilor instance: {new_instance_id}\n"
+            f"Agent: {resolved_agent_id} | Model: {canonical_model}\n"
+            f"To send the request, use: "
+            f"send_message(instance_id=\"{new_instance_id}\", message=\"{initial_message}\")"
+        )
+
+    @register_tool_category("council")
+    @tool
+    async def clear_councilor_errors() -> str:
+        """Clear the sticky parent-error flag so the governor can finalize as COMPLETED.
+
+        The dependency bus marks the parent as ERROR if ANY child (councilor)
+        fails. This flag is STICKY — once set, the parent terminal status is
+        forced to ERROR even if synthesis succeeded. Call this tool AFTER
+        successful synthesis to clear the flag and allow COMPLETED finalization.
+
+        Do NOT call if synthesis failed (all councilors errored) — let ERROR
+        propagate.
+
+        Returns:
+            A short status string describing the outcome (cleared / warning).
+        """
+        # Lazy import to avoid module-load circularity.
+        from daemon.services.dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return (
+                "Warning: No dependency bus available — cannot clear parent-error flag."
+            )
+
+        try:
+            bus.clear_parent_error(current_instance_id)
+            return (
+                f"Cleared parent-error flag for instance {current_instance_id[:8]}..."
+            )
+        except Exception as e:
+            return f"Warning: Failed to clear parent-error flag: {e}"
+
     @register_tool_category("instance")
     @tool
     async def send_message(
@@ -1116,6 +1258,8 @@ Returns:
         time,
         # Instance management tools
         spawn_instance,
+        spawn_councilor,          # Phase 2: council category — governor-only
+        clear_councilor_errors,   # Phase 2: council category — governor-only
         send_message,
         terminate_instance,
         list_instances,
