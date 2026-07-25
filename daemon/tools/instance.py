@@ -960,6 +960,63 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         except Exception as e:
             return f"Warning: Failed to clear parent-error flag: {e}"
 
+    @register_tool_category("council")
+    @tool
+    async def convene_council(
+        councilor_agent_id: str,
+        request: str,
+        models: list[str] | None = None,
+        max_councilors: int | None = None,
+        instance_name: str | None = None,
+    ) -> dict:
+        """Convene a council of agents with different LLM models to solve a problem.
+
+        Non-blocking: returns immediately with an async hint. The governor's
+        completion report arrives as a new message to the caller.
+        """
+        from ..registry import get_registry
+
+        canonical = get_registry().resolve_to_id(councilor_agent_id)
+        if not canonical:
+            raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
+
+        # convene_council requires "governor" in the caller's team_members.
+        # Add "governor" to meta.json team_members for any agent that should
+        # be able to convene councils.
+        membership_error = _check_team_membership(caller_agent_id, "governor")
+        if membership_error is not None:
+            raise ValueError(membership_error)
+
+        # No W1 identity guard: any caller authorized by team_members may convene.
+        gov_instance_id, _ = manager.spawn_instance(
+            agent_id="governor",
+            parent_id=current_instance_id,
+            instance_name=instance_name,
+        )
+
+        message_text = (
+            f'Convene a council using councilor_agent_id="{canonical}".\n'
+            f"Request: {request}\n"
+            f"Models: {', '.join(models) if models else 'all available'}\n"
+            f"Max councilors: "
+            f"{max_councilors if max_councilors is not None else 'governor decides'}"
+        )
+
+        await manager.enqueue_message(
+            instance_id=gov_instance_id,
+            message=message_text,
+            source=f"internal_agent:{current_instance_id}",
+        )
+
+        return {
+            "status": "convened",
+            "governor_instance_id": gov_instance_id,
+            "hint": (
+                "Council convened. The governor will process your request and "
+                "deliver a result. Watch for the completion report."
+            ),
+        }
+
     @register_tool_category("instance")
     @tool
     async def send_message(
@@ -1268,6 +1325,7 @@ Returns:
         spawn_instance,
         spawn_councilor,          # Phase 2: council category — governor-only
         clear_councilor_errors,   # Phase 2: council category — governor-only
+        convene_council,          # Council category — team-membership authorized
         send_message,
         terminate_instance,
         list_instances,
