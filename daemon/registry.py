@@ -126,6 +126,10 @@ class AgentMetadata(BaseModel):
         default=False,
         description="Whether this agent should have dynamic skills injected into conversations.",
     )
+    context_injection: bool = Field(
+        default=False,
+        description="When true, inject shared project context into this agent's system prompt at spawn time.",
+    )
     version_tag: str | None = Field(
         default=None,
         description="Directory-name derived version tag (e.g., 'v2' for 'developer[v2]'). None = base.",
@@ -262,8 +266,9 @@ class AgentRegistry:
                     innate_skills=meta.get("innate_skills", []),
                     llm_model=meta.get("llm_model"),
                     team_members=meta.get("team_members", []) or [],
-                    skill_injection=meta.get("skill_injection", False),
-                    version_tag=version_tag,
+                     skill_injection=meta.get("skill_injection", False),
+                     context_injection=meta.get("context_injection", False),
+                     version_tag=version_tag,
                 )
                 # Split storage: untagged → _agents, tagged → _versioned_agents.
                 # _agents keys are NEVER composite keys.

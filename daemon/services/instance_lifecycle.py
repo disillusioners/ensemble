@@ -26,6 +26,7 @@ from ..repositories.job_queue.models import AdmissionState
 from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
+from .context_injection import get_shared_context
 from .dependency_bus import get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
@@ -730,6 +731,44 @@ def append_auto_load_skills(
     return system_prompt + auto_load_section
 
 
+def append_context_injection(
+    system_prompt: str,
+    instance_id: str,
+    instance_repository: Any,
+    agent_meta: Any,
+    parent_id: str | None = None,
+    project_id: str | None = None,
+    project_repository: Any = None,
+) -> str:
+    """Append shared project context when enabled in agent metadata."""
+    if not getattr(agent_meta, "context_injection", False):
+        return system_prompt
+
+    try:
+        context_key = instance_id if parent_id is None else (
+            instance_repository.get_tree_root_id(parent_id) or parent_id
+        )
+        project_name = None
+        critical_notes = None
+        if project_id and project_repository is not None:
+            project = project_repository.get(project_id)
+            project_name = getattr(project, "name", None) if project else None
+            critical_notes = [note.to_dict() for note in project_repository.list_critical_notes(project_id)]
+        context = get_shared_context(
+            context_key,
+            "agent system prompt project context",
+            project_id=project_id,
+            project_name=project_name,
+            critical_notes=critical_notes,
+        )
+        if not context:
+            return system_prompt
+        return system_prompt + f"\n\n---\n\n# Injected Project Context\n\n{context}\n"
+    except Exception as exc:
+        logger.warning("Failed to inject project context: %s", exc)
+        return system_prompt
+
+
 def _apply_post_cache_appends(
     *,
     system_prompt: str,
@@ -741,6 +780,7 @@ def _apply_post_cache_appends(
     project_id: str | None,
     project_repository: Any,
     manager: Any,
+    agent_meta: Any = None,
 ) -> tuple[str, str]:
     """Apply the shared post-cache append chain for spawn and restore.
 
@@ -778,6 +818,15 @@ def _apply_post_cache_appends(
         parent_id=parent_id,
     )
     system_prompt = append_current_time(system_prompt)
+    system_prompt = append_context_injection(
+        system_prompt,
+        instance_id,
+        instance_repository,
+        agent_meta,
+        parent_id=parent_id,
+        project_id=project_id,
+        project_repository=project_repository,
+    )
     user_language = get_language_preference(project_repository)
     system_prompt = append_user_language(system_prompt, user_language)
     return (
@@ -1145,10 +1194,11 @@ class InstanceLifecycleService:
             shared_context_metadata_repo=self._manager.shared_context_metadata_repo,
             parent_id=parent_id,
             agent_id=resolved_agent_id,
-            project_id=project_id,
-            project_repository=project_repository,
-            manager=self._manager,
-        )
+             project_id=project_id,
+             project_repository=project_repository,
+             manager=self._manager,
+             agent_meta=metadata,
+         )
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
@@ -2517,10 +2567,11 @@ class InstanceLifecycleService:
             shared_context_metadata_repo=self._manager.shared_context_metadata_repo,
             parent_id=meta.parent_id,
             agent_id=resolved_agent_id,
-            project_id=meta.project_id,
-            project_repository=project_repository,
-            manager=self._manager,
-        )
+             project_id=meta.project_id,
+             project_repository=project_repository,
+             manager=self._manager,
+             agent_meta=agent_meta,
+         )
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches

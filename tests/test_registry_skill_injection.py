@@ -80,9 +80,16 @@ class TestAgentMetadataDefaults:
         """``skill_injection`` is a declared field (defends against removal)."""
         assert "skill_injection" in AgentMetadata.model_fields
 
+    def test_context_injection_default_false(self, tmp_path: Path):
+        meta = AgentMetadata(id="bare", name="Bare", path=tmp_path / "bare")
+        assert meta.context_injection is False
+
+    def test_context_injection_field_declared(self):
+        assert "context_injection" in AgentMetadata.model_fields
+
 
 class TestAgentRegistryDiscoverSkillInjection:
-    """``AgentRegistry.discover()`` reads ``skill_injection`` from ``meta.json``."""
+    """``AgentRegistry.discover()`` reads ``skill_injection`` and ``context_injection`` from ``meta.json``."""
 
     def test_skill_injection_from_meta_json(self, tmp_path: Path):
         """CRITICAL: ``discover()`` wires ``skill_injection=true`` from meta.json.
@@ -192,3 +199,23 @@ class TestAgentRegistryDiscoverSkillInjection:
         second = registry.get("reload-agent")
         assert second is not None
         assert second.skill_injection is True
+
+    def test_context_injection_from_meta_json(self, tmp_path: Path):
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(agents_dir, "context-agent", context_injection=True)
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        agent = registry.get("context-agent")
+        assert agent is not None
+        assert agent.context_injection is True
+
+    def test_context_injection_absent_from_meta_json(self, tmp_path: Path):
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(agents_dir, "no-context-agent")
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        agent = registry.get("no-context-agent")
+        assert agent is not None
+        assert agent.context_injection is False

@@ -7,6 +7,7 @@
   "version": "1.1.0",
   "innate_skills": ["coordination", "chart", "todo", "question"],
   "no_force_explore": true,
+  "context_injection": true,
   "tools": {
     "allow": ["instance", "self", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_context", "question"]
   },
