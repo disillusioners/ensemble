@@ -201,10 +201,14 @@ class TestGetEditor:
         body = resp.json()
         assert body["editor"] == "builtin"
         assert "vscode" in body
-        # vscode block shape
-        assert {"available", "binary_path", "status", "port", "allow_remote", "pid"} <= set(
+        # vscode block shape — C4: port and pid are intentionally absent
+        # (they would defeat the proxy boundary by leaking the OS-assigned
+        # loopback port and the code-server PID to API consumers).
+        assert {"available", "binary_path", "status", "allow_remote"} <= set(
             body["vscode"].keys()
         )
+        assert "port" not in body["vscode"]
+        assert "pid" not in body["vscode"]
 
     @pytest.mark.asyncio
     async def test_returns_stored_value_when_metadata_exists(self, client):
@@ -231,8 +235,9 @@ class TestGetEditor:
         assert resp.status_code == 200, resp.text
         vscode = resp.json()["vscode"]
         assert vscode["status"] == "running"
-        assert vscode["port"] == 8443
-        assert vscode["pid"] == 4242
+        # C4: port and pid are no longer exposed in the API response.
+        assert "port" not in vscode
+        assert "pid" not in vscode
         # available is True because the fake config has a binary_path.
         assert vscode["available"] is True
         assert vscode["binary_path"] == "/usr/local/bin/code-server"
@@ -250,8 +255,9 @@ class TestGetEditor:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["status"] == "running"
-        assert body["port"] == 9000
-        assert body["pid"] == 1234
+        # C4: port and pid are no longer exposed in the API response.
+        assert "port" not in body
+        assert "pid" not in body
         # The lightweight endpoint must not read editor preference metadata.
         mocks.get_editor_preference.assert_not_called()
 
@@ -378,6 +384,56 @@ class TestPutEditor:
         args, _ = mocks.set_editor_preference.call_args
         assert args[1] == "vscode"
 
+    @pytest.mark.asyncio
+    async def test_w13_ensure_running_fail_does_not_persist_preference(self, client):
+        """W13/W14: side-effect must run BEFORE the preference is persisted.
+
+        If the VS Code server fails to start (e.g. port collision, binary
+        crash on startup), the preference must NOT be flipped to ``vscode``
+        — otherwise the user is left in an inconsistent state where the
+        metadata says "vscode" but no server is running, and the only way
+        to recover is to manually flip back to "builtin".
+        """
+        ac, mocks = client
+        from daemon.services.vscode_server_manager import VSCodeServerStartError
+
+        # ensure_running succeeds-free raises the base VSCodeServerError
+        # subclass (not the NotInstalledError, which is handled separately
+        # with a 503 + install hint).
+        mocks.vscode_manager.ensure_running.side_effect = VSCodeServerStartError(
+            "port 8443 already in use"
+        )
+
+        resp = await ac.put("/api/settings/editor", json={"editor": "vscode"})
+
+        assert resp.status_code == 503, resp.text
+        # Side-effect ran first (otherwise the test wouldn't have triggered).
+        mocks.vscode_manager.ensure_running.assert_awaited_once()
+        # But the preference must NOT be persisted — this is the W13/W14 fix.
+        mocks.set_editor_preference.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_w13_vscode_not_installed_does_not_persist_preference(self, client):
+        """W13/W14: binary-missing failure mode also must not persist.
+
+        Mirrors the above for the more specific ``VSCodeServerNotInstalledError``
+        branch, which has its own 503 + install hint but must still leave
+        the preference untouched.
+        """
+        ac, mocks = client
+        from daemon.services.vscode_server_manager import VSCodeServerNotInstalledError
+
+        mocks.vscode_manager.ensure_running.side_effect = VSCodeServerNotInstalledError(
+            "code-server not found in PATH"
+        )
+
+        resp = await ac.put("/api/settings/editor", json={"editor": "vscode"})
+
+        assert resp.status_code == 503, resp.text
+        mocks.vscode_manager.ensure_running.assert_awaited_once()
+        # The preference must NOT be persisted.
+        mocks.set_editor_preference.assert_not_called()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /api/settings/vscode/start
@@ -399,8 +455,9 @@ class TestVSCodeStart:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["status"] == "running"
-        assert body["port"] == 7777
-        assert body["pid"] == 999
+        # C4: port and pid are no longer exposed in the API response.
+        assert "port" not in body
+        assert "pid" not in body
         mocks.vscode_manager.ensure_running.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -471,7 +528,9 @@ class TestVSCodeStop:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["status"] == "stopped"
-        assert body["port"] is None
+        # C4: port and pid are no longer exposed in the API response.
+        assert "port" not in body
+        assert "pid" not in body
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -575,7 +634,9 @@ class TestEditorUtilsR1R2:
 
         repo = MagicMock(name="repo")
         # set_metadata is sync; asyncio.to_thread will call it in a worker.
-        repo.set_metadata.return_value = None
+        # W12: set_metadata returns Project | None; on success it returns the
+        # enriched Project. Mock a truthy value so the function succeeds.
+        repo.set_metadata.return_value = MagicMock(name="project")
 
         result = await editor_utils_module.set_editor_preference(repo, "vscode")
 
@@ -598,9 +659,139 @@ class TestEditorUtilsR1R2:
         from daemon.services import editor_utils as editor_utils_module
 
         repo = MagicMock(name="repo")
+        # W12: set_metadata returns Project | None; mock a truthy value
+        # so the function succeeds (None-return path is tested separately).
+        repo.set_metadata.return_value = MagicMock(name="project")
         await editor_utils_module.set_editor_preference(repo, "builtin")
 
         args = repo.set_metadata.call_args.args
         assert args[0] == constants.SYSTEM_DEFAULT_PROJECT_ID
         assert args[1] == constants.EDITOR_METADATA_KEY
         assert args[2] == "builtin"
+
+    @pytest.mark.asyncio
+    async def test_w12_set_metadata_returns_none_raises_runtime_error(self):
+        """W12: set_metadata returning None indicates a no-op write.
+
+        ``set_metadata`` returns ``None`` only when the system default
+        project row is missing. The helper must surface this as a
+        ``RuntimeError`` rather than silently treating it as a successful
+        write.
+        """
+        from daemon.services import editor_utils as editor_utils_module
+
+        repo = MagicMock(name="repo")
+        repo.set_metadata.return_value = None  # project row missing
+
+        with pytest.raises(RuntimeError, match="metadata write returned None"):
+            await editor_utils_module.set_editor_preference(repo, "vscode")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# C4: port/pid must NEVER be exposed in API responses
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestVscodeStatusNoPortNoPid:
+    """C4 regression: ``port`` and ``pid`` are NEVER exposed in API responses.
+
+    The OS-assigned loopback port and the code-server PID are internal
+    implementation details. Leaking them through the API would defeat the
+    proxy boundary — clients could bypass the proxy and connect directly
+    to the loopback port. The C4 fix removes these fields from every
+    response shape; this class pins the contract explicitly.
+
+    These tests are intentionally named with the bug ID (``test_vscode_status_no_port_exposed``,
+    ``test_vscode_status_no_pid_exposed``, ``test_editor_status_response_no_port``)
+    so a future regression that re-introduces the fields is caught
+    immediately by name.
+    """
+
+    @pytest.mark.asyncio
+    async def test_vscode_status_no_port_exposed(self, client):
+        """C4: GET /api/settings/editor — vscode block MUST NOT contain ``port``."""
+        ac, mocks = client
+        # Set the manager to a state where port/pid would be populated.
+        mocks.vscode_manager.state.status = "running"
+        mocks.vscode_manager.state.port = 41293
+        mocks.vscode_manager.state.pid = 1234
+
+        resp = await ac.get("/api/settings/editor")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "vscode" in body
+        # The whole HTTP response body must NOT contain the word "port"
+        # in the vscode block. We assert at the JSON level so a future
+        # addition elsewhere in the response (e.g. an unrelated nested
+        # field) doesn't accidentally remove the substring.
+        assert "port" not in body["vscode"], (
+            f"C4 regression: vscode block must NOT expose 'port' — "
+            f"got {body['vscode']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_vscode_status_no_pid_exposed(self, client):
+        """C4: GET /api/settings/editor — vscode block MUST NOT contain ``pid``."""
+        ac, mocks = client
+        mocks.vscode_manager.state.status = "running"
+        mocks.vscode_manager.state.port = 41293
+        mocks.vscode_manager.state.pid = 1234
+
+        resp = await ac.get("/api/settings/editor")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "pid" not in body["vscode"], (
+            f"C4 regression: vscode block must NOT expose 'pid' — "
+            f"got {body['vscode']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_editor_status_response_no_port(self, client):
+        """C4: GET /api/settings/editor/status — body MUST NOT contain ``port``."""
+        ac, _ = client
+
+        resp = await ac.get("/api/settings/editor/status")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "port" not in body, (
+            f"C4 regression: status response must NOT expose 'port' — "
+            f"got {body!r}"
+        )
+        assert "pid" not in body, (
+            f"C4 regression: status response must NOT expose 'pid' — "
+            f"got {body!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_vscode_start_response_no_port_no_pid(self, client):
+        """C4: POST /api/settings/vscode/start — body MUST NOT contain ``port`` or ``pid``."""
+        ac, mocks = client
+        mocks.vscode_manager.state.status = "running"
+        mocks.vscode_manager.state.port = 41293
+        mocks.vscode_manager.state.pid = 1234
+
+        resp = await ac.post("/api/settings/vscode/start")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "port" not in body
+        assert "pid" not in body
+
+    @pytest.mark.asyncio
+    async def test_vscode_stop_response_no_port_no_pid(self, client):
+        """C4: POST /api/settings/vscode/stop — body MUST NOT contain ``port`` or ``pid``."""
+        ac, mocks = client
+        mocks.vscode_manager.is_running.return_value = True
+        mocks.vscode_manager.state.status = "stopped"
+        mocks.vscode_manager.state.port = None
+        mocks.vscode_manager.state.pid = None
+
+        resp = await ac.post("/api/settings/vscode/stop")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "port" not in body
+        assert "pid" not in body

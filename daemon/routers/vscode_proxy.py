@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
+from urllib.parse import parse_qs, urlencode
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
 from ..services.vscode_server_manager import VSCodeServerManager
+from ..services.workspace_guard import WorkspaceGuard
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
@@ -67,11 +72,89 @@ def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
-def create_vscode_proxy_app(manager: VSCodeServerManager) -> FastAPI:
+def _validate_folder_param(
+    query_string: str,
+    project_repo,
+) -> str:
+    """Validate the ``?folder=`` query parameter against known project directories.
+
+    C1: Prevents arbitrary filesystem access via ``?folder=/etc`` etc. by
+    confining the folder to a known project's main_directory using
+    :meth:`WorkspaceGuard.resolve_strict`.
+
+    - If no ``folder`` param is present, returns the query string unchanged.
+    - If ``folder`` is present but ``project_repo`` is ``None``, drops the
+      ``folder`` param entirely (fail-closed: no validation possible →
+      don't forward user-supplied paths).
+    - If ``folder`` is present and matches a known project workdir, returns
+      the query string with the resolved (canonicalized) folder value.
+    - If ``folder`` is present but matches no known project, raises
+      :class:`HTTPException` with status 403.
+    """
+    if not query_string:
+        return query_string
+
+    params = parse_qs(query_string, keep_blank_values=True)
+    folder = params.get("folder", [None])[0]
+    if not folder:
+        # No folder param, pass through unchanged
+        return query_string
+
+    if project_repo is None:
+        # Fail-closed: can't validate — drop the folder param entirely
+        logger.warning(
+            "C1: dropping ?folder= because project_repo is unavailable"
+        )
+        params.pop("folder", None)
+        return urlencode(params, doseq=True)
+
+    # Validate the folder against any project's main_directory
+    try:
+        projects = project_repo.list_projects()
+    except Exception as exc:
+        logger.warning("C1: folder validation DB read failed: %s", exc)
+        params.pop("folder", None)
+        return urlencode(params, doseq=True)
+
+    for project in projects:
+        main_directory = getattr(project, "main_directory", None)
+        if not main_directory:
+            continue
+        try:
+            guard = WorkspaceGuard(main_directory)
+        except (ValueError, OSError) as exc:
+            # main_directory doesn't exist or is invalid — skip
+            logger.debug(
+                "WorkspaceGuard init skipped for %s: %s", main_directory, exc
+            )
+            continue
+        resolved, error = guard.resolve_strict(folder)
+        if error is None and resolved is not None:
+            # Folder is within this project's workdir — valid
+            params["folder"] = [str(resolved)]
+            return urlencode(params, doseq=True)
+
+    # Folder doesn't match any project — reject
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "Invalid folder parameter",
+            "detail": "The folder path is not within any known project directory",
+        },
+    )
+
+
+def create_vscode_proxy_app(
+    manager: VSCodeServerManager,
+    project_repo=None,
+) -> FastAPI:
     """Create an unmounted HTTP and WebSocket proxy for code-server.
 
     Args:
         manager: VS Code server lifecycle manager.
+        project_repo: Optional project repository used to validate the
+            ``?folder=`` query parameter (C1 security fix). When ``None``,
+            the folder param is dropped (fail-closed).
 
     Returns:
         An independent FastAPI sub-application.
@@ -117,7 +200,12 @@ def create_vscode_proxy_app(manager: VSCodeServerManager) -> FastAPI:
         try:
             target = "/" + path
             if request.url.query:
-                target += f"?{request.url.query}"
+                # C1: Validate ?folder= before forwarding to code-server
+                validated_query = _validate_folder_param(
+                    request.url.query, project_repo
+                )
+                if validated_query:
+                    target += f"?{validated_query}"
             upstream = await client.send(
                 client.build_request(
                     request.method,

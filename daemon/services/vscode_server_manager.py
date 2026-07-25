@@ -329,10 +329,23 @@ class VSCodeServerManager:
             # SIGTERM the whole process group.
             # NOTE (S3): killpg may miss detached children that called
             # setsid (language servers, extension hosts). Best-effort.
+            #
+            # W8: Use the pgid captured at spawn time (state.pgid), NOT
+            # ``os.getpgid(process.pid)``. By the time we signal, the PID
+            # could have been reused by an unrelated process; re-resolving
+            # the pgid at signal time would risk targeting the wrong group.
             if is_unix:
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                except (OSError, ProcessLookupError):
+                if self.state.pgid is not None:
+                    try:
+                        os.killpg(self.state.pgid, signal.SIGTERM)
+                    except (OSError, ProcessLookupError):
+                        try:
+                            process.send_signal(signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                else:
+                    # pgid wasn't captured at spawn; fall back to the
+                    # subprocess handle's signal API (best-effort).
                     try:
                         process.send_signal(signal.SIGTERM)
                     except ProcessLookupError:
@@ -355,9 +368,15 @@ class VSCodeServerManager:
                     VSCODE_STOP_GRACE_S,
                 )
                 if is_unix:
-                    try:
-                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    except (OSError, ProcessLookupError):
+                    if self.state.pgid is not None:
+                        try:
+                            os.killpg(self.state.pgid, signal.SIGKILL)
+                        except (OSError, ProcessLookupError):
+                            try:
+                                process.kill()
+                            except ProcessLookupError:
+                                pass
+                    else:
                         try:
                             process.kill()
                         except ProcessLookupError:
@@ -398,20 +417,39 @@ class VSCodeServerManager:
     def is_running(self) -> bool:
         """Check if the process is alive and state says running.
 
+        For adopted processes (``self._process is None`` but ``state.status
+        == "running"`` after ``attach_existing()``), falls back to a PID
+        liveness probe via ``os.kill(pid, 0)`` since we have no subprocess
+        handle to inspect (C2).
+
         Returns:
-            ``True`` only if status is running, the subprocess handle is
-            live, and the OS still knows about the PID.
+            ``True`` only if status is running and the OS still knows
+            about the PID. If the adopted PID is no longer alive, flips
+            ``state.status`` to ``"crashed"`` and records ``last_error``.
         """
         if self.state.status != "running":
             return False
-        if self._process is None or self._process.returncode is not None:
-            return False
         if self.state.pid is None:
             return False
-        # Cross-check with the OS to detect zombie/reaping races.
+
+        if self._process is not None and self._process.returncode is not None:
+            return False  # process exited
+
+        if self._process is not None:
+            # Live subprocess handle — cross-check with the OS to detect
+            # zombie/reaping races.
+            try:
+                os.kill(self.state.pid, 0)
+            except (OSError, ProcessLookupError):
+                return False
+            return True
+
+        # C2: No subprocess handle (adopted process) — check via PID.
         try:
             os.kill(self.state.pid, 0)
         except (OSError, ProcessLookupError):
+            self.state.status = "crashed"
+            self.state.last_error = "Adopted process no longer alive"
             return False
         return True
 
@@ -479,6 +517,18 @@ class VSCodeServerManager:
             os.kill(pid, 0)
         except (OSError, ProcessLookupError):
             logger.info("Stale PID file for pid %d; removing", pid)
+            self._remove_pid_file()
+            return False
+
+        # W4: Verify the PID is actually code-server. PID reuse could
+        # otherwise cause us to adopt an unrelated process and try to
+        # signal its (now-wrong) process group on stop.
+        if not self._verify_pid_is_code_server(pid):
+            logger.warning(
+                "PID %d is not code-server (PID reuse?); "
+                "removing stale PID file",
+                pid,
+            )
             self._remove_pid_file()
             return False
 
@@ -806,3 +856,48 @@ class VSCodeServerManager:
             pass
         except OSError as exc:
             logger.warning("Failed to remove PID file: %s", exc)
+
+    def _verify_pid_is_code_server(self, pid: int) -> bool:
+        """Verify that ``pid`` is actually a code-server process (W4).
+
+        Guards against PID reuse: a stale PID file could otherwise let us
+        adopt an unrelated process and later try to signal its (now-wrong)
+        process group on stop.
+
+        On Linux, reads ``/proc/{pid}/cmdline``. On macOS / other Unix,
+        shells out to ``ps -p {pid} -o command=``. Returns ``True`` iff
+        the command line contains the substring ``code-server``.
+
+        Args:
+            pid: Candidate PID to verify.
+
+        Returns:
+            ``True`` if ``pid`` resolves to a code-server process.
+        """
+        try:
+            if sys.platform == "linux":
+                cmdline_path = f"/proc/{pid}/cmdline"
+                try:
+                    with open(cmdline_path, "r") as f:
+                        cmdline = f.read()
+                    return "code-server" in cmdline
+                except (OSError, FileNotFoundError):
+                    return False
+            else:
+                # macOS and other Unix: use ps.
+                import subprocess
+
+                result = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                return (
+                    result.returncode == 0
+                    and "code-server" in result.stdout
+                )
+        except Exception:
+            # Any unexpected error => treat as not-ours; caller will
+            # remove the stale PID file.
+            return False

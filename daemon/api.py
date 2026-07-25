@@ -607,7 +607,11 @@ async def lifespan(app: FastAPI):
         app.state.vscode_manager = vscode_manager
 
         # W3: Phase 3 owns the mount — mount the proxy sub-app here.
-        vscode_app = create_vscode_proxy_app(vscode_manager)
+        # C1: pass project_repo so the proxy can validate ?folder= queries
+        # against known project workdirs (prevents arbitrary FS access).
+        vscode_app = create_vscode_proxy_app(
+            vscode_manager, project_repo=manager._project_repository
+        )
         app.mount("/vscode", vscode_app)
 
         # app.mount() appends to the end of app.routes, but the

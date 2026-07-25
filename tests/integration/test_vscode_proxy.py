@@ -19,6 +19,12 @@ Covers three areas:
    "not ready" the WebSocket endpoint closes with code ``1013``
    (``TRY_AGAIN_LATER``) rather than attempting the upstream connection.
 
+4. **TestValidateFolderParam** — Direct unit coverage of the C1
+   ``_validate_folder_param`` helper that confines ``?folder=`` to known
+   project directories. The integration-level "send ``?folder=/etc``
+   and check behavior" path requires a real upstream, so we exercise the
+   helper directly here.
+
 Run only this file::
 
     pytest tests/integration/test_vscode_proxy.py -v
@@ -32,8 +38,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from daemon.routers import vscode_proxy
@@ -43,6 +51,7 @@ from daemon.routers.vscode_proxy import (
     VSCODE_PROXY_CSP,
     _proxy_headers,
     _response_headers,
+    _validate_folder_param,
     create_vscode_proxy_app,
 )
 
@@ -573,3 +582,165 @@ class TestFactorySurface:
         assert callable(_response_headers)
         # create_vscode_proxy_app must be exported.
         assert callable(vscode_proxy.create_vscode_proxy_app)
+        # _validate_folder_param is the C1 helper; must be exported.
+        assert callable(_validate_folder_param)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. C1: ?folder= validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestValidateFolderParam:
+    """Direct unit coverage of ``_validate_folder_param`` (C1 fix).
+
+    The C1 bug class: ``?folder=/etc`` would otherwise let code-server
+    open an arbitrary directory on the host, bypassing the daemon's
+    workdir boundary. The helper confines the folder to a known
+    project's main_directory via ``WorkspaceGuard.resolve_strict``.
+
+    These tests exercise the helper directly — endpoint-level tests
+    would require a real upstream and the 503 gate fires before the
+    folder check, so we pin the behavior at the function level.
+    """
+
+    def test_empty_query_string_returns_empty(self):
+        """Empty query string → returned unchanged (no folder to validate)."""
+        assert _validate_folder_param("", project_repo=None) == ""
+
+    def test_no_folder_param_passes_through_unchanged(self):
+        """Query string without ``folder=`` → returned unchanged."""
+        qs = "other=1&another=2"
+        assert _validate_folder_param(qs, project_repo=None) == qs
+
+    def test_folder_present_no_project_repo_dropped(self):
+        """C1: ``folder=`` present, ``project_repo=None`` → folder dropped.
+
+        Fail-closed: when the repo isn't available we can't validate, so
+        we drop the param entirely rather than forwarding an arbitrary
+        user-supplied path to code-server.
+        """
+        out = _validate_folder_param("folder=/etc", project_repo=None)
+        # folder is gone; query string no longer contains it.
+        assert "folder" not in out
+        assert "/etc" not in out
+
+    def test_folder_present_no_project_repo_keeps_other_params(self):
+        """When dropping folder, other query params are preserved."""
+        out = _validate_folder_param(
+            "folder=/etc&theme=dark", project_repo=None
+        )
+        assert "folder" not in out
+        assert "theme=dark" in out
+
+    def test_folder_no_match_in_any_project_raises_403(self, tmp_path):
+        """C1: ``folder=`` doesn't match any known project → 403.
+
+        ``project_repo.list_projects()`` returns a project whose
+        ``main_directory`` does NOT contain the requested folder, so
+        validation fails and the helper raises ``HTTPException(403)``.
+        """
+        # Build a project pointing at ``tmp_path`` so the validation
+        # sees a real WorkspaceGuard workdir.
+        project = MagicMock(name="project")
+        project.main_directory = str(tmp_path)
+
+        repo = MagicMock(name="project_repo")
+        repo.list_projects.return_value = [project]
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_folder_param("folder=/etc", project_repo=repo)
+        assert exc_info.value.status_code == 403
+
+    def test_folder_matches_project_returns_resolved_query(
+        self, tmp_path
+    ) -> None:
+        """C1: ``folder=`` is within a known project workdir → resolved forward.
+
+        The helper resolves the folder via ``WorkspaceGuard.resolve_strict``
+        and returns the query string with the canonicalized path.
+        """
+        # Build a project whose workdir IS the folder we're requesting.
+        target = tmp_path / "subdir"
+        target.mkdir()
+
+        project = MagicMock(name="project")
+        project.main_directory = str(tmp_path)
+
+        repo = MagicMock(name="project_repo")
+        repo.list_projects.return_value = [project]
+
+        out = _validate_folder_param(
+            f"folder={target.resolve()}", project_repo=repo
+        )
+        # Resolved path is forwarded (URL-decoded since the helper
+        # re-encodes via urlencode).
+        assert "folder=" in out
+        assert unquote(out) == f"folder={target.resolve()}"
+
+    def test_folder_match_preserves_other_params(self, tmp_path) -> None:
+        """When folder is valid, sibling query params are preserved."""
+        target = tmp_path / "subdir"
+        target.mkdir()
+
+        project = MagicMock(name="project")
+        project.main_directory = str(tmp_path)
+
+        repo = MagicMock(name="project_repo")
+        repo.list_projects.return_value = [project]
+
+        out = _validate_folder_param(
+            f"folder={target.resolve()}&theme=dark", project_repo=repo
+        )
+        assert "folder=" in out
+        assert "theme=dark" in out
+
+    def test_folder_repo_read_failure_drops_param(self):
+        """C1: ``project_repo.list_projects()`` raises → folder dropped.
+
+        Mirrors the no-repo case: any failure to read the project list
+        is treated as "can't validate", so the folder is dropped
+        (fail-closed). The exception is logged but swallowed.
+        """
+        repo = MagicMock(name="project_repo")
+        repo.list_projects.side_effect = RuntimeError("DB connection lost")
+
+        out = _validate_folder_param("folder=/etc", project_repo=repo)
+        assert "folder" not in out
+
+    def test_folder_skipped_for_project_with_missing_main_directory(self):
+        """A project with ``main_directory=None`` is skipped, not crashing.
+
+        Defensive: the repo may contain projects whose main_directory
+        hasn't been set yet. The helper must skip them rather than
+        raise, then continue checking other projects.
+        """
+        empty_project = MagicMock(name="empty_project")
+        empty_project.main_directory = None
+
+        repo = MagicMock(name="project_repo")
+        repo.list_projects.return_value = [empty_project]
+
+        # No matching project → 403.
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_folder_param("folder=/etc", project_repo=repo)
+        assert exc_info.value.status_code == 403
+
+    def test_folder_dropped_when_in_first_project_outside_workdir(
+        self, tmp_path
+    ) -> None:
+        """A folder inside the FIRST project's workdir but escaping it
+        does NOT match — guards against positive-only validation that
+        would accept a path that escapes the workdir via ``..``."""
+        project = MagicMock(name="project")
+        project.main_directory = str(tmp_path)
+
+        repo = MagicMock(name="project_repo")
+        repo.list_projects.return_value = [project]
+
+        # ``../etc`` is a traversal that resolves outside ``tmp_path``.
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_folder_param(
+                "folder=../etc", project_repo=repo
+            )
+        assert exc_info.value.status_code == 403

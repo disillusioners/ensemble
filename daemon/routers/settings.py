@@ -14,6 +14,7 @@ from daemon.services.vscode_server_manager import (
     VSCodeServerNotInstalledError,
     VSCodeServerState,
     VSCodeServerManager,
+    VSCodeServerError,
 )
 from daemon import constants
 from .schemas import (
@@ -65,9 +66,7 @@ def _build_vscode_status(manager: VSCodeServerManager | None) -> VSCodeStatus:
             available=bool(binary),
             binary_path=binary,
             status="stopped",
-            port=None,
             allow_remote=False,
-            pid=None,
         )
 
     state: VSCodeServerState = manager.state
@@ -77,9 +76,7 @@ def _build_vscode_status(manager: VSCodeServerManager | None) -> VSCodeStatus:
         available=bool(binary_path),
         binary_path=binary_path,
         status=state.status,
-        port=state.port,
         allow_remote=bool(getattr(config, "allow_remote", False)),
-        pid=state.pid,
     )
 
 
@@ -177,12 +174,12 @@ async def set_editor(body: EditorPreferenceUpdate, request: Request):
     repo = get_project_repository()  # raises 503 if not initialized
     manager = _get_vscode_manager(request)
 
-    # Persist the preference (R2: set_metadata opens its own Session).
-    # `set_editor_preference` returns the stored value; we use the locally
-    # cleaned value (already validated) for the response.
-    await set_editor_preference(repo, cleaned)
-
-    # Side effects: lazy start / stop.
+    # W13/W14: Side-effect FIRST, then persist.
+    # This prevents the preference from being persisted if the server fails
+    # to start (e.g. binary missing, port collision, timeout). The previous
+    # order (persist → side-effect) would leave the preference at "vscode"
+    # even when the underlying server never came up, forcing the user into
+    # an inconsistent state until they manually flipped back to "builtin".
     if cleaned == "vscode":
         if manager is None:
             # Manager not yet wired — return 503 with install instructions.
@@ -213,9 +210,22 @@ async def set_editor(body: EditorPreferenceUpdate, request: Request):
                     "detail": f"{install} (resolved: {e})",
                 },
             )
+        except VSCodeServerError as e:
+            # Catches VSCodeServerStartError, VSCodeServerTimeoutError, and
+            # any other base-class error from the manager.
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "VS Code server failed to start",
+                    "detail": str(e),
+                },
+            )
     elif cleaned == "builtin":
         if manager is not None and manager.is_running():
             await manager.stop()
+
+    # NOW persist the preference (after side effects succeed).
+    await set_editor_preference(repo, cleaned)
 
     return EditorPreferenceResponse(
         editor=cleaned,
@@ -232,13 +242,9 @@ async def get_editor_status(request: Request):
     """
     manager = _get_vscode_manager(request)
     if manager is None:
-        return VSCodeStatusResponse(status="stopped", port=None, pid=None)
+        return VSCodeStatusResponse(status="stopped")
     state = manager.state
-    return VSCodeStatusResponse(
-        status=state.status,
-        port=state.port,
-        pid=state.pid,
-    )
+    return VSCodeStatusResponse(status=state.status)
 
 
 @router.get("/vscode/status", response_model=VSCodeStatusResponse, include_in_schema=False)
@@ -271,7 +277,7 @@ async def post_vscode_start(request: Request):
             },
         )
     state = manager.state
-    return VSCodeStatusResponse(status=state.status, port=state.port, pid=state.pid)
+    return VSCodeStatusResponse(status=state.status)
 
 
 @router.post("/vscode/stop", response_model=VSCodeStatusResponse)
@@ -279,8 +285,8 @@ async def post_vscode_stop(request: Request):
     """Stop the VS Code server (``manager.stop()``)."""
     manager = _get_vscode_manager(request)
     if manager is None:
-        return VSCodeStatusResponse(status="stopped", port=None, pid=None)
+        return VSCodeStatusResponse(status="stopped")
     if manager.is_running():
         await manager.stop()
     state = manager.state
-    return VSCodeStatusResponse(status=state.status, port=state.port, pid=state.pid)
+    return VSCodeStatusResponse(status=state.status)

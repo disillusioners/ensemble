@@ -645,6 +645,15 @@ class TestVSCodeServerManager:
 
         # Liveness check passes (no exception).
         monkeypatch.setattr("os.kill", lambda *a, **kw: None)
+        # W4: PID-reuse guard — verify the PID is actually code-server.
+        # The test's mock PID (12345) is not a real process, so we stub
+        # out the verification to return True (otherwise the test would
+        # require a real code-server process on the host).
+        monkeypatch.setattr(
+            manager,
+            "_verify_pid_is_code_server",
+            lambda pid: True,
+        )
 
         result = await manager.attach_existing()
 
@@ -690,6 +699,205 @@ class TestVSCodeServerManager:
 
         assert result is False
         assert not pid_path.exists()
+
+    # ── W4: PID-reuse guard on attach_existing ───────────────────────────
+
+    async def test_attach_existing_rejects_non_codeserver_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W4: PID file whose PID is alive but NOT code-server → rejected.
+
+        Guards against PID reuse: if an unrelated process happened to
+        inherit the previously-recorded PID, the manager must refuse to
+        adopt it (otherwise we'd later try to signal its now-wrong
+        process group on stop). The stale PID file MUST also be removed.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        pid_path = tmp_path / VSCODE_PID_FILENAME
+        pid_path.write_text(
+            json.dumps(
+                {
+                    "pid": 12345,
+                    "pgid": 12345,
+                    "port": 8081,
+                    "started_at": "2026-07-25T00:00:00+00:00",
+                }
+            )
+        )
+
+        # Liveness check passes (some PID 12345 is alive).
+        monkeypatch.setattr("os.kill", lambda *a, **kw: None)
+        # But the cmdline does NOT contain "code-server".
+        monkeypatch.setattr(
+            manager,
+            "_verify_pid_is_code_server",
+            lambda pid: False,
+        )
+
+        result = await manager.attach_existing()
+
+        assert result is False
+        # Stale PID file must be removed so the next start() doesn't
+        # try to adopt the same PID again.
+        assert not pid_path.exists()
+        # State is left untouched (not promoted to "running").
+        assert manager.state.status == "stopped"
+
+    async def test_attach_existing_adopts_verified_codeserver_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W4: PID verified to be code-server → adoption succeeds.
+
+        Mirror of ``test_attach_existing_adopts_live_pid`` but driven
+        explicitly through the new verification hook so the W4 path
+        is independently exercised.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        pid_path = tmp_path / VSCODE_PID_FILENAME
+        pid_path.write_text(
+            json.dumps(
+                {
+                    "pid": 12345,
+                    "pgid": 12345,
+                    "port": 8081,
+                    "started_at": "2026-07-25T00:00:00+00:00",
+                }
+            )
+        )
+
+        monkeypatch.setattr("os.kill", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            manager,
+            "_verify_pid_is_code_server",
+            lambda pid: True,
+        )
+
+        result = await manager.attach_existing()
+
+        assert result is True
+        assert manager.state.pid == 12345
+        assert manager.state.port == 8081
+        assert manager.state.status == "running"
+
+    # ── C2: is_running() fallback for adopted processes ──────────────────
+
+    async def test_is_running_true_when_adopted_process_alive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C2: adopted process (no subprocess handle) + PID alive → True.
+
+        After ``attach_existing()`` adopts a process we have no
+        ``_process`` handle. ``is_running()`` must fall back to a
+        ``os.kill(pid, 0)`` liveness probe and return True.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        # Simulate an adopted process: state says running, pid set,
+        # but no subprocess handle.
+        manager.state.status = "running"
+        manager.state.pid = 12345
+        manager.state.port = 8081
+        manager._process = None  # type: ignore[assignment]
+
+        # os.kill(pid, 0) succeeds — process is alive.
+        monkeypatch.setattr("os.kill", lambda *a, **kw: None)
+
+        assert manager.is_running() is True
+
+    async def test_is_running_false_when_adopted_process_dead(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C2: adopted process + PID dead → False, flips to ``crashed``.
+
+        ``os.kill(pid, 0)`` raises ``ProcessLookupError`` when the PID
+        is no longer alive. ``is_running()`` must report False AND
+        update ``state.status`` to ``"crashed"`` so callers observe
+        the death.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        manager.state.status = "running"
+        manager.state.pid = 12345
+        manager.state.port = 8081
+        manager._process = None  # type: ignore[assignment]
+
+        def fake_kill(pid: int, sig: int, *args: Any, **kwargs: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        assert manager.is_running() is False
+        assert manager.state.status == "crashed"
+        assert manager.state.last_error is not None
+        assert "adopted" in manager.state.last_error.lower()
+
+    # ── W8: stop() must use captured pgid, not os.getpgid(pid) ───────────
+
+    async def test_stop_uses_captured_pgid_not_getpgid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W8: ``stop()`` signals ``state.pgid`` (captured at spawn), NOT
+        ``os.getpgid(process.pid)`` re-resolved at signal time.
+
+        PID reuse could otherwise let ``os.getpgid(pid)`` return the
+        group of an unrelated process and we'd accidentally signal
+        the wrong group on stop.
+        """
+        manager = make_manager(tmp_path)
+        fake_proc = FakeProcess(pid=12345, returncode=None)
+        patch_resolve_binary(monkeypatch, manager)
+        patch_create_subprocess(monkeypatch, fake_proc)
+        monkeypatch.setattr("os.getpgid", lambda pid: pid + 1000)
+        patch_port_wait(monkeypatch, manager)
+        slow_down_health_check(monkeypatch)
+
+        # Custom killpg recorder so we can inspect the pgid argument.
+        recorded_pgids: List[int] = []
+
+        def fake_killpg(pgid: int, sig: int, *args: Any, **kwargs: Any) -> None:
+            recorded_pgids.append(pgid)
+            # Simulate SIGTERM-exit so wait() returns promptly.
+            if sig == signal.SIGTERM and fake_proc.returncode is None:
+                fake_proc.returncode = -signal.SIGTERM
+
+        # Stash the fake after start() so we still capture the
+        # spawn-time os.getpgid() call used to populate state.pgid.
+        # Patch BEFORE start(): start() will call os.getpgid(pid) to
+        # capture state.pgid (this is the legitimate spawn-time use).
+        monkeypatch.setattr("os.killpg", fake_killpg)
+        monkeypatch.setattr("os.kill", lambda *a, **kw: None)
+
+        # Pretend the spawn-time os.getpgid returned a specific pgid;
+        # the manager will store it in state.pgid.
+        monkeypatch.setattr("os.getpgid", lambda pid: 99999)
+
+        await manager.start()
+        captured_pgid = manager.state.pgid
+        assert captured_pgid == 99999
+
+        # Now swap os.getpgid to return a DIFFERENT value. If stop()
+        # re-resolves pgid at signal time, it would call killpg with
+        # the *new* value — which is exactly the W8 bug we want to
+        # prevent.
+        def getpgid_returns_pid_plus_one(pid: int) -> int:
+            return pid + 1
+
+        monkeypatch.setattr("os.getpgid", getpgid_returns_pid_plus_one)
+
+        recorded_pgids.clear()
+        await manager.stop()
+
+        # W8: stop() must have signaled the captured pgid (99999),
+        # NOT the re-resolved value (12345 + 1 = 12346).
+        assert captured_pgid in recorded_pgids, (
+            f"stop() must use captured state.pgid={captured_pgid}, "
+            f"got killpg calls with {recorded_pgids}"
+        )
+        # And specifically NOT the value getpgid(pid) returned at
+        # signal time.
+        assert 12346 not in recorded_pgids, (
+            "stop() re-resolved os.getpgid(pid) at signal time — "
+            "W8 regression: must use captured pgid instead"
+        )
 
     # ── Binary not found ─────────────────────────────────────────────────
 

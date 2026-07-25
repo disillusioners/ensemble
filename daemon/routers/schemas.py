@@ -728,18 +728,11 @@ class VSCodeStatus(BaseModel):
         default="stopped",
         description="VSCodeServerState.status: stopped|starting|running|crashed|stopping",
     )
-    port: int | None = Field(
-        default=None,
-        description="Bound port (only set when status == 'running')",
-    )
     allow_remote: bool = Field(
         default=False,
         description="Whether the server is configured to allow remote access",
     )
-    pid: int | None = Field(
-        default=None,
-        description="Process ID of the running code-server, or null if stopped",
-    )
+    # C4: port and pid REMOVED — defeats proxy boundary
 
 
 class EditorPreferenceResponse(BaseModel):
@@ -785,5 +778,4 @@ class VSCodeStatusResponse(BaseModel):
         default="stopped",
         description="VSCodeServerState.status: stopped|starting|running|crashed|stopping",
     )
-    port: int | None = Field(default=None, description="Bound port if running")
-    pid: int | None = Field(default=None, description="Process ID if running")
+    # C4: port and pid REMOVED — defeats proxy boundary

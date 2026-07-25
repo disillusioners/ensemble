@@ -61,19 +61,34 @@ async def set_editor_preference(repo, value: str) -> str:
     R2: ``set_metadata`` opens its own Session internally — do NOT pass a
     session parameter. Mirror ``settings.py:58-59`` exactly.
 
+    W12: ``set_metadata`` returns ``None`` if the underlying project row is
+    missing (no system default project). Detect that no-op and raise so the
+    caller surfaces a 503 rather than silently reporting success.
+
     Args:
         repo: A ``SQLModelProjectRepository`` instance.
         value: One of ``constants.EDITOR_OPTIONS``.
 
     Returns:
         The stored value.
+
+    Raises:
+        RuntimeError: if ``set_metadata`` returns ``None`` (write no-op).
     """
     # R2: set_metadata opens its own Session — NO session param passed.
     # Off the event loop so it cannot block other in-flight requests.
-    await asyncio.to_thread(
+    result = await asyncio.to_thread(
         repo.set_metadata,
         constants.SYSTEM_DEFAULT_PROJECT_ID,
         constants.EDITOR_METADATA_KEY,
         value,
     )
+    if result is None:
+        # W12: set_metadata may return None if the project row is missing.
+        # Mirror the repo's contract: set_metadata returns Project | None and
+        # returns None only when the project row does not exist.
+        raise RuntimeError(
+            "Failed to set editor preference: metadata write returned None "
+            "(system default project missing?)"
+        )
     return value
