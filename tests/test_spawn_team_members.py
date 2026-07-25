@@ -246,8 +246,14 @@ class TestTeamMembersAuthorization:
                 f"spawn of '{target}'; got: {result!r}"
             )
             assert "not allowed to spawn" in result
-            assert "Allowed team members: ['explorer']" in result, (
-                f"developer.team_members must be shown as ['explorer']; "
+            # After auto-derivation: developer has team_members=['explorer']
+            # (explicit) AND tools.allow includes 'image' and 'knowledge',
+            # which imply 'explorer', 'kb-writer', and 'image-reader'.
+            # The merged, canonicalized, sorted set is
+            # ['explorer', 'image-reader', 'kb-writer'].
+            assert "Allowed team members: ['explorer', 'image-reader', 'kb-writer']" in result, (
+                f"developer auto-derived allow-set must be "
+                f"['explorer', 'image-reader', 'kb-writer']; "
                 f"got: {result!r}"
             )
             manager2.spawn_instance.assert_not_called()
@@ -270,7 +276,19 @@ class TestTeamMembersAuthorization:
         assert isinstance(result, str)
         assert result.startswith("ERROR")
         assert "not allowed to spawn" in result
-        assert "Allowed team members: ['explorer', 'worker']" in result
+        # After auto-derivation: tester has team_members=['explorer', 'worker']
+        # (explicit) AND tools.allow includes 'image' and 'knowledge',
+        # which imply 'explorer', 'kb-writer', and 'image-reader'.
+        # The merged, canonicalized, sorted set is
+        # ['explorer', 'image-reader', 'kb-writer', 'worker'].
+        assert (
+            "Allowed team members: ['explorer', 'image-reader', 'kb-writer', 'worker']"
+            in result
+        ), (
+            f"tester auto-derived allow-set must be "
+            f"['explorer', 'image-reader', 'kb-writer', 'worker']; "
+            f"got: {result!r}"
+        )
         manager.spawn_instance.assert_not_called()
 
     async def test_unknown_caller_agent_is_denied(self):
@@ -499,8 +517,14 @@ class TestCheckTeamMembershipUnit:
         err = _check_team_membership("developer", "leader")
         assert err is not None
         assert "not allowed to spawn" in err
-        assert "Allowed team members: ['explorer']" in err, (
-            f"developer.team_members should be rendered as ['explorer']; "
+        # After auto-derivation: developer has team_members=['explorer']
+        # (explicit) AND tools.allow includes 'image' and 'knowledge',
+        # which imply 'explorer', 'kb-writer', and 'image-reader'.
+        # The merged, canonicalized, sorted set is
+        # ['explorer', 'image-reader', 'kb-writer'].
+        assert "Allowed team members: ['explorer', 'image-reader', 'kb-writer']" in err, (
+            f"developer auto-derived allow-set must be "
+            f"['explorer', 'image-reader', 'kb-writer']; "
             f"got: {err!r}"
         )
 
@@ -677,3 +701,244 @@ class TestCheckTeamMembershipUnit:
         err = _check_team_membership("leader", "developer ")
         assert err is not None
         assert "not allowed to spawn" in err, f"Got: {err!r}"
+
+
+# =============================================================================
+# Auto-derivation of implied team_members from tools.allow
+# =============================================================================
+#
+# The ``_check_team_membership`` helper in ``daemon/tools/_auth.py`` now
+# expands the caller's ``tools.allow`` categories through
+# ``TOOL_REQUIRED_AGENTS`` to derive implied team members. This makes
+# ``tools.allow`` the single source of truth — the caller no longer
+# needs to ALSO duplicate the backing agent in ``team_members``.
+#
+# These tests pin the auto-derivation contract directly against
+# ``_check_team_membership`` (independent of the ``spawn_instance``
+# tool wiring) so refactors of the tool layer don't lose coverage.
+
+
+def _install_synthetic_caller(monkeypatch, agent_id, *, team_members,
+                               tools_allow):
+    """Install a synthetic AgentMetadata into the registry for one test.
+
+    Patches ``registry.get_resolved`` to return our synthetic metadata
+    for the supplied ``agent_id``; other ids pass through to the real
+    registry so ``resolve_pure_id`` keeps working normally.
+
+    The synthetic caller carries:
+      * ``team_members`` — explicit allow-set (raw, not yet canonicalized).
+      * ``tools.allow`` — the list of category strings the helper
+        auto-expands via :data:`TOOL_REQUIRED_AGENTS`.
+
+    Returns the synthetic ``AgentMetadata`` so the test can assert
+    against its rendered ``.id`` / ``.team_members`` directly.
+    """
+    from pathlib import Path
+
+    from daemon.registry import AgentMetadata, get_registry
+
+    registry = get_registry()
+
+    tools_filter = None
+    if tools_allow is not None:
+        # Use a real ``ToolFilter`` so the helper reads
+        # ``caller_meta.tools.allow`` (a real list, not a MagicMock).
+        from daemon.registry import ToolFilter
+        tools_filter = ToolFilter(allow=list(tools_allow))
+
+    synthetic = AgentMetadata(
+        id=agent_id,
+        name=agent_id,
+        description=f"Synthetic caller for auto-derivation test ({agent_id})",
+        path=Path(f"/tmp/{agent_id}"),
+        team_members=list(team_members),
+        tools=tools_filter,
+    )
+
+    original_get_resolved = registry.get_resolved
+
+    def patched_get_resolved(query_id: str):
+        if query_id == agent_id:
+            return synthetic
+        return original_get_resolved(query_id)
+
+    monkeypatch.setattr(registry, "get_resolved", patched_get_resolved)
+    return synthetic
+
+
+class TestAutoDerivationOfImpliedTeamMembers:
+    """Pin the auto-derivation contract of ``_check_team_membership``.
+
+    The helper now reads the caller's ``tools.allow`` and merges
+    :data:`TOOL_REQUIRED_AGENTS`-implied agents into the effective
+    allow-set, alongside any explicit ``team_members`` declarations.
+    Explicit team_members remain honored (union semantics). The
+    tests below cover all branches of the new contract.
+    """
+
+    def test_auto_derive_knowledge_implies_explorer_and_kb_writer(self, monkeypatch):
+        """An agent with ``tools.allow=['knowledge']`` but no explicit
+        ``explorer``/``kb-writer`` in ``team_members`` → both are
+        implicitly allowed (auto-derived from the ``knowledge``
+        category).
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_knowledge_only_caller",
+            team_members=[],  # explicit list is empty
+            tools_allow=["knowledge"],
+        )
+
+        # Both required_agents for the "knowledge" category are
+        # implicitly allowed.
+        assert _check_team_membership("synthetic_knowledge_only_caller", "explorer") is None
+        assert _check_team_membership("synthetic_knowledge_only_caller", "kb-writer") is None
+
+    def test_auto_derive_multiple_categories_all_implied_allowed(self, monkeypatch):
+        """An agent with ``tools.allow=['knowledge', 'image', 'chart']`` →
+        ``explorer``, ``kb-writer``, ``image-reader``, and ``charter``
+        are all implicitly allowed.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_multi_category_caller",
+            team_members=[],
+            tools_allow=["knowledge", "image", "chart"],
+        )
+
+        # Every required agent for every declared category must pass.
+        assert _check_team_membership("synthetic_multi_category_caller", "explorer") is None
+        assert _check_team_membership("synthetic_multi_category_caller", "kb-writer") is None
+        assert _check_team_membership("synthetic_multi_category_caller", "image-reader") is None
+        assert _check_team_membership("synthetic_multi_category_caller", "charter") is None
+
+    def test_explicit_team_members_still_allow_when_tools_allow_empty(self, monkeypatch):
+        """Backward compatibility: an agent with explicit
+        ``team_members=['developer']`` and empty ``tools.allow`` →
+        ``_check_team_membership`` allows ``developer`` and denies others.
+        Explicit declarations still work after the auto-derivation change.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_explicit_only_caller",
+            team_members=["developer"],
+            tools_allow=[],  # no category → no auto-derivation
+        )
+
+        # Explicit member is allowed.
+        assert _check_team_membership("synthetic_explicit_only_caller", "developer") is None
+        # Any other agent is denied (no auto-derivation can rescue it).
+        err = _check_team_membership("synthetic_explicit_only_caller", "explorer")
+        assert err is not None
+        assert "not allowed to spawn" in err
+        # The allowed set is just the explicit declaration.
+        assert "Allowed team members: ['developer']" in err, (
+            f"Explicit-only caller must show ['developer']; got: {err!r}"
+        )
+
+    def test_empty_tools_and_empty_team_members_denies_everything(self, monkeypatch):
+        """Deny-by-default: an agent with empty ``tools.allow`` AND empty
+        ``team_members`` denies ALL spawns. Returns an error string (not
+        None) — pinning the foundational security guarantee that
+        post-W1 callers with no authority whatsoever are rejected.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_deny_default_caller",
+            team_members=[],
+            tools_allow=[],
+        )
+
+        err = _check_team_membership("synthetic_deny_default_caller", "developer")
+        assert err is not None, "Deny-by-default: empty allow-set must produce an error"
+        assert "not allowed to spawn" in err
+        assert "Allowed team members: []" in err, (
+            f"Empty allow-set must render as []; got: {err!r}"
+        )
+
+    def test_non_matching_category_does_not_imply_other_categories(self, monkeypatch):
+        """An agent with ``tools.allow=['chart']`` only →
+        ``_check_team_membership`` ALLOWS ``charter`` (chart's
+        required agent) but DENIES ``explorer`` (knowledge-implied)
+        and ``image-reader`` (image-implied). Only the categories
+        actually present in ``tools.allow`` grant their required
+        agents — no transitive cross-category grants.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        _install_synthetic_caller(
+            monkeypatch,
+            "synthetic_chart_only_caller",
+            team_members=[],
+            tools_allow=["chart"],  # ONLY chart, no knowledge / image
+        )
+
+        # Charter IS allowed (chart's required agent).
+        assert _check_team_membership("synthetic_chart_only_caller", "charter") is None
+
+        # Explorer and image-reader are NOT allowed (knowledge and
+        # image categories are absent → no cross-category grants).
+        err_explorer = _check_team_membership("synthetic_chart_only_caller", "explorer")
+        assert err_explorer is not None, "chart-only caller must NOT allow 'explorer'"
+        assert "not allowed to spawn" in err_explorer
+        assert "Allowed team members: ['charter']" in err_explorer, (
+            f"chart-only allow-set must be exactly ['charter']; "
+            f"got: {err_explorer!r}"
+        )
+
+        err_image = _check_team_membership("synthetic_chart_only_caller", "image-reader")
+        assert err_image is not None, "chart-only caller must NOT allow 'image-reader'"
+        assert "not allowed to spawn" in err_image
+
+        err_kb = _check_team_membership("synthetic_chart_only_caller", "kb-writer")
+        assert err_kb is not None, "chart-only caller must NOT allow 'kb-writer'"
+        assert "not allowed to spawn" in err_kb
+
+    def test_canonicalization_preserved_for_implied_members(self, monkeypatch):
+        """Canonicalization: if an implied id has an alias, the helper
+        resolves it through the registry and the auto-derived set
+        matches the canonical id. We exercise this by registering a
+        synthetic ALIAS → required_agent mapping in
+        ``AGENT_ID_ALIASES`` and verifying the helper still allows
+        the canonical id (and the alias form).
+        """
+        from daemon.tools.instance import _check_team_membership
+        from daemon.registry import AGENT_ID_ALIASES, get_registry
+
+        registry = get_registry()
+
+        # Pick a real required agent we can alias without colliding
+        # with any existing alias. ``charter`` is the simplest target
+        # (single required agent for the "chart" category, no existing
+        # alias in the empty-AGENT_ID_ALIASES baseline).
+        # The test adds "chartist" → "charter" so the synthetic
+        # caller's tools.allow=['chart'] yields an implied member
+        # whose canonical form resolves cleanly.
+        AGENT_ID_ALIASES["chartist"] = "charter"
+        try:
+            _install_synthetic_caller(
+                monkeypatch,
+                "synthetic_alias_caller",
+                team_members=[],
+                tools_allow=["chart"],
+            )
+
+            # The canonical form ("charter") is allowed.
+            assert _check_team_membership("synthetic_alias_caller", "charter") is None
+            # The aliased form ("chartist") is also allowed — the
+            # helper resolves the requested id through
+            # ``registry.resolve_pure_id`` before comparison, so an
+            # alias on the REQUEST side also canonicalizes correctly.
+            assert _check_team_membership("synthetic_alias_caller", "chartist") is None
+        finally:
+            # Clean up the alias so other tests see a pristine registry.
+            AGENT_ID_ALIASES.pop("chartist", None)
