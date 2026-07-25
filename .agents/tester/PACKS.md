@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 184 packs
-- Unit: 151 | Integration: 4 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5
+- Total: 194 packs
+- Unit: 155 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 2
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -449,3 +449,22 @@ Frontend `SearchableSelectComponent` feature — reusable Angular standalone com
 | searchable_dropdowns_build_test | frontend/ (`npm run build`) | Frontend production build for searchable-dropdowns: ng build succeeds, no compilation errors | 5 min | 2026-07-22 | ✅ PASS (exit 0 in 10.5s, only pre-existing bundle budget warnings, feature/searchable-dropdowns) |
 | question_dismiss_unit_test | tests/test_question_dismiss.py | POST /api/instances/{id}/question/dismiss endpoint: happy path (200 + dismissed status), state surface clearing (pack/flag/deferred marker), SSE emission (status="dismissed", best-effort, skip-on-no-hub), resume cascade (target dismissal message, child silent resume), 404 (no pack / unknown instance), 409 (already answered), 503 (write-paused), cascade failure (500), empty resumed_ids (200) | 2 min | 2026-07-23 | ✅ PASS (15/15, feature/question-ui-clear-and-custom @ 1c970bf0, 0.85s, 0 failures) |
 | question_regression_unit_test | tests/test_question_api.py + tests/test_question_manager.py + tests/test_question_tools.py + tests/test_question_untested_paths.py | Question subsystem regression: API endpoints, question manager CRUD, question tools, untested paths — verifies no regressions from question dismiss feature changes | 2 min | 2026-07-23 | ✅ PASS (30/30, feature/question-ui-clear-and-custom @ 1c970bf0, 1.05s, 0 failures) |
+
+## VS Code Server Editor Packs (2026-07-25)
+
+VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c42b4). 5-phase project: Phase 0 (WS spike), Phase 1 (VSCodeServerManager), Phase 2 (Reverse Proxy HTTP+WS), Phase 3 (Settings API + Wiring), Phase 4+5 (Frontend UI + iframe viewer). 10 packs total: 5 pre-existing test suites verified + 5 NEW test suites written during this test run (4 by workers, 1 pre-existing routing e2e).
+
+**Backend test files** (run with `.venv/bin/pytest` — default addopts exclude integration/postgres markers; these use mocks/ASGITransport, no real code-server needed unless noted).
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| vscode_server_manager_unit_test | tests/unit/test_vscode_server_manager.py | VSCodeServerManager lifecycle: spawn (127.0.0.1 + --auth none), track, health-check, stop. Mocked asyncio.create_subprocess_exec. | 2 min | 2026-07-25 | ✅ PASS (36/36 in 4.19s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
+| vscode_path_validation_unit_test | tests/unit/test_vscode_path_validation.py | WorkspaceGuard.resolve_strict() security: path traversal (..), symlink escapes, null byte injection, temp-dir bypass (C1/C2 constraints) | 2 min | 2026-07-25 | ✅ PASS (13/13 in 0.70s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
+| vscode_editor_settings_api_test | tests/api/test_editor_settings.py | Editor settings API: GET/PUT /api/settings/editor, status endpoint. W13 transactionality (side-effect before persist), C4 port/pid leak prevention. Mocked manager + httpx ASGITransport. | 2 min | 2026-07-25 | ✅ PASS (29/29 in 0.97s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
+| vscode_proxy_integration_test | tests/integration/test_vscode_proxy.py | WebSocket + HTTP reverse proxy: binary frame handling (msgpack-RPC isinstance→send_bytes), TaskGroup lifecycle, streaming body cap (P1), Origin/hop-by-hop headers (P2). Mocked httpx.AsyncClient + websockets. | 5 min | 2026-07-25 | ✅ PASS (35/35 in 0.93s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
+| vscode_routing_integration_test | tests/integration/test_vscode_routing.py | /vscode mount isolation (C3): /vscode/* reaches proxy not SPA, /vscodefoo isolated, catch-all has vscode prefix guard + is last route. ASGITransport + mocked upstream. | 5 min | 2026-07-25 | ✅ PASS (8/8 in 1.48s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
+| vscode_security_integration_test | tests/integration/test_vscode_security_integration.py | **NEW** Security integration: C1 path traversal via real proxy (/etc, /etc/passwd, ../../etc, null byte → 403; valid repo folder not blocked). C4 port/pid leak absence across 3 status endpoints. ASGITransport + manual proxy mount. | 5 min | 2026-07-25 | ✅ PASS (8/8 in 1.78s, NEW test file, commit fe9942fe, 0 failures) |
+| vscode_lifecycle_integration_test | tests/integration/test_vscode_lifecycle_integration.py | **NEW** Lifecycle integration: editor switch vscode→start, builtin→stop, W13 transactionality (VSCodeServerError + NotInstalled → 503 + not persisted), crash recovery (dead process → status="crashed"). REAL manager + mocked subprocess + file-backed SQLite. | 5 min | 2026-07-25 | ✅ PASS (6/6 in ~4s, NEW test file, commit 31ada174, 0 failures) |
+| vscode_routing_e2e_test | tests/integration/test_vscode_routing_e2e.py | **NEW** Real proxy routing E2E: C3 mount isolation, API works, SPA catch-all serves index.html. LIVE dev server (localhost:8079) with ASGI fallback. | 5 min | 2026-07-25 | ✅ PASS (8/8 in 1.11s warm, NEW test file, commit 303d9605, 0 failures. Ran against LIVE dev server) |
+| vscode_frontend_unit_test | frontend/ (`npx jest vscode-viewer.component.spec.ts settings.component.spec.ts settings.service.spec.ts`) | Frontend VS Code specs: VsCodeViewerComponent (postMessage origin, debounce, cleanup), SettingsComponent (editor section, Apply dirty/loading), SettingsService (PUT/GET editor API). **Jest + jest-preset-angular** (NOT Karma). | 5 min | 2026-07-25 | ✅ PASS (84/84 in 1.36s, feature/vscode-server-editor @ bf3c42b4, 0 failures) |
+| vscode_frontend_integration_test | frontend/ (`npx jest vscode-viewer.integration.spec.ts`) | **NEW** Frontend integration: onIframeLoad direct postMessage (bypasses debounce) with window.location.origin, loading signal flip, empty workdir guard, rapid-change last-value-wins debounce, timer cleanup no stale leak. | 5 min | 2026-07-25 | ✅ PASS (7/7 in 1.08s, NEW test file, commit 399ad76b, 0 failures) |
