@@ -845,6 +845,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             name used, and instructions to forward the request via
             ``send_message``.
         """
+        # W1 FIX: Restrict to governor agent only
+        if caller_agent_id != "governor":
+            raise ValueError("council tools are restricted to the governor agent")
+
         # ─── STEP 1: Validate councilor_agent_id (C4: resolve_to_id returns None, never raises) ───
         # Lazy import to avoid circular import (registry imports utils indirectly).
         from ..registry import get_registry
@@ -935,6 +939,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         Returns:
             A short status string describing the outcome (cleared / warning).
         """
+        # W1 FIX: Restrict to governor agent only
+        if caller_agent_id != "governor":
+            raise ValueError("council tools are restricted to the governor agent")
+
         # Lazy import to avoid module-load circularity.
         from daemon.services.dependency_bus import get_dependency_bus
 

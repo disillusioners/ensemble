@@ -2,7 +2,7 @@
 
 ## Overview
 
-One workflow: **Validate → Manifest → Convene → Dispatch → Collect → Synthesize → Clear Errors → Deliver**.
+One workflow: **Validate → Manifest → Convene → Dispatch → Collect → Synthesize → Terminate + Clear → Deliver**.
 
 The governor is a synthesizer. Every step below assumes that all real work is delegated to councilors; the governor's job is to coordinate, track, and synthesize.
 
@@ -253,30 +253,36 @@ was not achieved — confidence is reduced. Consider re-running for higher confi
 <actual synthesized answer>
 ```
 
-**⚠️ Reminder:** Degraded synthesis STILL calls `clear_councilor_errors()` in Step 5 (synthesis succeeded). The degraded notice is the user's signal of reduced confidence — it is **not** a failure.
+**⚠️ Reminder:** Degraded synthesis STILL performs Step 5: terminate every lingering `RUNNING` councilor, then call `clear_councilor_errors()` and verify `cleared=true` (synthesis succeeded). The degraded notice is the user's signal of reduced confidence — it is **not** a failure.
 
 ---
 
-## Step 5: Clear Errors (NEW — C1/D7 — CRITICAL)
+## Step 5: Terminate + Clear (NEW — C1/D7 — CRITICAL)
 
-Before delivering, clear the sticky parent-error flag **if and only if** synthesis succeeded.
+Before delivering, terminate lingering councilors and clear the sticky parent-error flag **if and only if** synthesis succeeded.
 
 ```raw
 If synthesis produced a valid answer (NORMAL or DEGRADED path):
-  1. Call clear_councilor_errors()
+  1. For every councilor still RUNNING, call terminate_instance(instance_id).
+     → A terminated councilor cannot call emit_terminal
+     → This closes the common-case TOCTOU window and makes the dependency bus quiet
+  2. Only after every lingering RUNNING councilor has been terminated, call
+     clear_councilor_errors()
      → This clears _parent_errored[governor_instance_id] in the dependency bus
      → Allows the governor to finalize as COMPLETED despite individual
        councilor failures
-  2. Proceed to Step 6
+  3. Verify the returned result reports cleared=true.
+     → If cleared is not true, do NOT proceed to delivery
+  4. Proceed to Step 6 only after cleared=true is verified
 
 If synthesis FAILED (all councilors errored, no answer):
   → Do NOT call clear_councilor_errors()
   → Governor will finalize as ERROR (correct behavior)
 ```
 
-**⚠️ Why this is critical:** Without this step, ANY councilor failure forces the governor's terminal status to ERROR via the dependency bus's sticky `_parent_errored` flag — even if 3 of 4 councilors succeeded and the governor synthesized a perfect answer. This step restores fault-tolerance.
+**⚠️ Why this is critical:** Without clearing the sticky `_parent_errored` flag, ANY councilor failure forces the governor's terminal status to ERROR via the dependency bus — even if 3 of 4 councilors succeeded and the governor synthesized a perfect answer. Terminating lingering `RUNNING` councilors first prevents them from calling `emit_terminal`, makes the bus quiet, and closes the common-case TOCTOU window before the clear. This step restores fault-tolerance.
 
-**Timing:** Call `clear_councilor_errors()` IMMEDIATELY before producing the final output. Do not delay. A late child error arriving after the clear is acceptable (TOCTOU window) — synthesis has already succeeded and the result is sound.
+**Timing:** After successful synthesis, terminate every lingering `RUNNING` councilor first. Then call `clear_councilor_errors()` immediately, verify `cleared=true`, and proceed to delivery without delay. Never clear while a councilor remains `RUNNING`.
 
 ---
 
@@ -288,13 +294,12 @@ Present the synthesized answer to the requester.
 1. Present the synthesized answer (NORMAL or DEGRADED path).
 2. If disagreements were unresolved, surface them — quote the councilor
    positions, explain my reasoning, recommend the preferred position.
-3. Terminate any councilors that are still running (free worker slots).
-4. Clear the council manifest from shared_context_metadata on successful
+3. Clear the council manifest from shared_context_metadata on successful
    delivery.
-5. Report completion to the caller.
+4. Report completion to the caller.
 ```
 
-**Cleanup is part of delivery.** Leaving orphan councilors running wastes worker slots. Leaving the manifest behind pollutes shared_context_metadata.
+**Cleanup is part of delivery.** Lingering councilors were terminated in Step 5 before the error clear; leaving the manifest behind pollutes shared_context_metadata.
 
 ---
 
@@ -356,14 +361,14 @@ The manifest is the single source of truth across crashes. Every councilor read,
 | Invalid `councilor_agent_id` | STOP at Step 0 |
 | Invalid `model` (not in `<allowed_models>`) | STOP at Step 0 |
 | `spawn_councilor` raises (invalid model) | Report, do NOT retry with fallback |
-| Councilor errors during execution | Proceed with available results; clear errors in Step 5 |
+| Councilor errors during execution | Proceed with available results; after successful synthesis, terminate lingering `RUNNING` councilors, then clear errors in Step 5 and verify `cleared=true` |
 | **`send_message` returns an error (W2)** | Mark councilor `FAILED` with `dispatch_status=FAILED`, record error, do NOT retry silently, proceed with remaining councilors |
 | **All councilors fail** | Do NOT clear errors; report failure (bus marks ERROR) |
 | Councilor times out (30min soft limit) | Extend if RUNNING + long-running task; otherwise mark `TIMED_OUT` and proceed |
 | Councilor hits 1h hard limit | `terminate_instance`, capture partial result, mark `PARTIAL_TIMED_OUT`, counts as 1 degraded result |
 | All councilors fail / 0 results | Report failure. Do NOT clear errors. |
 | 1 result only (degraded) | Synthesize with degraded-confidence notice prepended to output |
-| Late child error after `clear_councilor_errors()` | Acceptable (TOCTOU window); synthesis already succeeded |
+| Lingering `RUNNING` councilor after synthesis | Call `terminate_instance(instance_id)` before clearing; termination prevents `emit_terminal` and quiets the bus |
 | Manifest missing on restart | Fresh start at Step 1 |
 | Crash mid-council | On restore, read manifest, refresh statuses, resume from Step 3 or Step 4 |
 
