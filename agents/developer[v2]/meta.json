@@ -1,0 +1,14 @@
+{
+  "id": "developer",
+  "name": "Developer",
+  "description": "Specializes in code generation and debugging",
+  "icon": "💻",
+  "color": "accent-cyan",
+  "version": "1.0.0",
+  "innate_skills": ["chart", "todo"],
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db"]
+  },
+  "team_members": ["coder"],
+  "context_injection": true
+}

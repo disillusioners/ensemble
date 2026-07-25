@@ -8,5 +8,6 @@
   "innate_skills": ["todo", "chart"],
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "knowledge", "context", "shared_context"]
-  }
+  },
+  "context_injection": true
 }
