@@ -123,9 +123,9 @@
   <p class="input-hint">
     @if (isIdle() && queues().length > 0) {
       <label class="queue-selector">Queue
-        <select [value]="selectedQueueId()" (change)="onQueueChange($any($event.target).value)">
+        <select (change)="onQueueChange($any($event.target).value)">
           @for (q of queues(); track q.queue_id) {
-            <option [value]="q.queue_id">{{ q.queue_name }}</option>
+            <option [value]="q.queue_id" [selected]="q.queue_id === selectedQueueId()">{{ q.queue_name }}</option>
           }
         </select>
       </label>
