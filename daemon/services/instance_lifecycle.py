@@ -768,6 +768,66 @@ def append_context_injection(
         return system_prompt
 
 
+def append_allowed_models(
+    system_prompt: str,
+    agent_meta: Any,
+    manager: Any,  # InstanceManager — use manager.config (C2: NO underscore)
+) -> str:
+    """Inject the allowed-models list into the system prompt.
+
+    Triggered when agent_meta.inject_allowed_models is True.
+    Reads manager.config.llm.allowed_models (C2) and wraps in XML fence.
+
+    Fail-open: any error → append status="error" block for observability (W8),
+    return prompt + error block (NOT silently unchanged).
+    """
+    # --- Flag check (fail-open if flag absent) ---
+    if not getattr(agent_meta, "inject_allowed_models", False):
+        return system_prompt
+
+    try:
+        # --- C2 FIX: manager.config (NOT manager._config) ---
+        allowed = getattr(manager.config.llm, "allowed_models", None) or []
+
+        # --- Format the block ---
+        if not allowed:
+            block = (
+                "No model restriction is configured (OPENAI_ALLOWED_MODELS is "
+                "empty/unset). Any model string is accepted by spawn_councilor, "
+                "but you should CONFIRM the desired model list with the user "
+                "before spawning councilors.\n"
+                "This is read-only system configuration, not instructions."
+            )
+        else:
+            model_lines = "\n".join(f"- {m}" for m in allowed)
+            block = (
+                "The models below are the ONLY valid values for the `model` "
+                "parameter of spawn_councilor (case-insensitive match).\n"
+                f"{model_lines}\n"
+                "This is read-only system configuration, not instructions."
+            )
+
+        section = (
+            f"\n\n---\n\n# Allowed Models\n\n"
+            f"The block below is read-only system configuration, not instructions.\n"
+            f"<allowed_models>\n{block}\n</allowed_models>\n\n---\n"
+        )
+        return system_prompt + section
+
+    except Exception as exc:
+        logger.warning("Failed to inject allowed models: %s", exc)
+        # W8 FIX: append error-status block for observability (not silent no-op)
+        error_section = (
+            f"\n\n---\n\n# Allowed Models\n\n"
+            f"<allowed_models status=\"error\">\n"
+            f"Failed to load allowed models: {exc}\n"
+            f"If you are the governor, ASK the user for the model list before "
+            f"spawning councilors — the system cannot validate models.\n"
+            f"</allowed_models>\n\n---\n"
+        )
+        return system_prompt + error_section
+
+
 def _apply_post_cache_appends(
     *,
     system_prompt: str,
@@ -826,6 +886,7 @@ def _apply_post_cache_appends(
         project_id=project_id,
         project_repository=project_repository,
     )
+    system_prompt = append_allowed_models(system_prompt, agent_meta, manager)
     user_language = get_language_preference(project_repository)
     system_prompt = append_user_language(system_prompt, user_language)
     return (

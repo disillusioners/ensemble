@@ -233,6 +233,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "dynamic-skill": "daemon.tools.skill_tools",
     "language": "daemon.tools.language_tools",
     "proc": "daemon.tools.proc_tools",
+    "council": "daemon.tools.instance",  # Phase 2: spawn_councilor + clear_councilor_errors
 }
 
 

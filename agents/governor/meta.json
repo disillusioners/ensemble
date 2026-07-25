@@ -1,0 +1,32 @@
+{
+  "id": "governor",
+  "name": "Governor",
+  "description": "Council-manager agent. Spawns multiple instances of one agent_id with different LLM models, forwards the same request to each, then aggregates and refines results into a high-confidence answer.",
+  "icon": "⚖️",
+  "color": "accent-purple",
+  "version": "0.1.0",
+  "innate_skills": ["todo", "chart"],
+  "context_injection": true,
+  "inject_allowed_models": true,
+  "tools": {
+    "allow": [
+      "council",
+      "instance",
+      "self",
+      "project",
+      "help",
+      "question",
+      "shared_context",
+      "knowledge",
+      "time"
+    ]
+  },
+  "team_members": [
+    "developer",
+    "coder",
+    "wanderer",
+    "explorer",
+    "doc-writer",
+    "reviewer"
+  ]
+}
