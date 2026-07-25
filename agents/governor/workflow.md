@@ -2,7 +2,7 @@
 
 ## Overview
 
-One workflow: **Validate → Persist Manifest → Spawn Councilors → Dispatch → Collect → Synthesize → Clear Errors → Deliver**.
+One workflow: **Validate → Manifest → Convene → Dispatch → Collect → Synthesize → Clear Errors → Deliver**.
 
 The governor is a synthesizer. Every step below assumes that all real work is delegated to councilors; the governor's job is to coordinate, track, and synthesize.
 
@@ -39,7 +39,7 @@ If any validation fails, STOP. Do not proceed to Step 0.5. Do not persist a mani
 
 ---
 
-## Step 0.5: Persist Council Manifest (W4/D8) — BEFORE FIRST SPAWN
+## Step 0.5: Write Council Manifest (W4/D8) — BEFORE FIRST SPAWN
 
 Before spawning any councilor, write the council manifest to `shared_context_metadata` under the key `council_manifest`. This is the **crash-recovery anchor**.
 
@@ -49,11 +49,13 @@ Before spawning any councilor, write the council manifest to `shared_context_met
      "request_id": "<uuid>",
      "councilor_agent_id": <validated agent_id>,
      "original_request": <the request>,
-     "spawned_at": <current time, ISO timestamp>,
+     "models": [<validated selected models, max 4>],
+     "councilors": [],
+     "round": 0,
+     "created_at": <current time, ISO timestamp>,
      "deadline": <current time + 30 min per councilor (soft limit)>,
      "deadline_hard_cap": <current time + 1 hour (absolute cap, immutable)>,
-     "deadline_extended": false,
-     "councilors": []
+     "deadline_extended": false
    }
 2. Proceed to Step 1
 ```
@@ -65,10 +67,7 @@ Before spawning any councilor, write the council manifest to `shared_context_met
   "request_id": "string (uuid)",
   "councilor_agent_id": "string",
   "original_request": "string",
-  "spawned_at": "ISO timestamp",
-  "deadline": "ISO timestamp (30min soft)",
-  "deadline_hard_cap": "ISO timestamp (1h hard)",
-  "deadline_extended": false,
+  "models": ["string"],
   "councilors": [
     {
       "instance_id": "string",
@@ -78,7 +77,12 @@ Before spawning any councilor, write the council manifest to `shared_context_met
       "result": "string|null",
       "dispatch_status": "DISPATCHED|FAILED"
     }
-  ]
+  ],
+  "round": 0,
+  "created_at": "ISO timestamp",
+  "deadline": "ISO timestamp (30min soft)",
+  "deadline_hard_cap": "ISO timestamp (1h hard)",
+  "deadline_extended": false
 }
 ```
 

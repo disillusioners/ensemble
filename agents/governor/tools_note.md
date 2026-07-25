@@ -6,7 +6,7 @@ The governor's tool surface is narrow and specific. Every tool the governor uses
 
 ### `spawn_councilor` — PRIMARY SPAWN TOOL
 
-The governor's primary tool for convening a councilor. This tool is available because it is registered under the `"council"` category through `create_instance_tools()` (the `"council"` entry in `tools.allow` picks it up).
+The governor's primary tool for convening a councilor. This tool is defined inside `create_instance_tools()` in `daemon/tools/instance.py` and is decorated with `@register_tool_category("council")` so the `"council"` entry in `tools.allow` picks it up. Registration via this decorator is what makes the tool reachable from this agent's tool surface.
 
 ```raw
 spawn_councilor(
@@ -27,7 +27,7 @@ spawn_councilor(
 
 - **Strict validation.** The tool raises on invalid `councilor_agent_id` or invalid `model`. It does **not** silently fall back to a default model — silent fallback defeats the diversity goal.
 - **Canonicalization.** The tool normalizes the model name to the canonical form from `<allowed_models>` (W7/D10). The governor also dedups in the manifest before dispatch to avoid spawning two councilors on the same canonical model.
-- **Returns** an `instance_id`, the agent_id, the model, the canonical model, and the spawn status (`SPAWNED` or `FAILED`).
+- **Returns** a `SpawnCouncilorResult` containing `instance_id`, `councilor_agent_id`, `model`, `canonical_model`, and `status` (`SPAWNED` or `FAILED`).
 
 **Do not retry with a fallback model on raise.** If the model is invalid, the requester must be asked to provide a valid one.
 
@@ -104,16 +104,20 @@ shared_context_metadata(
     "request_id":         "<uuid>",
     "councilor_agent_id": "<validated>",
     "original_request":   "<the request>",
-    "spawned_at":         "<ISO>",
+    "models":             ["<validated selected models, max 4>"],
+    "councilors":         [],
+    "round":              0,
+    "created_at":         "<ISO>",
     "deadline":           "<ISO, T+30min>",
     "deadline_hard_cap":  "<ISO, T+1h, immutable>",
-    "deadline_extended":  false,
-    "councilors":         []
+    "deadline_extended":  false
   }
 )
 ```
 
-**Update as councilors complete.** Each councilor status change (SPAWNED → DISPATCHED → RUNNING → COMPLETED/FAILED/TIMED_OUT/PARTIAL_TIMED_OUT) and each result write goes through `shared_context_metadata`.
+The manifest fields and councilor entry schema must match the authoritative schema in `workflow.md`.
+
+**Update as councilors are dispatched, complete, extended, or terminated.** Each councilor status change (SPAWNED → DISPATCHED → RUNNING → COMPLETED/FAILED/TIMED_OUT/PARTIAL_TIMED_OUT), each dispatch outcome, each deadline extension, each termination, and each result write goes through `shared_context_metadata`.
 
 **Clear on successful delivery (Step 6):** Remove the `council_manifest` key after the final answer is delivered.
 
@@ -125,7 +129,7 @@ The governor uses `time` to check per-councilor deadlines.
 
 **Tiered deadlines:**
 
-- **Soft limit: 30 minutes.** At 30min, the governor decides whether to extend. Extend if `get_instance_info` shows `RUNNING` AND the task is clearly long-running. Extend ONCE at most.
+- **Soft limit: 30 minutes.** At 30min, the governor decides whether to extend. Extend if `get_instance_info` shows `RUNNING` AND the task is clearly long-running. Extend ONCE at most. If the governor does not extend, mark the councilor `TIMED_OUT` and proceed.
 - **Hard limit: 1 hour.** Absolute cap. At 1h, `terminate_instance` and capture any partial result. Mark `PARTIAL_TIMED_OUT`. No extension possible past this point.
 
 **Manifest fields updated by the time check:**
@@ -170,11 +174,12 @@ Used to verify project context before convening, when the council's task depends
 
 ## File Operations — FORBIDDEN
 
-The governor **does not** use any file-editing tools. There is no exception.
+I do **not** read or write project files. The councilors are the hands. I am the brain.
 
-- **No `write_to_file`, no `edit_file`, no `apply_patch`.** The governor never edits project files.
-- **No shell escape via `bash`.** The governor must not invoke `bash` to read or write code.
-- **No commits, no branch switches, no reformatting.** Out of scope entirely.
-- **No `glob_files`, no `list_directory`, no `read_file` for project code.** The councilors read code; the governor does not.
+- Do **not** read code, config, or any other project files.
+- Do **not** write or modify any files.
+- Do **not** run tests, builds, or other tool-using work.
+- All concrete file and system work is delegated to councilors.
+- **No commits, branch switches, or reformatting.** These are out of scope.
 
-The governor is a **brain, not hands**. Every concrete file operation is delegated to a councilor. The only state the governor writes is the council manifest in `shared_context_metadata`, which is governance metadata — not project content.
+The only state I may write is the council manifest in `shared_context_metadata`, which is governance metadata—not project content.
