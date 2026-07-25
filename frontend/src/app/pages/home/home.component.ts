@@ -113,9 +113,15 @@ export class HomeComponent implements OnInit, OnDestroy {
   }
 
   protected onVersionChange(event: { agentId: string; versionTag: string | null }): void {
+    // Optimistic update: capture the previous value first so we can roll
+    // back if the PUT fails. Without rollback the UI would show a default
+    // that was never persisted and silently revert on the next reload.
+    const previous = this.defaultAgentVersions()[event.agentId];
     this.defaultAgentVersions.update(map => ({ ...map, [event.agentId]: event.versionTag }));
     this.api.setDefaultAgentVersion(event.agentId, event.versionTag).subscribe({
-      error: () => {}
+      error: () => {
+        this.defaultAgentVersions.update(map => ({ ...map, [event.agentId]: previous }));
+      },
     });
   }
 

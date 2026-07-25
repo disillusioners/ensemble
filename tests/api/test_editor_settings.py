@@ -30,7 +30,9 @@ Run only this file::
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -531,6 +533,103 @@ class TestVSCodeStop:
         # C4: port and pid are no longer exposed in the API response.
         assert "port" not in body
         assert "pid" not in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUT /api/settings/default-agent-versions
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDefaultAgentVersions:
+    """Default agent-version validation and concurrent updates."""
+
+    @staticmethod
+    def _wire_metadata_repo(mocks, monkeypatch):
+        """Configure the client repo as an in-memory metadata store."""
+        stored: dict[str, str | None] = {}
+
+        class _DummySession:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def get_record(_session, _project_id, _key):
+            if not stored:
+                return None
+            return SimpleNamespace(meta_value=json.dumps(stored))
+
+        def set_metadata(_project_id, _key, value):
+            stored.clear()
+            stored.update(value)
+
+        mocks.repo.get_metadata_record.side_effect = get_record
+        mocks.repo.set_metadata.side_effect = set_metadata
+        monkeypatch.setattr(settings_module, "Session", _DummySession)
+        monkeypatch.setattr(constants, "SYSTEM_DEFAULT_PROJECT_ID", "system-default")
+        return stored
+
+    @pytest.mark.asyncio
+    async def test_invalid_version_tag_returns_422(self, client, monkeypatch):
+        ac, mocks = client
+        self._wire_metadata_repo(mocks, monkeypatch)
+        registry = MagicMock()
+        registry.list_versions.return_value = [None, "v2"]
+        monkeypatch.setattr(settings_module, "get_registry", lambda: registry)
+
+        resp = await ac.put(
+            "/api/settings/default-agent-versions",
+            json={"agent_id": "developer", "version_tag": "missing"},
+        )
+
+        assert resp.status_code == 422, resp.text
+
+    @pytest.mark.asyncio
+    async def test_none_version_tag_allows_base_reset(self, client, monkeypatch):
+        ac, mocks = client
+        self._wire_metadata_repo(mocks, monkeypatch)
+        registry = MagicMock()
+        registry.list_versions.side_effect = AssertionError("base reset must not validate")
+        monkeypatch.setattr(settings_module, "get_registry", lambda: registry)
+
+        resp = await ac.put(
+            "/api/settings/default-agent-versions",
+            json={"agent_id": "developer", "version_tag": None},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"default_versions": {}}
+
+    @pytest.mark.asyncio
+    async def test_concurrent_puts_preserve_both_agents(self, client, monkeypatch):
+        ac, mocks = client
+        self._wire_metadata_repo(mocks, monkeypatch)
+        registry = MagicMock()
+        registry.list_versions.return_value = [None, "v2", "v3"]
+        monkeypatch.setattr(settings_module, "get_registry", lambda: registry)
+
+        first, second = await asyncio.gather(
+            ac.put(
+                "/api/settings/default-agent-versions",
+                json={"agent_id": "developer", "version_tag": "v2"},
+            ),
+            ac.put(
+                "/api/settings/default-agent-versions",
+                json={"agent_id": "tester", "version_tag": "v3"},
+            ),
+        )
+        result = await ac.get("/api/settings/default-agent-versions")
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert result.status_code == 200, result.text
+        assert result.json() == {
+            "default_versions": {"developer": "v2", "tester": "v3"}
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

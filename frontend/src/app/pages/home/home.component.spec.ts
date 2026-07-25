@@ -50,9 +50,15 @@ class TestableHomeComponent {
   }
 
   protected onVersionChange(event: { agentId: string; versionTag: string | null }): void {
+    // Optimistic update: capture the previous value first so we can roll
+    // back if the PUT fails. Without rollback the UI would show a default
+    // that was never persisted and silently revert on the next reload.
+    const previous = this.defaultAgentVersions()[event.agentId];
     this.defaultAgentVersions.update(map => ({ ...map, [event.agentId]: event.versionTag }));
     this.api.setDefaultAgentVersion(event.agentId, event.versionTag).subscribe({
-      error: () => {}
+      error: () => {
+        this.defaultAgentVersions.update(map => ({ ...map, [event.agentId]: previous }));
+      },
     });
   }
 
@@ -259,6 +265,39 @@ describe('HomeComponent - Project-Aware Navigation', () => {
 
       expect(component.defaultAgentVersions()).toEqual({ 'my-agent': 'v2' });
       expect(mockApiService.setDefaultAgentVersion).toHaveBeenCalledWith('my-agent', 'v2');
+    });
+
+    it('rolls back the optimistic update when the PUT errors', () => {
+      // Seed an existing default so we can verify it survives a failed PUT.
+      component.defaultAgentVersions.set({ developer: 'v1' });
+      mockApiService.setDefaultAgentVersion.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.error(new Error('fail'));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onVersionChange({ agentId: 'developer', versionTag: 'v2' });
+
+      // After the error, the optimistic v2 must be reverted back to v1 —
+      // never persisted, never displayed.
+      expect(component.defaultAgentVersions()).toEqual({ developer: 'v1' });
+      expect(component.defaultAgentVersions()['developer']).toBe('v1');
+    });
+
+    it('rolls back to undefined when no previous default existed and the PUT errors', () => {
+      mockApiService.setDefaultAgentVersion.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.error(new Error('fail'));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onVersionChange({ agentId: 'developer', versionTag: 'v2' });
+
+      // No prior default -> rollback restores the absence of an entry.
+      expect(component.defaultAgentVersions()).toEqual({});
+      expect(component.defaultAgentVersions()['developer']).toBeUndefined();
     });
   });
 

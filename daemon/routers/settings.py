@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlmodel import Session
 
 from daemon.repositories import SQLModelProjectRepository
+from daemon.registry import get_registry
 from daemon.services.language_utils import get_language_preference, LANGUAGE_METADATA_KEY, DEFAULT_LANGUAGE
 from daemon.services.editor_utils import get_editor_preference, set_editor_preference
 from daemon.services.vscode_server_manager import (
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+_default_versions_lock = asyncio.Lock()
 _project_repo: SQLModelProjectRepository | None = None
 
 
@@ -367,6 +369,17 @@ async def set_default_agent_version(request: DefaultAgentVersionUpdate):
     if project_id is None:
         raise HTTPException(status_code=503, detail="System default project not initialized")
 
+    if request.version_tag is not None:
+        available = get_registry().list_versions(request.agent_id)
+        if available and request.version_tag not in available:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Version tag '{request.version_tag}' not found for agent "
+                    f"'{request.agent_id}'. Available: {available}"
+                ),
+            )
+
     # Read existing dict (or empty dict if no record / no value).
     def _read() -> dict[str, str | None]:
         with Session(repo.engine) as session:
@@ -397,21 +410,22 @@ async def set_default_agent_version(request: DefaultAgentVersionUpdate):
                 existing[k] = v
         return existing
 
-    existing_dict = await asyncio.to_thread(_read)
+    async with _default_versions_lock:
+        existing_dict = await asyncio.to_thread(_read)
 
-    # Mutate the one key.
-    if request.version_tag is None:
-        # Reset to base: remove the entry entirely.
-        existing_dict.pop(request.agent_id, None)
-    else:
-        existing_dict[request.agent_id] = request.version_tag
+        # Mutate the one key.
+        if request.version_tag is None:
+            # Reset to base: remove the entry entirely.
+            existing_dict.pop(request.agent_id, None)
+        else:
+            existing_dict[request.agent_id] = request.version_tag
 
-    # Persist. ``repo.set_metadata`` opens its own Session internally (R2);
-    # off the event loop so it cannot block other in-flight requests.
-    await asyncio.to_thread(
-        repo.set_metadata,
-        project_id,
-        constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
-        existing_dict,
-    )
+        # Persist. ``repo.set_metadata`` opens its own Session internally (R2);
+        # off the event loop so it cannot block other in-flight requests.
+        await asyncio.to_thread(
+            repo.set_metadata,
+            project_id,
+            constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
+            existing_dict,
+        )
     return DefaultAgentVersionsResponse(default_versions=existing_dict)
