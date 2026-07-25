@@ -35,6 +35,7 @@ export class HomeComponent implements OnInit, OnDestroy {
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  readonly defaultAgentVersions = signal<Record<string, string | null>>({});
   /** Phase 3: the AgentSelector child owns the chosen version tag —
    *  each create event carries the tag explicitly in its payload. The
    *  parent does not need to mirror the tag as a separate signal. */
@@ -43,6 +44,10 @@ export class HomeComponent implements OnInit, OnDestroy {
   readonly hasInstances = computed(() => this.instances().length > 0);
 
   ngOnInit(): void {
+    this.api.getDefaultAgentVersions().subscribe({
+      next: (response) => this.defaultAgentVersions.set(response.default_versions ?? {}),
+      error: () => {}
+    });
     this.loadInitialData();
     this.startPolling();
   }
@@ -105,6 +110,13 @@ export class HomeComponent implements OnInit, OnDestroy {
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
+  }
+
+  protected onVersionChange(event: { agentId: string; versionTag: string | null }): void {
+    this.defaultAgentVersions.update(map => ({ ...map, [event.agentId]: event.versionTag }));
+    this.api.setDefaultAgentVersion(event.agentId, event.versionTag).subscribe({
+      error: () => {}
+    });
   }
 
   protected onCreateInstance(payload?: { versionTag?: string | null }): void {

@@ -423,6 +423,26 @@ describe('AgentSelectorComponent', () => {
       expect(component.selectedVersionTag()).toBeNull();
     });
 
+    it('onSelect restores the default version from defaultVersions when present', () => {
+      fixture.componentRef.setInput('defaultVersions', { developer: 'v2' });
+      fixture.detectChanges();
+
+      component.onSelect(AGENTS[0]); // developer
+
+      expect(component.selectedVersionTag()).toBe('v2');
+    });
+
+    it('onVersionTagChange emits versionChange with the selected agent id and the chosen tag', () => {
+      const emitted = jest.fn();
+      component.versionChange.subscribe(emitted);
+      fixture.componentRef.setInput('selectedAgent', AGENTS[0]); // developer
+      fixture.detectChanges();
+
+      component.onVersionTagChange('v3');
+
+      expect(emitted).toHaveBeenCalledWith({ agentId: 'developer', versionTag: 'v3' });
+    });
+
     it('shouldShowVersionPicker is false when no agent is selected', () => {
       fixture.componentRef.setInput('selectedAgent', null);
       expect(component.shouldShowVersionPicker()).toBe(false);

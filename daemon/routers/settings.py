@@ -1,11 +1,13 @@
 """Settings API endpoints."""
 import asyncio
+import json
 import logging
 import re
 import shutil
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlmodel import Session
 
 from daemon.repositories import SQLModelProjectRepository
 from daemon.services.language_utils import get_language_preference, LANGUAGE_METADATA_KEY, DEFAULT_LANGUAGE
@@ -24,6 +26,8 @@ from .schemas import (
     EditorPreferenceUpdate,
     VSCodeStatus,
     VSCodeStatusResponse,
+    DefaultAgentVersionsResponse,
+    DefaultAgentVersionUpdate,
 )
 
 logger = logging.getLogger(__name__)
@@ -290,3 +294,124 @@ async def post_vscode_stop(request: Request):
         await manager.stop()
     state = manager.state
     return VSCodeStatusResponse(status=state.status)
+
+
+# ==================== Default Agent Versions Endpoints ====================
+
+
+@router.get("/default-agent-versions", response_model=DefaultAgentVersionsResponse)
+async def get_default_agent_versions():
+    """Get the current default version overrides for agents.
+
+    Returns a map of ``agent_id → version_tag`` (e.g.,
+    ``{"developer": "v2", "tester": None}``). An empty dict means no
+    overrides are configured — all agents use their base version.
+
+    Stored as a JSON dict under the ``DEFAULT_AGENT_VERSIONS_METADATA_KEY``
+    metadata record on the system default project.
+    """
+    repo = get_project_repository()  # raises 503 if not initialized
+    project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if project_id is None:
+        raise HTTPException(status_code=503, detail="System default project not initialized")
+
+    # ``get_metadata_record`` requires a session (R2 mirror: same pattern as
+    # ``editor_utils.py:42-46``). Open the session inside the thread so it
+    # cannot block other in-flight requests.
+    def _read() -> dict[str, str | None]:
+        with Session(repo.engine) as session:
+            record = repo.get_metadata_record(
+                session,
+                project_id,
+                constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
+            )
+        if record is None:
+            return {}
+        # Stored value is a JSON dict; ``meta_value`` holds the raw JSON string.
+        raw = getattr(record, "meta_value", None)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            # Corrupt JSON — surface as empty dict rather than 500. The next
+            # PUT will overwrite the bad value with a valid one.
+            logger.warning(
+                "Corrupt default_agent_versions metadata, returning empty dict: %r",
+                raw,
+            )
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        # Normalize: only keep str→str|None entries.
+        normalized: dict[str, str | None] = {}
+        for k, v in parsed.items():
+            if isinstance(k, str) and (v is None or isinstance(v, str)):
+                normalized[k] = v
+        return normalized
+
+    result = await asyncio.to_thread(_read)
+    return DefaultAgentVersionsResponse(default_versions=result)
+
+
+@router.put("/default-agent-versions", response_model=DefaultAgentVersionsResponse)
+async def set_default_agent_version(request: DefaultAgentVersionUpdate):
+    """Set the default version override for a single agent.
+
+    Reads the existing dict (or starts empty), updates one ``agent_id`` key,
+    and writes the result back. Setting ``version_tag=null`` resets that
+    agent to its base version (removes the override).
+    """
+    repo = get_project_repository()  # raises 503 if not initialized
+    project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if project_id is None:
+        raise HTTPException(status_code=503, detail="System default project not initialized")
+
+    # Read existing dict (or empty dict if no record / no value).
+    def _read() -> dict[str, str | None]:
+        with Session(repo.engine) as session:
+            existing_record = repo.get_metadata_record(
+                session,
+                project_id,
+                constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
+            )
+        if existing_record is None:
+            return {}
+        raw = getattr(existing_record, "meta_value", None)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            # Corrupt existing JSON — start fresh rather than 500.
+            logger.warning(
+                "Corrupt default_agent_versions metadata, overwriting: %r",
+                raw,
+            )
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        existing: dict[str, str | None] = {}
+        for k, v in parsed.items():
+            if isinstance(k, str) and (v is None or isinstance(v, str)):
+                existing[k] = v
+        return existing
+
+    existing_dict = await asyncio.to_thread(_read)
+
+    # Mutate the one key.
+    if request.version_tag is None:
+        # Reset to base: remove the entry entirely.
+        existing_dict.pop(request.agent_id, None)
+    else:
+        existing_dict[request.agent_id] = request.version_tag
+
+    # Persist. ``repo.set_metadata`` opens its own Session internally (R2);
+    # off the event loop so it cannot block other in-flight requests.
+    await asyncio.to_thread(
+        repo.set_metadata,
+        project_id,
+        constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
+        existing_dict,
+    )
+    return DefaultAgentVersionsResponse(default_versions=existing_dict)

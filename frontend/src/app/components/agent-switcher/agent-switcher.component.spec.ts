@@ -165,63 +165,26 @@ describe('AgentSwitcherComponent', () => {
     });
   });
 
-  // ── selectedVersionTag reset on selectAgent (Phase 3) ──────────────────
-  describe('version tag reset on selectAgent', () => {
-    it('selectAgent() clears selectedVersionTag so the next session starts fresh', () => {
-      component.selectedVersionTag.set('v2');
-      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
-      component.selectAgent(planner);
-      expect(component.selectedVersionTag()).toBeNull();
-    });
-
-    it('selectAgent() emits the chosen version tag in the agentChange payload', () => {
-      component.selectedVersionTag.set('v2');
-      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
+  // ── default version tags and agent selection ─────────────────────────────
+  describe('defaultVersions', () => {
+    it('uses the selected agent default version tag', () => {
+      fixture.componentRef.setInput('defaultVersions', { planner: 'v2' });
       const emitted = jest.fn();
       component.agentChange.subscribe(emitted);
+      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
       component.selectAgent(planner);
       expect(emitted).toHaveBeenCalledWith({ agent: planner, versionTag: 'v2' });
     });
 
-    it('selectAgent() emits null versionTag when none was picked', () => {
-      component.selectedVersionTag.set(null);
-      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
+    it('falls back to null when no default version exists', () => {
       const emitted = jest.fn();
       component.agentChange.subscribe(emitted);
+      const planner = component.selectableAgents().find(a => a.id === 'planner')!;
       component.selectAgent(planner);
       expect(emitted).toHaveBeenCalledWith({ agent: planner, versionTag: null });
     });
   });
-
-  // ── shouldShowVersionPicker (Phase 3) ──────────────────────────────────
-  describe('shouldShowVersionPicker', () => {
-    it('returns false when no agent is selected', () => {
-      fixture.componentRef.setInput('selectedAgent', null);
-      expect(component.shouldShowVersionPicker()).toBe(false);
-    });
-
-    it('returns false when the selected agent has no available_versions', () => {
-      fixture.componentRef.setInput('selectedAgent', AGENTS[0]);
-      expect(component.shouldShowVersionPicker()).toBe(false);
-    });
-
-    it('returns false when the selected agent has exactly one version', () => {
-      fixture.componentRef.setInput('selectedAgent', {
-        ...AGENTS[0],
-        available_versions: ['v1'],
-      });
-      expect(component.shouldShowVersionPicker()).toBe(false);
-    });
-
-    it('returns true when the selected agent has multiple versions', () => {
-      fixture.componentRef.setInput('selectedAgent', {
-        ...AGENTS[0],
-        available_versions: [null, 'v2'],
-      });
-      expect(component.shouldShowVersionPicker()).toBe(true);
-    });
-  });
-
+  // ── Deduplication (Phase 3 W8) ─────────────────────────────────────────
   // ── Deduplication (Phase 3 W8) ─────────────────────────────────────────
   describe('deduplicatedAgents (W8)', () => {
     it('deduplicates entries with the same id, keeping the base version', () => {

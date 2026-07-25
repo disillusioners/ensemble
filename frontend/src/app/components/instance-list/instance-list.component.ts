@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed, input, inject, ViewChild, ElementRef, effect, AfterViewInit, OnDestroy, DestroyRef } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, input, inject, ViewChild, ElementRef, effect, AfterViewInit, OnInit, OnDestroy, DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
@@ -9,6 +9,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatDialog } from '@angular/material/dialog';
 import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
+import { ApiService } from '../../services/api.service';
 import { InstanceService } from '../../services/instance.service';
 import { InstancePrefsService, COLOR_OPTIONS, ICON_OPTIONS } from '../../services/instance-prefs.service';
 import { TabStateService } from '../../services/tab-state.service';
@@ -68,10 +69,11 @@ function sortNodesPinnedFirst(nodes: InstanceTreeNode[]): void {
   templateUrl: './instance-list.html',
   styleUrl: './instance-list.scss'
 })
-export class InstanceListComponent implements AfterViewInit, OnDestroy {
+export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
   protected readonly prefsService = inject(InstancePrefsService);
   private readonly tabStateService = inject(TabStateService);
+  private readonly api = inject(ApiService);
   private readonly dialog = inject(MatDialog);
 
   // Signal inputs
@@ -100,6 +102,10 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
 
   // Manual refresh state
   readonly isRefreshing = signal(false);
+
+  // Phase 3: default version tag per agent. Surfaced to the AgentSwitcher so
+  // its `selectAgent` emits the tag the parent requested via the picker.
+  readonly defaultAgentVersions = signal<Record<string, string | null>>({});
 
   // Scroll position tracking
   private scrollTop = 0;
@@ -164,6 +170,19 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
         });
       }
     });
+  }
+
+  ngOnInit(): void {
+    // Load default version tags so the AgentSwitcher can forward them
+    // when the user picks an agent. Mirrors the same call HomeComponent
+    // makes at startup.
+    this.api
+      .getDefaultAgentVersions()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (response) => this.defaultAgentVersions.set(response.default_versions ?? {}),
+        error: () => {},
+      });
   }
 
   ngAfterViewInit(): void {

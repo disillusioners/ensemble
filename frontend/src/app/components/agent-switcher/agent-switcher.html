@@ -121,20 +121,6 @@
         }
       </div>
 
-      <!-- Version picker for the currently selected agent (Phase 3).
-           Only shown when the selected agent has more than one available
-           version, so single-version agents stay quiet. -->
-      @if (shouldShowVersionPicker()) {
-        <div class="menu-version-picker">
-          <span class="menu-version-label">Version for new chat</span>
-          <app-version-picker
-            [availableVersions]="selectedAgent()?.available_versions ?? []"
-            [selectedTag]="selectedVersionTag()"
-            (tagChange)="onVersionTagChange($event)"
-          ></app-version-picker>
-        </div>
-      }
-
       <!-- Footer hint -->
       <div class="menu-footer">
         <p>Switch to change agent for next session</p>

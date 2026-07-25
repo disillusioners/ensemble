@@ -15,6 +15,7 @@
         <app-agent-switcher
           [agents]="agents()"
           [selectedAgent]="selectedAgent()"
+          [defaultVersions]="defaultAgentVersions()"
           (agentChange)="onAgentChange($event)"
         ></app-agent-switcher>
         <button

@@ -9,8 +9,11 @@
         [agents]="agents()"
         [selectedAgent]="selectedAgent()"
         [hasInstances]="hasInstances()"
-        [isLoading]="isLoading()"
-        (selectAgent)="onSelectAgent($event)"
+         [isLoading]="isLoading()"
+         [defaultVersions]="defaultAgentVersions()"
+         (selectAgent)="onSelectAgent($event)"
+         (versionChange)="onVersionChange($event)"
+
         (createInstance)="onCreateInstance($event)"
         (continueInstance)="onContinueInstance($event)"
         (addAgent)="onAddAgent($event)"

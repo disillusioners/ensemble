@@ -4,7 +4,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { Agent } from '../../models';
-import { VersionPickerComponent } from '../version-picker/version-picker.component';
 import { deduplicateAgentsById } from '../../utils/agent-dedup';
 
 const colorMap: Record<string, string> = {
@@ -22,16 +21,15 @@ const colorMap: Record<string, string> = {
 @Component({
   selector: 'app-agent-switcher',
   standalone: true,
-  imports: [CommonModule, MatButtonModule, MatIconModule, MatMenuModule, VersionPickerComponent],
+  imports: [CommonModule, MatButtonModule, MatIconModule, MatMenuModule],
   templateUrl: './agent-switcher.html',
   styleUrl: './agent-switcher.scss'
 })
 export class AgentSwitcherComponent {
   readonly agents = input<Agent[]>([]);
   readonly selectedAgent = input<Agent | null>(null);
-  /** Emits the chosen agent plus an optional version tag for the next
-   *  instance creation. Phase 3: ``versionTag`` is ``null``/undefined when
-   *  the user hasn't picked a tag (use base). */
+  readonly defaultVersions = input<Record<string, string | null>>({});
+  /** Emits the chosen agent plus its configured default version tag. */
   readonly agentChange = output<{ agent: Agent; versionTag?: string | null }>();
 
   @ViewChild('triggerButton') triggerButton!: ElementRef<HTMLButtonElement>;
@@ -42,11 +40,6 @@ export class AgentSwitcherComponent {
   isOpen = signal(false);
   focusedIndex = signal(-1);
   searchQuery = signal('');
-
-  /** Phase 3: version tag the user picked in the dropdown. Reset to null
-   *  whenever the dropdown opens so the new selection doesn't inherit a
-   *  stale tag from a previous session. */
-  selectedVersionTag = signal<string | null>(null);
 
   // Filter out system agents from selection
   readonly selectableAgents = computed(() =>
@@ -141,29 +134,12 @@ export class AgentSwitcherComponent {
   }
 
   selectAgent(agent: Agent): void {
-    this.agentChange.emit({ agent, versionTag: this.selectedVersionTag() });
+    const versionTag = this.defaultVersions()[agent.id] ?? null;
+    this.agentChange.emit({ agent, versionTag });
     this.isOpen.set(false);
     this.focusedIndex.set(-1);
     this.searchQuery.set('');
-    this.selectedVersionTag.set(null);
   }
-
-  /** Phase 3: track version tag selection from the picker. */
-  onVersionTagChange(tag: string | null): void {
-    this.selectedVersionTag.set(tag);
-  }
-
-  /** Show version picker only when the currently selected agent has more
-   *  than one available version. The picker sits in the dropdown footer.
-   *  Implemented as a ``computed`` so the template re-evaluates
-   *  automatically when the selected agent or its
-   *  ``available_versions`` change. */
-  readonly shouldShowVersionPicker = computed(() => {
-    const sel = this.selectedAgent();
-    if (!sel) return false;
-    const versions = sel.available_versions ?? [];
-    return versions.length > 1;
-  });
 
   closeDropdown(): void {
     this.isOpen.set(false);

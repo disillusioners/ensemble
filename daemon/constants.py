@@ -119,3 +119,8 @@ VSCODE_HEALTH_TIMEOUT_S: int = 10            # Max seconds for a single health c
 EDITOR_METADATA_KEY = "editor_preference"     # metadata key in project_metadata_records
 EDITOR_DEFAULT = "builtin"                     # default when no preference set
 EDITOR_OPTIONS = ["builtin", "vscode"]         # valid editor values
+
+# ---------------------------------------------------------------------------
+# Default Agent Versions
+# ---------------------------------------------------------------------------
+DEFAULT_AGENT_VERSIONS_METADATA_KEY = "default_agent_versions"  # metadata key in project_metadata_records

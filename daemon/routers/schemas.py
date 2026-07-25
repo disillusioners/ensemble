@@ -779,3 +779,48 @@ class VSCodeStatusResponse(BaseModel):
         description="VSCodeServerState.status: stopped|starting|running|crashed|stopping",
     )
     # C4: port and pid REMOVED — defeats proxy boundary
+
+
+# ==================== Default Agent Versions Schemas ====================
+
+
+class DefaultAgentVersionsResponse(BaseModel):
+    """Response for GET /api/settings/default-agent-versions."""
+
+    default_versions: dict[str, str | None] = Field(
+        default_factory=dict,
+        description="Map of agent_id → version_tag (null means use base version)",
+    )
+
+
+class DefaultAgentVersionUpdate(BaseModel):
+    """Request body for PUT /api/settings/default-agent-versions."""
+
+    agent_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Agent identifier (e.g., 'developer', 'tester')",
+    )
+    version_tag: str | None = Field(
+        default=None,
+        description="Default version tag for this agent (null to reset to base)",
+    )
+
+    @field_validator("agent_id")
+    @classmethod
+    def _validate_agent_id(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("agent_id must be a non-empty string")
+        return cleaned
+
+    @field_validator("version_tag")
+    @classmethod
+    def _validate_version_tag(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("version_tag must be a non-empty string or null")
+        return cleaned

@@ -268,6 +268,20 @@ export class ApiService {
     return this.http.delete<DeleteResponse>(`${this.API_BASE}/sources/${sourceId}/mappings/${encodeURIComponent(mappingId)}`);
   }
 
+  // Default agent versions
+  getDefaultAgentVersions(): Observable<{ default_versions: Record<string, string | null> }> {
+    return this.http.get<{ default_versions: Record<string, string | null> }>(
+      `${this.API_BASE}/settings/default-agent-versions`,
+    );
+  }
+
+  setDefaultAgentVersion(agentId: string, versionTag: string | null): Observable<any> {
+    return this.http.put(
+      `${this.API_BASE}/settings/default-agent-versions`,
+      { agent_id: agentId, version_tag: versionTag },
+    );
+  }
+
   // Injection slot (Phase 2 / Task 6 fallback). Returns the backend's
   // current view of the per-instance RAM injection slot so the chat UI
   // can reconcile on initial load and SSE reconnect. ``pending=false`` is

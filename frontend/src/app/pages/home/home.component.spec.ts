@@ -15,6 +15,8 @@ const mockApiService = {
   createInstance: jest.fn(),
   createAgent: jest.fn(),
   deleteAgent: jest.fn(),
+  getDefaultAgentVersions: jest.fn(),
+  setDefaultAgentVersion: jest.fn(),
 };
 
 // Testable HomeComponent (mirrors actual component logic)
@@ -25,6 +27,7 @@ class TestableHomeComponent {
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  readonly defaultAgentVersions = signal<Record<string, string | null>>({});
   /** Phase 3: the AgentSelector child owns the version tag — each create
    *  event payload carries the tag explicitly. The parent does not
    *  mirror the tag as a separate signal. */
@@ -44,6 +47,13 @@ class TestableHomeComponent {
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
+  }
+
+  protected onVersionChange(event: { agentId: string; versionTag: string | null }): void {
+    this.defaultAgentVersions.update(map => ({ ...map, [event.agentId]: event.versionTag }));
+    this.api.setDefaultAgentVersion(event.agentId, event.versionTag).subscribe({
+      error: () => {}
+    });
   }
 
   protected onCreateInstance(payload?: { versionTag?: string | null }): void {
@@ -236,6 +246,19 @@ describe('HomeComponent - Project-Aware Navigation', () => {
 
       expect(component.navigateCalls).toHaveLength(1);
       expect(component.navigateCalls[0].path).toEqual(['/projects', 'project-abc', 'instances', 'inst-002']);
+    });
+  });
+
+  describe('onVersionChange()', () => {
+    it('updates local defaults and persists the selected version', () => {
+      mockApiService.setDefaultAgentVersion.mockReturnValue({
+        subscribe: () => ({ unsubscribe: () => {} })
+      });
+
+      component.onVersionChange({ agentId: 'my-agent', versionTag: 'v2' });
+
+      expect(component.defaultAgentVersions()).toEqual({ 'my-agent': 'v2' });
+      expect(mockApiService.setDefaultAgentVersion).toHaveBeenCalledWith('my-agent', 'v2');
     });
   });
 

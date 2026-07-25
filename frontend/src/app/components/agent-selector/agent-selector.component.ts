@@ -50,6 +50,15 @@ export class AgentSelectorComponent {
   readonly selectedAgent = input<Agent | null>(null);
   readonly hasInstances = input(false);
   readonly isLoading = input(false);
+  /** Per-agent default version tag. The map is keyed by ``agent.id``; the
+   *  value is the version tag string (e.g. ``'v2'``) or ``null`` for the
+   *  base version. Used by ``onSelect`` so picking an agent restores the
+   *  parent's preferred version rather than always resetting to null. */
+  readonly defaultVersions = input<Record<string, string | null>>({});
+  /** Emits whenever the user picks a different version from the picker.
+   *  Payload carries the owning agent id so the parent can keep its
+   *  default-version map in sync without re-deriving it from the agent. */
+  readonly versionChange = output<{ agentId: string; versionTag: string | null }>();
 
   readonly selectAgent = output<Agent>();
   /** Carries the chosen version tag when present (Phase 3). The parent
@@ -263,9 +272,11 @@ export class AgentSelectorComponent {
 
   /** Select an agent without starting a conversation. The version tag is
    *  reset imperatively (W2) so a new agent never inherits the previous
-   *  selection's tag. */
+   *  selection's tag. When the parent supplies a ``defaultVersions`` map,
+   *  the stored default for the picked agent is restored instead of
+   *  always clearing to null. */
   onSelect(agent: Agent): void {
-    this.selectedVersionTag.set(null);
+    this.selectedVersionTag.set(this.defaultVersions()[agent.id] ?? null);
     this.selectAgent.emit(agent);
   }
 
@@ -299,9 +310,14 @@ export class AgentSelectorComponent {
     this.createInstance.emit({ versionTag: this.selectedVersionTag() });
   }
 
-  /** Version picker changed — record the new tag for the next create. */
+  /** Version picker changed — record the new tag for the next create and
+   *  notify the parent so it can keep its default-version map in sync. */
   onVersionTagChange(tag: string | null): void {
     this.selectedVersionTag.set(tag);
+    const sel = this.selectedAgent();
+    if (sel) {
+      this.versionChange.emit({ agentId: sel.id, versionTag: tag });
+    }
   }
 
   /** Convenience: does the selected agent actually have a version picker
