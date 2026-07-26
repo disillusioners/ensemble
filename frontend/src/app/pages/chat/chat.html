@@ -160,10 +160,10 @@
              signal is cleared by the SSE effects in ChatComponent as
              soon as the agent picks the message up (thinking event,
              first assistant message, or status → running). -->
-        @if (queuedMessageId() !== null) {
+        @if (queuedMessage() !== null) {
           <div class="queued-indicator" role="status" aria-live="polite">
             <mat-icon class="queued-icon">schedule</mat-icon>
-            <span class="queued-label">Message queued — waiting for an available slot</span>
+            <span class="queued-label">⏳ Queued: "{{ queuedSnippet() }}" — waiting for slot</span>
           </div>
         }
         <app-message-input

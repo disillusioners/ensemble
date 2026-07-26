@@ -91,15 +91,28 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly sendError = signal<string | null>(null);
   readonly instanceNotFound = signal<string | null>(null);
   /**
-   * Tracks the id of the most recently queued user message (the backend
-   * accepted the message but did not dispatch it to the agent). The
-   * "Message queued" indicator is guarded by this signal. Cleared when:
+   * Tracks the most recently queued user message (the backend accepted the
+   * message but did not dispatch it to the agent). The "Message queued"
+   * indicator is guarded by this signal; the stored content is shown as a
+   * truncated snippet so the user can tell at a glance WHICH message is
+   * waiting. Cleared when:
    *   - the next sendMessage response is NOT queued (immediate dispatch),
    *   - an assistant message / thinking event arrives for this instance,
    *   - a status_change → running event arrives for this instance,
    *   - the user switches to a different instance.
    */
-  readonly queuedMessageId = signal<string | null>(null);
+  readonly queuedMessage = signal<{ content: string } | null>(null);
+
+  /**
+   * Truncated snippet of the queued message content (max 50 chars + "...").
+   * Drives the inline indicator label so users can see WHICH message is
+   * queued without flooding the UI with full-length input text.
+   */
+  readonly queuedSnippet = computed(() => {
+    const msg = this.queuedMessage();
+    if (!msg) return '';
+    return msg.content.length > 50 ? msg.content.slice(0, 50) + '...' : msg.content;
+  });
 
   /**
    * Context-usage snapshot for the currently open instance. Mirrors the
@@ -241,7 +254,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // with a populated `thinking` field for the former), so watching the
     // message list covers both cases without subscribing to a new SSE channel.
     effect(() => {
-      if (this.queuedMessageId() === null) return;
+      if (this.queuedMessage() === null) return;
       const messages = this.sseService.messages();
       if (messages.length === 0) return;
       const currentInstance = this.currentInstance();
@@ -250,7 +263,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (!last || last.role !== 'assistant') return;
       // Defensive: if the message carries an instance_id it must match.
       if (last.instance_id && last.instance_id !== currentInstance.instance_id) return;
-      this.queuedMessageId.set(null);
+      this.queuedMessage.set(null);
     }, { allowSignalWrites: true });
 
     // Defensive: clear the queued indicator when the instance transitions
@@ -258,14 +271,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     // signal is the same source the instance list uses, so we don't open a
     // new SSE subscription.
     effect(() => {
-      if (this.queuedMessageId() === null) return;
+      if (this.queuedMessage() === null) return;
       const statusChange = this.sseService.statusChange();
       if (!statusChange) return;
       const currentInstance = this.currentInstance();
       if (!currentInstance || statusChange.instance_id !== currentInstance.instance_id) return;
       const status = statusChange.status;
       if (status === 'running' || status === 'processing') {
-        this.queuedMessageId.set(null);
+        this.queuedMessage.set(null);
       }
     }, { allowSignalWrites: true });
   }
@@ -344,7 +357,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // The queued indicator is tied to a specific instance; clear it on
     // every route change so a stale "queued" badge never bleeds across
     // chats.
-    this.queuedMessageId.set(null);
+    this.queuedMessage.set(null);
 
     if (!instanceId) {
       console.log('[Chat] No instanceId, disconnecting SSE');
@@ -535,13 +548,13 @@ export class ChatComponent implements OnInit, OnDestroy {
         // Clear input only on success — error recovery keeps input populated
         this.messageInputRef?.clearInput();
         // Surface a "queued" indicator when the backend accepted the message
-        // but did not dispatch it to the running agent. The id is nullish-safe
-        // so backend payloads that omit ``message_id`` (older or partial
-        // responses) still produce a stable truthy signal without throwing.
+        // but did not dispatch it to the running agent. Store the typed
+        // content so the template can render a truncated snippet letting
+        // the user see WHICH message is queued.
         if (response.queued === true) {
-          this.queuedMessageId.set(response.message_id ?? null);
+          this.queuedMessage.set({ content: payload.content });
         } else {
-          this.queuedMessageId.set(null);
+          this.queuedMessage.set(null);
         }
       },
       error: (err) => {
