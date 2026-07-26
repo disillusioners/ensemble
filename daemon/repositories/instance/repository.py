@@ -385,6 +385,9 @@ class SQLModelInstanceRepository:
 
                 total = db_session.exec(count_stmt).one()
 
+                # NOTE: under DESC NULLS LAST, pinned sorts true > false > NULL, so an explicit
+                # pinned=False row ranks above an untouched (pinned=NULL) instance. Both are
+                # "unpinned" and tiebreak on created_at then instance_id.
                 stmt = (
                     stmt.outerjoin(
                         InstanceUiPrefs,
@@ -394,6 +397,7 @@ class SQLModelInstanceRepository:
                         col(InstanceUiPrefs.pinned).desc().nulls_last(),
                         col(InstanceUiPrefs.pinned_at).desc().nulls_last(),
                         col(Instance.created_at).desc(),
+                        col(Instance.instance_id).asc(),  # stable final tiebreaker
                     )
                     .offset(offset)
                     .limit(limit)
@@ -428,6 +432,9 @@ class SQLModelInstanceRepository:
             if exclude_kb:
                 root_stmt = root_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
 
+            # NOTE: under DESC NULLS LAST, pinned sorts true > false > NULL, so an explicit
+            # pinned=False row ranks above an untouched (pinned=NULL) instance. Both are
+            # "unpinned" and tiebreak on created_at then instance_id.
             root_stmt = (
                 root_stmt.outerjoin(
                     InstanceUiPrefs,
@@ -437,6 +444,7 @@ class SQLModelInstanceRepository:
                     col(InstanceUiPrefs.pinned).desc().nulls_last(),
                     col(InstanceUiPrefs.pinned_at).desc().nulls_last(),
                     col(Instance.created_at).desc(),
+                    col(Instance.instance_id).asc(),  # stable final tiebreaker
                 )
                 .offset(offset)
                 .limit(limit)
