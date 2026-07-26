@@ -132,16 +132,19 @@ def _build_manager(
     """Build a mock ``InstanceManager`` exposing only the attributes
     ``enqueue_message`` and ``enqueue_message_job`` actually touch.
 
-    ``_job_queue_service._repository`` is wired to the real
-    ``JobRepository`` so the POC's ``enqueue_message_job`` can write
-    JobItem rows + stamp ``message_id`` via the repository's
-    low-level path.
+    Phase 5 (Option B) cutover: ``enqueue_message_job`` routes the
+    message through ``JobQueueService.enqueue`` (the async entry
+    point) instead of writing Task + MessageQueue + JobItem rows
+    directly. The mock's ``_job_queue_service.enqueue`` is therefore
+    an ``AsyncMock`` that returns a synthetic JobItem.
 
-    ``_job_queue_service._queue_repo`` is wired to the real
-    ``JobQueueRepository`` so the queue_id resolution
-    (``get_by_name("system_parallel_queue")``) returns a real
-    ``JobQueue`` with a string ``queue_id`` (not a ``MagicMock``,
-    which fails SQLite parameter binding).
+    ``_job_queue_service._repository`` is kept on the real
+    ``JobRepository`` so the cross-table drift checks (used by the
+    observer tests) can still resolve. ``_job_queue_service._queue_repo``
+    is wired to the real ``JobQueueRepository`` so the queue_id
+    resolution (``get_by_name("system_parallel_queue")``) returns a
+    real ``JobQueue`` with a string ``queue_id`` (a ``MagicMock``
+    would fail SQLite parameter binding).
     """
     manager = MagicMock()
     manager.engine = engine
@@ -152,22 +155,30 @@ def _build_manager(
     manager._live_hub = MagicMock()
     manager._live_hub.stream_status_change = AsyncMock()
 
-    # ``enqueue_message`` calls ``_worker_pool.notify_work()``; None is fine
-    # because the code guards with ``if self._manager._worker_pool is not None``.
+    # ``enqueue_message`` (the dispatch-time path) still calls
+    # ``_worker_pool.notify_work()``; ``enqueue_message_job`` does
+    # NOT call it (deferred to dispatch). The assertion lives in the
+    # test below.
     manager._worker_pool = MagicMock()
     manager._worker_pool.notify_work = MagicMock()
 
-    # Wire the JobQueueService to expose a real JobRepository. The POC
-    # ``enqueue_message_job`` resolves ``manager._job_queue_service._repository``
-    # via the ``_job_repository`` property on InstanceMessagingService.
+    # Option B: ``enqueue_message_job`` calls this async method on
+    # ``_job_queue_service``. Return a synthetic JobItem mirroring
+    # the ``create`` contract.
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._repository = job_repository
-    # Wire a real JobQueueRepository so the queue_id lookup returns a
-    # real ``JobQueue.queue_id`` (str). Earlier revisions resolved
-    # ``_repository`` (JobRepository) here, which lacks
-    # ``get_by_name``; the resulting ``AttributeError`` was silently
-    # swallowed and ``queue_id_for_job`` stayed ``None`` in production.
     manager._job_queue_service._queue_repo = queue_repository
+    # ``enqueue`` is async — it returns a JobItem whose
+    # ``job_id`` is the new UUID4 minted by the repository.
+    fake_job_item = MagicMock()
+    fake_job_item.job_id = "job-from-enqueue"
+    fake_job_item.job_type = "message"
+    fake_job_item.instance_id = "inst-1"
+    fake_job_item.admission_state = AdmissionState.QUEUED.value
+    fake_job_item.project_id = "test-project"
+    fake_job_item.queue_id = None
+    fake_job_item.max_retries = 0
+    manager._job_queue_service.enqueue = AsyncMock(return_value=fake_job_item)
 
     # Config -- single public path after Phase 5 cutover.
     manager.config = Config(job_system=JobSystemConfig())
@@ -292,23 +303,45 @@ def _load_message_job_items(engine) -> list[JobItem]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Test (a): atomic JobItem + Task creation with flag ON, work_id == job_id
+# Test (a): enqueue_message_job routes through JobQueueService.enqueue
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestAtomicCreationWithFlagOn:
-    """``enqueue_message_job()`` creates a JobItem mirror with
-    ``job_type='message'`` alongside the Task + ``MessageQueue`` rows
-    in one call. The JobItem's ``job_id`` equals the Task's
-    ``work_id`` (same UUID4 string) -- the linkage contract.
+class TestEnqueueMessageJobRoutesThroughEnqueue:
+    """``enqueue_message_job()`` routes the message through
+    ``JobQueueService.enqueue(job_type='message', ...)`` (Phase 5 /
+    Option B cutover) — the JobItem is created via the queue path
+    (real slot-based concurrency enforcement) AND the Task +
+    ``MessageQueue`` rows are created **synchronously** inside
+    ``enqueue_message_job`` itself (via
+    ``_prepare_enqueued_message``).
+
+    The AsyncMessageResult contract:
+
+    * ``message_id`` is a non-null string (the Task row's
+      ``message_id`` column) — created at submission time, not at
+      dispatch time. The HTTP ``POST /messages`` route can return the
+      real ``message_id`` immediately.
+    * ``job_id`` is the JobItem's UUID4 minted by ``enqueue``.
+    * ``status`` is ``"queued"`` — waiting for slot, not running.
+    * The Task row's ``work_id`` matches the JobItem's ``job_id`` (the
+      linkage contract maintained via
+      ``_prepare_enqueued_message(work_id=job_id)``).
+
+    The JobProcessor's message branch is reduced to a wake-only step
+    (``worker_pool.notify_work()``) — the Task is already in PENDING
+    by the time the JobProcessor picks up the JobItem.
     """
 
     @pytest.mark.asyncio
-    async def test_a_work_id_equals_job_id(
+    async def test_a_routes_through_enqueue_with_preserved_instance_id(
         self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository, queue_repository
+        )
+        job_repository.stamp_message_id = MagicMock(
+            wraps=job_repository.stamp_message_id
         )
 
         messaging_service = InstanceMessagingService(
@@ -320,12 +353,6 @@ class TestAtomicCreationWithFlagOn:
 
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
 
-        # The POC path resolves agent_dir via the registry. Patch the
-        # registry to return None so the fallback path runs (agent_dir=""
-        # is acceptable -- the JobItem is an informational mirror).
-        # NB: ``get_registry`` is imported lazily inside
-        # ``enqueue_message_job`` (``from ..registry import get_registry``)
-        # so we must patch the source location, not the importer.
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ), patch("daemon.registry.get_registry") as mock_get_registry:
@@ -335,79 +362,108 @@ class TestAtomicCreationWithFlagOn:
 
             result = await messaging_service.enqueue_message_job(
                 instance_id="inst-1",
-                message="hello from flag-on path",
+                message="hello from option-b path",
                 source="api",
             )
 
-        # ── Result contract ──
+        # ── AsyncMessageResult contract (Option B, sync Task) ──
         assert result.status == "queued"
-        assert result.message_id is not None
+        # Option B (synchronous Task contract): message_id is created
+        # SYNCHRONOUSLY in enqueue_message_job via
+        # ``_prepare_enqueued_message`` — not None, not deferred.
+        assert result.message_id is not None, (
+            f"enqueue_message_job must return a real message_id "
+            f"(created synchronously via _prepare_enqueued_message); "
+            f"got {result.message_id!r}"
+        )
+        assert isinstance(result.message_id, str), (
+            f"enqueue_message_job must return a str message_id; "
+            f"got {type(result.message_id).__name__}"
+        )
         assert result.instance_id == "inst-1"
         assert result.job_id is not None, "enqueue_message_job must mint a job_id"
 
-        # ── Exactly 1 MessageQueue row ──
+        # ── JobQueueService.enqueue called with the correct parameters ──
+        manager._job_queue_service.enqueue.assert_awaited_once()
+        enqueue_kwargs = manager._job_queue_service.enqueue.call_args.kwargs
+        assert enqueue_kwargs.get("job_type") == "message", (
+            f"enqueue must be called with job_type='message'; "
+            f"got kwargs={enqueue_kwargs!r}"
+        )
+        assert enqueue_kwargs.get("instance_id") == "inst-1", (
+            f"enqueue must preserve the existing instance_id; "
+            f"got instance_id={enqueue_kwargs.get('instance_id')!r}"
+        )
+        assert enqueue_kwargs.get("message") == "hello from option-b path", (
+            f"enqueue must thread the supplied message; "
+            f"got message={enqueue_kwargs.get('message')!r}"
+        )
+        assert enqueue_kwargs.get("source") == "api"
+        assert enqueue_kwargs.get("job_id") == result.job_id, (
+            "enqueue_message_job must pass its minted UUID through to "
+            "JobQueueService.enqueue unchanged"
+        )
+        job_repository.stamp_message_id.assert_called_once_with(
+            result.job_id, result.message_id
+        )
+
+        # ── Task + MessageQueue rows ARE created synchronously ──
+        # Option B (synchronous Task contract): the Task +
+        # ``MessageQueue`` rows are written by
+        # ``_prepare_enqueued_message`` INSIDE ``enqueue_message_job``,
+        # before the call returns. The HTTP response carries the real
+        # ``message_id`` (Task row's column) immediately.
         mq_rows = _load_message_queues(engine, "inst-1")
-        assert len(mq_rows) == 1, f"expected exactly one MessageQueue row, got {len(mq_rows)}"
-
-        # ── Exactly 1 Task row ──
+        assert len(mq_rows) == 1, (
+            f"enqueue_message_job must create the MessageQueue row "
+            f"synchronously (Option B contract); got {len(mq_rows)}"
+        )
+        assert mq_rows[0].content == "hello from option-b path", (
+            f"MessageQueue.content must carry the submitted message; "
+            f"got {mq_rows[0].content!r}"
+        )
         task_rows = _load_tasks(engine, "inst-1")
-        assert len(task_rows) == 1, f"expected exactly one Task row, got {len(task_rows)}"
-        task = task_rows[0]
-        assert task.work_id is not None
-
-        # ── Exactly 1 JobItem row with ``job_type='message'`` ──
+        assert len(task_rows) == 1, (
+            f"enqueue_message_job must create the Task row "
+            f"synchronously (Option B contract); got {len(task_rows)}"
+        )
+        # ── Linkage contract: Task.work_id == JobItem.job_id ──
+        assert task_rows[0].work_id == result.job_id, (
+            f"Task.work_id must equal JobItem.job_id (the linkage "
+            f"contract); got Task.work_id={task_rows[0].work_id!r}, "
+            f"JobItem.job_id={result.job_id!r}"
+        )
+        # The mock's enqueue is the only writer of the JobItem — the
+        # DB-side repo is NOT called directly (the enqueue path goes
+        # through the AsyncMock, not the real ``job_repository``).
         all_jobs = _load_job_items(engine)
-        assert len(all_jobs) == 1, (
-            f"expected exactly one JobItem row, got {len(all_jobs)}"
-        )
-        ji = all_jobs[0]
-        assert ji.job_type == "message", (
-            f"JobItem.job_type must be 'message', got {ji.job_type!r}"
+        assert len(all_jobs) == 0, (
+            f"enqueue_message_job (Option B) must NOT write JobItem rows "
+            f"directly via the repository — the queue's enqueue() is the "
+            f"sole writer; got {len(all_jobs)} JobItem rows"
         )
 
-        # ── Queue routing: message JobItem is scoped to ``system_parallel_queue`` ──
-        # Without this assertion the queue_id assignment path is untested
-        # — earlier revisions resolved ``_repository`` (JobRepository,
-        # no ``get_by_name``) and silently swallowed the AttributeError,
-        # leaving ``queue_id`` NULL on the JobItem in production.
-        expected_queue = queue_repository.get_by_name(
-            "test-project", "system_parallel_queue"
-        )
-        assert expected_queue is not None, (
-            "test fixture must seed system_parallel_queue for test-project"
-        )
-        assert ji.queue_id == expected_queue.queue_id, (
-            f"JobItem.queue_id ({ji.queue_id!r}) must equal the "
-            f"system_parallel_queue.queue_id ({expected_queue.queue_id!r}) "
-            f"so message jobs appear in the project's parallel queue stats"
-        )
-
-        # ── Linkage contract: task.work_id == result.job_id AND ji.job_id == task.work_id ──
-        assert task.work_id == result.job_id, (
-            f"Task.work_id ({task.work_id}) must equal AsyncMessageResult.job_id "
-            f"({result.job_id})"
-        )
-        assert ji.job_id == task.work_id, (
-            f"JobItem.job_id ({ji.job_id}) must equal Task.work_id "
-            f"({task.work_id}) per the linkage contract"
+        # ── worker_pool.notify_work() is deferred to the JobProcessor ──
+        manager._worker_pool.notify_work.assert_not_called(), (
+            "enqueue_message_job must not wake the worker pool before "
+            "JobProcessor slot admission"
         )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Test (b): message_id stamped on JobItem
+# Test (b): metadata (images, is_deferred, is_background) flows through enqueue
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestMessageIdStamped:
-    """``enqueue_message_job()`` must stamp the ``message_id`` onto the
-    JobItem's ``metadata`` JSON. The cross-system guard reads
-    ``job_queue_items.metadata.message_id`` to resolve an active MESSAGE
-    JobItem back to its originating message -- without this stamp the
-    correlation is NULL and the cross-system guard cannot match.
+class TestMetadataFlowsThroughEnqueue:
+    """``enqueue_message_job()`` threads ``images``, ``is_deferred``,
+    and ``is_background`` through the ``metadata`` dict passed to
+    ``JobQueueService.enqueue(...)``. The JobProcessor's message branch
+    reads these straight from ``job.job_metadata`` at dispatch time.
     """
 
     @pytest.mark.asyncio
-    async def test_b_message_id_in_job_metadata(
+    async def test_b_metadata_threads_to_enqueue_kwargs(
         self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         manager = _build_manager(
@@ -423,12 +479,6 @@ class TestMessageIdStamped:
 
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
 
-        # Wrap stamp_message_id BEFORE the call so we can capture call args
-        # without replacing the underlying behaviour (the
-        # ``enqueue_message_job`` path calls it via ``asyncio.to_thread``).
-        original_stamp = job_repository.stamp_message_id
-        job_repository.stamp_message_id = MagicMock(wraps=original_stamp)
-
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ), patch("daemon.registry.get_registry") as mock_get_registry:
@@ -436,34 +486,39 @@ class TestMessageIdStamped:
             mock_registry.get_resolved.return_value = None
             mock_get_registry.return_value = mock_registry
 
-            result = await messaging_service.enqueue_message_job(
+            await messaging_service.enqueue_message_job(
                 instance_id="inst-1",
-                message="message-id-stamp-test",
+                message="metadata-flow-test",
                 source="api",
+                images=["b64-image-1", "b64-image-2"],
+                is_deferred=True,
+                is_background=True,
+                metadata={"custom_key": "custom_val"},
             )
 
-        # ── message_id present in JobItem.job_metadata ──
-        jobs = _load_message_job_items(engine)
-        assert len(jobs) == 1
-        ji = jobs[0]
+        manager._job_queue_service.enqueue.assert_awaited_once()
+        enqueue_kwargs = manager._job_queue_service.enqueue.call_args.kwargs
 
-        assert ji.job_metadata is not None
-        assert ji.job_metadata.get("message_id") == result.message_id, (
-            f"JobItem.job_metadata.message_id ({ji.job_metadata.get('message_id')!r}) "
-            f"must equal result.message_id ({result.message_id!r}) -- "
-            f"stamp_message_id was not called or failed silently"
+        # ── metadata dict holds the three keyboard-forwarding fields ──
+        metadata = enqueue_kwargs.get("metadata")
+        assert metadata is not None, (
+            f"enqueue must be called with a metadata dict; "
+            f"got kwargs={enqueue_kwargs!r}"
         )
-
-        # ── stamp_message_id called once with (job_id, message_id) ──
-        job_repository.stamp_message_id.assert_called_once()
-        stamp_args = job_repository.stamp_message_id.call_args.args
-        assert stamp_args[0] == result.job_id, (
-            f"stamp_message_id called with job_id={stamp_args[0]!r}, "
-            f"expected {result.job_id!r}"
+        assert metadata.get("images") == ["b64-image-1", "b64-image-2"], (
+            f"metadata.images must be threaded through; "
+            f"got {metadata.get('images')!r}"
         )
-        assert stamp_args[1] == result.message_id, (
-            f"stamp_message_id called with message_id={stamp_args[1]!r}, "
-            f"expected {result.message_id!r}"
+        assert metadata.get("is_deferred") is True, (
+            f"metadata.is_deferred must be True; got {metadata.get('is_deferred')!r}"
+        )
+        assert metadata.get("is_background") is True, (
+            f"metadata.is_background must be True; got {metadata.get('is_background')!r}"
+        )
+        # User-supplied metadata is preserved alongside the forwarded fields.
+        assert metadata.get("custom_key") == "custom_val", (
+            f"user-supplied metadata must be preserved; "
+            f"got {metadata.get('custom_key')!r}"
         )
 
 
@@ -473,18 +528,23 @@ class TestMessageIdStamped:
 
 
 class TestObserverFinalizesQueuedJobItem:
-    """End-to-end coverage of the stuck-queued finalize path.
+    """End-to-end coverage of the stuck-queued finalize path under
+    Option B.
 
-    Simulates the PG trigger failure described in the plan: the eager
-    ``atomic_transition`` call inside ``enqueue_message_job`` (which flips
-    ``queued`` -> ``active``) is patched to raise, so the JobItem stays
-    in ``queued``. After the Task is manually flipped to ``RUNNING``
-    (simulating a worker claim), the C1 guard in
-    ``_get_processing_job_for_instance`` opens because Task=RUNNING and
-    returns the JobItem as the processing-job context. The
-    ``_finalize_job_db_sync`` WHERE clause ``WHERE admission_state IN
-    ('queued', 'active')`` then matches the still-queued JobItem and
-    transitions it to ``done``.
+    In Option B, the message JobItem is INTENTIONALLY in
+    ``admission_state='queued'`` after ``enqueue_message_job`` (it
+    waits for slot acquisition). The observer's C1 guard in
+    ``_get_processing_job_for_instance`` opens when the JobItem is in
+    ``queued`` AND a Task exists AND the Task is RUNNING — exactly the
+    state that arises once the JobProcessor's message branch fires
+    ``enqueue_message`` (writes Task + MessageQueue) and a worker claims
+    the Task.
+
+    This test sets up that state directly (bypassing the dispatch path,
+    which we test in a separate integration test) and verifies the
+    ``_finalize_job_db_sync`` Utrecht WHERE clause
+    ``WHERE admission_state IN ('queued', 'active')`` matches the
+    still-queued JobItem and transitions it to ``done``.
     """
 
     @pytest.mark.asyncio
@@ -497,59 +557,51 @@ class TestObserverFinalizesQueuedJobItem:
         task_repository,
         queue_repository,
     ):
-        # ── Phase 5 cutover: every public message is a JobItem ──
-        manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository, queue_repository
-        )
-
-        messaging_service = InstanceMessagingService(
-            manager=manager,
-            cancellation_service=MagicMock(
-                spec=CancellationService, is_shutting_down=False
-            ),
-        )
-
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
 
-        # Patch the eager ``atomic_transition`` call inside
-        # ``enqueue_message_job`` to raise, so the JobItem stays in
-        # ``queued``. Production code suppresses this exception via the
-        # ``except`` block at ``instance_messaging.py:~1331`` (debug log
-        # only); message processing is unaffected because the Task row
-        # is the authoritative dispatch primitive.
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ), patch("daemon.registry.get_registry") as mock_get_registry, patch.object(
-            job_repository,
-            "atomic_transition",
-            side_effect=RuntimeError(
-                "simulated post-claim activation UPDATE missed"
-            ),
-        ):
-            mock_registry = MagicMock()
-            mock_registry.get_resolved.return_value = None
-            mock_get_registry.return_value = mock_registry
-
-            result = await messaging_service.enqueue_message_job(
+        # ── Insert a JobItem(message, queued) directly — simulates the
+        #    Option B state AFTER ``enqueue`` returns and BEFORE the
+        #    JobProcessor dispatch runs.
+        with Session(engine) as session:
+            job = JobItem(
+                job_id="job-stuck-queued",
+                job_type="message",
+                agent_id="developer",
+                agent_dir="/agents/developer",
+                project_id="test-project",
                 instance_id="inst-1",
                 message="stuck-queued scenario",
                 source="api",
+                priority=1,
+                admission_state=AdmissionState.QUEUED.value,
+                max_retries=0,
+                job_metadata={"images": [], "is_deferred": False, "is_background": False},
             )
+            session.add(job)
+            session.commit()
 
-        # ── Precondition: JobItem stayed in ``queued`` ──
-        jobs_before = _load_message_job_items(engine)
-        assert len(jobs_before) == 1, (
-            f"expected exactly one message JobItem, got {len(jobs_before)}"
-        )
-        assert jobs_before[0].admission_state == AdmissionState.QUEUED.value, (
-            "stuck-queued precondition: JobItem must remain in queued "
-            f"(got {jobs_before[0].admission_state!r})"
-        )
+        # ── Insert a Task row with ``work_id == job_id`` (the
+        #    dispatch-time link). This is what the JobProcessor's
+        #    message branch writes via ``enqueue_message(work_id=…)``.
+        from daemon.repositories.task.models import Task as _Task
+
+        with Session(engine) as session:
+            task = _Task(
+                instance_id="inst-1",
+                work_id="job-stuck-queued",
+                status=TaskStatus.PENDING.value,
+                message_id="msg-stub",
+                task_type="message",
+                is_deferred=False,
+                is_background=False,
+            )
+            session.add(task)
+            session.commit()
 
         # ── Manually flip Task -> RUNNING (simulate worker claim) ──
         with Session(engine) as session:
             task = session.exec(
-                select(Task).where(Task.work_id == result.job_id)
+                select(_Task).where(_Task.work_id == "job-stuck-queued")
             ).one()
             task.status = TaskStatus.RUNNING.value
             task.started_at = task.started_at or task.created_at
@@ -563,12 +615,12 @@ class TestObserverFinalizesQueuedJobItem:
 
         # ── C1 guard opens because Task is RUNNING ──
         assert isinstance(ctx, _ProcessingJobContext), (
-            "helper must return a _ProcessingJobContext (post-D13 contract)"
+            "helper must return a _ProcessingJobContext (Option B contract)"
         )
         assert ctx.instance_id == "inst-1"
-        assert ctx.job_id == result.job_id, (
+        assert ctx.job_id == "job-stuck-queued", (
             "C1 guard must open for queued + Task RUNNING: expected "
-            f"job_id={result.job_id!r}, got {ctx.job_id!r}"
+            f"job_id='job-stuck-queued', got {ctx.job_id!r}"
         )
 
         # ── Run the exact UPDATE ``_finalize_job_db_sync`` would run ──
@@ -673,96 +725,30 @@ class TestInternalEnqueueMessageNoJobItem:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Test (e): max_retries=0 on message JobItems
+# Test (e): message JobItem inherits instance project_id
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestMaxRetriesZero:
-    """``enqueue_message_job()`` must create the JobItem mirror with
-    ``max_retries=0`` -- messages are inline-dispatched by the
-    ``POST /messages`` handler, so retries are managed by the
-    instance-side ``retry_count`` mechanism rather than the JobRetryEngine.
-    A default ``max_retries`` (None or 3) would let the JobRetryEngine
-    reschedule a message-JobItem after a terminal failure, racing the
-    instance's own retry path.
+class TestMessageJobItemInheritsProjectId:
+    """``enqueue_message_job()`` resolves the instance's
+    ``project_id`` and forwards it to ``JobQueueService.enqueue``. The
+    JobItem inherits its instance's project_id so project-scoped views
+    (the Jobs UI refresh) see the message.
+
+    Regression (2026-07-07): the pre-Phase-3 ``enqueue_message_job``
+    created the message JobItem via ``job_repo.create(...)`` WITHOUT a
+    ``project_id``, so the row was stored with a NULL project_id.
+    That made the job invisible to project-scoped views — the Jobs
+    UI refresh (``GET /api/jobs?project_id=…``) dropped a paused
+    message job even though its instance belonged to the project.
+    The fix resolves ``instances.project_id`` and forwards it
+    (normalised) into ``enqueue``.
     """
 
     @pytest.mark.asyncio
-    async def test_e_max_retries_zero_on_message_jobitems(
+    async def test_e_project_id_threads_to_enqueue(
         self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
-        manager = _build_manager(
-            engine, instance_repository, write_guard, job_repository, queue_repository
-        )
-
-        messaging_service = InstanceMessagingService(
-            manager=manager,
-            cancellation_service=MagicMock(
-                spec=CancellationService, is_shutting_down=False
-            ),
-        )
-
-        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
-
-        # Wrap ``create`` BEFORE the call. ``MagicMock(wraps=...)``
-        # delegates to the real method AND records call_args so we
-        # can inspect the kwargs after. The production code calls
-        # ``job_repo.create`` via ``asyncio.to_thread`` -- the
-        # wrapping works regardless of the thread the call runs on.
-        original_create = job_repository.create
-        job_repository.create = MagicMock(wraps=original_create)
-
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ), patch("daemon.registry.get_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_resolved.return_value = None
-            mock_get_registry.return_value = mock_registry
-
-            result = await messaging_service.enqueue_message_job(
-                instance_id="inst-1",
-                message="max-retries-test",
-                source="api",
-            )
-
-        # ── JobItem has ``max_retries == 0`` (NOT None, NOT 3) ──
-        jobs = _load_message_job_items(engine)
-        assert len(jobs) == 1
-        ji = jobs[0]
-
-        assert ji.max_retries == 0, (
-            f"message JobItem must have max_retries=0 "
-            f"(got {ji.max_retries!r}) -- a non-zero or None value lets "
-            f"the JobRetryEngine reschedule the JobItem after a terminal "
-            f"failure, racing the instance's own retry path"
-        )
-        assert ji.max_retries is not None, (
-            f"max_retries must be the explicit integer 0, not None "
-            f"(got {ji.max_retries!r})"
-        )
-
-        # ── ``job_repository.create`` was called with ``max_retries=0`` ──
-        job_repository.create.assert_called()
-        create_kwargs = job_repository.create.call_args.kwargs
-        assert create_kwargs.get("max_retries") == 0, (
-            f"job_repository.create must be called with max_retries=0 "
-            f"kwarg (got kwargs={ {k: v for k, v in create_kwargs.items()} })"
-        )
-
-    async def test_f_message_jobitem_inherits_instance_project_id(
-        self, engine, instance_repository, write_guard, job_repository, queue_repository
-    ):
-        """The message JobItem must carry its instance's project_id.
-
-        Regression (2026-07-07): ``enqueue_message_job`` created the
-        message JobItem via ``job_repo.create(...)`` WITHOUT a
-        ``project_id``, so the row was stored with a NULL project_id.
-        That made the job invisible to project-scoped views — the Jobs
-        UI refresh (``GET /api/jobs?project_id=…``) dropped a paused
-        message job even though its instance belonged to the project.
-        The fix resolves ``instances.project_id`` and forwards it
-        (normalised) into ``job_repo.create``.
-        """
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository, queue_repository
         )
@@ -794,18 +780,16 @@ class TestMaxRetriesZero:
                 source="api",
             )
 
-        jobs = _load_message_job_items(engine)
-        assert len(jobs) == 1
-        ji = jobs[0]
-
-        assert ji.project_id == "proj-message-test", (
-            f"message JobItem must inherit its instance's project_id "
-            f"(expected 'proj-message-test', got {ji.project_id!r}) — "
-            f"a NULL project_id makes the job invisible to project-"
-            f"scoped filters (Jobs UI refresh drops paused message jobs)."
+        # ── enqueue received the instance's project_id ──
+        manager._job_queue_service.enqueue.assert_awaited_once()
+        enqueue_kwargs = manager._job_queue_service.enqueue.call_args.kwargs
+        assert enqueue_kwargs.get("project_id") == "proj-message-test", (
+            f"enqueue must be called with the instance's project_id "
+            f"'proj-message-test'; got project_id={enqueue_kwargs.get('project_id')!r}"
         )
 
-    async def test_f_message_jobitem_project_id_falls_back_to_system_default(
+    @pytest.mark.asyncio
+    async def test_e_project_id_falls_back_to_system_default(
         self, engine, instance_repository, write_guard, job_repository, queue_repository
     ):
         """When the instance has no project_id, the message JobItem
@@ -846,12 +830,11 @@ class TestMaxRetriesZero:
                 source="api",
             )
 
-        jobs = _load_message_job_items(engine)
-        assert len(jobs) == 1
-        ji = jobs[0]
-
-        assert ji.project_id == constants.SYSTEM_DEFAULT_PROJECT_ID, (
-            f"message JobItem for a project-less instance must fall back "
-            f"to the system default project_id "
-            f"({constants.SYSTEM_DEFAULT_PROJECT_ID!r}), got {ji.project_id!r}"
+        # ── enqueue received the system default project_id ──
+        manager._job_queue_service.enqueue.assert_awaited_once()
+        enqueue_kwargs = manager._job_queue_service.enqueue.call_args.kwargs
+        assert enqueue_kwargs.get("project_id") == constants.SYSTEM_DEFAULT_PROJECT_ID, (
+            f"enqueue must be called with the system default project_id "
+            f"({constants.SYSTEM_DEFAULT_PROJECT_ID!r}) for project-less "
+            f"instances; got project_id={enqueue_kwargs.get('project_id')!r}"
         )

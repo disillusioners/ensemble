@@ -73,9 +73,33 @@ class MessageCreate(BaseModel):
 
 
 class MessageResponse(BaseModel):
-    """Response after sending a message."""
+    """Response after sending a message.
 
-    message_id: str = Field(..., description="Unique message identifier")
+    Option B (synchronous Task contract): ``message_id`` is REQUIRED and
+    non-null. Under the new contract, ``enqueue_message_job`` creates
+    the ``MessageQueue`` + ``Task`` rows synchronously (via
+    ``_prepare_enqueued_message``) BEFORE the JobItem is enqueued; the
+    HTTP response therefore carries the real ``message_id`` immediately
+    (the Task row's ``message_id`` column).
+
+    The ``job_id`` field is the JobItem's UUID4, which equals the
+    Task's ``work_id`` (the linkage contract maintained via
+    ``_prepare_enqueued_message(work_id=job_id)``). Both handles are
+    populated at response time; no asynchronous correlation step is
+    needed.
+    """
+
+    message_id: str = Field(
+        ...,
+        description=(
+            "Unique message identifier — IDENTIFIER OF THE TASK ROW's "
+            "``message_id`` column. Created synchronously in "
+            "``enqueue_message_job`` via ``_prepare_enqueued_message`` "
+            "before the JobItem is enqueued; the HTTP response carries "
+            "the real ``message_id`` immediately. Use ``job_id`` for "
+            "JobItem-mirror correlation (== Task.work_id)."
+        ),
+    )
     role: str = Field(..., description="Message role (always 'assistant')")
     content: str | None = Field(default=None, description="Message content")
     thinking: str | None = Field(default=None, description="Thinking from metadata (reasoning_content, etc.)")

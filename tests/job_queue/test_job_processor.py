@@ -624,6 +624,75 @@ class TestOrphanJobRecovery:
         # Should NOT have spawned a new instance
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_skips_message_orphan_in_inline_recovery_loop(
+        self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """ACTIVE message JobItems must NOT be re-spawned by the orphan loop.
+
+        The inline recovery branch (the ``for proc_job in (active_jobs or []):``
+        loop inside ``_process_next_job``) is for ACTIVE-admission TASK jobs
+        whose instance crashed before completion. Message jobs target an
+        EXISTING instance and are dispatched via the message branch in
+        ``_process_next_job`` (Option B synchronous Task contract); re-running
+        ``spawn_instance_with_mcp`` / ``enqueue_message`` here would create a
+        duplicate instance + duplicate Task.
+
+        Guards the production guard at the top of the loop:
+            if proc_job.job_type == "message":
+                continue
+
+        The side_effect=AssertionError(...) on the three mocks is the
+        contract proof: if the guard fails to short-circuit, the test will
+        explode on the first accidental call rather than silently passing.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        # ACTIVE message JobItem with instance_id set — the orphan loop
+        # will pick this up via list_by_queue(admission_states=[ACTIVE]).
+        message_orphan = MockJob(
+            "job-message-orphan",
+            project_id="project-1",
+            queue_id="queue-1",
+            status=AdmissionState.ACTIVE.value,
+        )
+        message_orphan.instance_id = "existing-instance-id"
+        message_orphan.job_type = "message"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        # No pending jobs — forces the orphan branch.
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        # Surface the message JobItem to the orphan loop.
+        mock_queue_service._repository.list_by_queue.return_value = ([message_orphan], None)
+
+        # Force the orphan loop past its ``if proc_job.instance_id: get_instance()``
+        # short-circuit so the guard at the TOP of the loop is the only thing
+        # standing between the message JobItem and a duplicate
+        # ``spawn_instance_with_mcp`` call. Without this KeyError, the
+        # existing ``continue # Instance exists, skip`` line would hide the
+        # guard behind a no-op pass.
+        mock_instance_manager.get_instance.side_effect = KeyError("Instance not found")
+
+        # Contract proof: any of these three calls means the guard failed.
+        mock_instance_manager.spawn_instance_with_mcp.side_effect = AssertionError(
+            "orphan loop re-spawned a message job (should be skipped)"
+        )
+        mock_instance_manager.enqueue_message.side_effect = AssertionError(
+            "orphan loop re-enqueued a message job (should be skipped)"
+        )
+        mock_queue_service.complete_job.side_effect = AssertionError(
+            "orphan loop completed a message job (should be skipped)"
+        )
+
+        await processor._process_next_job()
+
+        # Guard fired: none of the orphan-loop side effects were triggered.
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
+        mock_instance_manager.enqueue_message.assert_not_called()
+        mock_queue_service.complete_job.assert_not_called()
+
 
 @pytest.fixture
 def dispatch_bus():

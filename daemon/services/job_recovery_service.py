@@ -174,6 +174,83 @@ class JobRecoveryService:
         stats = {"recovered": 0, "alive": 0, "total": len(processing_jobs)}
 
         for job in processing_jobs:
+            # Phase 5 (Option B): for MESSAGE jobs, check whether the
+            # Task was created (i.e., ``enqueue_message`` ran after
+            # ``start_job``). If the daemon crashed between
+            # ``start_job`` and ``enqueue_message``, the JobItem is
+            # ``active`` with no Task row — the observer will wait
+            # forever for an instance-completion event that never
+            # arrives. Detect and re-arm to ``queued`` so the
+            # ``JobProcessor`` re-dispatches it.
+            if job.job_type == "message" and job.instance_id and self._task_repository is not None:
+                try:
+                    task_exists = await asyncio.to_thread(
+                        self._task_repository.get_by_work_id, job.job_id
+                    )
+                except Exception as task_check_err:
+                    logger.warning(
+                        f"JobRecovery: failed to check Task existence "
+                        f"for message job {job.job_id[:8]}...: "
+                        f"{task_check_err}. Falling through to "
+                        "standard alive-leave branch."
+                    )
+                    task_exists = None  # Treat as unknown — leave alone.
+
+                if task_exists is None:
+                    # No Task row — crash between start_job and
+                    # enqueue_message. Reset to 'queued' for re-dispatch
+                    # and release the slot lock so re-dispatch can
+                    # re-acquire it.
+                    logger.warning(
+                        f"JobRecovery: message job {job.job_id[:8]}... "
+                        f"is active but has no Task — resetting to "
+                        f"queued for re-dispatch (instance "
+                        f"{job.instance_id[:8]}...)"
+                    )
+                    try:
+                        # B2 fix: ``rearm_with_lock`` (F9 race-safe
+                        # variant) handles the ``done -> active``
+                        # post-finalize re-arm path for late-child
+                        # callbacks. The crash-recovery path needs the
+                        # OPPOSITE direction (``active -> queued``), and
+                        # ``rearm_with_lock`` explicitly returns
+                        # ``(None, False)`` for any state that is not
+                        # ``done``. The dedicated
+                        # ``reset_active_to_queued`` repository method
+                        # performs DELETE-lock + UPDATE-state in a
+                        # single transaction (same transactional
+                        # pattern as ``start_job_atomic_with_lock`` so
+                        # the PG ``trg_job_locks_active_guard`` trigger
+                        # is satisfied at COMMIT). Returns True iff
+                        # the state flip succeeded. Only increments
+                        # ``stats["recovered"]`` on success so the
+                        # counter reflects reality.
+                        lock_ok = await asyncio.to_thread(
+                            self._job_repository.reset_active_to_queued,
+                            job.job_id,
+                            job.instance_id,
+                        )
+                        if lock_ok:
+                            logger.info(
+                                f"JobRecovery: reset orphaned message "
+                                f"job {job.job_id[:8]}... from active "
+                                f"to queued for re-dispatch"
+                            )
+                            stats["recovered"] += 1
+                        else:
+                            logger.warning(
+                                f"JobRecovery: failed to reset message "
+                                f"job {job.job_id[:8]}... (state "
+                                f"changed concurrently? — leaving as-is)"
+                            )
+                    except Exception as rearm_err:
+                        logger.error(
+                            f"JobRecovery: failed to reset message "
+                            f"job {job.job_id[:8]}... to queued: "
+                            f"{rearm_err}. Leaving as-is."
+                        )
+                    continue  # Skip the rest of the recovery branches
+
             if not job.instance_id:
                 # Job has no instance — orphaned, mark as failed
                 logger.warning(f"Job {job.job_id[:8]}... has no instance_id, marking FAILED")

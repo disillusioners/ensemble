@@ -442,17 +442,22 @@ class TestUnifiedEnqueueDispatcher:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# D13 guard: enqueue_job(job_type="message") raises ValueError
+# Phase 5 (Option B): JobQueueService.enqueue NOW accepts job_type="message"
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestEnqueueJobRejectsMessage:
-    """D13 defense-in-depth guard: ``JobQueueService.enqueue`` rejects
-    ``job_type="message"`` with ``ValueError``.
+class TestEnqueueAcceptsMessageJobType:
+    """Phase 5 (Option B) cutover: ``JobQueueService.enqueue`` now ACCEPTS
+    ``job_type="message"``.
 
-    After D13 messages write only Task + MessageQueue rows. Any leftover
-    caller attempting the legacy API must fail loudly rather than
-    silently creating a JobItem that no processor can handle.
+    Pre-Option B (D13): the guard at the top of ``enqueue`` raised
+    ``ValueError`` for ``job_type="message"`` and forced all message
+    routing through the legacy ``_prepare_enqueued_message`` + Task-row
+    path. Post-Option B: the guard is removed. Messages flow through the
+    queue (creating a ``job_type='message'`` JobItem with the existing
+    ``instance_id`` preserved) and the ``JobProcessor._process_next_job``
+    message branch routes the dispatch to ``enqueue_message`` for the
+    existing instance.
     """
 
     @pytest.fixture(autouse=True)
@@ -470,27 +475,68 @@ class TestEnqueueJobRejectsMessage:
             constants.SYSTEM_DEFAULT_PROJECT_ID = original
 
     @pytest.mark.asyncio
-    async def test_enqueue_rejects_message_job_type(self):
-        """``enqueue(job_type="message")`` raises ``ValueError`` immediately."""
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_enqueue_accepts_message_job_type(self):
+        """``enqueue(job_type="message")`` no longer raises — it returns a
+        freshly-created JobItem with ``job_type='message'`` and the
+        supplied ``instance_id`` preserved on the row.
+
+        Verifies the post-Option-B contract: messages enter the queue as
+        JobItems and wait for the JobProcessor message branch.
+        """
+        from unittest.mock import MagicMock, patch
         from daemon.services.job_queue_service import JobQueueService
+        from daemon.repositories.job_queue.models import AdmissionState
 
         service = JobQueueService(
             repository=MagicMock(),
             lock_manager=MagicMock(),
             queue_repo=MagicMock(),
         )
-        with pytest.raises(ValueError) as exc_info:
-            await service.enqueue(
+        # Stub repo.create() to return a fake JobItem that carries the
+        # message-type metadata. ``_queue_repo.get(queue_id)`` is called
+        # when ``queue_id`` is provided directly — its returned object
+        # must have ``.project_id == "test-project"`` so the production
+        # "Queue does not belong to project" guard does not raise.
+        fake_job = MagicMock()
+        fake_job.job_id = "message-job-1"
+        fake_job.job_type = "message"
+        fake_job.instance_id = "existing-instance-abc"
+        fake_job.admission_state = AdmissionState.QUEUED.value
+        fake_queue = MagicMock()
+        fake_queue.project_id = "test-project"
+        queue_repo_stub = MagicMock(
+            get_by_name=MagicMock(return_value=None),
+            get=MagicMock(return_value=fake_queue),
+        )
+        with patch.object(service, "_queue_repo", new=queue_repo_stub):
+            service._repository.create = MagicMock(return_value=fake_job)
+            service._dispatch_bus = MagicMock()
+            result = await service.enqueue(
                 agent_id="developer",
-                message="test",
+                message="hello",
                 job_type="message",
                 project_id="test-project",
+                queue_id="some-queue-id",
+                instance_id="existing-instance-abc",
             )
-        # The error message must mention both the deprecated type and the
-        # replacement entry point so operators can find the right method.
-        assert "message" in str(exc_info.value).lower()
-        assert "enqueue_message" in str(exc_info.value)
+        # Result carries the JobItem's job_id — message JobItems now
+        # share the same UUID4 handle with their Task row (set later in
+        # the message branch via ``work_id=job.job_id``).
+        assert result.job_id == "message-job-1"
+        assert result.job_type == "message"
+        # ``service._repository.create`` was called with
+        # ``job_type='message'`` and the preserved ``instance_id``.
+        service._repository.create.assert_called_once()
+        create_kwargs = service._repository.create.call_args.kwargs
+        assert create_kwargs.get("job_type") == "message", (
+            f"enqueue must thread job_type='message' to repository.create; "
+            f"got kwargs={create_kwargs!r}"
+        )
+        assert create_kwargs.get("instance_id") == "existing-instance-abc", (
+            f"enqueue must preserve the supplied instance_id on the JobItem "
+            f"so the message branch can route back to the same instance; "
+            f"got instance_id={create_kwargs.get('instance_id')!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_enqueue_accepts_task_job_type(self):

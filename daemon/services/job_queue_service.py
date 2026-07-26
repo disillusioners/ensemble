@@ -556,6 +556,7 @@ class JobQueueService:
         idempotency_key: str | None = None,
         job_type: str = "task",
         instance_id: str | None = None,
+        job_id: str | None = None,
     ) -> JobItem:
         """Submit a job for processing.
 
@@ -569,11 +570,9 @@ class JobQueueService:
         With idempotency_key: if a job with the same key exists and is non-terminal,
         returns the existing job instead of creating a duplicate.
 
-        D13 (Phase 2): ``job_type="message"`` is REJECTED with ``ValueError``.
-        Messages no longer create ``JobItem`` rows — they create ``Task`` rows
-        in the WorkerPool path (see :meth:`InstanceMessagingService.enqueue_message`).
-        This guard is defense-in-depth against any leftover caller that might
-        attempt the legacy API.
+        Phase 5 (Option B): ``job_type="message"`` is ACCEPTED. Messages
+        flow through the queue and route to the pre-created Task via the
+        message branch in ``JobProcessor._process_next_job``.
 
         Args:
             agent_id: Agent ID (e.g., 'developer').
@@ -586,26 +585,19 @@ class JobQueueService:
                      is set, defaults to the project's system FIFO queue.
             idempotency_key: Optional idempotency key for deduplication.
                            If a non-terminal job with this key exists, returns it.
-            job_type: Job type — must be ``"task"`` (D13 rejects ``"message"``).
-            instance_id: Optional pre-set instance ID.
+            job_type: Job type — ``"task"`` (default) or ``"message"``.
+            instance_id: Optional pre-set instance ID (for message jobs,
+                        this is the existing target instance).
+            job_id: Optional explicit JobItem UUID. When supplied, the
+                    repository uses this exact ID; this is used by Option B
+                    to link ``JobItem.job_id`` to ``Task.work_id``.
 
         Returns:
             JobItem with PENDING status (or existing non-terminal job if idempotent).
 
         Raises:
-            ValueError: If ``job_type == "message"`` (D13 — use
-                :meth:`InstanceMessagingService.enqueue_message` instead).
+            ValueError: If ``project_id`` cannot be normalized.
         """
-        # D13 defense-in-depth: messages must use enqueue_message (WorkerPool
-        # Task row), not this JobItem-creating path. Raising here ensures
-        # any leftover caller fails loudly rather than silently creating
-        # a JobItem that no processor can handle.
-        if job_type == "message":
-            raise ValueError(
-                "enqueue_job no longer accepts job_type='message' — "
-                "use enqueue_message instead (D13 architecture migration)"
-            )
-
         # Canonical normalization: ensures ALL callers get system_default_project for None/empty
         project_id = normalize_project_id(project_id)
         if project_id is None:
@@ -629,15 +621,26 @@ class JobQueueService:
             agent_dir = str(agent_meta.path)
 
             # Resolve queue_id for projects (needed for the INSERT row)
-            # D13: only TASK jobs reach this point (message jobs are
-            # rejected by the guard above). Always route to the FIFO
-            # system queue.
+            # Phase 5 (Option B): both TASK and MESSAGE jobs reach this
+            # point. The D13 "message-rejection guard" was removed in
+            # Phase 5 — messages now flow through the standard queue
+            # path. The default-queue lookup is keyed by ``job_type``
+            # so a message that fails to resolve a queue_id falls back
+            # to ``system_parallel_queue`` (concurrency_limit > 1,
+            # allows messages to interleave) rather than serializing
+            # on ``system_fifo_queue`` (concurrency_limit = 1, which
+            # would block unrelated messages behind the failed lookup).
             resolved_queue_id = queue_id
             if resolved_queue_id is None:
-                queue = await asyncio.to_thread(
-                    self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+                default_queue_name = (
+                    "system_parallel_queue"
+                    if job_type == "message"
+                    else "system_fifo_queue"
                 )
-                queue_kind = "fifo"
+                queue = await asyncio.to_thread(
+                    self._queue_repo.get_by_name, project_id, default_queue_name
+                )
+                queue_kind = "parallel" if job_type == "message" else "fifo"
                 if queue is not None:
                     resolved_queue_id = queue.queue_id
                 else:
@@ -674,6 +677,7 @@ class JobQueueService:
                 idempotency_key=idempotency_key,
                 job_type=job_type,
                 instance_id=instance_id,
+                job_id=job_id,
             )
 
             if not created and job is not None:
@@ -741,16 +745,24 @@ class JobQueueService:
         agent_dir = str(agent_meta.path)
 
         # Resolve queue_id for projects
-        # D13: only TASK jobs reach this point (message jobs are
-        # rejected by the guard above). Always route to the FIFO
-        # system queue.
+        # Phase 5 (Option B): both TASK and MESSAGE jobs reach this
+        # point. The D13 "message-rejection guard" was removed in
+        # Phase 5. The default-queue lookup is keyed by ``job_type``
+        # — messages fall back to ``system_parallel_queue`` (lets
+        # unrelated messages run concurrently) rather than serializing
+        # on ``system_fifo_queue`` (concurrency_limit = 1).
         resolved_queue_id = queue_id
         if queue_id is None:
             # project_id is always valid after normalize_project_id()
-            queue = await asyncio.to_thread(
-                self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+            default_queue_name = (
+                "system_parallel_queue"
+                if job_type == "message"
+                else "system_fifo_queue"
             )
-            queue_kind = "fifo"
+            queue = await asyncio.to_thread(
+                self._queue_repo.get_by_name, project_id, default_queue_name
+            )
+            queue_kind = "parallel" if job_type == "message" else "fifo"
             if queue is not None:
                 resolved_queue_id = queue.queue_id
             else:
@@ -786,8 +798,9 @@ class JobQueueService:
             idempotency_key=idempotency_key,
             job_type=job_type,
             instance_id=instance_id,
+            job_id=job_id,
         )
-        
+
         # Notify dispatch bus of new job (for event-driven processing)
         if self._dispatch_bus is not None:
             self._dispatch_bus.notify_new_job(project_id)
@@ -2718,13 +2731,86 @@ class JobQueueService:
                     return None
 
                 if instance.status in TERMINAL_STATUSES:
+                    # Phase 5 (Option B): message jobs target an EXISTING
+                    # instance. If that instance is already terminal, the
+                    # message cannot be delivered.
+                    #
+                    # B3 fix (v2): the v1 implementation called
+                    # ``complete_job(FAILED)``, which delegates to
+                    # ``_finalize_terminal``. ``_finalize_terminal`` only
+                    # handles ``admission_state='active'`` rows — for a
+                    # ``queued`` job it sets ``_dispatch_skipped=True`` and
+                    # returns without changing state, creating an INFINITE
+                    # retry loop (``start_job`` returns ``None`` →
+                    # dispatch refetches the same queued row → loops
+                    # forever). The fix routes the queued → terminal
+                    # transition through ``atomic_transition`` directly,
+                    # which issues a single UPDATE with the
+                    # ``WHERE admission_state = 'queued'`` SQL guard.
+                    # ``terminal_reason='aborted'`` matches the model
+                    # docstring's "instance-terminated cascade" semantics
+                    # (models.py:372) and the state machine validates
+                    # ``(QUEUED, DONE)`` as a legal transition
+                    # (job_state_machine.py:55).
+                    #
+                    # ``error_message`` was dropped from the ``JobItem``
+                    # schema in Phase 5 (see ``_REMOVED_JOB_COLUMNS`` in
+                    # repository.py:47) — the abort cause is captured
+                    # structurally via ``terminal_reason='aborted'`` and
+                    # the warning log carries the human-readable detail.
+                    #
+                    # TASK jobs continue to use the existing
+                    # ``clear stale instance_id`` flow below (re-spawn
+                    # on next ``start_job``), which is the correct
+                    # semantic for fresh-instance tasks.
+                    if job.job_type == "message":
+                        logger.warning(
+                            f"start_job: message job {job_id[:8]}... "
+                            f"targets terminal instance "
+                            f"{job.instance_id[:8]}... "
+                            f"({instance.status}) — aborting job "
+                            f"to break the retry loop "
+                            f"(target instance {job.instance_id} is "
+                            f"terminal ({instance.status}))"
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                self._repository.atomic_transition,
+                                job_id,
+                                from_status=AdmissionState.QUEUED.value,
+                                to_status=AdmissionState.DONE.value,
+                                terminal_reason="aborted",
+                            )
+                        except InvalidTransitionError as trans_err:
+                            # Race: a concurrent writer flipped the row
+                            # out of ``queued`` between our read and our
+                            # UPDATE. The dispatch loop will re-evaluate
+                            # on the next tick; the new state is whatever
+                            # the winner set (done/dead/active), so we
+                            # don't need to retry.
+                            logger.info(
+                                f"start_job: atomic_transition lost the "
+                                f"race for message job {job_id[:8]}... "
+                                f"targeting terminal instance "
+                                f"{job.instance_id[:8]}...: "
+                                f"{trans_err}"
+                            )
+                        except Exception as abort_err:
+                            logger.exception(
+                                f"start_job: failed to abort message "
+                                f"job {job_id[:8]}... targeting "
+                                f"terminal instance: {abort_err}"
+                            )
+                        # Return None to keep the contract:
+                        # ``start_job`` returning None means "do not
+                        # process this job in this dispatch attempt".
+                        # The terminal transition has moved the job out
+                        # of ``admission_state='queued'`` so the next
+                        # dispatch loop iteration will skip it.
+                        return None
                     # Stale instance ref: the instance pointed to by this
                     # job is already terminal. Clear the ref so a fresh
-                    # instance is assigned below. This applies to all job
-                    # types — including message-type JobItem mirrors
-                    # created by ``enqueue_message_job`` (which bypass
-                    # ``enqueue_job``'s rejection of message jobs by
-                    # calling ``JobRepository.create`` directly).
+                    # instance is assigned below. Applies to TASK jobs.
                     logger.info(
                         f"[TRACE] start_job: clearing stale instance_id for TASK job {job_id[:8]}... "
                         f"(instance {job.instance_id[:8]}... is {instance.status})"
@@ -2738,14 +2824,13 @@ class JobQueueService:
                     )
                     return None
 
-        # Generate instance_id: always mint a fresh UUID for the job's
-        # target instance. The legacy MESSAGE-specific branch that
-        # preserved an existing instance_id was removed; message-type
-        # JobItem mirrors (created by ``enqueue_message_job``) are
-        # excluded from the dispatch path by the ``job_type != 'message'``
-        # filter in ``list_pending_*``, so this code only runs for
-        # genuine dispatch-queue jobs.
-        instance_id = str(uuid.uuid4())
+        # Generate instance_id:
+        # - For message jobs: preserve the existing instance_id (the target instance)
+        # - For task jobs: mint a fresh UUID for the new instance
+        if job.job_type == "message" and job.instance_id:
+            instance_id = job.instance_id  # preserve existing target
+        else:
+            instance_id = str(uuid.uuid4())  # fresh for new task instances
         
         # [TRACE] Log instance_id being used
         logger.info(

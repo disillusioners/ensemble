@@ -276,6 +276,7 @@ class JobRepository:
         idempotency_key: str,
         job_type: str = "task",
         instance_id: str | None = None,
+        job_id: str | None = None,
     ) -> tuple[JobItem | None, bool]:
         """Atomically insert a job or return the existing one with the same key.
 
@@ -299,6 +300,9 @@ class JobRepository:
             idempotency_key: Required idempotency key. Must be non-null.
             job_type: Job type ("task" or "message").
             instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+            job_id: Optional explicit JobItem UUID. When supplied, the
+                     newly inserted row uses this exact ID. If an existing
+                     idempotent row wins, its existing ID is returned.
 
         Returns:
             Tuple ``(job, created)`` where ``job`` is the JobItem that now
@@ -321,7 +325,7 @@ class JobRepository:
         with SQLModelSession(self.engine) as db_session:
             insert_fn = self._get_dialect_insert(db_session)
             now = datetime.now(timezone.utc).isoformat()
-            new_job_id = str(uuid.uuid4())
+            new_job_id = job_id or str(uuid.uuid4())
 
             # Build the values dict. The Core ``Table`` uses the DB
             # column name ``metadata`` for the JSON column, while the
@@ -902,10 +906,10 @@ class JobRepository:
         Under the new model, 'queued' is the admission bucket that covers
         PENDING-status jobs (the dual-write keeps status in sync).
 
-        Excludes ``job_type='message'`` JobItems, which are dispatched inline
-        (e.g. POST /messages) rather than via the JobProcessor poll loop.
-        Without this filter the poll loop would double-dispatch message jobs
-        and create a duplicate Task. (Same wording as ``list_pending_by_queue``.)
+        Phase 5 (Option B): includes ``job_type='message'`` JobItems so message
+        dispatch flows through the queue and respects ``concurrency_limit``.
+        ``batch_cancel_queued`` and ``find_active_jobs`` still exclude message
+        mirrors for cleanup safety.
 
         Args:
             project_id: Project identifier.
@@ -918,7 +922,6 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.project_id == project_id)
                 .where(JobItem.admission_state == AdmissionState.QUEUED.value)
-                .where(JobItem.job_type != "message")
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
@@ -930,10 +933,9 @@ class JobRepository:
 
         Phase 3: queries admission_state='queued' instead of status='pending'.
 
-        Excludes ``job_type='message'`` JobItems, which are dispatched inline
-        (e.g. POST /messages) rather than via the JobProcessor poll loop.
-        Without this filter the poll loop would double-dispatch message jobs
-        and create a duplicate Task. (Same wording as ``list_pending_by_queue``.)
+        Phase 5 (Option B): includes ``job_type='message'`` JobItems so message
+        dispatch flows through the queue. See ``list_pending_by_queue`` for
+        the rationale.
 
         Returns:
             List of all pending JobItem objects.
@@ -942,7 +944,6 @@ class JobRepository:
             stmt = (
                 select(JobItem)
                 .where(JobItem.admission_state == AdmissionState.QUEUED.value)
-                .where(JobItem.job_type != "message")
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), col(JobItem.created_at).asc())
             )
@@ -1003,10 +1004,10 @@ class JobRepository:
 
         Phase 3: queries admission_state='queued' instead of status='pending'.
 
-        Excludes ``job_type='message'`` JobItems, which are dispatched inline
-        (e.g. POST /messages) rather than via the JobProcessor poll loop.
-        Without this filter the poll loop would double-dispatch message jobs
-        and create a duplicate Task.
+        Phase 5 (Option B): includes ``job_type='message'`` JobItems so message
+        dispatch flows through the queue and respects ``concurrency_limit``.
+        This is the central enabler of the message branch in
+        ``JobProcessor._process_next_job``.
 
         Args:
             queue_id: Queue identifier.
@@ -1019,7 +1020,6 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.queue_id == queue_id)
                 .where(JobItem.admission_state == AdmissionState.QUEUED.value)
-                .where(JobItem.job_type != "message")
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
@@ -2128,6 +2128,101 @@ SET admission_state = 'queued',
                 # missing job" contract rather than raising.
                 return None, True
             return job, True
+
+    def reset_active_to_queued(
+        self,
+        job_id: str,
+        instance_id: str,
+    ) -> bool:
+        """Crash-recovery helper: flip an orphaned message JobItem
+        ``active -> queued`` AND release its slot lock in ONE transaction.
+
+        Used by :class:`daemon.services.job_recovery_service.JobRecoveryService`
+        when a daemon crash is detected between ``start_job`` (slot acquired,
+        ``admission_state='active'``) and ``enqueue_message`` (Task row created).
+        Without this reset the JobItem would stay ``active`` forever, the
+        slot would remain claimed, queue concurrency would be permanently
+        exhausted, and the observer would wait indefinitely for an
+        instance-completion event that never arrives.
+
+        Why a NEW method (not a reuse of :meth:`rearm_with_lock`):
+            ``rearm_with_lock`` only handles the ``done -> active`` re-arm
+            direction with `INSERT lock + UPDATE state`; it explicitly
+            returns ``(None, False)`` for any state that is not ``done``.
+            The crash-recovery direction is the OPPOSITE
+            (``active -> queued``) with `DELETE lock + UPDATE state`, so
+            reusing ``rearm_with_lock`` is a category error. The
+            ``trg_job_locks_active_guard`` PG trigger fires on any
+            mutation of ``job_locks``; doing DELETE+UPDATE inside the same
+            ``engine.begin()`` block is the same transactional shape used
+            by :meth:`start_job_atomic_with_lock`, which the
+            ``trg_job_locks_active_guard`` review (V12) confirmed as
+            correct.
+
+        Args:
+            job_id: The orphaned message JobItem to flip back to queued.
+            instance_id: The instance_id the job was bound to. Currently
+                used only as a corroborating log signal — the
+                ``admission_state='active'`` guard on the UPDATE is the
+                authority.
+
+        Returns:
+            ``True`` iff the UPDATE affected exactly one row (the job
+            was in ``active`` state and was successfully flipped to
+            ``queued``). ``False`` for missing job / wrong state / no
+            slot lock to release — caller treats this as "leave the job
+            alone, it was already moved by another actor".
+        """
+        with self.engine.begin() as conn:
+            # 1. Release the slot lock (if any) for this job. The DELETE
+            # is scoped by ``job_id`` so concurrent lock operations on
+            # OTHER jobs in the same queue are unaffected. No-op if no
+            # lock row exists.
+            lock_delete = conn.execute(
+                text("DELETE FROM job_locks WHERE job_id = :job_id"),
+                {"job_id": job_id},
+            )
+            # 2. Flip the JobItem's admission_state in the SAME
+            # transaction. Guarded on ``admission_state='active'`` so a
+            # concurrent ``complete_job`` / ``cancel_job`` / etc. that
+            # already moved the job cannot have its terminal write
+            # clobbered. ``rowcount`` is the authoritative contract:
+            # 0 -> state changed, leave alone; 1 -> reset succeeded.
+            update_result = conn.execute(
+                text(
+                    "UPDATE job_queue_items "
+                    "SET admission_state = :queued_state "
+                    "WHERE job_id = :job_id "
+                    "  AND admission_state = :active_state "
+                    "  AND deleted_at IS NULL"
+                ),
+                {
+                    "queued_state": AdmissionState.QUEUED.value,
+                    "active_state": AdmissionState.ACTIVE.value,
+                    "job_id": job_id,
+                },
+            )
+
+            updated = (update_result.rowcount or 0) == 1
+            if updated:
+                logger.info(
+                    f"reset_active_to_queued: released {lock_delete.rowcount or 0} "
+                    f"lock row(s) and reset job {job_id[:8]}... (instance "
+                    f"{instance_id[:8]}...) from active to queued for crash "
+                    f"recovery"
+                )
+            else:
+                # State changed — DELETE may already have removed the
+                # lock row. Rollback keeps the DB consistent: the
+                # transaction either commits both DELETE+UPDATE or
+                # commits neither. With ``rowcount==0`` on the UPDATE
+                # the commit still lands (we did no work) — caller
+                # checks the return value.
+                logger.debug(
+                    f"reset_active_to_queued: job {job_id[:8]}... not in "
+                    f"active state (or missing) — no-op for crash recovery"
+                )
+            return updated
 
     def complete_job(
         self,
