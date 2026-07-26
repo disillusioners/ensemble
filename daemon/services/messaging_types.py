@@ -34,6 +34,7 @@ class AsyncMessageResult:
     instance_id: str
     status: str = "queued"
     job_id: str | None = None  # job_id of the enqueued MESSAGE job (None for non-JQ paths)
+    queued: bool = False
 
 
 __all__ = ["AsyncMessageResult"]

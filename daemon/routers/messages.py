@@ -11,7 +11,6 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.work_status import canonicalize_status
 from sse_starlette.sse import EventSourceResponse
@@ -335,27 +334,7 @@ async def send_message(
             ).model_dump(),
         )
 
-    # Snapshot the JobItem's admission_state right after enqueue so the
-    # frontend can render a "queued" indicator without a follow-up GET.
-    # The race window — the worker could claim the slot between
-    # ``enqueue_message_job`` returning and this lookup — is acceptable:
-    # if the job is already ``active`` (or ``done`` / ``dead``) by the
-    # time we read it, ``queued=False`` is the truthful value. A lookup
-    # failure (missing service in tests, transient DB error, missing
-    # row) MUST NOT fail the request — the message is already enqueued,
-    # so we default to ``queued=False`` and log at WARNING.
-    queued: bool = False
-    job_queue_service = getattr(manager, "_job_queue_service", None)
-    if result.job_id is not None and job_queue_service is not None:
-        try:
-            job_item = await job_queue_service.get_job(result.job_id)
-            if job_item is not None:
-                queued = job_item.admission_state == AdmissionState.QUEUED.value
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning(
-                f"send_message: failed to read admission_state for "
-                f"job {result.job_id[:8]}...: {type(e).__name__}: {e}"
-            )
+    queued = getattr(result, "queued", False)
 
     response_data = MessageResponse(
         message_id=result.message_id,

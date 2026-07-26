@@ -111,6 +111,7 @@ def _make_queue(
     project_id: str,
     *,
     name: str = "test-queue",
+    concurrency_limit: int | None = 1,
 ) -> SimpleNamespace:
     """Build a JobQueue-shaped object with the attributes the
     resolution code reads.
@@ -124,6 +125,7 @@ def _make_queue(
         project_id=project_id,
         queue_name=name,
         queue_name_lower=name.lower(),
+        concurrency_limit=concurrency_limit,
     )
 
 
@@ -164,6 +166,7 @@ def _build_queue_repo(
 
     repo.get = MagicMock(side_effect=_get)
     repo.get_by_name = MagicMock(side_effect=_get_by_name)
+    repo.count_jobs_by_admission = MagicMock(return_value={"active": 0})
     return repo
 
 
@@ -374,7 +377,10 @@ class TestEnqueueMessageJobQueueIdResolution:
         * No WARNING is logged (default path is not a fallback).
         """
         default_queue = _make_queue(_DEFAULT_QUEUE_ID, _PROJECT_ID, name="system_parallel_queue")
-        queue_repo = _build_queue_repo(default_queue=default_queue)
+        queue_repo = _build_queue_repo(
+            by_id={_DEFAULT_QUEUE_ID: default_queue},
+            default_queue=default_queue,
+        )
         job_repo = MagicMock()
 
         with caplog.at_level(logging.WARNING, logger="daemon.services.instance_messaging"):
@@ -391,8 +397,12 @@ class TestEnqueueMessageJobQueueIdResolution:
         captured_queue_repo.get_by_name.assert_called_once_with(
             _PROJECT_ID, "system_parallel_queue"
         )
-        # No caller-supplied id → no need to validate against ``get``.
-        captured_queue_repo.get.assert_not_called()
+        # No caller-supplied id → validation `get` is skipped, but the
+        # capacity snapshot legitimately calls `get('default-queue-id-0001')`
+        # to read the queue's concurrency_limit. Assert the snapshot call
+        # happened (the behavior that matters) without over-specifying
+        # the exact call count.
+        captured_queue_repo.get.assert_any_call(_DEFAULT_QUEUE_ID)
         # No fallback happened → no WARNING.
         assert not any(
             record.levelno >= logging.WARNING for record in caplog.records
@@ -407,7 +417,10 @@ class TestEnqueueMessageJobQueueIdResolution:
         the ``None`` case.
         """
         default_queue = _make_queue(_DEFAULT_QUEUE_ID, _PROJECT_ID, name="system_parallel_queue")
-        queue_repo = _build_queue_repo(default_queue=default_queue)
+        queue_repo = _build_queue_repo(
+            by_id={_DEFAULT_QUEUE_ID: default_queue},
+            default_queue=default_queue,
+        )
         job_repo = MagicMock()
 
         with caplog.at_level(logging.WARNING, logger="daemon.services.instance_messaging"):
@@ -423,7 +436,9 @@ class TestEnqueueMessageJobQueueIdResolution:
         captured_queue_repo.get_by_name.assert_called_once_with(
             _PROJECT_ID, "system_parallel_queue"
         )
-        captured_queue_repo.get.assert_not_called()
+        # Capacity snapshot legitimately calls `get` with the default
+        # queue id (see comment on test_queue_id_none_uses_default_queue).
+        captured_queue_repo.get.assert_any_call(_DEFAULT_QUEUE_ID)
         assert not any(
             record.levelno >= logging.WARNING for record in caplog.records
         )
@@ -463,8 +478,11 @@ class TestEnqueueMessageJobQueueIdResolution:
 
         # The caller-supplied id is the one that flowed through.
         assert resolved == _VALID_QUEUE_ID
-        # Validation path: ``get`` was consulted.
-        captured_queue_repo.get.assert_called_once_with(_VALID_QUEUE_ID)
+        # Validation path: ``get`` was consulted at least once with the
+        # supplied id. The capacity snapshot may also call ``get`` with
+        # the same id, so we assert behavioral presence rather than call
+        # count.
+        captured_queue_repo.get.assert_any_call(_VALID_QUEUE_ID)
         # Winner-takes-all: default fallback is NOT executed.
         captured_queue_repo.get_by_name.assert_not_called()
         # No fallback → no WARNING.
@@ -508,8 +526,11 @@ class TestEnqueueMessageJobQueueIdResolution:
                 resolved = _captured_queue_id(captured_job_queue_service)
 
         assert resolved == _DEFAULT_QUEUE_ID
-        # Validation tried first; default fallback attempted second.
-        captured_queue_repo.get.assert_called_once_with(_OTHER_PROJECT_QUEUE_ID)
+        # Validation tried first (with the other-project id, then
+        # rejected); default fallback attempted second. The capacity
+        # snapshot may also call ``get`` with the resolved default id.
+        # Assert behavioral presence rather than exact call count.
+        captured_queue_repo.get.assert_any_call(_OTHER_PROJECT_QUEUE_ID)
         captured_queue_repo.get_by_name.assert_called_once_with(
             _PROJECT_ID, "system_parallel_queue"
         )
@@ -555,7 +576,11 @@ class TestEnqueueMessageJobQueueIdResolution:
                 resolved = _captured_queue_id(captured_job_queue_service)
 
         assert resolved == _DEFAULT_QUEUE_ID
-        captured_queue_repo.get.assert_called_once_with(_NONEXISTENT_QUEUE_ID)
+        # Validation attempted first (id is not found → returns None);
+        # default fallback attempted second. The capacity snapshot may
+        # also call ``get`` with the resolved default id. Assert
+        # behavioral presence rather than exact call count.
+        captured_queue_repo.get.assert_any_call(_NONEXISTENT_QUEUE_ID)
         captured_queue_repo.get_by_name.assert_called_once_with(
             _PROJECT_ID, "system_parallel_queue"
         )
@@ -599,7 +624,10 @@ class TestEnqueueMessageJobQueueIdResolution:
         # into the same fallback path and the ``get_by_name`` lookup
         # is still attempted after the ``get`` error.
         assert resolved == _DEFAULT_QUEUE_ID
-        captured_queue_repo.get.assert_called_once_with(_VALID_QUEUE_ID)
+        # Validation ``get`` was attempted with the supplied id;
+        # capacity snapshot may also call ``get`` with the resolved
+        # default id. Assert behavioral presence rather than call count.
+        captured_queue_repo.get.assert_any_call(_VALID_QUEUE_ID)
         captured_queue_repo.get_by_name.assert_called_once_with(
             _PROJECT_ID, "system_parallel_queue"
         )
@@ -841,6 +869,127 @@ class TestEnqueueMessageJobProjectlessFallback:
         # the W2 fallback is a wake-all safety net, NOT a duplicate
         # notify path.
         dispatch_bus.notify_new_job.assert_not_called()
+
+
+async def _enqueue_with_capacity_snapshot(
+    *,
+    routing_engine: Any,
+    active_count: int,
+    concurrency_limit: int | None,
+    queue_lookup_error: Exception | None = None,
+):
+    """Run one enqueue and return its capacity snapshot plus repository mock."""
+    queue = _make_queue(
+        _VALID_QUEUE_ID,
+        _PROJECT_ID,
+        concurrency_limit=concurrency_limit,
+    )
+    queue_repo = _build_queue_repo(
+        by_id={_VALID_QUEUE_ID: queue},
+        raise_on_get=queue_lookup_error,
+    )
+    queue_repo.count_jobs_by_admission.return_value = {"active": active_count}
+    job_repo = MagicMock()
+
+    from sqlmodel import Session
+    from daemon.repositories.instance.models import Instance, InstanceStatus
+
+    with Session(routing_engine) as session:
+        session.add(
+            Instance(
+                instance_id="inst-1",
+                agent_id="leader",
+                agent_dir="/path/to/leader",
+                project_id=_PROJECT_ID,
+                status=InstanceStatus.IDLE.value,
+                instance_metadata={"project_id": _PROJECT_ID},
+            )
+        )
+        session.commit()
+
+    manager = _make_manager(
+        queue_repo=queue_repo,
+        job_repo=job_repo,
+        engine=routing_engine,
+    )
+    svc = _make_service(manager)
+    with patch(
+        "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
+    ), patch("daemon.registry.get_registry") as mock_get_registry:
+        registry = MagicMock()
+        registry.get_resolved.return_value = SimpleNamespace(
+            id="leader", path="/path/to/leader"
+        )
+        mock_get_registry.return_value = registry
+        result = await svc.enqueue_message_job(
+            instance_id="inst-1",
+            message="hello",
+            queue_id=_VALID_QUEUE_ID,
+        )
+    return result, queue_repo
+
+
+@pytest.mark.asyncio
+class TestEnqueueMessageJobQueuedSnapshot:
+    """Queue feedback is computed from capacity, not claim-loop timing."""
+
+    @pytest.mark.parametrize(
+        ("active_count", "concurrency_limit", "expected"),
+        [
+            (0, 1, False),
+            (1, 1, True),
+            (3, 5, False),
+            (5, 5, True),
+        ],
+    )
+    async def test_capacity_snapshot(
+        self,
+        routing_engine,
+        active_count: int,
+        concurrency_limit: int,
+        expected: bool,
+    ) -> None:
+        result, queue_repo = await _enqueue_with_capacity_snapshot(
+            routing_engine=routing_engine,
+            active_count=active_count,
+            concurrency_limit=concurrency_limit,
+        )
+
+        assert result.queued is expected
+        queue_repo.count_jobs_by_admission.assert_called_once_with(_VALID_QUEUE_ID)
+
+    async def test_missing_concurrency_limit_defaults_false(
+        self, routing_engine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.instance_messaging"
+        ):
+            result, queue_repo = await _enqueue_with_capacity_snapshot(
+                routing_engine=routing_engine,
+                active_count=1,
+                concurrency_limit=None,
+            )
+
+        assert result.queued is False
+        queue_repo.count_jobs_by_admission.assert_not_called()
+        assert "defaulting queued=False" in caplog.text
+
+    async def test_queue_lookup_failure_defaults_false(
+        self, routing_engine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.instance_messaging"
+        ):
+            result, queue_repo = await _enqueue_with_capacity_snapshot(
+                routing_engine=routing_engine,
+                active_count=1,
+                concurrency_limit=1,
+                queue_lookup_error=RuntimeError("synthetic DB error"),
+            )
+
+        assert result.queued is False
+        queue_repo.count_jobs_by_admission.assert_not_called()
+        assert "defaulting queued=False" in caplog.text
 
 
 # ============================================================
