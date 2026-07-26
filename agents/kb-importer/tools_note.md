@@ -8,7 +8,6 @@
   - LightRAG auto-extracts entities and relationships from the text.
 
 ## Utility Tools
-- `rag_track_status(track_id)` — Check if an async insertion has completed.
 - `time()` — Get current time if needed.
 
 ## Forbidden Tools
