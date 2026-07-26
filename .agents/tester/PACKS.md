@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 196 packs
-- Unit: 157 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
+- Total: 197 packs
+- Unit: 158 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -408,6 +408,13 @@ Feature: pin-to-top + color-tag UI on instance list. New `instance_ui_prefs` tab
 | instance_ui_prefs_api_integration_test | tests/api/test_instance_ui_prefs_api.py | End-to-end HTTP scenarios via httpx.AsyncClient + ASGITransport with a real InstanceUiPrefsRepository against in-memory SQLite (not mocked): (1) PUT pinned=true stamps pinned_at; (2) PUT color_tag=red; (3) PUT color_tag=null CLEARS tag (C1 fix via HTTP); (4) PUT pinned=false clears pinned_at; (5) DELETE removes row + GET shows nulls; (6) GET list includes merged fields; (7) GET single includes merged fields; (8) partial upsert preserves other field; (9) PUT icon_tag=star; (10) PUT icon_tag=null CLEARS tag; (11) GET list includes icon_tag; (12) GET single includes icon_tag; (13) PUT icon_tag+color_tag simultaneously. | 2 min | 2026-07-22 | ✅ PASS (13/13 in 1.22s, feature/instance-ui-pins-tags + icon_tag, 0 failures) |
 | instance_ui_prefs_insulation_check | (ad-hoc static + dynamic) | Agent-tool insulation verification: `Instance.to_dict()` returns 14 keys, NONE are UI prefs; `list_instances` tool delegates to to_dict() with no UI-prefs reference; merge happens ONLY at router layer (daemon/routers/instances.py:316-349, 382-402). Dynamic check confirmed. | 2 min | 2026-07-22 | ✅ PASS (insulation confirmed — 14 keys in to_dict(), zero UI-pref keys, static + dynamic, icon_tag verified) |
 | frontend_instance_ui_build_test | frontend/ (ng build) | Angular 21 production build compile check for the pin/color-tag/icon-tag FE changes (instance-prefs.service.ts, instance-list component, icon picker). No TS/template errors. | 5 min | 2026-07-22 | ✅ PASS (build in 10.26s, 0 errors; pre-existing bundle-size budget warnings only) |
+
+## Pinned-First Sort Feature Packs (2026-07-26)
+Feature: sort pinned instances first in `GET /instances` listing API. `InstanceRepository.list()` LEFT JOINs `instance_ui_prefs`, sorts by `pinned DESC NULLS LAST, pinned_at DESC NULLS LAST, created_at DESC`. Applied to both flat pagination and root-based API pagination paths. Count queries and router-level merge unchanged.
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| instance_list_pinned_sort_unit_test | tests/repositories/test_instance_list_pinned_sort.py | InstanceRepository.list() pinned-first sort: (1) older pinned before newer unpinned, (2) all pinned precede all unpinned, (3) pagination concentrates pinned on page 1, (4) no-prefs-row NULL handling (sorts after pinned), (5) most-recently-pinned first, (6) pinned_at DESC beats created_at DESC, (7) explicit pinned=False sorts above NULL (NULLS LAST edge case). SQLite in-memory. | 2 min | 2026-07-26 | ✅ PASS (7/7 in 1.07s, feature/pinned-instance-sort @ 8fae7b8d, commit 3f3ef0fd, 0 failures) |
 
 ## Injection Queue Feature Packs (2026-07-22)
 
