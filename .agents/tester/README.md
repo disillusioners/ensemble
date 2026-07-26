@@ -19,5 +19,5 @@
 
 ## ensure.md
 - Status: ✅ ACTIVE — `.agents/tester/rules/ensure.md` exists with Core + Release Gate requirements
-- E2E Release Gate (4 tests): last run **2026-07-26 on `feature/queue-dispatch-option-b` (message_id contract fixed)** → ✅ PASS (4/4). happy_path 61s, pause+resume 38s, terminate+revive 45s, 3-level cascade 121s. All 4 exercised real workflow logic (spawn→child→terminal, pause→resume, terminate→revive, cascade). The synchronous `message_id` contract was restored in production code (synchronous Task + MessageQueue creation in `enqueue_message_job`; wake-only `_process_next_job` message branch), so the e2e helpers work unchanged.
+- E2E Release Gate (4 tests): last run **2026-07-26 on `latest` @ `67eb16b1` (FIFO concurrency fix)** → ✅ PASS (4/4). happy_path 49s, pause+resume 38s, terminate+revive 41s, 3-level cascade 118s. No regressions from the FIFO fix. **Also validated FIFO concurrency scenario separately:** concurrency_limit=1 queue serializes messages (2nd Task blocked until 1st finishes — daemon-log confirmed).
 - Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)
