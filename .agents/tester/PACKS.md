@@ -414,7 +414,7 @@ Feature: sort pinned instances first in `GET /instances` listing API. `InstanceR
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| instance_list_pinned_sort_unit_test | tests/repositories/test_instance_list_pinned_sort.py | InstanceRepository.list() pinned-first sort: (1) older pinned before newer unpinned, (2) all pinned precede all unpinned, (3) pagination concentrates pinned on page 1, (4) no-prefs-row NULL handling (sorts after pinned), (5) most-recently-pinned first, (6) pinned_at DESC beats created_at DESC, (7) explicit pinned=False sorts above NULL (NULLS LAST edge case). SQLite in-memory. | 2 min | 2026-07-26 | ✅ PASS (7/7 in 1.07s, feature/pinned-instance-sort @ 8fae7b8d, commit 3f3ef0fd, 0 failures) |
+| instance_list_pinned_sort_unit_test | tests/repositories/test_instance_list_pinned_sort.py | InstanceRepository.list() pinned-first sort via CASE expression (only pinned=True → tier 1; both pinned=False and pinned=NULL → tier 0, tiebreak on created_at DESC then instance_id ASC). 10 tests covering: (1) older pinned before newer unpinned, (2) all pinned precede all unpinned, (3) pagination 6-instance concentration, (4) no-prefs-row NULL sorts after pinned, (5) explicit pinned=False treated same as NULL, (6) most-recently-pinned first, (7) pinned_at DESC beats created_at DESC, (8) exact [TRUE,FALSE,NULL] bug fix, (9) 10+ instance pagination (12 instances/3 pages; pinned + newer FALSE/NULL unpinned on page 1), (10) FALSE+NULL SAME created_at → instance_id ASC tiebreak. SQLite in-memory. | 2 min | 2026-07-26 | ✅ PASS (10/10 in 0.91s, fix/pinned-sort-false-vs-null @ 9f9d3ec4, test commit 72c8825c, 0 failures) |
 
 ## Injection Queue Feature Packs (2026-07-22)
 
