@@ -73,9 +73,35 @@ class MessageCreate(BaseModel):
 
 
 class MessageResponse(BaseModel):
-    """Response after sending a message."""
+    """Response after sending a message.
 
-    message_id: str = Field(..., description="Unique message identifier")
+    Phase 5 (Option B): ``message_id`` is now OPTIONAL. Under the
+    Job-as-Front-Primitive (JAFP) cutover, ``enqueue_message_job`` no
+    longer creates the Task row at enqueue time — the Task is created
+    later at dispatch time inside ``JobProcessor._process_next_job``'s
+    message branch. The HTTP response therefore can only carry the
+    ``job_id`` (JobItem mirror) immediately; the ``message_id`` (Task
+    row) is populated when the dispatch runs. Callers that need
+    ``message_id`` for round-trip correlation should poll
+    ``GET /api/instances/{id}/jobs/{job_id}`` or subscribe to the
+    ``message_queued`` / ``message_dispatched`` SSE events emitted by
+    ``JobProcessor``.
+
+    ``None`` is a transient, valid steady state — *the message is
+    queued, but not yet dispatched*. The field becomes a non-null
+    string after ``JobProcessor`` creates the matching Task row.
+    """
+
+    message_id: str | None = Field(
+        default=None,
+        description=(
+            "Unique message identifier — IDENTIFIER OF THE TASK ROW, not the "
+            "JobItem mirror. ``None`` until ``JobProcessor`` dispatches the "
+            "message and creates the Task row; populated when the Task is "
+            "actually created. Use ``job_id`` for immediate JobItem-mirror "
+            "correlation."
+        ),
+    )
     role: str = Field(..., description="Message role (always 'assistant')")
     content: str | None = Field(default=None, description="Message content")
     thinking: str | None = Field(default=None, description="Thinking from metadata (reasoning_content, etc.)")

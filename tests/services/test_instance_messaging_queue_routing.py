@@ -6,7 +6,7 @@ caller can route the JobItem mirror to a specific JobQueue instead of
 the hardcoded ``system_parallel_queue``. The resolution logic lives in
 ``enqueue_message_job`` (the service method the HTTP route forwards to
 in the NORMAL / IDLE branch) and threads the resolved
-``queue_id_for_job`` into ``JobRepository.create(queue_id=...)``.
+``queue_id_for_job`` into ``JobQueueService.enqueue(queue_id=...)``.
 
 This file exercises the four contract scenarios:
 
@@ -19,12 +19,11 @@ This file exercises the four contract scenarios:
 4. ``queue_id=<nonexistent id>`` — falls back to default, WARNING logged,
    no exception raised.
 
-The repository call that stamps the queue_id onto the JobItem mirror
-(``JobRepository.create``) is what we observe — the assertion captures
-``queue_id=...`` from the kwargs / args and verifies the resolved value.
-We do NOT exercise a real DB because the resolution logic is purely a
-function of the queue repository's metadata lookups; the downstream
-``create`` is exercised by the existing ``tests/job_queue/`` suite.
+The observable side effect we capture is the ``queue_id`` kwarg passed
+to ``JobQueueService.enqueue`` (Phase 5 / Option B cutover: the
+JobItem is now created via the queue path, not via
+``JobRepository.create`` directly). The async entry point is
+``manager._job_queue_service.enqueue`` (an AsyncMock in tests).
 """
 
 from __future__ import annotations
@@ -127,11 +126,12 @@ def _make_manager(
     """Build a manager mock with the queue + job repositories wired
     to the supplied stubs.
 
-    The instance repository lookup that
-    :meth:`enqueue_message_job` performs to discover the instance's
-    ``project_id`` is mocked to return a ``SimpleNamespace`` carrying
-    the requested project id. The full ``_prepare_enqueued_message``
-    prelude is monkeypatched in the test body to skip DB writes.
+    Phase 5 (Option B) cutover: ``enqueue_message_job`` no longer
+    calls ``job_repo.create(...)`` directly. It routes through
+    ``manager._job_queue_service.enqueue(...)`` (an ``AsyncMock``).
+    The queue_repo and job_repo mocks are still wired in case the
+    resolution code touches them, but the primary observable side
+    effect is the ``queue_id`` kwarg passed to ``enqueue``.
     """
     instance_meta = SimpleNamespace(
         instance_id="inst-1",
@@ -148,11 +148,19 @@ def _make_manager(
     # ``manager._job_repository``). Both ``_queue_repo`` and
     # ``_repository`` live on the same ``_job_queue_service`` mock
     # under distinct attribute names — keep them separate so the
-    # resolution code can pull the queue metadata and the JobItem
-    # insert through their own paths.
+    # resolution code can pull the queue metadata through its own
+    # path.
     manager._job_queue_service = MagicMock()
     manager._job_queue_service._queue_repo = queue_repo
     manager._job_queue_service._repository = job_repo
+    # ``enqueue`` is the new dispatch entry point (Option B). It is
+    # async — must be an AsyncMock so the `await` inside
+    # ``enqueue_message_job`` consumes it correctly.
+    fake_job = MagicMock()
+    fake_job.job_id = "job-stub"
+    fake_job.job_type = "message"
+    fake_job.instance_id = "inst-1"
+    manager._job_queue_service.enqueue = AsyncMock(return_value=fake_job)
     manager._live_hub = MagicMock()
     manager._live_hub.stream_status_change = MagicMock()
     manager._worker_pool = MagicMock()
@@ -161,47 +169,18 @@ def _make_manager(
 
 
 def _make_service(manager: MagicMock) -> InstanceMessagingService:
-    """Build an :class:`InstanceMessagingService` around ``manager``,
-    with the prelude and side-effect helpers stubbed so the body of
-    :meth:`enqueue_message_job` runs end-to-end without touching the
-    DB.
+    """Build an :class:`InstanceMessagingService` around ``manager``.
 
-    The single observable side effect we want to capture is the
-    ``queue_id`` kwarg passed to ``JobRepository.create``; the prelude
-    + SSE + title-generation helpers are irrelevant to the queue
-    resolution contract under test.
+    Option B: ``enqueue_message_job`` no longer calls
+    ``_prepare_enqueued_message``; the Task + MessageQueue rows are
+    created at dispatch time inside the JobProcessor message branch.
+    The only observable side effect we capture is the ``queue_id``
+    kwarg passed to ``JobQueueService.enqueue``.
     """
-    svc = InstanceMessagingService(
+    return InstanceMessagingService(
         manager=manager,
         cancellation_service=MagicMock(is_shutting_down=False),
     )
-
-    # Stub the prelude so the test does not require a real DB. The
-    # prelude writes MessageQueue + Task rows in a single transaction;
-    # the resolution logic lives AFTER the prelude, so stubbing it
-    # here does not affect the queue_id routing path.
-    #
-    # The shape must match :class:`_PreparedEnqueueContext` (NamedTuple
-    # in daemon/services/instance_messaging.py) — the resolution code
-    # later reads ``ctx.message_id`` and ``ctx.task_id`` / ``ctx.work_id``
-    # downstream for the JobItem linkage, so all fields must be
-    # present even when the test only cares about the queue_id.
-    from daemon.services.instance_messaging import _PreparedEnqueueContext
-
-    prelude_ctx = _PreparedEnqueueContext(
-        message_id="msg-stub",
-        msg_type="human",
-        status_changed_to_running=False,
-        is_idle_to_running=False,
-        instance_agent_id="leader",
-        previous_status=None,
-        task_id=None,
-        work_id="work-id-stub",
-        is_deferred=False,
-    )
-    svc._prepare_enqueued_message = MagicMock(return_value=prelude_ctx)
-    svc._maybe_trigger_title_generation = MagicMock()
-    return svc
 
 
 @asynccontextmanager
@@ -219,6 +198,10 @@ async def _invoke_enqueue(
     The ``project_id`` defaults to the same project the instance is
     mocked to belong to, so the same project mocks the resolved
     ``requested.project_id`` is compared against.
+
+    Option B cutover: the observable side effect is the ``queue_id``
+    kwarg passed to ``JobQueueService.enqueue`` (not
+    ``JobRepository.create``).
     """
     manager = _make_manager(
         queue_repo=queue_repo,
@@ -244,20 +227,23 @@ async def _invoke_enqueue(
             queue_id=queue_id,
         )
 
-    yield job_repo, queue_repo
+    yield manager._job_queue_service, queue_repo
 
 
-def _captured_queue_id(job_repo: MagicMock) -> str | None:
+def _captured_queue_id(job_queue_service: MagicMock) -> str | None:
     """Return the ``queue_id`` kwarg captured by the most recent
-    ``JobRepository.create`` call.
+    ``JobQueueService.enqueue`` call.
 
-    The resolution code threads the resolved id into
-    ``job_repo.create(..., queue_id=<resolved>, ...)`` at line ~1546
-    of daemon/services/instance_messaging.py. Pull it out of the
-    captured kwargs so the caller can assert on the resolved value.
+    Option B: the resolution code threads the resolved id into
+    ``job_queue_service.enqueue(..., queue_id=<resolved>, ...)`` at
+    ``daemon/services/instance_messaging.py:1484`` (the enqueue-call
+    site). Pull it out of the captured kwargs so the caller can assert
+    on the resolved value.
     """
-    assert job_repo.create.called, "JobRepository.create was not invoked"
-    _, kwargs = job_repo.create.call_args
+    assert job_queue_service.enqueue.called, (
+        "JobQueueService.enqueue was not invoked"
+    )
+    _, kwargs = job_queue_service.enqueue.call_args
     return kwargs.get("queue_id")
 
 
@@ -299,8 +285,8 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=None,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
-            ) as (captured_job_repo, captured_queue_repo):
-                resolved = _captured_queue_id(captured_job_repo)
+            ) as (captured_job_queue_service, captured_queue_repo):
+                resolved = _captured_queue_id(captured_job_queue_service)
 
         assert resolved == _DEFAULT_QUEUE_ID
         # Default resolution path: by-name lookup was used.
@@ -331,8 +317,8 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id="",
                 queue_repo=queue_repo,
                 job_repo=job_repo,
-            ) as (captured_job_repo, captured_queue_repo):
-                resolved = _captured_queue_id(captured_job_repo)
+            ) as (captured_job_queue_service, captured_queue_repo):
+                resolved = _captured_queue_id(captured_job_queue_service)
 
         assert resolved == _DEFAULT_QUEUE_ID
         captured_queue_repo.get_by_name.assert_called_once_with(
@@ -372,8 +358,8 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_VALID_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
-            ) as (captured_job_repo, captured_queue_repo):
-                resolved = _captured_queue_id(captured_job_repo)
+            ) as (captured_job_queue_service, captured_queue_repo):
+                resolved = _captured_queue_id(captured_job_queue_service)
 
         # The caller-supplied id is the one that flowed through.
         assert resolved == _VALID_QUEUE_ID
@@ -417,8 +403,8 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_OTHER_PROJECT_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
-            ) as (captured_job_repo, captured_queue_repo):
-                resolved = _captured_queue_id(captured_job_repo)
+            ) as (captured_job_queue_service, captured_queue_repo):
+                resolved = _captured_queue_id(captured_job_queue_service)
 
         assert resolved == _DEFAULT_QUEUE_ID
         # Validation tried first; default fallback attempted second.
@@ -463,8 +449,8 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_NONEXISTENT_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
-            ) as (captured_job_repo, captured_queue_repo):
-                resolved = _captured_queue_id(captured_job_repo)
+            ) as (captured_job_queue_service, captured_queue_repo):
+                resolved = _captured_queue_id(captured_job_queue_service)
 
         assert resolved == _DEFAULT_QUEUE_ID
         captured_queue_repo.get.assert_called_once_with(_NONEXISTENT_QUEUE_ID)
@@ -503,8 +489,8 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_VALID_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
-            ) as (captured_job_repo, captured_queue_repo):
-                resolved = _captured_queue_id(captured_job_repo)
+            ) as (captured_job_queue_service, captured_queue_repo):
+                resolved = _captured_queue_id(captured_job_queue_service)
 
         # The default queue still wins — the repo error is folded
         # into the same fallback path and the ``get_by_name`` lookup

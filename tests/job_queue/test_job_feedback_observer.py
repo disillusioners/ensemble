@@ -1510,59 +1510,60 @@ class TestObserverHealthCheck:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fix 4: regression tests for the stale ``job_type='message'`` JobItem filter
+# Phase 5 (Option B): ``list_pending_*`` queries NOW include MESSAGE JobItems.
 #
-# Bug summary: ``list_pending_by_project`` and ``list_all_pending`` (in
-# ``daemon/repositories/job_queue/repository.py``) used to surface MESSAGE
-# JobItems to the JobQueue handoff. After a JOB completion, the
-# ``JobFeedbackObserver._trigger_next_job`` call would pick up a stale
-# MESSAGE JobItem (left in ``admission_state='queued'`` from a prior run),
-# then route it through ``start_job`` → ``spawn_instance_with_mcp`` →
-# ``enqueue_message`` — which is exactly the dispatch path MESSAGE JobItems
-# are NOT supposed to flow through (they are dispatched inline by the
-# ``POST /messages`` chokepoint).
+# Pre-Option B (D13 / Fix 1): MESSAGE JobItems were filtered out at the
+# SQL layer in ``list_pending_by_project`` and ``list_all_pending`` to
+# prevent ``_trigger_next_job`` from double-dispatching MESSAGE mirrors
+# via the legacy ``spawn_instance_with_mcp`` path.
 #
-# Fix 1: the two repository methods now add
-# ``.where(JobItem.job_type != "message")`` so MESSAGE rows are filtered
-# out at the SQL layer.
+# Post-Option B: messages flow through the queue and are dispatched by
+# ``JobProcessor._process_next_job``'s message branch
+# (``enqueue_message(work_id=job.job_id)``). The dispatch queries
+# (Phase 1) include ``job_type='message'`` rows so the message branch
+# picks them up. The observer's ``_trigger_next_job`` is reserved for
+# TASK-type completion-triggered handoffs; MESSAGE jobs are dispatched
+# by the JobProcessor polling/event loop, NOT by the observer.
 #
-# The tests below pin both halves of the contract:
+# The tests below pin the new contract:
 #
-#   * ``test_get_next_job_filters_message_type_at_repository_layer`` —
+#   * ``test_get_next_job_includes_message_type_at_repository_layer`` —
 #     direct DB-layer test against a real ``JobRepository`` (using the
 #     ``engine`` / ``repository`` fixtures from ``tests/job_queue/conftest.py``).
 #     Insert one MESSAGE + one TASK row in the same project, both
 #     ``admission_state='queued'`` and ``deleted_at IS NULL``; assert
 #     that both ``list_pending_by_project`` and ``list_all_pending``
-#     return ONLY the TASK row. This is the lower-level invariant.
+#     return BOTH rows. The MESSAGE row is the JobProcessor's dispatch
+#     candidate; the TASK row is the observer's. The split is enforced
+#     upstream (``start_job`` preserves ``instance_id`` for messages,
+#     ``_process_next_job`` routes message-type jobs to
+#     ``enqueue_message``) so the repository layer just surfaces both.
 #
 #   * ``test_trigger_next_job_skips_stale_message_jobitem`` — observer
-#     integration test. Calls ``_trigger_next_job`` directly with a
-#     ``job.project_id`` whose only pending candidate is a stale MESSAGE
-#     JobItem. The mock service's ``_get_next_job`` is wired to return
-#     ``None`` (the post-Fix-1 behavior — the repository layer filters
-#     out MESSAGE rows before they reach the service), so the observer
-#     must NOT call ``start_job``, ``spawn_instance_with_mcp``, or
-#     ``enqueue_message``. This is the upper-level invariant — the
-#     observer must not double-dispatch MESSAGE JobItems regardless of
-#     how ``_get_next_job`` arrived at ``None``.
-#
-# The two tests are deliberately independent (one tests the repo layer,
-# the other tests the observer's "no next job" branch) so that a
-# regression in either layer surfaces as a single failing test.
+#     integration test. The post-Option-B contract: ``_trigger_next_job``
+#     is TASK-only by design. We verify the observer does NOT call
+#     ``start_job`` etc. when only a stale MESSAGE JobItem is pending
+#     (the mock ``_get_next_job`` is wired to return ``None``, mirroring
+#     the post-Phase-5 shape where the observer's TASK-only handoff
+#     short-circuits).
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestTriggerNextJobSkipsStaleMessageJobItem:
-    """Regression tests for the Fix 4 stale MESSAGE JobItem filter.
+    """Observer-side regression for the Phase 5 (Option B) split.
 
-    Pin the post-Fix-1 contract: ``_trigger_next_job`` must NOT trigger
-    ``start_job`` / ``spawn_instance_with_mcp`` / ``enqueue_message`` when
-    the only pending candidate in the project is a stale ``job_type='message'``
-    JobItem left over from a prior run. The filter lives in the
-    ``JobRepository`` (``list_pending_by_project`` / ``list_all_pending``);
-    this test exercises the observer's downstream behavior once that filter
-    has returned ``None``.
+    ``_trigger_next_job`` is reserved for TASK-type completion-triggered
+    handoffs. The MESSAGE branch lives in
+    ``JobProcessor._process_next_job``, not the observer — a stale
+    MESSAGE JobItem picked up by the observer would route through
+    ``start_job`` → ``spawn_instance_with_mcp`` → ``enqueue_message``
+    (the wrong path; messages already flowed through
+    ``enqueue_message_job`` → ``enqueue`` → JobProcessor message branch).
+
+    Pin the observer's TASK-only contract: ``_get_next_job`` returns
+    ``None`` (the post-Phase-5 wrapper excludes MESSAGE JobItems from
+    the observer's TASK-only handoff) and the observer's downstream
+    chain is never entered.
     """
 
     @pytest.mark.asyncio
@@ -1665,42 +1666,110 @@ class TestTriggerNextJobSkipsStaleMessageJobItem:
 
 
 class TestRepositoryFiltersMessageTypeAtPendingQueries:
-    """Repository-layer regression tests for Fix 4.
+    """Repository-layer regression tests for Phase 5 (Option B).
 
-    Pins the post-Fix-1 SQL contract directly against the
-    ``JobRepository``: ``list_pending_by_project`` and ``list_all_pending``
-    MUST exclude ``job_type='message'`` JobItems, even when those rows are
-    in ``admission_state='queued'`` and ``deleted_at IS NULL``.
+    Pins the post-Option-B SQL contract directly against the
+    ``JobRepository``: ``list_pending_by_project`` and
+    ``list_all_pending`` MUST include ``job_type='message'`` JobItems,
+    even when those rows are in ``admission_state='queued'`` and
+    ``deleted_at IS NULL``. The MESSAGE branch in
+    ``JobProcessor._process_next_job`` is what dispatches them — the
+    observer's ``_trigger_next_job`` is TASK-only.
 
-    These are the lower-level guards that the ``_trigger_next_job``
-    integration test above depends on — if these filters regress,
-    ``_get_next_job`` will start surfacing stale MESSAGE rows again and
-    the observer test will (correctly) start failing too. Keeping them as
-    separate tests means a regression in either layer produces a single,
-    clearly-attributed failure.
+    The split is enforced at the dispatch layer (not the SQL layer):
+    ``start_job`` preserves ``instance_id`` for messages and the
+    ``_process_next_job`` message branch routes to
+    ``enqueue_message(work_id=job.job_id)``. The repository layer
+    surfaces both row types so the JobProcessor can pick the right
+    branch.
     """
 
-    def test_get_next_job_filters_message_type_at_repository_layer(self, repository):
-        """``list_pending_by_project`` / ``list_all_pending`` exclude MESSAGE JobItems.
+    def test_get_next_job_includes_message_type_at_repository_layer(self, repository):
+        """``list_pending_by_project`` / ``list_all_pending`` include MESSAGE JobItems.
 
         Setup: two JobItems in the same project, both freshly created
         (``admission_state='queued'`` by default, ``deleted_at IS NULL``).
-        One ``job_type='message'`` (the stale-row candidate that triggered
-        the bug), one ``job_type='task'``.
+        One ``job_type='message'`` (the JobProcessor's dispatch
+        candidate), one ``job_type='task'``.
 
-        Expected (Fix 1 contract):
-          * ``list_pending_by_project(project_id)`` returns exactly the TASK
-            row — the MESSAGE row must be filtered out.
-          * ``list_all_pending()`` (project_id-less path used by
-            ``_get_next_job`` when called without a project) also returns
-            only the TASK row.
-
-        Uses the real ``JobRepository`` backed by the in-memory SQLite
-        engine from the session-scoped ``engine`` fixture in
-        ``tests/job_queue/conftest.py`` (autouse
-        ``_truncate_tables`` fixture isolates each test). The same SQL is
-        portable to PostgreSQL — no SQLite-only constructs are used.
+        Phase 5 (Option B) contract: BOTH rows surface through the
+        dispatch queries. The TASK/MESSAGE dispatch split is enforced
+        by ``JobProcessor._process_next_job`` (the message branch
+        routes to ``enqueue_message``; the task branch routes to
+        ``spawn_instance_with_mcp``). The SQL layer is back to
+        surfacing both row types — the pre-Phase-5
+        ``job_type != 'message'`` filter was removed because
+        excluding messages from the dispatch queries would prevent the
+        message branch from picking them up at all.
         """
+        project_id = "test-project"
+
+        # Insert both rows. The repository defaults ``admission_state`` to
+        # ``QUEUED`` and leaves ``deleted_at`` NULL — exactly the
+        # ``admission_state='queued'`` + ``deleted_at IS NULL`` shape the
+        # JobProcessor's ``list_pending_by_queue`` selects on.
+        message_job = repository.create(
+            agent_id="test-agent",
+            agent_dir="./agents/test-agent",
+            message="MESSAGE JobItem dispatched by JobProcessor message branch",
+            source="api",
+            project_id=project_id,
+            priority=5,
+            job_type="message",
+        )
+        task_job = repository.create(
+            agent_id="test-agent",
+            agent_dir="./agents/test-agent",
+            message="TASK JobItem dispatched by JobProcessor task branch",
+            source="api",
+            project_id=project_id,
+            priority=5,
+            job_type="task",
+        )
+
+        # Sanity: both rows were actually persisted in QUEUED state with
+        # deleted_at IS NULL.
+        assert message_job.job_type == "message"
+        assert task_job.job_type == "task"
+        assert message_job.job_id != task_job.job_id
+
+        # ── list_pending_by_project ──
+        # Phase 5 (Option B) contract: BOTH rows surface. The TASK vs
+        # MESSAGE dispatch split lives in
+        # ``JobProcessor._process_next_job`` (the message branch
+        # routes to ``enqueue_message(work_id=job.job_id)``), not the
+        # SQL layer.
+        pending_by_project = repository.list_pending_by_project(project_id)
+
+        returned_ids = {j.job_id for j in pending_by_project}
+        assert task_job.job_id in returned_ids, (
+            "TASK row was filtered out by list_pending_by_project — "
+            "the dispatch query must surface TASK candidates"
+        )
+        assert message_job.job_id in returned_ids, (
+            "MESSAGE row was filtered out by list_pending_by_project — "
+            "the Phase 5 dispatch path requires the query to surface "
+            "MESSAGE candidates so JobProcessor._process_next_job's "
+            "message branch can pick them up"
+        )
+
+        # ── list_all_pending ──
+        # The no-project_id / no-queue_id path (``list_all_pending``)
+        # is used as a fallback by some legacy handoffs. Same contract
+        # applies: BOTH rows surface.
+        pending_all = repository.list_all_pending()
+
+        returned_ids_all = {j.job_id for j in pending_all}
+        assert task_job.job_id in returned_ids_all, (
+            "TASK row was filtered out by list_all_pending — "
+            "the dispatch query must surface TASK candidates"
+        )
+        assert message_job.job_id in returned_ids_all, (
+            "MESSAGE row was filtered out by list_all_pending — "
+            "the Phase 5 dispatch path requires the query to surface "
+            "MESSAGE candidates so JobProcessor._process_next_job's "
+            "message branch can pick them up"
+        )
         project_id = "test-project"
 
         # Insert both rows. The repository defaults ``admission_state`` to
@@ -1728,43 +1797,44 @@ class TestRepositoryFiltersMessageTypeAtPendingQueries:
 
         # Sanity: both rows were actually persisted in QUEUED state with
         # deleted_at IS NULL — these are the conditions under which the
-        # pre-Fix-1 bug surfaced.
+        # pre-Phase-5 bug surfaced.
         assert message_job.job_type == "message"
         assert task_job.job_type == "task"
         assert message_job.job_id != task_job.job_id
 
         # ── list_pending_by_project ──
-        # Fix 1 contract: the repository MUST filter out the MESSAGE row
-        # so the JobQueue handoff (which calls this through
-        # ``_get_next_job``) cannot pick it up.
+        # Phase 5 (Option B) contract: the repository MUST surface BOTH
+        # rows so the JobProcessor's dispatch loop picks the right
+        # branch (message → enqueue_message, task → spawn_instance_with_mcp).
         pending_by_project = repository.list_pending_by_project(project_id)
 
         returned_ids = {j.job_id for j in pending_by_project}
         assert task_job.job_id in returned_ids, (
             "TASK row was filtered out by list_pending_by_project — "
-            "Fix 1 over-filtered and now drops legitimate task candidates"
+            "the dispatch query must surface TASK candidates"
         )
-        assert message_job.job_id not in returned_ids, (
-            "MESSAGE row leaked through list_pending_by_project — "
-            "Fix 1 has regressed; stale MESSAGE JobItems will now be "
-            "double-dispatched via _trigger_next_job"
+        assert message_job.job_id in returned_ids, (
+            "MESSAGE row was filtered out by list_pending_by_project — "
+            "the Phase 5 dispatch path requires the query to surface "
+            "MESSAGE candidates so JobProcessor._process_next_job's "
+            "message branch can pick them up"
         )
 
         # ── list_all_pending ──
-        # The no-project_id code path (``_get_next_job`` with neither
-        # queue_id nor project_id) goes through ``list_all_pending`` —
-        # same filter MUST apply there.
+        # The no-project_id code path goes through ``list_all_pending``
+        # — same Phase 5 (Option B) contract applies.
         pending_all = repository.list_all_pending()
 
         returned_ids_all = {j.job_id for j in pending_all}
         assert task_job.job_id in returned_ids_all, (
             "TASK row was filtered out by list_all_pending — "
-            "Fix 1 over-filtered and now drops legitimate task candidates"
+            "the dispatch query must surface TASK candidates"
         )
-        assert message_job.job_id not in returned_ids_all, (
-            "MESSAGE row leaked through list_all_pending — "
-            "Fix 1 has regressed; stale MESSAGE JobItems will now be "
-            "double-dispatched via _trigger_next_job"
+        assert message_job.job_id in returned_ids_all, (
+            "MESSAGE row was filtered out by list_all_pending — "
+            "the Phase 5 dispatch path requires the query to surface "
+            "MESSAGE candidates so JobProcessor._process_next_job's "
+            "message branch can pick them up"
         )
 
 

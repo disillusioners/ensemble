@@ -4906,7 +4906,7 @@ class InstanceManager:
                     images=images,
                     metadata={"resume_mode": True, "silent": silent},
                 )
-                logger.info(f"Child instance {instance_id[:8]}... enqueued via WorkerPool: message_id={result.message_id[:8]}...")
+                logger.info(f"Child instance {instance_id[:8]}... enqueued via WorkerPool: message_id={result.message_id[:8] if result.message_id else None}...")
                 return {
                     "instance_id": instance_id,
                     "job_id": None,

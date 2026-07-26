@@ -114,6 +114,12 @@ class MockJob:
         self.message = "test message"
         self.source = "api"
         self.instance_id = None
+        # Phase 5 (Option B): ``JobProcessor._process_next_job`` checks
+        # ``job.job_type`` to route the message branch. The mock must
+        # carry the same attribute; the default ``task`` matches the
+        # pre-Option-B test contract (no message-type jobs in this
+        # file).
+        self.job_type = "task"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1004,16 +1004,91 @@ class JobProcessor:
                         f"admission_state={started_job.admission_state}"
                     )
 
-                    # D13 (Phase 2): the legacy MESSAGE dispatch branch
-                    # via JobFeedbackObserver has been removed. Messages
-                    # no longer create JobItem rows (see
-                    # InstanceMessagingService.enqueue_message) — they
-                    # write only Task + MessageQueue rows. The
-                    # JobProcessor therefore only handles TASK-type
-                    # dispatch-queue jobs from this point forward.
-                    # Phase 3 (D11) completed the cleanup of legacy
-                    # admission-path code in the observer.
+                    # Phase 5 (Option B): MESSAGE BRANCH.
+                    # Message jobs target an EXISTING instance — skip the
+                    # ``spawn_instance_with_mcp`` call (which would create
+                    # a duplicate instance) and route to ``enqueue_message``
+                    # to write the Task + MessageQueue rows. The existing
+                    # instance's instance_id is preserved by
+                    # ``start_job`` (see ``JobQueueService.start_job``'s
+                    # instance_id preservation for message jobs).
+                    if job.job_type == "message":
+                        # Fire-and-forget: after ``enqueue_message``
+                        # returns, ``_process_next_job`` moves on.
+                        # ``JobFeedbackObserver`` owns terminal transitions
+                        # and the slot lock release on instance completion.
+                        # We only call ``complete_job(FAILED)`` on the
+                        # enqueue_message failure path.
+                        try:
+                            # Extract dispatch-time metadata (stored on the
+                            # JobItem's JSON ``job_metadata`` column at
+                            # ``enqueue_message_job`` time).
+                            job_meta = job.job_metadata or {}
+                            result = await self._instance_manager.enqueue_message(
+                                instance_id=started_job.instance_id,
+                                message=job.message,
+                                source=job.source,
+                                images=job_meta.get("images"),
+                                metadata=job_meta,
+                                is_deferred=bool(job_meta.get("is_deferred", False)),
+                                is_background=bool(job_meta.get("is_background", False)),
+                                # ``work_id == job_id`` is the linkage
+                                # contract — ``enqueue_message`` stamps it
+                                # onto the Task row so F10 drift detection
+                                # and the work resolver can correlate
+                                # Task ↔ JobItem precisely.
+                                work_id=job.job_id,
+                            )
+                            # Best-effort: stamp the message_id onto the
+                            # JobItem for the cross-system guard in
+                            # ``claim_pending_task``. Failure is non-fatal
+                            # — the dispatch has already succeeded.
+                            if result and result.message_id:
+                                try:
+                                    await asyncio.to_thread(
+                                        self._queue_service._repository.stamp_message_id,
+                                        job.job_id,
+                                        result.message_id,
+                                    )
+                                except Exception as stamp_err:
+                                    logger.warning(
+                                        f"JobProcessor (message branch): "
+                                        f"stamp_message_id failed for "
+                                        f"job {job.job_id[:8]}...: {stamp_err}"
+                                    )
+                            logger.info(
+                                f"JobProcessor (message branch): delivered "
+                                f"job {job.job_id[:8]}... to instance "
+                                f"{started_job.instance_id[:8] if started_job.instance_id else 'N/A'}..."
+                            )
+                            # S1 fix: clear the in-progress tracking
+                            # entry on the SUCCESS path too. Prior code
+                            # only cleared it on the enqueue_message
+                            # failure branch (the ``except`` block
+                            # below), which meant every successful
+                            # message job leaked an entry in
+                            # ``_last_in_progress`` /
+                            # ``_in_progress_since`` — over time the
+                            # dicts grew without bound. The dispatch
+                            # itself succeeds, the JobItem stays
+                            # ``active`` until
+                            # ``JobFeedbackObserver`` releases the
+                            # slot, so the cleanup is safe here.
+                            self._cleanup_in_progress_tracking(job.job_id)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to enqueue message for job "
+                                f"{job.job_id[:8]}...: {e}"
+                            )
+                            await self._queue_service.complete_job(
+                                job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                            )
+                            self._cleanup_in_progress_tracking(job.job_id)
+                        # Skip the task-path spawn below — message jobs
+                        # use the existing instance.
+                        continue
 
+                    # === TASK PATH (existing) ===
                     # Spawn instance for this job
                     try:
                         instance_id = await self._instance_manager.spawn_instance_with_mcp(

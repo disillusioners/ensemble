@@ -1208,6 +1208,27 @@ class InstanceMessagingService:
             work_id=work_id,
         )
 
+        # Phase 5 (Option B): when this message is being delivered via
+        # the JobProcessor's message branch, ``ctx.work_id`` is the
+        # shared UUID linking the Task ↔ JobItem. Stamp the
+        # ``message_id`` onto the JobItem mirror so the cross-system
+        # guard in ``claim_pending_task`` can correlate active MESSAGE
+        # JobItems with their ``message_queue`` row. Failure is
+        # non-fatal (same pattern as JobProcessor L1059-1069).
+        if ctx.work_id:
+            try:
+                await asyncio.to_thread(
+                    self._manager._job_queue_service._repository.stamp_message_id,
+                    ctx.work_id,
+                    ctx.message_id,
+                )
+            except Exception:
+                logger.debug(
+                    f"enqueue_message: stamp_message_id failed for "
+                    f"work_id={ctx.work_id[:8]}...",
+                    exc_info=True,
+                )
+
         # Emit status_change event if status was changed to running
         if ctx.status_changed_to_running:
             await self._manager._live_hub.stream_status_change(
@@ -1285,414 +1306,204 @@ class InstanceMessagingService:
         is_background: bool = False,
         queue_id: str | None = None,
     ) -> "AsyncMessageResult":
-        """POC variant of :meth:`enqueue_message` that also creates a JobItem.
+        """Submit a message to the queue as a JobItem (Option B).
 
-        Mirrors ``enqueue_message`` end-to-end, then additionally creates a
-        ``JobItem(job_type='message', job_id=task.work_id, admission_state='queued')``
-        in the same logical dispatch window. The JobItem is the
-        informational mirror of the Task's running state — the Task is
-        still the authoritative serialization gate.
+        Phase 5 (Option B): route the message through
+        :meth:`JobQueueService.enqueue` (real slot-based concurrency
+        enforcement via ``job_locks``) instead of the legacy D13 inline
+        write path. The ``JobProcessor._process_next_job`` message branch
+        picks the JobItem up, acquires a slot, and routes the delivery
+        to :meth:`enqueue_message` for the existing instance.
 
-        Why a sibling method instead of a flag on ``enqueue_message``:
+        This is the unified public entry point that replaces both
+        ``enqueue_message`` (kept for backwards compatibility) and the
+        prior D13 mirror-creation path. The HTTP ``POST /messages``
+        route and ``job_continue`` tool flow through this method.
 
-        * The existing D13 flow (``enqueue_message`` only writes Task +
-          MessageQueue) is frozen. A parallel method keeps the diff
-          additive so a flag flip can A/B the two without one path
-          silently regressing.
-        * ``JobQueueService.enqueue_job`` rejects ``job_type='message'``
-          with ``ValueError`` (D13 defense-in-depth). This method calls
-          ``JobRepository.create`` directly — the lowest-level insert
-          that bypasses the service-layer guard.
+        Architecture:
+            1. Resolve the target instance's project_id + queue_id
+               (cross-project guard, default ``system_parallel_queue``).
+            2. Call ``JobQueueService.enqueue(job_type='message',
+               instance_id=instance_id, ...)`` — this creates the
+               JobItem in ``admission_state='queued'`` with the
+               existing instance_id preserved. ``enqueue`` emits
+               ``dispatch_bus.notify_new_job()`` to wake the
+               ``JobProcessor`` near-instantly.
+            3. Return ``AsyncMessageResult`` with ``status='queued'``
+               and ``job_id`` set to the JobItem's UUID. ``message_id``
+               is ``None`` — it is created at dispatch time inside
+               ``enqueue_message`` (see :meth:`_process_next_job`'s
+               message branch).
 
-        JobItem ↔ Task linkage:
-
-        * ``job_id = task.work_id`` — the same UUID4 minted by the Task
-          model's ``default_factory`` in the prelude. The
-          ``stamp_message_id`` correlation key goes onto the JobItem's
-          ``metadata.message_id`` so the cross-system guard can resolve
-          a claimed MESSAGE JobItem back to the originating message.
-        * ``instance_id`` matches the Task row. The post-claim
-          activation in ``worker_pool`` flips the JobItem queued→active
-          as an informational mirror; the Task's running state remains
-          the authoritative gate.
+        Concurrency: ``concurrency_limit`` on the resolved queue is
+        NOW ENFORCED for messages. With a FIFO queue at
+        ``concurrency_limit=1``, two messages to the same/different
+        instances run strictly serially.
 
         Failure handling:
-
-        * If the JobRepository is unavailable (test fixtures), the
-          method logs and skips JobItem creation — ``enqueue_message``
-          semantics are preserved so callers don't see a regression.
-        * If ``JobRepository.create`` or ``stamp_message_id`` raises,
-          the exception is logged at warning level and the Task row
-          remains the sole dispatch primitive. The message still gets
-          processed (Task IS the dispatch primitive); the JobItem is a
-          derived mirror, not a gate.
+            * Any exception in the resolve or enqueue step propagates
+              to the caller. The Task row has not been written yet, so
+              there is no work to roll back. The caller (``POST /messages``
+              HTTP route, ``job_continue`` tool) surfaces the error
+              through its normal error channel.
+            * JobItem creation failure inside ``enqueue`` is handled
+              by the lower layer — see :meth:`JobQueueService.enqueue`.
 
         Args:
-            instance_id: Target instance ID.
+            instance_id: Target instance ID (the existing instance that
+                will receive the message).
             message: User content.
             source: Source tag (e.g. ``"api"``, ``"telegram:user:1"``).
-            priority: 0=system, 1=user (matches ``enqueue_message``).
+            priority: 0=system, 1=user.
             images: Optional base64 images for vision messages.
             metadata: Optional metadata dict.
-            is_deferred: Forwarded to ``enqueue_message`` — stamps
-                ``Task.is_deferred=True`` so the worker pool's idle gate
-                holds the task until every non-defer queue is empty.
+            is_deferred: Forwarded to ``enqueue_message`` at dispatch
+                time — stamps ``Task.is_deferred=True`` so the worker
+                pool's idle gate holds the task.
             is_background: Forwarded to ``enqueue_message`` — stamps
-                ``Task.is_background=True`` so the dispatcher routes the
-                work onto the background queue instead of the foreground
-                message lane.
+                ``Task.is_background=True`` for background routing.
+            queue_id: Optional queue override. Validated against the
+                target project; falls back to ``system_parallel_queue``
+                on mismatch.
 
         Returns:
-            ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
-            ``status="queued"``, and ``job_id`` populated as the shared
-            UUID4 (Task.work_id == JobItem.job_id). HTTP callers discard
-            ``job_id``; tooling that needs the cross-system handle
-            receives a real one.
+            ``AsyncMessageResult`` with ``message_id=None`` (created at
+            dispatch), ``instance_id=instance_id``, ``status='queued'``
+            (waiting for slot), and ``job_id`` populated as the
+            JobItem's UUID4.
         """
-        from ..registry import get_registry
-        from ..repositories.job_queue.models import AdmissionState
+        # --- Step 1: Resolve queue_id (reuse existing logic) ---
+        # We need the instance's project_id (authoritative
+        # ``instances.project_id`` column — NOT the LLM-controllable
+        # ``instance_metadata.project_id``) and the resolved queue_id
+        # (cross-project guard, default ``system_parallel_queue``).
 
-        # Step 1: write MessageQueue + Task via the frozen prelude.
-        # This mints ``job_id = task.work_id`` (UUID4) inside the same
-        # transaction as the MessageQueue row.
-        job_id = str(uuid.uuid4())
-        ctx = await asyncio.to_thread(
-            self._prepare_enqueued_message,
-            instance_id=instance_id,
+        # 1a. Resolve project_id from the instance row.
+        project_id_for_job: str | None = None
+        instance_meta = None
+        try:
+            instance_meta = await asyncio.to_thread(
+                self._manager._instance_repository.get, instance_id
+            )
+            if instance_meta is not None:
+                raw_project_id = instance_meta.project_id
+                project_id_for_job = normalize_project_id(raw_project_id)
+        except Exception as project_err:
+            logger.debug(
+                f"enqueue_message_job: failed to resolve project_id "
+                f"for instance {instance_id[:8]}...: "
+                f"{type(project_err).__name__}: {project_err}"
+            )
+
+        if project_id_for_job is None:
+            logger.warning(
+                "Instance %s has no project_id; queue routing will use default",
+                instance_id,
+            )
+
+        # 1b. Resolve agent_id from the instance (for JobItem row).
+        agent_id_for_job = (
+            instance_meta.agent_id if instance_meta is not None else None
+        ) or "default"
+
+        # 1c. Resolve queue_id (cross-project guard).
+        queue_id_for_job: str | None = None
+        queue_id_supplied = bool(queue_id and queue_id.strip())
+        if project_id_for_job is not None:
+            queue_repo = getattr(
+                getattr(self._manager, "_job_queue_service", None),
+                "_queue_repo",
+                None,
+            )
+            if queue_repo is not None:
+                try:
+                    if queue_id_supplied:
+                        try:
+                            requested = await asyncio.to_thread(
+                                queue_repo.get, queue_id
+                            )
+                        except Exception as get_err:
+                            logger.warning(
+                                "enqueue_message_job: queue_repo.get "
+                                f"failed for queue_id={queue_id!r} "
+                                f"on project {project_id_for_job}: "
+                                f"{type(get_err).__name__}: {get_err}; "
+                                "falling back to default "
+                                "system_parallel_queue"
+                            )
+                            requested = None
+                        if (
+                            requested is not None
+                            and getattr(requested, "project_id", None)
+                            == project_id_for_job
+                        ):
+                            queue_id_for_job = requested.queue_id
+                        else:
+                            mismatch_reason = (
+                                "not_found_or_repo_error"
+                                if requested is None
+                                else "wrong_project"
+                            )
+                            logger.warning(
+                                "enqueue_message_job: caller-supplied "
+                                f"queue_id={queue_id!r} is invalid "
+                                f"({mismatch_reason}) for project "
+                                f"{project_id_for_job}; falling back "
+                                "to default system_parallel_queue"
+                            )
+                    if queue_id_for_job is None:
+                        try:
+                            queue = await asyncio.to_thread(
+                                queue_repo.get_by_name,
+                                project_id_for_job,
+                                "system_parallel_queue",
+                            )
+                        except Exception as by_name_err:
+                            logger.warning(
+                                "enqueue_message_job: queue_repo."
+                                "get_by_name failed for project "
+                                f"{project_id_for_job}: "
+                                f"{type(by_name_err).__name__}: "
+                                f"{by_name_err}; leaving queue_id "
+                                "unset on the JobItem"
+                            )
+                            queue = None
+                        if queue is not None:
+                            queue_id_for_job = queue.queue_id
+                except Exception as queue_lookup_err:
+                    logger.debug(
+                        f"enqueue_message_job: unexpected error "
+                        f"resolving queue_id for project "
+                        f"{project_id_for_job}: "
+                        f"{type(queue_lookup_err).__name__}: "
+                        f"{queue_lookup_err}"
+                    )
+
+        # --- Step 2: Enqueue via JobQueueService (real concurrency enforcement) ---
+        # The repository call passes ``job_type='message'`` and ``instance_id=instance_id``.
+        job_item = await self._manager._job_queue_service.enqueue(
+            agent_id=agent_id_for_job,
             message=message,
             source=source,
+            project_id=project_id_for_job,
             priority=priority,
-            images=images,
-            metadata=metadata,
-            is_deferred=is_deferred,
-            is_background=is_background,
-            work_id=job_id,
+            metadata={
+                **(metadata or {}),
+                "images": images or [],
+                "is_deferred": is_deferred,
+                "is_background": is_background,
+            },
+            queue_id=queue_id_for_job,
+            job_type="message",
+            instance_id=instance_id,
         )
 
-        # Step 2: emit status change if IDLE/WAITING_CHILDREN → RUNNING.
-        # Mirrors ``enqueue_message``'s post-prelude SSE emit so the
-        # frontend sees identical behavior on the wire.
-        if ctx.status_changed_to_running:
-            await self._manager._live_hub.stream_status_change(
-                instance_id, InstanceStatus.RUNNING.value, agent_id=ctx.instance_agent_id
-            )
-
-        # Step 3: fire-and-forget title generation for the first message.
-        self._maybe_trigger_title_generation(
-            instance_id, message, ctx.is_idle_to_running
-        )
-
-        # Step 4: create the JobItem mirror. Best-effort — the Task is
-        # the authoritative dispatch primitive, so a JobItem creation
-        # failure must not break message enqueue. When the JobRepository
-        # is unavailable (test fixtures, pre-wiring bootstrap) we
-        # quietly skip the mirror creation.
-        job_repo = self._job_repository
-        if job_repo is None:
-            logger.debug(
-                "enqueue_message_job: JobRepository unavailable for instance "
-                f"{instance_id[:8]}... — skipping JobItem mirror creation. "
-                "Task row remains the sole dispatch primitive."
-            )
-        else:
-            try:
-                # Resolve agent_dir from the registry. Same lookup
-                # JobQueueService.enqueue_job uses; we can't share the
-                # helper without dragging in the project_id resolution
-                # path that the message flow does not have.
-                agent_id_for_job = ctx.instance_agent_id or "default"
-                registry = get_registry()
-                agent_meta = registry.get_resolved(agent_id_for_job)
-                if agent_meta is None:
-                    # Fall back to the instance's stored agent_id if
-                    # registry lookup fails (e.g. unregistered agent).
-                    # The JobItem still gets a usable row; downstream
-                    # consumers can re-resolve.
-                    agent_dir_value = ""
-                    resolved_agent_id = agent_id_for_job
-                else:
-                    agent_dir_value = str(agent_meta.path)
-                    resolved_agent_id = agent_meta.id
-
-                # Resolve the instance's project_id so the message
-                # JobItem is project-scoped. Without this the JobItem is
-                # stored with a NULL project_id and disappears from
-                # project-scoped views (e.g. the Jobs UI refresh with a
-                # project filter active drops a paused message job even
-                # though its instance belongs to the project).
-                # ``instances.project_id`` is the authoritative source
-                # (set by ``InstanceLifecycleService.spawn_instance``);
-                # normalize so a missing value falls back to the system
-                # default project instead of NULL.
-                project_id_for_job: str | None = None
-                try:
-                    instance_meta = await asyncio.to_thread(
-                        self._manager._instance_repository.get, instance_id
-                    )
-                    if instance_meta is not None:
-                        # W1 (security): drop the
-                        # ``instance_metadata.get("project_id")`` fallback.
-                        # ``instance_metadata`` is written by
-                        # ``spawn_instance`` from prompts/inputs an LLM can
-                        # influence, so it is not a trustworthy source of
-                        # project identity. The DB column
-                        # ``instances.project_id`` — set by the
-                        # authoritative ``InstanceLifecycleService`` — is
-                        # the only source we accept here.
-                        raw_project_id = instance_meta.project_id
-                        project_id_for_job = normalize_project_id(raw_project_id)
-                except Exception as project_err:
-                    logger.debug(
-                        f"enqueue_message_job: failed to resolve project_id "
-                        f"for instance {instance_id[:8]}...: "
-                        f"{type(project_err).__name__}: {project_err}"
-                    )
-
-                if project_id_for_job is None:
-                    # Either the instance row was missing, the lookup
-                    # raised (DEBUG-logged above), or the instance has
-                    # no project_id stamped. None of those is a valid
-                    # state for queue routing — the JobItem mirror will
-                    # fall back to the default queue. WARNING so
-                    # operators can spot instances whose project_id is
-                    # not set (would silently lose cross-project
-                    # isolation previously masked by the metadata
-                    # fallback).
-                    logger.warning(
-                        "Instance %s has no project_id; queue routing will use default",
-                        instance_id,
-                    )
-
-                # Resolve the JobQueue id the message JobItem mirror is
-                # stamped with. Resolution order:
-                #   1. Caller-supplied ``queue_id`` — validated for
-                #      existence (via ``queue_repo.get``) and project
-                #      ownership. A repo error, an unknown id, or an id
-                #      belonging to a different project all fall back to
-                #      the default with a WARNING — graceful degradation,
-                #      never a 4xx.
-                #   2. Default ``system_parallel_queue`` for the resolved
-                #      project — the pre-existing behaviour when no
-                #      ``queue_id`` is supplied. Preserves backward
-                #      compatibility for every caller that does not pass
-                #      the new field.
-                #
-                # The two lookups share a single try/except so a transient
-                # DB error from either is logged at DEBUG, but the
-                # individual steps are NOT short-circuited by each
-                # other: a ``get`` failure must not skip the
-                # ``get_by_name`` fallback, and vice versa. The spec
-                # requires the default to win on any per-lookup error.
-                queue_id_for_job: str | None = None
-                queue_id_supplied = bool(queue_id and queue_id.strip())
-                if project_id_for_job is not None:
-                    # ``JobQueueService`` exposes ``_queue_repo``
-                    # (``JobQueueRepository``) for queue metadata;
-                    # ``_repository`` is the ``JobRepository`` for jobs
-                    # and does not have ``get_by_name``. Earlier
-                    # revisions looked up ``_repository`` here and the
-                    # resulting ``AttributeError`` was silently
-                    # swallowed by the try/except below, leaving
-                    # ``queue_id_for_job = None`` in production.
-                    queue_repo = getattr(
-                        getattr(self._manager, "_job_queue_service", None),
-                        "_queue_repo",
-                        None,
-                    )
-                    if queue_repo is not None:
-                        try:
-                            if queue_id_supplied:
-                                # Validate the caller-supplied id
-                                # against the repository. ``get`` returns
-                                # ``None`` for unknown ids; any exception
-                                # (DB outage, typed error) is folded into
-                                # the same fallback path.
-                                try:
-                                    requested = await asyncio.to_thread(
-                                        queue_repo.get, queue_id
-                                    )
-                                except Exception as get_err:
-                                    logger.warning(
-                                        "enqueue_message_job: queue_repo.get "
-                                        f"failed for queue_id={queue_id!r} "
-                                        f"on project {project_id_for_job}: "
-                                        f"{type(get_err).__name__}: {get_err}; "
-                                        "falling back to default "
-                                        "system_parallel_queue"
-                                    )
-                                    requested = None
-                                if (
-                                    requested is not None
-                                    and getattr(requested, "project_id", None)
-                                    == project_id_for_job
-                                ):
-                                    queue_id_for_job = requested.queue_id
-                                else:
-                                    # Wrong project, or id not found, or
-                                    # lookup errored — log + fall back to
-                                    # the default. The two error
-                                    # conditions are distinct log
-                                    # messages so operators can tell
-                                    # "bad caller" from "broken repo".
-                                    if requested is None:
-                                        mismatch_reason = "not_found_or_repo_error"
-                                    else:
-                                        mismatch_reason = "wrong_project"
-                                    logger.warning(
-                                        "enqueue_message_job: caller-supplied "
-                                        f"queue_id={queue_id!r} is invalid "
-                                        f"({mismatch_reason}) for project "
-                                        f"{project_id_for_job}; falling back "
-                                        "to default system_parallel_queue"
-                                    )
-                            if queue_id_for_job is None:
-                                # Default resolution — either the caller
-                                # did not supply a queue_id, or the
-                                # supplied one failed validation above.
-                                try:
-                                    queue = await asyncio.to_thread(
-                                        queue_repo.get_by_name,
-                                        project_id_for_job,
-                                        "system_parallel_queue",
-                                    )
-                                except Exception as by_name_err:
-                                    logger.warning(
-                                        "enqueue_message_job: queue_repo."
-                                        "get_by_name failed for project "
-                                        f"{project_id_for_job}: "
-                                        f"{type(by_name_err).__name__}: "
-                                        f"{by_name_err}; leaving queue_id "
-                                        "unset on the JobItem mirror"
-                                    )
-                                    queue = None
-                                if queue is not None:
-                                    queue_id_for_job = queue.queue_id
-                        except Exception as queue_lookup_err:
-                            # Catch-all for any unexpected error outside
-                            # the two guarded lookups (e.g. the
-                            # ``getattr`` chain). The per-lookup guards
-                            # above already cover the documented failure
-                            # modes; this branch is purely defensive
-                            # against future regressions.
-                            logger.debug(
-                                f"enqueue_message_job: unexpected error "
-                                f"resolving queue_id for project "
-                                f"{project_id_for_job}: "
-                                f"{type(queue_lookup_err).__name__}: "
-                                f"{queue_lookup_err}"
-                            )
-
-                # Bypass JobQueueService.enqueue_job (D13 rejects
-                # job_type='message') and call the repository's low-level
-                # create() directly. The repository already sets
-                # admission_state=QUEUED by default — no need to override.
-                #
-                # ``job_id=job_id`` is the linkage handle: the same
-                # UUID4 we passed to ``_prepare_enqueued_message(work_id=...)``
-                # is forwarded to ``JobItem.job_id`` so the two rows
-                # share one handle (the linkage contract). Passing it
-                # explicitly suppresses ``JobItem``'s ``default_factory``
-                # for this row, which is what makes the equality hold.
-                await asyncio.to_thread(
-                    job_repo.create,
-                    agent_id=resolved_agent_id,
-                    agent_dir=agent_dir_value,
-                    message=message,
-                    source=source,
-                    project_id=project_id_for_job,
-                    priority=priority,
-                    job_metadata={},
-                    queue_id=queue_id_for_job,
-                    idempotency_key=None,
-                    job_type="message",
-                    instance_id=instance_id,
-                    job_id=job_id,
-                    max_retries=0,  # message Jobs do not retry — observer finalizes them
-                )
-
-                # Eagerly flip the mirror queued→active BEFORE stamping
-                # the message_id. The post-claim worker hook in
-                # ``_activate_message_jobitem_async`` would otherwise
-                # run AFTER ``claim_pending_task``, and Phase-2
-                # second messages were getting blocked by the cross-
-                # system guard carving out a still-queued JobItem as
-                # a "blocker" before the worker could flip the state.
-                # Eager activation aligns with the POC contract:
-                # "Task IS the dispatch primitive; JobItem is a
-                # derived mirror" — the mirror should be active as
-                # soon as it is created. ``atomic_transition`` is
-                # race-safe (single-statement UPDATE with
-                # ``WHERE admission_state='queued'`` guard) and is
-                # idempotent with the worker hook, which will see
-                # ``InvalidTransitionError`` when the row is no
-                # longer in ``queued`` and swallow it at debug.
-                try:
-                    await asyncio.to_thread(
-                        job_repo.atomic_transition,
-                        job_id,
-                        AdmissionState.QUEUED.value,
-                        AdmissionState.ACTIVE.value,
-                    )
-                except Exception as activate_exc:
-                    # Mirror activation is best-effort. The Task row
-                    # is the authoritative dispatch primitive; a
-                    # still-queued JobItem only delays the worker's
-                    # post-claim activation (which is itself a no-op
-                    # for the dispatch path). Log and continue.
-                    logger.debug(
-                        f"enqueue_message_job: eager JobItem "
-                        f"activation failed for "
-                        f"job_id={job_id[:8]}...: "
-                        f"{type(activate_exc).__name__}: "
-                        f"{activate_exc}"
-                    )
-
-                # Cross-system guard correlation — the observer finalize
-                # path and the worker claim path both resolve MESSAGE
-                # JobItems back to the originating message_id via
-                # ``job_queue_items.metadata->>'message_id'``. Without
-                # this stamp, the correlation returns NULL and the
-                # cross-system guard cannot match.
-                await asyncio.to_thread(
-                    job_repo.stamp_message_id,
-                    job_id,
-                    ctx.message_id,
-                )
-
-                logger.debug(
-                    f"enqueue_message_job: created JobItem mirror "
-                    f"job_id={job_id[:8]}... for instance {instance_id[:8]}... "
-                    f"message_id={ctx.message_id[:8]}..."
-                )
-            except Exception as e:
-                # Mirror creation is best-effort. The Task row is the
-                # authoritative dispatch primitive; a missing JobItem
-                # just means the WorkResolver facade sees fewer rows,
-                # not that message processing breaks.
-                logger.warning(
-                    f"enqueue_message_job: JobItem mirror creation failed "
-                    f"for instance {instance_id[:8]}... message "
-                    f"{ctx.message_id[:8]}...: {type(e).__name__}: {e}. "
-                    "Task row remains the sole dispatch primitive."
-                )
-
-        # Step 5: notify the WorkerPool (Task row already written by
-        # the prelude). Same dispatch path as ``enqueue_message`` —
-        # the JobItem mirror is informational only and does not change
-        # which primitive drives worker claim.
-        if self._manager._worker_pool is not None:
-            self._manager._worker_pool.notify_work()
-
-        logger.debug(
-            f"Enqueued message {ctx.message_id} (job-mirror) for instance "
-            f"{instance_id} job_id={job_id[:8]}..."
-        )
-
+        # --- Step 3: Return adapted result ---
         return AsyncMessageResult(
-            message_id=ctx.message_id,
+            message_id=None,
             instance_id=instance_id,
             status="queued",
-            job_id=job_id,
+            job_id=job_item.job_id,
         )
 
     async def _process_message_with_tracking(
