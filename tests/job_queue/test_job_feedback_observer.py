@@ -1665,6 +1665,351 @@ class TestTriggerNextJobSkipsStaleMessageJobItem:
         mock_instance_manager.enqueue_message.assert_not_called()
 
 
+class TestTriggerNextJobMessageBranchGuardsAgainstSpawn:
+    """B11 / B12 regression (2026-07-26): observer's ``_trigger_next_job``
+    must NOT call ``spawn_instance_with_mcp`` for MESSAGE-type JobItems.
+
+    Production evidence:
+
+    .. code-block:: text
+
+        16:47:55 start_job for job 338316af — slot now free, lock ACQUIRED
+        16:47:55 Spawning instance 898b3c18...  (the offender)
+        16:47:55 ERROR Observer: failed to spawn instance for job
+                    338316af...: UniqueViolation ... already exists
+        16:47:55 job moved to DLQ reason=MANUAL, admission_state=dead
+        16:47:56 Processing message task 11363 ...  (the message DID
+                                                            run anyway)
+
+    The instance ``898b3c18`` already existed — created at 16:46:38 for
+    the FIRST message. The SECOND message's JobItem targeted the SAME
+    instance; its Task was already created by ``enqueue_message_job``.
+    The observer's blind ``spawn_instance_with_mcp`` attempted to INSERT
+    a row with a reused ``instance_id`` and violated the
+    ``instances_pkey`` constraint, then dropped the job to DLQ with
+    ``reason='MANUAL'`` even though the message was delivering via the
+    Task path.
+
+    The B11 fix short-circuits the spawn + ``enqueue_message`` pair when
+    ``started_job.job_type == "message"`` and only wakes the WorkerPool
+    via ``notify_work()``. The B12 verification defends against the
+    "post-claim activation UPDATE missed" symptom by checking that
+    ``started_job.admission_state`` is ``active`` (the
+    ``start_job_atomic_with_lock`` B1 fix commits lock INSERT + status
+    UPDATE atomically). Any other state is a band-aid warning so
+    operators can spot a regression.
+
+    Two tests pin the contract:
+
+      * ``test_message_branch_no_spawn_calls_notify_work`` — happy path:
+        ``start_job`` returns an ``active`` MESSAGE row; the observer
+        only calls ``notify_work``, never ``spawn_instance_with_mcp`` or
+        ``enqueue_message``, and never ``complete_job(FAILED)``.
+      * ``test_message_branch_logs_activation_warning_when_state_not_active``
+        — degraded path: ``start_job`` returned a MESSAGE row that did
+        NOT make it to ``active`` (legacy project-only path); the
+        observer still proceeds with ``notify_work`` and logs the
+        B12-warning band-aid (does NOT block the dispatch — the Task
+        row + slot lock are already correct, only the JobItem mirror
+        state is stale).
+    """
+
+    @pytest.mark.asyncio
+    async def test_message_branch_no_spawn_calls_notify_work(self, caplog):
+        """MESSAGE branch wakes the WorkerPool only — never spawns.
+
+        Contract pinned here:
+          * ``_job_queue_service._get_next_job`` returns a MESSAGE row.
+          * ``_job_queue_service.start_job`` returns it flipped to
+            ``admission_state='active'`` (the B1 atomic activation path).
+          * ``_instance_manager._worker_pool.notify_work`` is called
+            exactly once.
+          * ``_instance_manager.spawn_instance_with_mcp`` is NEVER
+            called (would violate ``instances_pkey`` on a reused
+            ``instance_id``).
+          * ``_instance_manager.enqueue_message`` is NEVER called
+            (the Task was already created by ``enqueue_message_job``;
+            a second ``enqueue_message`` would create a duplicate Task).
+          * ``_job_queue_service.complete_job`` is NEVER called with
+            ``demand_state=FAILED`` (the spurious DLQ insertion that
+            masked the real dispatch).
+        """
+        import logging
+        from daemon.repositories.job_queue.models import JobItem as JobItemModel
+
+        completed_job = MagicMock(spec=JobItemModel)
+        completed_job.job_id = "completed-job-id"
+        completed_job.project_id = "p-b11"
+
+        message_next_job = MagicMock(spec=JobItemModel)
+        message_next_job.job_id = "msg-job-338316af"
+        message_next_job.job_type = "message"
+        message_next_job.instance_id = "inst-898b3c18-existing"
+        message_next_job.project_id = "p-b11"
+        message_next_job.agent_id = "leader"
+
+        # ``start_job`` returns the SAME JobItem flipped to ``active``
+        # — mirroring the atomic ``start_job_atomic_with_lock`` write
+        # that committed the lock INSERT and the admission_state UPDATE
+        # in a single transaction.
+        started_message_job = MagicMock(spec=JobItemModel)
+        started_message_job.job_id = "msg-job-338316af"
+        started_message_job.job_type = "message"
+        started_message_job.instance_id = "inst-898b3c18-existing"
+        started_message_job.project_id = "p-b11"
+        started_message_job.agent_id = "leader"
+        started_message_job.admission_state = AdmissionState.ACTIVE.value
+        started_message_job.message = "second message, same instance"
+        started_message_job.source = "api"
+
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service._get_next_job = AsyncMock(
+            return_value=message_next_job
+        )
+        mock_job_queue_service.start_job = AsyncMock(
+            return_value=started_message_job
+        )
+        # Sentinels: the message branch must NEVER reach these.
+        mock_job_queue_service.complete_job = AsyncMock(
+            side_effect=AssertionError(
+                "complete_job(FAILED) must NOT be called for a message "
+                "job in the wake-only branch — the message is already "
+                "delivering via the Task path"
+            )
+        )
+
+        # Worker pool with a notifying mock accessible via the
+        # ``_instance_manager._worker_pool`` chain. ``notify_work`` is
+        # the only legitimate side effect of the message branch.
+        mock_worker_pool = MagicMock()
+        mock_worker_pool.notify_work = MagicMock()
+
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._worker_pool = mock_worker_pool
+        # Sentinels: the B11 guard MUST block these calls.
+        mock_instance_manager.spawn_instance_with_mcp = AsyncMock(
+            side_effect=AssertionError(
+                "spawn_instance_with_mcp must NOT be called for a "
+                "message job — the instance already exists and the "
+                "Task was already created by enqueue_message_job"
+            )
+        )
+        mock_instance_manager.enqueue_message = AsyncMock(
+            side_effect=AssertionError(
+                "enqueue_message must NOT be called for a message "
+                "job — the Task is pre-existing; a second enqueue "
+                "would create a duplicate Task on the same instance"
+            )
+        )
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.job_feedback_observer"):
+            await observer._trigger_next_job(completed_job)
+
+        # 1. start_job was called (the lock + activation flip).
+        mock_job_queue_service.start_job.assert_awaited_once_with(
+            "msg-job-338316af"
+        )
+        # 2. notify_work fired exactly once (the wake-only side effect).
+        mock_worker_pool.notify_work.assert_called_once_with()
+        # 3. No spawn — guard blocked the UniqueViolation path.
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_awaited()
+        # 4. No duplicate enqueue_message call.
+        mock_instance_manager.enqueue_message.assert_not_awaited()
+        # 5. No spurious DLQ insertion via complete_job(FAILED).
+        mock_job_queue_service.complete_job.assert_not_awaited()
+        # 6. The message-branch info log carries the wake-only rationale.
+        assert any(
+            "Observer (message branch): woke worker pool" in record.message
+            for record in caplog.records
+        ), "Expected message-branch info log; missing."
+
+    @pytest.mark.asyncio
+    async def test_message_branch_logs_activation_warning_when_state_not_active(
+        self, caplog
+    ):
+        """B12 band-aid: when ``start_job`` returns a non-active MESSAGE row
+        (e.g. the legacy project-only path that bypasses
+        ``start_job_atomic_with_lock``), the observer logs a WARNING and
+        STILL proceeds with ``notify_work``.
+
+        This is a regression detector only — the B1 fix makes the
+        activation atomic for the standard queue+lock path, so the
+        ``non_active`` case should be rare in production. Pinning the
+        warning keeps operators aware if a future code change reintroduces
+        the dual-primitive bypass.
+        """
+        import logging
+        from daemon.repositories.job_queue.models import JobItem as JobItemModel
+
+        completed_job = MagicMock(spec=JobItemModel)
+        completed_job.job_id = "completed-job-id"
+        completed_job.project_id = "p-b11"
+
+        message_next_job = MagicMock(spec=JobItemModel)
+        message_next_job.job_id = "msg-job-legacy"
+        message_next_job.job_type = "message"
+        message_next_job.instance_id = "inst-legacy"
+        message_next_job.project_id = "p-b11"
+        message_next_job.agent_id = "leader"
+
+        # Simulate the legacy path: lock INSERT ran but the activation
+        # UPDATE did NOT (admission_state stayed 'queued'). The B12
+        # band-aid logs a warning but still proceeds with ``notify_work``.
+        stale_started_message_job = MagicMock(spec=JobItemModel)
+        stale_started_message_job.job_id = "msg-job-legacy"
+        stale_started_message_job.job_type = "message"
+        stale_started_message_job.instance_id = "inst-legacy"
+        stale_started_message_job.project_id = "p-b11"
+        stale_started_message_job.agent_id = "leader"
+        stale_started_message_job.admission_state = AdmissionState.QUEUED.value
+        stale_started_message_job.message = "stale message row"
+        stale_started_message_job.source = "api"
+
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service._get_next_job = AsyncMock(
+            return_value=message_next_job
+        )
+        mock_job_queue_service.start_job = AsyncMock(
+            return_value=stale_started_message_job
+        )
+        mock_job_queue_service.complete_job = AsyncMock()
+
+        mock_worker_pool = MagicMock()
+        mock_worker_pool.notify_work = MagicMock()
+
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._worker_pool = mock_worker_pool
+        mock_instance_manager.spawn_instance_with_mcp = AsyncMock()
+        mock_instance_manager.enqueue_message = AsyncMock()
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="daemon.services.job_feedback_observer"):
+            await observer._trigger_next_job(completed_job)
+
+        # B11 guard still blocked spawn / enqueue_message / complete_job
+        # even on the degraded path.
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_awaited()
+        mock_instance_manager.enqueue_message.assert_not_awaited()
+        mock_job_queue_service.complete_job.assert_not_awaited()
+        # notify_work fired — dispatch proceeds.
+        mock_worker_pool.notify_work.assert_called_once_with()
+        # B12 band-aid warning fired.
+        assert any(
+            "atomic activation UPDATE missed" in record.message
+            for record in caplog.records
+        ), "Expected B12 band-aid warning; missing."
+
+    @pytest.mark.asyncio
+    async def test_task_branch_still_spawns_instance(self, caplog):
+        """TASK branch keeps the normal ``spawn_instance_with_mcp`` path.
+
+        Regression guard for the B11 message-branch guard: the
+        ``if started_job.job_type == "message":`` short-circuit MUST
+        NOT swallow TASK-type JobItems. A TASK row falls through to the
+        pre-existing spawn + ``enqueue_message`` flow.
+
+        Contract pinned here:
+          * ``_job_queue_service._get_next_job`` returns a TASK row.
+          * ``_job_queue_service.start_job`` returns it flipped to
+            ``admission_state='active'``.
+          * ``_instance_manager.spawn_instance_with_mcp`` IS awaited
+            once (the normal spawn path is intact).
+          * ``_instance_manager._worker_pool.notify_work`` is NOT
+            called — that's the message-branch wake-only side effect
+            and must not leak into the task branch.
+        """
+        import logging
+        from daemon.repositories.job_queue.models import JobItem as JobItemModel
+
+        completed_job = MagicMock(spec=JobItemModel)
+        completed_job.job_id = "completed-job-id"
+        completed_job.project_id = "p-b11"
+
+        task_next_job = MagicMock(spec=JobItemModel)
+        task_next_job.job_id = "task-job-7f3a9c1d"
+        task_next_job.job_type = "task"
+        task_next_job.instance_id = "inst-task-target"
+        task_next_job.project_id = "p-b11"
+        task_next_job.agent_id = "leader"
+
+        started_task_job = MagicMock(spec=JobItemModel)
+        started_task_job.job_id = "task-job-7f3a9c1d"
+        started_task_job.job_type = "task"
+        started_task_job.instance_id = "inst-task-target"
+        started_task_job.project_id = "p-b11"
+        started_task_job.agent_id = "leader"
+        started_task_job.admission_state = AdmissionState.ACTIVE.value
+        started_task_job.message = "task payload"
+        started_task_job.source = "api"
+
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service._get_next_job = AsyncMock(
+            return_value=task_next_job
+        )
+        mock_job_queue_service.start_job = AsyncMock(
+            return_value=started_task_job
+        )
+        mock_job_queue_service.complete_job = AsyncMock()
+
+        mock_worker_pool = MagicMock()
+        mock_worker_pool.notify_work = MagicMock(
+            side_effect=AssertionError(
+                "notify_work must NOT be called for a task job — "
+                "that's the message-branch wake-only side effect; "
+                "the task branch uses spawn_instance_with_mcp instead"
+            )
+        )
+
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._worker_pool = mock_worker_pool
+        mock_instance_manager.spawn_instance_with_mcp = AsyncMock(
+            return_value="inst-task-target"
+        )
+        mock_instance_manager.enqueue_message = AsyncMock()
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.job_feedback_observer"):
+            await observer._trigger_next_job(completed_job)
+
+        # 1. start_job ran (lock INSERT + atomic activation UPDATE).
+        mock_job_queue_service.start_job.assert_awaited_once_with(
+            "task-job-7f3a9c1d"
+        )
+        # 2. Spawn path is intact for TASK rows.
+        mock_instance_manager.spawn_instance_with_mcp.assert_awaited_once_with(
+            agent_id="leader",
+            instance_id="inst-task-target",
+            project_id="p-b11",
+        )
+        # 3. Message-branch wake MUST NOT have fired for a task job.
+        mock_worker_pool.notify_work.assert_not_called()
+
+
 class TestRepositoryFiltersMessageTypeAtPendingQueries:
     """Repository-layer regression tests for Phase 5 (Option B).
 

@@ -3462,6 +3462,26 @@ class JobFeedbackObserver:
         the job still gets marked FAILED (the JobProcessor safety net
         will eventually retry the spawn).
 
+        **B11 fix (message-job re-spawn UniqueViolation, 2026-07-26)**:
+        MESSAGE-type JobItems are now shortlisted with TASK-type rows by
+        ``JobQueueService._get_next_job`` post-Phase 5 / Option B, so the
+        observer's TASK-only handoff needs an explicit guard. A queued
+        MESSAGE JobItem already targets an existing ``instances`` row
+        (its ``instance_id`` was preserved by ``enqueue_message_job``) and
+        its Task + ``MessageQueue`` rows were created synchronously — the
+        observer's blind ``spawn_instance_with_mcp`` would violate the
+        ``instances_pkey`` UniqueViolation, then drop the job to DLQ with
+        ``reason='MANUAL'`` even though the message was already
+        delivering via the Task path. The fix short-circuits the spawn
+        + ``enqueue_message`` pair for MESSAGE jobs and only wakes the
+        WorkerPool via ``notify_work()`` so a worker thread can claim
+        the pre-existing PENDING Task. The JobItem's post-claim
+        ``admission_state='active'`` flip is enforced atomically by
+        ``start_job_atomic_with_lock`` (lock INSERT + admission UPDATE
+        in a single transaction, guarded by the PostgreSQL
+        ``trg_job_locks_active_guard`` trigger) — see B12 verification
+        below.
+
         Args:
             job: The job that just completed (used for ``project_id``).
         """
@@ -3479,6 +3499,59 @@ class JobFeedbackObserver:
                 next_job.job_id
             )
             if started_job is None:
+                return
+
+            # ─── B11: Message-job guard (no spawn, wake-only) ───
+            # Production evidence (2026-07-26 16:47:55):
+            #   start_job for job 338316af → slot ACQUIRED
+            #   Spawning instance 898b3c18...  ← would violate instances_pkey
+            #   UniqueViolation: duplicate key value violates unique
+            #     constraint "instances_pkey"
+            #   ERROR Observer: failed to spawn instance ...
+            #   job moved to DLQ reason=MANUAL, admission_state=dead
+            # The instance 898b3c18 was the EXISTING target of two
+            # consecutive messages; the observer's blind
+            # ``spawn_instance_with_mcp`` attempted to INSERT a row
+            # with a reused ``instance_id``. Skip the spawn + enqueue
+            # pair entirely for MESSAGE jobs: the Task + MessageQueue
+            # rows are already written by ``enqueue_message_job``; all
+            # we need is ``notify_work()`` to surface the PENDING Task
+            # to a worker thread.
+            if started_job.job_type == "message":
+                # ─── B12: defensive verification (regression detector) ───
+                # Atomicity is already guaranteed by ``start_job_atomic_with_lock``;
+                # any non-active state means the legacy project-only path was taken.
+                # Warn + proceed.
+                if (
+                    getattr(started_job, "admission_state", None)
+                    != AdmissionState.ACTIVE.value
+                ):
+                    logger.warning(
+                        f"Observer (message branch): job "
+                        f"{started_job.job_id[:8]}... left start_job with "
+                        f"admission_state={started_job.admission_state!r} "
+                        f"(expected 'active') — atomic activation UPDATE "
+                        f"missed on this code path; proceeding with "
+                        f"notify_work() — see B11/B12"
+                    )
+                worker_pool = getattr(
+                    self._instance_manager, "_worker_pool", None
+                )
+                if worker_pool is not None:
+                    worker_pool.notify_work()
+                else:
+                    logger.warning(
+                        f"Observer (message branch): worker_pool is None "
+                        f"for message job {started_job.job_id[:8]}... — "
+                        f"Task will surface on the next worker-poll tick"
+                    )
+                logger.info(
+                    f"Observer (message branch): woke worker pool for "
+                    f"pre-existing Task on job "
+                    f"{started_job.job_id[:8]}... / instance "
+                    f"{started_job.instance_id[:8] if started_job.instance_id else 'N/A'}... "
+                    f"(no spawn; instance already exists for this message job)"
+                )
                 return
 
             instance_id = started_job.instance_id
