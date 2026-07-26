@@ -115,6 +115,18 @@ class MessageResponse(BaseModel):
             "WorkResolver facade."
         ),
     )
+    queued: bool = Field(
+        default=False,
+        description=(
+            "True when the message JobItem is waiting for a queue slot at "
+            "the moment the response is built (JobItem.admission_state == "
+            "'queued'). False once the worker claims the slot "
+            "('active') or the JobItem cannot be read. Lets the frontend "
+            "show a 'queued' indicator without an extra round-trip; the "
+            "value reflects a snapshot, not a live subscription — clients "
+            "needing progress should subscribe to the SSE stream."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -128,6 +140,7 @@ class MessageResponse(BaseModel):
                 "images": None,
                 "created_at": "2024-01-01T00:00:00Z",
                 "job_id": "11111111-2222-3333-4444-555555555555",
+                "queued": False,
             }
         }
     )

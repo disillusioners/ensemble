@@ -101,6 +101,10 @@ export interface MessageResponse {
   created_at: string;
   // Vision support: base64 data URIs of attached images (up to 3)
   images?: string[];
+  // When true, the backend enqueued the message instead of dispatching it
+  // straight to the running agent. Allows the UI to render a "queued"
+  // indicator until the agent picks the message up.
+  queued?: boolean;
 }
 
 // Health types

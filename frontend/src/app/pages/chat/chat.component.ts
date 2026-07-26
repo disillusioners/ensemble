@@ -90,6 +90,16 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
   readonly instanceNotFound = signal<string | null>(null);
+  /**
+   * Tracks the id of the most recently queued user message (the backend
+   * accepted the message but did not dispatch it to the agent). The
+   * "Message queued" indicator is guarded by this signal. Cleared when:
+   *   - the next sendMessage response is NOT queued (immediate dispatch),
+   *   - an assistant message / thinking event arrives for this instance,
+   *   - a status_change → running event arrives for this instance,
+   *   - the user switches to a different instance.
+   */
+  readonly queuedMessageId = signal<string | null>(null);
 
   /**
    * Context-usage snapshot for the currently open instance. Mirrors the
@@ -224,6 +234,40 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.sseService.latestError.set(null);
       }
     }, { allowSignalWrites: true });
+
+    // Clear the queued indicator when an assistant message arrives for the
+    // current instance. Both `thinking` and `assistant_message` SSE events
+    // upsert messages into `sseService.messages()` (mapped to role 'assistant'
+    // with a populated `thinking` field for the former), so watching the
+    // message list covers both cases without subscribing to a new SSE channel.
+    effect(() => {
+      if (this.queuedMessageId() === null) return;
+      const messages = this.sseService.messages();
+      if (messages.length === 0) return;
+      const currentInstance = this.currentInstance();
+      if (!currentInstance) return;
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'assistant') return;
+      // Defensive: if the message carries an instance_id it must match.
+      if (last.instance_id && last.instance_id !== currentInstance.instance_id) return;
+      this.queuedMessageId.set(null);
+    }, { allowSignalWrites: true });
+
+    // Defensive: clear the queued indicator when the instance transitions
+    // to a running/processing state. The existing `sseService.statusChange`
+    // signal is the same source the instance list uses, so we don't open a
+    // new SSE subscription.
+    effect(() => {
+      if (this.queuedMessageId() === null) return;
+      const statusChange = this.sseService.statusChange();
+      if (!statusChange) return;
+      const currentInstance = this.currentInstance();
+      if (!currentInstance || statusChange.instance_id !== currentInstance.instance_id) return;
+      const status = statusChange.status;
+      if (status === 'running' || status === 'processing') {
+        this.queuedMessageId.set(null);
+      }
+    }, { allowSignalWrites: true });
   }
 
   /**
@@ -297,6 +341,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Reset sending state when switching instances to prevent input lock
     this.isSending.set(false);
     this.sendError.set(null);
+    // The queued indicator is tied to a specific instance; clear it on
+    // every route change so a stale "queued" badge never bleeds across
+    // chats.
+    this.queuedMessageId.set(null);
 
     if (!instanceId) {
       console.log('[Chat] No instanceId, disconnecting SSE');
@@ -483,9 +531,18 @@ export class ChatComponent implements OnInit, OnDestroy {
       // UI's perspective — clear the input, rely on `injection_pending`
       // SSE event (and the chat-interface pendingInjection card driven
       // off the SseService signal) to reflect the injection's queued state.
-      next: (_response) => {
+      next: (response) => {
         // Clear input only on success — error recovery keeps input populated
         this.messageInputRef?.clearInput();
+        // Surface a "queued" indicator when the backend accepted the message
+        // but did not dispatch it to the running agent. The id is nullish-safe
+        // so backend payloads that omit ``message_id`` (older or partial
+        // responses) still produce a stable truthy signal without throwing.
+        if (response.queued === true) {
+          this.queuedMessageId.set(response.message_id ?? null);
+        } else {
+          this.queuedMessageId.set(null);
+        }
       },
       error: (err) => {
         console.error('Failed to send message:', err);

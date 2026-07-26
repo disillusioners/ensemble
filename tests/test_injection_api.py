@@ -105,6 +105,13 @@ def _make_manager(
     enqueue_result.job_id = "job-enqueued"
     manager.enqueue_message_job = AsyncMock(return_value=enqueue_result)
 
+    # _job_queue_service — by default the snapshot lookup is disabled so
+    # the existing tests (which don't care about ``queued``) don't have
+    # to wire up an ``AsyncMock`` for ``get_job``. Tests that DO assert
+    # on the queued field can override this with a stub that returns a
+    # synthetic JobItem via ``set_job_queue_service_with_state``.
+    manager._job_queue_service = None
+
     # resume_instance_cascade (async) — used by the PAUSED path.
     manager.resume_instance_cascade = AsyncMock(return_value={
         "target_id": instance_id,
@@ -116,6 +123,33 @@ def _make_manager(
     manager.resume_processing_job = AsyncMock(return_value={"status": "resumed", "instance_id": instance_id})
 
     return manager
+
+
+def set_job_queue_service_with_state(manager, admission_state: str | None) -> None:
+    """Wire ``manager._job_queue_service.get_job`` to return a synthetic JobItem.
+
+    Tests that assert on the ``queued`` field inject this stub so the
+    router's snapshot lookup resolves a JobItem with the desired
+    ``admission_state``. Pass ``admission_state=None`` to simulate a
+    missing JobItem row (the lookup returns ``None``).
+
+    Args:
+        manager: The MagicMock manager returned by ``_make_manager``.
+        admission_state: The string value the synthetic JobItem should
+            expose on its ``admission_state`` attribute. ``None`` makes
+            ``get_job`` return ``None`` (row missing / purged).
+    """
+    job_queue_service = MagicMock()
+
+    async def _get_job(job_id):
+        if admission_state is None:
+            return None
+        synthetic = MagicMock()
+        synthetic.admission_state = admission_state
+        return synthetic
+
+    job_queue_service.get_job = AsyncMock(side_effect=_get_job)
+    manager._job_queue_service = job_queue_service
 
 
 def _make_live_hub():
@@ -359,6 +393,145 @@ class TestEnqueuePath:
         client.post("/instances/inst-abc/messages", json={"content": "x"})
 
         manager.set_injection.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ``queued`` field on the NORMAL-path response
+# ---------------------------------------------------------------------------
+
+
+class TestQueuedField:
+    """``queued`` snapshot — read off ``JobItem.admission_state`` after enqueue.
+
+    The router performs a synchronous lookup against
+    ``manager._job_queue_service.get_job(result.job_id)`` immediately
+    after ``enqueue_message_job`` returns and sets ``queued=True`` iff
+    ``JobItem.admission_state == 'queued'``. The field defaults to
+    ``False`` when the JobItem cannot be read (service missing, lookup
+    raised, row purged) — the message is still enqueued in that case.
+    """
+
+    def test_queued_true_when_admission_state_is_queued(self, client_and_state):
+        """admission_state='queued' → response body carries queued=True."""
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        set_job_queue_service_with_state(manager, admission_state="queued")
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["queued"] is True
+        # job_id propagates from the AsyncMessageResult mock
+        assert body["job_id"] == "job-enqueued"
+
+    @pytest.mark.parametrize(
+        "admission_state",
+        ["active", "done", "dead"],
+    )
+    def test_queued_false_when_admission_state_is_not_queued(
+        self, client_and_state, admission_state
+    ):
+        """admission_state != 'queued' → queued=False regardless of value.
+
+        Covers the active (worker claimed) and terminal (done, dead)
+        cases. All three resolve to queued=False because the field is
+        strictly the ``QUEUED == 'queued'`` predicate.
+        """
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        set_job_queue_service_with_state(manager, admission_state=admission_state)
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is False
+
+    def test_queued_false_when_job_item_not_found(self, client_and_state):
+        """JobItem row missing (purged / not yet visible) → queued=False.
+
+        The router MUST NOT raise on a missing row — the message is
+        already enqueued, so the response still succeeds.
+        """
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        set_job_queue_service_with_state(manager, admission_state=None)
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is False
+
+    def test_queued_false_when_job_queue_service_missing(self, client_and_state):
+        """``_job_queue_service is None`` (test fixture default) → queued=False.
+
+        Mirrors the no-service-fanout path: the router skips the lookup
+        and returns the default False rather than failing the request.
+        """
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        # Explicitly NOT calling set_job_queue_service_with_state — the
+        # _make_manager helper defaults _job_queue_service to None.
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is False
+
+    def test_queued_lookup_failure_does_not_fail_request(self, client_and_state):
+        """``get_job`` raising (DB blip) → queued=False, request still succeeds.
+
+        Defensive contract: a transient lookup error must not regress
+        the enqueue. The router logs at WARNING and falls back to
+        ``queued=False``.
+        """
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        job_queue_service = MagicMock()
+
+        async def _raise(job_id):
+            raise RuntimeError("synthetic DB error")
+
+        job_queue_service.get_job = AsyncMock(side_effect=_raise)
+        manager._job_queue_service = job_queue_service
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is False
+        # The lookup was actually attempted
+        job_queue_service.get_job.assert_awaited_once_with("job-enqueued")
+
+    def test_queued_lookup_uses_job_id_from_enqueue_result(self, client_and_state):
+        """The router passes ``result.job_id`` into ``get_job`` — not the message_id.
+
+        The lookup is keyed on the JobItem primary key (== Task.work_id),
+        which is what ``AsyncMessageResult.job_id`` carries.
+        """
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        # Override the default ``job_id`` so we can assert the lookup
+        # uses it verbatim.
+        manager.enqueue_message_job.return_value.job_id = "job-xyz"
+        set_job_queue_service_with_state(manager, admission_state="queued")
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is True
+        manager._job_queue_service.get_job.assert_awaited_once_with("job-xyz")
 
 
 # ---------------------------------------------------------------------------
