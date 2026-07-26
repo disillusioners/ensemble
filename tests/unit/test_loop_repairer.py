@@ -21,6 +21,11 @@ Covers ``daemon.graph.LoopRepairer``:
        ``repaired_messages`` after the state re-read (C3 pattern).
     8. ``repair()`` returns the ORIGINAL message list when the state update
        itself raises (defensive fallback so the graph can keep running).
+    9. Layer 1 pre-validation: ``repair()`` filters ``RemoveMessage`` IDs
+       against the live checkpoint so IDs renamed by compaction (see
+       ``daemon/compaction.py:696-699``) don't cause ``ValueError``.
+   10. Layer 2 safety net: ``repair()`` catches ``ValueError`` from
+       ``aupdate_state`` and retries with the repair message only.
 
 The repairer is a stateless helper: it only depends on ``graph``,
 ``llm_config``, and the messages passed via ``RepairContext``. The LLM is
@@ -132,11 +137,26 @@ def _mock_graph(updated_messages: list | None = None) -> MagicMock:
 
     ``updated_messages`` is what ``aget_state`` will return — defaults to an
     empty list to match the post-compaction baseline.
+
+    String entries are auto-coerced into ``AIMessage(id=string)`` instances
+    so the Layer 1 pre-validation in ``LoopRepairer.repair`` (which extracts
+    IDs via ``getattr(m, "id", None)``) sees realistic message objects.
+    Pass pre-built ``BaseMessage`` instances when you need richer content.
     """
+    # Coerce string entries into AIMessage so .id is accessible. This
+    # mirrors the real LangGraph checkpoint shape (BaseMessage instances
+    # with ``.id`` set) and lets the pre-validation filter work in
+    # otherwise string-only test fixtures.
+    coerced: list = []
+    for entry in updated_messages or []:
+        if isinstance(entry, str):
+            coerced.append(AIMessage(content="", id=entry))
+        else:
+            coerced.append(entry)
     graph = MagicMock()
     graph.aupdate_state = AsyncMock()
     graph.aget_state = AsyncMock(
-        return_value=MagicMock(values={"messages": updated_messages or []})
+        return_value=MagicMock(values={"messages": coerced})
     )
     return graph
 
@@ -373,7 +393,10 @@ class TestRepairStateUpdate:
 
     @pytest.mark.asyncio
     async def test_aupdate_state_called_with_replacement_and_as_node_agent(self):
-        graph = _mock_graph(updated_messages=["state-after"])
+        # Seed the live checkpoint with the loop message IDs so the
+        # Layer 1 pre-validation lets them through (real-world: the
+        # messages we want to remove ARE in the checkpoint).
+        graph = _mock_graph(updated_messages=["loop-ai-1", "loop-ai-2"])
         mock_llm = _mock_llm("summary text")
 
         with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
@@ -406,16 +429,24 @@ class TestRepairStateUpdate:
 
     @pytest.mark.asyncio
     async def test_aget_state_called_after_aupdate(self):
-        """The state is re-read after the update (for re-append + re-invoke)."""
+        """The state is re-read after the update (for re-append + re-invoke).
+
+        With the Layer 1 pre-validation in place, ``aget_state`` is now
+        called TWICE: once before the update to filter stale removal IDs
+        and once after to re-read the post-repair checkpoint. The
+        assertion uses ``assert_awaited`` (≥1) to acknowledge both reads.
+        """
         graph = _mock_graph(updated_messages=["repaired-1"])
         mock_llm = _mock_llm("ok")
 
         with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
             await LoopRepairer().repair(_make_context(graph=graph))
 
-        # aupdate_state first, then aget_state to re-read the checkpoint.
+        # aupdate_state called once (the repair write).
         graph.aupdate_state.assert_awaited_once()
-        graph.aget_state.assert_awaited_once()
+        # aget_state called AT LEAST once — pre-validation + post-update
+        # re-read both go through this mock.
+        assert graph.aget_state.await_count >= 1
         # Repaired messages come from the state re-read.
         # (Verified in TestRepairInjectedMessageReappend below.)
 
@@ -543,7 +574,13 @@ class TestRepairInjectedMessageReappend:
 
     @pytest.mark.asyncio
     async def test_no_injected_msg_no_reappend(self):
-        """When ``injected_msg`` is None, repaired_messages equals the state re-read."""
+        """When ``injected_msg`` is None, repaired_messages equals the state re-read.
+
+        With the Layer 1 pre-validation in place, the live state must
+        contain the loop message IDs (otherwise they'd be filtered out
+        as "renamed by compaction"). The repaired list therefore
+        contains the AIMessage instances from the live state re-read.
+        """
         graph = _mock_graph(updated_messages=["x", "y"])
 
         with patch("daemon.graph.ThinkingChatOpenAI", return_value=_mock_llm("ok")):
@@ -553,7 +590,9 @@ class TestRepairInjectedMessageReappend:
             ))
 
         assert result.success is True
-        assert result.repaired_messages == ["x", "y"]
+        # The repaired messages are the AIMessage instances seeded into
+        # the live checkpoint — verified by their IDs.
+        assert [m.id for m in result.repaired_messages] == ["x", "y"]
 
 
 # ===========================================================================
@@ -662,3 +701,277 @@ class TestRepairPromptTemplate:
     def test_default_timeout_constant(self):
         # The default timeout is the LOOP_BREAKER constant (30s).
         assert LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS == 30
+
+
+# ===========================================================================
+# Test 9: Layer 1 — pre-validation against the live checkpoint
+# ===========================================================================
+# ``daemon/compaction.py:696-699`` renames message IDs from ``lc_run--...``
+# to ``truncated-<uuid>`` during compaction. The repair was previously
+# building ``RemoveMessage(id=msg_id)`` from the in-memory state list, but
+# ``aupdate_state`` re-reads the checkpoint independently and raised::
+#
+#     ValueError: Attempting to delete a message with an ID that doesn't
+#     exist ('lc_run--...')
+#
+# Layer 1 pre-validates removal IDs against the live checkpoint and filters
+# out any ID that was renamed. Layer 2 (see Test 10) catches the residual
+# race between the pre-validation read and the actual write.
+
+
+class TestLayer1PreValidation:
+    """Layer 1: pre-validate removal IDs against the live checkpoint state."""
+
+    @pytest.mark.asyncio
+    async def test_partial_mismatch_filters_only_missing_ids(self):
+        """When SOME removal IDs exist in the checkpoint and SOME don't,
+        only the valid ones are removed; the repair completes successfully.
+        """
+        # Default detection has loop_message_ids=["loop-ai-1", "loop-ai-2"].
+        # Seed the live checkpoint with ONLY one of them — the other has
+        # been renamed by compaction.
+        graph = _mock_graph(updated_messages=["loop-ai-1"])
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        # Repair still succeeds — Layer 1 filtered out the missing ID.
+        assert result.success is True
+        # The aupdate_state call received only the ONE valid removal plus
+        # the repair SystemMessage.
+        call = graph.aupdate_state.call_args
+        replacement = call.args[1]["messages"]
+        removals = [m for m in replacement if isinstance(m, RemoveMessage)]
+        systems = [m for m in replacement if isinstance(m, SystemMessage)]
+        assert len(removals) == 1
+        assert removals[0].id == "loop-ai-1"
+        # The repair SystemMessage is still appended (loop still broken).
+        assert len(systems) == 1
+        # Exactly one aupdate_state call (no Layer 2 retry needed).
+        graph.aupdate_state.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_all_ids_missing_skips_removal_step(self):
+        """When ALL removal IDs are missing (renamed by compaction),
+        the removal step is skipped entirely; the repair still completes
+        with summary + fresh SystemMessage.
+        """
+        # Live checkpoint has NONE of the loop message IDs.
+        graph = _mock_graph(updated_messages=["unrelated-msg-1", "unrelated-msg-2"])
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        # Repair still succeeds — Layer 1 short-circuited the removals.
+        assert result.success is True
+        # The aupdate_state call receives ONLY the repair SystemMessage
+        # (no RemoveMessage sentinels).
+        call = graph.aupdate_state.call_args
+        replacement = call.args[1]["messages"]
+        removals = [m for m in replacement if isinstance(m, RemoveMessage)]
+        systems = [m for m in replacement if isinstance(m, SystemMessage)]
+        assert len(removals) == 0
+        assert len(systems) == 1
+        # Layer 1 logged a warning about the all-missing case.
+        # Layer 2 was NOT triggered (no ValueError was raised).
+        graph.aupdate_state.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_aget_state_failure_falls_back_to_unfiltered_removals(self):
+        """When the pre-validation ``aget_state`` call (Layer 1) fails
+        with a transient error, Layer 1 returns the UNFILTERED list and
+        the repair proceeds. The post-repair re-read (Step 5) then
+        succeeds normally.
+        """
+        # Build a graph whose aget_state fails on the FIRST call (Layer
+        # 1 pre-validation) and succeeds on the SECOND call (Step 5
+        # post-repair re-read). This mirrors a transient checkpoint
+        # hiccup that recovers by the time we write.
+        graph = MagicMock()
+        aget_state_calls: list[str] = []
+
+        async def fake_aget_state(config):
+            aget_state_calls.append("call")
+            if len(aget_state_calls) == 1:
+                # First call (Layer 1) fails.
+                raise RuntimeError("checkpoint store unavailable")
+            # Second call (Step 5) succeeds with a realistic post-repair
+            # state. The exact contents are not asserted here — this
+            # test focuses on Layer 1's fallback behavior.
+            return MagicMock(values={"messages": [
+                AIMessage(content="repaired", id="repaired-1"),
+            ]})
+
+        graph.aget_state = AsyncMock(side_effect=fake_aget_state)
+        graph.aupdate_state = AsyncMock()
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        # Repair did not abort on the pre-validation failure — Layer 1
+        # returned the unfiltered list and the repair completed.
+        assert result.success is True
+        # aupdate_state was called once with the unfiltered removal
+        # list (Layer 1 didn't filter anything because the read failed).
+        assert graph.aupdate_state.await_count == 1
+        call = graph.aupdate_state.call_args
+        replacement = call.args[1]["messages"]
+        removals = [m for m in replacement if isinstance(m, RemoveMessage)]
+        # Both loop message IDs are present (unfiltered).
+        assert len(removals) == 2
+        assert {r.id for r in removals} == {"loop-ai-1", "loop-ai-2"}
+
+    @pytest.mark.asyncio
+    async def test_all_ids_present_no_filtering(self):
+        """Sanity: when every removal ID is in the live checkpoint, the
+        filter is a no-op and the full removal list is passed through.
+        """
+        # Seed the checkpoint with BOTH loop message IDs.
+        graph = _mock_graph(updated_messages=["loop-ai-1", "loop-ai-2"])
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        assert result.success is True
+        call = graph.aupdate_state.call_args
+        replacement = call.args[1]["messages"]
+        removals = [m for m in replacement if isinstance(m, RemoveMessage)]
+        # Both removal sentinels survive Layer 1.
+        assert len(removals) == 2
+        assert {r.id for r in removals} == {"loop-ai-1", "loop-ai-2"}
+
+
+# ===========================================================================
+# Test 10: Layer 2 — try/except ValueError safety net
+# ===========================================================================
+# Layer 1 catches the COMMON case of stale IDs. Layer 2 handles the
+# residual race: a second compaction could rename IDs between Layer 1's
+# ``aget_state`` read and the actual ``aupdate_state`` write, raising::
+#
+#     ValueError: Attempting to delete a message with an ID that doesn't
+#     exist ('lc_run--...')
+#
+# On ValueError, Layer 2 strips all removals and retries the write with
+# just the repair SystemMessage. The LLM retry still gets the fresh
+# SystemMessage nudge, so the loop is still broken.
+
+
+class TestLayer2ValueErrorSafetyNet:
+    """Layer 2: catch ValueError from stale removal IDs despite Layer 1."""
+
+    @pytest.mark.asyncio
+    async def test_value_error_triggers_retry_without_removals(self):
+        """Simulate a race: Layer 1's aget_state returns the IDs as
+        present, but aupdate_state raises ValueError (another
+        compaction ran between the two). Layer 2 must retry with
+        ONLY the repair SystemMessage.
+        """
+        # Build a graph whose aupdate_state raises ValueError on the
+        # FIRST call (with removals) and succeeds on the second call
+        # (without removals).
+        graph = MagicMock()
+        call_log: list[list] = []
+
+        async def fake_aupdate_state(config, values, as_node=None):
+            call_log.append(list(values.get("messages", [])))
+            if len(call_log) == 1:
+                # First call: with removals → simulate stale ID.
+                raise ValueError(
+                    "Attempting to delete a message with an ID that "
+                    "doesn't exist ('lc_run--stale-id')"
+                )
+            # Second call: without removals → success.
+
+        graph.aupdate_state = AsyncMock(side_effect=fake_aupdate_state)
+        # aget_state returns the loop IDs (Layer 1 lets them through).
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(values={"messages": [
+                AIMessage(content="", id="loop-ai-1"),
+                AIMessage(content="", id="loop-ai-2"),
+            ]})
+        )
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        # Repair succeeded via the Layer 2 retry path.
+        assert result.success is True
+        # Exactly TWO aupdate_state calls: the failing first attempt
+        # + the successful retry without removals.
+        assert graph.aupdate_state.await_count == 2
+        # First call had RemoveMessage sentinels.
+        first_call_msgs = call_log[0]
+        assert any(isinstance(m, RemoveMessage) for m in first_call_msgs)
+        # Second call had ONLY the repair SystemMessage (no removals).
+        second_call_msgs = call_log[1]
+        assert not any(isinstance(m, RemoveMessage) for m in second_call_msgs)
+        assert any(isinstance(m, SystemMessage) for m in second_call_msgs)
+
+    @pytest.mark.asyncio
+    async def test_value_error_does_not_bubble_to_outer_failure(self):
+        """When Layer 2 successfully retries, the OUTER exception handler
+        must NOT fire — the repair is a success, not a failure.
+        """
+        graph = MagicMock()
+
+        async def fake_aupdate_state(config, values, as_node=None):
+            # Always raise ValueError (Layer 1 + Layer 2 together can't
+            # help if the IDs are still bad). The second call (retry
+            # without removals) should succeed because we have no
+            # RemoveMessage sentinels anymore.
+            msgs = list(values.get("messages", []))
+            has_removal = any(isinstance(m, RemoveMessage) for m in msgs)
+            if has_removal:
+                raise ValueError(
+                    "Attempting to delete a message with an ID that "
+                    "doesn't exist ('lc_run--bad')"
+                )
+            return None
+
+        graph.aupdate_state = AsyncMock(side_effect=fake_aupdate_state)
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(values={"messages": [
+                AIMessage(content="", id="loop-ai-1"),
+            ]})
+        )
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        # Repair succeeded via the Layer 2 retry — no outer failure.
+        assert result.success is True
+        assert result.error is None
+        # The retry call was made with ONLY the SystemMessage.
+        assert graph.aupdate_state.await_count == 2
+        second_call = graph.aupdate_state.call_args_list[1]
+        retry_msgs = second_call.args[1]["messages"]
+        assert not any(isinstance(m, RemoveMessage) for m in retry_msgs)
+        assert any(isinstance(m, SystemMessage) for m in retry_msgs)
+
+    @pytest.mark.asyncio
+    async def test_runtime_error_still_bubbles_to_outer_failure(self):
+        """Non-ValueError exceptions (e.g. transient DB error on the
+        write) MUST still propagate to the outer failure path so the
+        repair returns the ORIGINAL messages. Only ValueError gets
+        the Layer 2 retry.
+        """
+        graph = _mock_graph(updated_messages=["loop-ai-1", "loop-ai-2"])
+        graph.aupdate_state = AsyncMock(
+            side_effect=RuntimeError("checkpoint DB locked")
+        )
+        mock_llm = _mock_llm("ok")
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+            result = await LoopRepairer().repair(_make_context(graph=graph))
+
+        # RuntimeError is NOT a ValueError → no Layer 2 retry.
+        assert result.success is False
+        assert "checkpoint DB locked" in (result.error or "")
+        # The original messages are returned for fallback.
+        assert result.repair_message_id == ""
