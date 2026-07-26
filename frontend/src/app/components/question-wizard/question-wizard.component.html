@@ -24,7 +24,7 @@
 
         @if (q.options?.length) {
           <div class="options">
-            @for (opt of q.options; track opt) {
+            @for (opt of q.options; track optionText(opt)) {
               <button
                 type="button"
                 class="option-chip"
@@ -32,7 +32,7 @@
                 [disabled]="isSubmitting() || isDismissing()"
                 (click)="selectOption(opt)"
               >
-                {{ opt }}
+                {{ optionText(opt) }}
               </button>
             }
           </div>

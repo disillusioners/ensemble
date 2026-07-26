@@ -41,6 +41,56 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _normalize_option(value: Any) -> str:
+    """Coerce a single question option to a plain string.
+
+    LLMs occasionally pass option entries as ``{"text": "Option A"}``
+    dicts (or other JSON-object shapes) instead of plain strings. When
+    those objects reach the frontend, Angular's interpolation renders
+    them as ``[object Object]`` and any click-driven answer path stores
+    the object verbatim — corrupting both display and submit.
+
+    The manager's contract is ``options: list[str]``. To honor that
+    contract without rejecting well-meaning callers, this helper applies
+    a friendly normalization:
+
+      * ``str`` → returned as-is (the common case).
+      * ``dict`` with a ``"text"`` key → the extracted text value,
+        recursively normalized so a nested object also collapses to a
+        string.
+      * Anything else → ``str(value)`` so the field is never silently
+        dropped.
+
+    Mirrors the ``bool(q.get("allow_custom", True))`` coercion style used
+    by the surrounding ``set_question_pack`` body — never raises, always
+    produces a ``str``.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        text = value.get("text")
+        if text is not None:
+            return _normalize_option(text)
+    return str(value)
+
+
+def _normalize_options(values: Any) -> list[str]:
+    """Normalize an ``options`` field to a fresh ``list[str]``.
+
+    Mirrors the existing ``list(q.get("options", []) or [])`` pattern:
+    a missing, ``None``, or non-iterable value collapses to ``[]``,
+    and any iterable produces a fresh list of normalized entries.
+    Always returns a new list (no shared mutable state with the input).
+    """
+    if not values:
+        return []
+    try:
+        iterable = list(values)
+    except TypeError:
+        return []
+    return [_normalize_option(item) for item in iterable]
+
+
 @dataclass
 class Question:
     """A single question inside a :class:`QuestionPack`.
@@ -177,7 +227,7 @@ class QuestionManager:
                     Question(
                         id=qid,
                         text=text,
-                        options=list(q.get("options", []) or []),
+                        options=_normalize_options(q.get("options")),
                         allow_custom=bool(q.get("allow_custom", True)),
                         required=bool(q.get("required", True)),
                     )
@@ -294,7 +344,7 @@ def pack_to_dict(pack: QuestionPack) -> dict[str, Any]:
             {
                 "id": q.id,
                 "text": q.text,
-                "options": list(q.options),
+                "options": _normalize_options(q.options),
                 "allow_custom": q.allow_custom,
                 "required": q.required,
                 "answer": q.answer,

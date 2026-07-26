@@ -146,6 +146,62 @@ class TestSetQuestionPack:
         assert replacement.status == "pending"
         assert replacement.questions[0].text == "Second question"
 
+    def test_set_question_pack_normalizes_object_shaped_options(self):
+        """Dict-shaped options ``{"text": "..."}`` collapse to plain strings.
+
+        LLMs sometimes pass option entries as ``{"text": "Option A"}``
+        dicts instead of plain strings. Without normalization those
+        objects render as ``[object Object]`` in the frontend chip
+        display AND get stored verbatim as the user's submitted answer.
+        The manager must collapse them to their ``text`` value so the
+        downstream contract (``list[str]``) is honored.
+        """
+        mgr = QuestionManager()
+        pack = mgr.set_question_pack(
+            "inst-obj",
+            [
+                {
+                    "text": "Which approach?",
+                    "options": [
+                        {"text": "Option A"},
+                        {"text": "Option B"},
+                    ],
+                },
+            ],
+        )
+        assert pack is not None
+        assert pack.questions[0].options == ["Option A", "Option B"]
+        # Each entry is a real str, not a leftover dict.
+        for opt in pack.questions[0].options:
+            assert isinstance(opt, str)
+
+    def test_set_question_pack_normalizes_mixed_options(self):
+        """A mix of plain strings, dicts, and other shapes all normalize.
+
+        Stresses the friendly-coercion philosophy: the manager never
+        rejects a pack on shape, but it always returns ``list[str]``.
+        Strings pass through, dicts collapse via their ``text`` key,
+        and odd shapes fall back to ``str(value)``.
+        """
+        mgr = QuestionManager()
+        pack = mgr.set_question_pack(
+            "inst-mix",
+            [
+                {
+                    "text": "Pick one?",
+                    "options": [
+                        "Plain A",
+                        {"text": "Dict B"},
+                        42,
+                    ],
+                },
+            ],
+        )
+        assert pack is not None
+        assert pack.questions[0].options == ["Plain A", "Dict B", "42"]
+        for opt in pack.questions[0].options:
+            assert isinstance(opt, str)
+
 
 # =============================================================================
 # Get question pack
@@ -287,3 +343,33 @@ class TestPackToDict:
         assert second["allow_custom"] is True
         assert second["required"] is True
         assert second["answer"] is None
+
+    def test_pack_to_dict_normalizes_stale_object_shaped_options(self):
+        """Defensive normalization on serialize — stale objects collapse too.
+
+        Belt-and-suspenders coverage: even when an in-memory pack somehow
+        carries dict entries in its ``options`` list (e.g. a future code
+        path that constructs ``Question`` directly), ``pack_to_dict``
+        must still emit a ``list[str]`` so the SSE payload reaches the
+        frontend without ``[object Object]``.
+        """
+        from daemon.services.question_manager import Question, QuestionPack
+
+        # Bypass ``set_question_pack`` to plant dict entries directly on
+        # the Question — simulates a stale or future-shape pack that the
+        # defensive normalize step must still sanitize.
+        pack = QuestionPack(
+            instance_id="inst-stale",
+            questions=[
+                Question(
+                    id="q1",
+                    text="Stale options?",
+                    options=[{"text": "Old A"}, {"text": "Old B"}],  # type: ignore[arg-type]
+                ),
+            ],
+        )
+
+        d = pack_to_dict(pack)
+        assert d["questions"][0]["options"] == ["Old A", "Old B"]
+        for opt in d["questions"][0]["options"]:
+            assert isinstance(opt, str)

@@ -159,11 +159,18 @@ export class QuestionWizardComponent {
    * Toggle an option as the answer for the current question. Selecting
    * the same option twice is idempotent; selecting a different one
    * replaces the previous selection. Clears any stale submission error.
+   *
+   * The ``option`` parameter is typed loosely (``unknown``) because the
+   * backend is the source of truth and older/shim layers may emit option
+   * payloads as either ``string`` or ``{ text: string }`` objects. We
+   * coerce via ``optionText`` defensively before storing the answer so
+   * the wizard can never persist ``[object Object]`` (Layer-2 hardening).
    */
-  selectOption(option: string): void {
+  selectOption(option: unknown): void {
     const q = this.currentQuestion();
     if (!q) return;
-    this.answers.update(a => ({ ...a, [q.id]: option }));
+    const text = this.optionText(option);
+    this.answers.update(a => ({ ...a, [q.id]: text }));
     if (this.submitError() !== null) this.submitError.set(null);
   }
 
@@ -292,11 +299,42 @@ export class QuestionWizardComponent {
   }
 
   /**
-   * Whether a given option string is the currently selected answer for
-   * the supplied question. Used by the template to apply ``.selected``
-   * to the active chip.
+   * Whether a given option is the currently selected answer for the
+   * supplied question. Used by the template to apply ``.selected`` to
+   * the active chip.
+   *
+   * The ``option`` parameter is typed loosely (``unknown``) for the same
+   * defensive reason documented on ``selectOption`` — the backend may
+   * emit strings or ``{ text: string }`` objects. We compare via the
+   * coerced text so a chip that was selected while the backend sent an
+   * object remains highlighted after the payload shape is normalized.
    */
-  isSelected(q: Question, option: string): boolean {
-    return this.answers()[q.id] === option;
+  isSelected(q: Question, option: unknown): boolean {
+    return this.answers()[q.id] === this.optionText(option);
+  }
+
+  /**
+   * Coerce a question-option payload to its display text. Layer-2
+   * defensive helper for the wizard UI: the canonical backend contract
+   * is ``string``, but to keep the front-end resilient against legacy
+   * or buggy emitters that send ``{ text: string }`` objects (which
+   * Angular otherwise renders as ``[object Object]``), we accept both.
+   *
+   * Order of resolution:
+   *   1. Already a ``string`` — return as-is (including empty strings).
+   *   2. Object with a string ``text`` field — return ``text``.
+   *   3. Anything else — fall back to ``String(opt)``.
+   *
+   * Pure / side-effect-free; safe to call from templates and event
+   * handlers. This is presentation-layer coercion only — the model
+   * layer (``Question.options: string[]``) remains strict, and the
+   * backend fix is the real fix.
+   */
+  optionText(opt: unknown): string {
+    if (typeof opt === 'string') return opt;
+    if (opt !== null && typeof opt === 'object' && typeof (opt as { text?: unknown }).text === 'string') {
+      return (opt as { text: string }).text;
+    }
+    return String(opt);
   }
 }
