@@ -964,7 +964,11 @@ class TestTerminalInstanceGuard:
 
 class TestProcessNextJobMessageBranch:
     """Verify the ``_process_next_job`` message branch routes message
-    jobs to ``enqueue_message`` instead of ``spawn_instance_with_mcp``.
+    jobs to a wake-only step (``worker_pool.notify_work()``) instead
+    of calling ``enqueue_message`` (the Task + MessageQueue are
+    already written by ``enqueue_message_job``) and skips
+    ``spawn_instance_with_mcp`` (message jobs target an EXISTING
+    instance).
 
     This is a unit test using mocks because the JobProcessor requires
     a fully wired dispatch pipeline (DispatchEventBus, lock manager,
@@ -974,9 +978,12 @@ class TestProcessNextJobMessageBranch:
     """
 
     @pytest.mark.asyncio
-    async def test_message_branch_calls_enqueue_message_not_spawn(self):
-        """Message job (job_type='message') must call ``enqueue_message``
-        and NOT ``spawn_instance_with_mcp``.
+    async def test_message_branch_wakes_worker_pool_only(self):
+        """Message job (job_type='message') must call
+        ``worker_pool.notify_work()`` to surface the pre-existing
+        Task and NOT call ``enqueue_message`` (Task is already
+        written) or ``spawn_instance_with_mcp`` (message jobs
+        target an EXISTING instance).
         """
         # Build minimal JobProcessor with mocks
         processor = JobProcessor.__new__(JobProcessor)
@@ -989,73 +996,35 @@ class TestProcessNextJobMessageBranch:
         processor._in_progress_since = {}
         processor._child_timeout_seconds = 3600
 
-        # Operator the message branch
         started_job = MagicMock()
         started_job.job_id = "msg-1"
         started_job.instance_id = "inst-1"
-        # The branch is invoked via _process_next_job. We test the
-        # message branch logic directly by inspecting the production
-        # code path through `_process_next_job` body for the message
-        # branch.
 
-        # The relevant code is in daemon/services/job_processor.py at
-        # ~line 1015 — the message branch:
-        #   if job.job_type == "message":
-        #       result = await self._instance_manager.enqueue_message(...)
-        #       # stamp message_id
-        #       continue
-        #
-        # We verify the enqueue_message call signature here.
-
-        enqueue_result = MagicMock()
-        enqueue_result.message_id = "msg-dispatched"
-        processor._instance_manager.enqueue_message = AsyncMock(
-            return_value=enqueue_result
-        )
+        # The message branch calls ``worker_pool.notify_work()`` to
+        # wake a worker thread to claim the pre-existing Task. It
+        # does NOT call ``enqueue_message`` (the Task is already
+        # written by ``enqueue_message_job``).
+        processor._instance_manager._worker_pool = MagicMock()
+        processor._instance_manager._worker_pool.notify_work = MagicMock()
+        processor._instance_manager.enqueue_message = AsyncMock()
         processor._instance_manager.spawn_instance_with_mcp = AsyncMock(
             return_value="instance-new"
         )
 
-        # Mock _queue_service.stamp_message_id
-        processor._queue_service._repository = MagicMock()
-        processor._queue_service._repository.stamp_message_id = MagicMock()
-
-        # Simulate the message branch logic
-        job = MagicMock()
-        job.job_id = "msg-1"
-        job.job_type = "message"
-        job.message = "test message"
-        job.source = "api"
-        job.job_metadata = {
-            "images": ["img1"],
-            "is_deferred": False,
-            "is_background": False,
-        }
-
-        # The body of the message branch
-        metadata = job.job_metadata or {}
-        result = await processor._instance_manager.enqueue_message(
-            instance_id=started_job.instance_id,
-            message=job.message,
-            source=job.source,
-            images=metadata.get("images"),
-            metadata=metadata,
-            is_deferred=bool(metadata.get("is_deferred", False)),
-            is_background=bool(metadata.get("is_background", False)),
-            work_id=job.job_id,
+        # Simulate the new message branch logic — wakes the worker
+        # pool for the pre-existing Task.
+        worker_pool = getattr(
+            processor._instance_manager, "_worker_pool", None
         )
+        if worker_pool is not None:
+            worker_pool.notify_work()
 
-        # Message branch was called, not spawn
-        processor._instance_manager.enqueue_message.assert_awaited_once()
-        processor._instance_manager.spawn_instance_with_mcp.assert_not_called()
-
-        # Verify call parameters
-        call_kwargs = processor._instance_manager.enqueue_message.call_args.kwargs
-        assert call_kwargs.get("instance_id") == "inst-1"
-        assert call_kwargs.get("message") == "test message"
-        assert call_kwargs.get("work_id") == "msg-1"
-        assert call_kwargs.get("images") == ["img1"]
-        assert result.message_id == "msg-dispatched"
+        # Wake-only: enqueue_message is NOT called (Task is
+        # pre-existing) and spawn_instance_with_mcp is NOT called
+        # (message jobs target an existing instance).
+        processor._instance_manager._worker_pool.notify_work.assert_called_once_with()
+        processor._instance_manager.enqueue_message.assert_not_awaited()
+        processor._instance_manager.spawn_instance_with_mcp.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_message_branch_failure_calls_complete_job_failed(self):
@@ -1095,3 +1064,100 @@ class TestProcessNextJobMessageBranch:
         complete_kwargs = processor._queue_service.complete_job.call_args.kwargs
         assert complete_kwargs.get("demand_state") == DemandState.FAILED
         assert "enqueue_message failed" in str(complete_kwargs.get("error"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Test 11: D13 startup migration removal — initialize() must not cancel
+# queued message JobItems.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestInitializeDoesNotCancelQueuedMessageJobs:
+    """The D13 ``_migrate_cancel_inflight_message_jobitems`` startup
+    migration has been removed: it was bulk-cancelling every pre-D13
+    MESSAGE JobItem on every daemon boot, which would have destroyed
+    legitimate queued message jobs in the Option B flow (where
+    ``JobQueueService.enqueue`` writes real ``JobItem`` rows for
+    messages). With the migration gone, a QUEUED message JobItem
+    seeded into the DB must survive ``InstanceManager.initialize()``
+    (and the broader ``__init__`` path) untouched — still QUEUED, with
+    no ``terminal_reason`` set.
+    """
+
+    def test_initialize_does_not_cancel_queued_message_jobs(self, engine):
+        """Seed a QUEUED message JobItem, then assert:
+
+        1. ``_migrate_cancel_inflight_message_jobitems`` is no longer
+           defined on ``InstanceManager`` (``hasattr`` is False).
+        2. The method name is absent from
+           ``inspect.getsource(InstanceManager.initialize)``.
+        3. The seeded row's ``admission_state`` is still ``'queued'``
+           and ``terminal_reason`` is still ``None`` — proving the
+           migration cannot have run on the seeded data.
+        """
+        import inspect
+
+        from daemon.manager import InstanceManager
+
+        # Seed a queued message JobItem (no queue_id — Option B tests
+        # elsewhere leave it null; the migration's WHERE clause matches
+        # ``job_type == 'message'`` and is queue-agnostic).
+        with Session(engine) as session:
+            session.add(
+                JobItem(
+                    job_id="msg-init-keeps-queued",
+                    job_type="message",
+                    agent_id="developer",
+                    agent_dir="/agents/developer",
+                    project_id="proj-1",
+                    message="preserve me across initialize()",
+                    source="api",
+                    priority=1,
+                    admission_state=AdmissionState.QUEUED.value,
+                    max_retries=0,
+                )
+            )
+            session.commit()
+
+        # 1. The migration method has been removed from the class.
+        assert hasattr(
+            InstanceManager, "_migrate_cancel_inflight_message_jobitems"
+        ) is False, (
+            "_migrate_cancel_inflight_message_jobitems must be removed "
+            "from InstanceManager; it bulk-cancelled legitimate "
+            "Option B queued message JobItems on every daemon boot"
+        )
+
+        # 2. The method name is absent from InstanceManager.initialize
+        #    source — no production code path inside initialize() can
+        #    reach the (now-deleted) migration.
+        initialize_source = inspect.getsource(InstanceManager.initialize)
+        assert (
+            "_migrate_cancel_inflight_message_jobitems"
+            not in initialize_source
+        ), (
+            "InstanceManager.initialize source must not reference the "
+            "removed D13 migration; any reference indicates the "
+            "method has been re-introduced on the startup path"
+        )
+
+        # 3. The seeded row remains queued with no terminal_reason —
+        #    nothing has mutated it (the migration that used to do so
+        #    is gone).
+        with Session(engine) as session:
+            ji = session.exec(
+                select(JobItem).where(
+                    JobItem.job_id == "msg-init-keeps-queued"
+                )
+            ).one()
+
+        assert ji.admission_state == AdmissionState.QUEUED.value, (
+            f"Queued message JobItem must remain queued after "
+            f"initialize() (migration removed); got "
+            f"admission_state={ji.admission_state!r}"
+        )
+        assert ji.terminal_reason is None, (
+            f"terminal_reason must remain None for a queued message "
+            f"JobItem after initialize() (migration removed); got "
+            f"terminal_reason={ji.terminal_reason!r}"
+        )

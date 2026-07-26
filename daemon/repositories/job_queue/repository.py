@@ -276,6 +276,7 @@ class JobRepository:
         idempotency_key: str,
         job_type: str = "task",
         instance_id: str | None = None,
+        job_id: str | None = None,
     ) -> tuple[JobItem | None, bool]:
         """Atomically insert a job or return the existing one with the same key.
 
@@ -299,6 +300,9 @@ class JobRepository:
             idempotency_key: Required idempotency key. Must be non-null.
             job_type: Job type ("task" or "message").
             instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+            job_id: Optional explicit JobItem UUID. When supplied, the
+                     newly inserted row uses this exact ID. If an existing
+                     idempotent row wins, its existing ID is returned.
 
         Returns:
             Tuple ``(job, created)`` where ``job`` is the JobItem that now
@@ -321,7 +325,7 @@ class JobRepository:
         with SQLModelSession(self.engine) as db_session:
             insert_fn = self._get_dialect_insert(db_session)
             now = datetime.now(timezone.utc).isoformat()
-            new_job_id = str(uuid.uuid4())
+            new_job_id = job_id or str(uuid.uuid4())
 
             # Build the values dict. The Core ``Table`` uses the DB
             # column name ``metadata`` for the JSON column, while the

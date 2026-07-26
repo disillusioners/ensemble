@@ -1308,32 +1308,33 @@ class InstanceMessagingService:
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
-        Phase 5 (Option B): route the message through
-        :meth:`JobQueueService.enqueue` (real slot-based concurrency
-        enforcement via ``job_locks``) instead of the legacy D13 inline
-        write path. The ``JobProcessor._process_next_job`` message branch
-        picks the JobItem up, acquires a slot, and routes the delivery
-        to :meth:`enqueue_message` for the existing instance.
-
-        This is the unified public entry point that replaces both
-        ``enqueue_message`` (kept for backwards compatibility) and the
-        prior D13 mirror-creation path. The HTTP ``POST /messages``
-        route and ``job_continue`` tool flow through this method.
+        Option B (synchronous Task contract): the ``MessageQueue`` and
+        ``Task`` rows are created synchronously (via
+        :meth:`_prepare_enqueued_message`) BEFORE the JobItem is
+        enqueued, so the HTTP response can carry a real ``message_id``
+        immediately. The ``JobProcessor._process_next_job`` message
+        branch is then reduced to a wake-only step — it just calls
+        ``worker_pool.notify_work()`` to surface the already-existing
+        Task to a worker thread (the Task is created in PENDING by
+        ``_prepare_enqueued_message`` and the worker pool's claim path
+        picks it up).
 
         Architecture:
             1. Resolve the target instance's project_id + queue_id
                (cross-project guard, default ``system_parallel_queue``).
-            2. Call ``JobQueueService.enqueue(job_type='message',
-               instance_id=instance_id, ...)`` — this creates the
-               JobItem in ``admission_state='queued'`` with the
-               existing instance_id preserved. ``enqueue`` emits
+            2. Mint one UUID and call
+               ``_prepare_enqueued_message(work_id=job_id, ...)`` to write
+               the ``MessageQueue`` + ``Task`` rows in one transaction.
+            3. Restore the synchronous RUNNING SSE and first-message title
+               side effects after the transaction commits.
+            4. Call ``JobQueueService.enqueue(job_type='message',
+               instance_id=instance_id, job_id=job_id, ...)``. This creates
+               the JobItem with the exact shared UUID and only then emits
                ``dispatch_bus.notify_new_job()`` to wake the
-               ``JobProcessor`` near-instantly.
-            3. Return ``AsyncMessageResult`` with ``status='queued'``
-               and ``job_id`` set to the JobItem's UUID. ``message_id``
-               is ``None`` — it is created at dispatch time inside
-               ``enqueue_message`` (see :meth:`_process_next_job`'s
-               message branch).
+               ``JobProcessor``.
+            5. Stamp the authoritative ``message_id`` onto the JobItem and
+               return ``AsyncMessageResult`` with the real message ID,
+               ``status='queued'``, and ``job_id == Task.work_id``.
 
         Concurrency: ``concurrency_limit`` on the resolved queue is
         NOW ENFORCED for messages. With a FIFO queue at
@@ -1341,13 +1342,11 @@ class InstanceMessagingService:
         instances run strictly serially.
 
         Failure handling:
-            * Any exception in the resolve or enqueue step propagates
-              to the caller. The Task row has not been written yet, so
-              there is no work to roll back. The caller (``POST /messages``
-              HTTP route, ``job_continue`` tool) surfaces the error
-              through its normal error channel.
-            * JobItem creation failure inside ``enqueue`` is handled
-              by the lower layer — see :meth:`JobQueueService.enqueue`.
+            * Any exception while resolving the queue or creating the Task
+              propagates before a JobItem is visible to the dispatch bus.
+            * If JobItem creation fails after the Task transaction commits,
+              the Task remains the authoritative work item and the caller
+              receives the enqueue error for normal recovery handling.
 
         Args:
             instance_id: Target instance ID (the existing instance that
@@ -1357,20 +1356,20 @@ class InstanceMessagingService:
             priority: 0=system, 1=user.
             images: Optional base64 images for vision messages.
             metadata: Optional metadata dict.
-            is_deferred: Forwarded to ``enqueue_message`` at dispatch
-                time — stamps ``Task.is_deferred=True`` so the worker
-                pool's idle gate holds the task.
-            is_background: Forwarded to ``enqueue_message`` — stamps
-                ``Task.is_background=True`` for background routing.
+            is_deferred: Stamps ``Task.is_deferred=True`` on the
+                created Task row so the worker pool's idle gate holds
+                the task until every non-defer queue is empty.
+            is_background: Stamps ``Task.is_background=True`` on the
+                created Task row for background-queue routing.
             queue_id: Optional queue override. Validated against the
                 target project; falls back to ``system_parallel_queue``
                 on mismatch.
 
         Returns:
-            ``AsyncMessageResult`` with ``message_id=None`` (created at
-            dispatch), ``instance_id=instance_id``, ``status='queued'``
-            (waiting for slot), and ``job_id`` populated as the
-            JobItem's UUID4.
+            ``AsyncMessageResult`` with the real ``message_id`` (Task
+            row's column), ``instance_id=instance_id``,
+            ``status='queued'`` (waiting for slot), and ``job_id``
+            populated as the JobItem's UUID4 (== ``Task.work_id``).
         """
         # --- Step 1: Resolve queue_id (reuse existing logic) ---
         # We need the instance's project_id (authoritative
@@ -1381,12 +1380,15 @@ class InstanceMessagingService:
         # 1a. Resolve project_id from the instance row.
         project_id_for_job: str | None = None
         instance_meta = None
+        raw_project_was_none = True
         try:
             instance_meta = await asyncio.to_thread(
                 self._manager._instance_repository.get, instance_id
             )
             if instance_meta is not None:
                 raw_project_id = instance_meta.project_id
+                if raw_project_id is not None:
+                    raw_project_was_none = False
                 project_id_for_job = normalize_project_id(raw_project_id)
         except Exception as project_err:
             logger.debug(
@@ -1479,9 +1481,39 @@ class InstanceMessagingService:
                         f"{queue_lookup_err}"
                     )
 
-        # --- Step 2: Enqueue via JobQueueService (real concurrency enforcement) ---
-        # The repository call passes ``job_type='message'`` and ``instance_id=instance_id``.
-        job_item = await self._manager._job_queue_service.enqueue(
+        # --- Step 2: Mint the shared linkage ID and create the Task +
+        # MessageQueue rows FIRST. The JobItem must not be visible to the
+        # dispatch bus until its authoritative Task already exists.
+        job_id = str(uuid.uuid4())
+        ctx = await asyncio.to_thread(
+            self._prepare_enqueued_message,
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+            metadata=metadata,
+            is_deferred=is_deferred,
+            is_background=is_background,
+            work_id=job_id,
+        )
+
+        # Preserve the historical synchronous side effects from the
+        # enqueue path: publish the RUNNING transition and start title
+        # generation only after the message transaction has committed.
+        if ctx.status_changed_to_running:
+            await self._manager._live_hub.stream_status_change(
+                instance_id, InstanceStatus.RUNNING.value, agent_id=ctx.instance_agent_id
+            )
+        self._maybe_trigger_title_generation(
+            instance_id, message, ctx.is_idle_to_running
+        )
+
+        # --- Step 3: Enqueue the JobItem using the exact same UUID. ---
+        # JobQueueService.enqueue emits the dispatch-bus notification only
+        # after this call returns, so the JobProcessor can never observe a
+        # message JobItem before its Task + MessageQueue rows exist.
+        await self._manager._job_queue_service.enqueue(
             agent_id=agent_id_for_job,
             message=message,
             source=source,
@@ -1496,14 +1528,54 @@ class InstanceMessagingService:
             queue_id=queue_id_for_job,
             job_type="message",
             instance_id=instance_id,
+            job_id=job_id,
         )
 
-        # --- Step 3: Return adapted result ---
+        # Stamp the message_id onto the JobItem for cross-system correlation.
+        # This remains best-effort for compatibility with the historical path:
+        # Task + MessageQueue creation and queue admission have already succeeded.
+        try:
+            await asyncio.to_thread(
+                self._manager._job_queue_service._repository.stamp_message_id,
+                job_id,
+                ctx.message_id,
+            )
+        except Exception:
+            logger.debug(
+                f"enqueue_message_job: stamp_message_id failed for job "
+                f"{job_id[:8]}...",
+                exc_info=True,
+            )
+
+        # Do not notify the WorkerPool here. The JobProcessor's message
+        # branch is the wake-only handoff after queue slot admission;
+        # waking here would bypass that gate.
+        # W2 fix — project-less fallback. When the authoritative instance project
+        # was None, JobQueueService.enqueue already called notify_new_job with
+        # the normalized system project (which works today), but this belt-and-suspenders
+        # fallback calls notify_all() to guarantee the wakeup reaches every known
+        # project + the global event. Safe getattr keeps it inert when the bus
+        # isn't wired (e.g. unit tests with a bare MagicMock manager).
+        if raw_project_was_none:
+            bus = getattr(
+                getattr(self._manager, "_job_queue_service", None),
+                "_dispatch_bus",
+                None,
+            )
+            if bus is not None and hasattr(bus, "notify_all"):
+                try:
+                    bus.notify_all()
+                except Exception as bus_err:
+                    logger.debug(
+                        f"enqueue_message_job: notify_all fallback failed "
+                        f"for project-less instance {instance_id[:8]}...: "
+                        f"{type(bus_err).__name__}: {bus_err}"
+                    )
         return AsyncMessageResult(
-            message_id=None,
+            message_id=ctx.message_id,
             instance_id=instance_id,
             status="queued",
-            job_id=job_item.job_id,
+            job_id=job_id,
         )
 
     async def _process_message_with_tracking(

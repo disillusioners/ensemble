@@ -15,18 +15,13 @@ What's covered (Phase 6 / Option B cutover):
   3. A failed message-Job finalizes to ``done`` (terminal_reason='failed')
      — NEVER to ``dead`` (the retry/DLQ path is reserved for TASK jobs).
 
-Option B cutover notes:
+Option B contract notes:
 
-  * ``enqueue_message_job`` no longer creates Task / MessageQueue rows.
-    Those are written inside ``JobProcessor._process_next_job``'s message
-    branch via ``enqueue_message(work_id=job.job_id)``. The single source
-    of truth for the JobItem's state-machine transition is the JobQueue
-    (``start_job_atomic_with_lock``); there is no longer an eager
-    ``atomic_transition(queued -> active)`` step at enqueue time.
-  * The cross-system serialization guard at
-    ``TaskRepository._admitted_task_carve_out_sql`` continues to enforce
-    one-RUNNING-Task-per-instance — the underlying Task-row invariant is
-    unchanged by the dispatch-path migration.
+  * ``enqueue_message_job`` creates the Task + MessageQueue rows before
+    calling ``JobQueueService.enqueue``. The shared UUID is passed as
+    ``Task.work_id`` and ``JobItem.job_id``.
+  * The JobItem remains ``queued`` until the JobProcessor admits a queue
+    slot. Its message_id metadata is stamped immediately after enqueue.
 
 Run with::
 
@@ -203,6 +198,7 @@ def _build_manager(
         idempotency_key=None,
         job_type="task",
         instance_id=None,
+        job_id=None,
     ):
         """Async shim that mirrors ``JobQueueService.enqueue``'s DB write.
 
@@ -228,6 +224,7 @@ def _build_manager(
             idempotency_key=idempotency_key,
             job_type=job_type,
             instance_id=instance_id,
+            job_id=job_id,
         )
 
     manager._job_queue_service.enqueue = AsyncMock(side_effect=_enqueue_side_effect)
@@ -363,29 +360,19 @@ class TestTwoMessageJobsSerialize:
     The cross-system ``_admitted_task_carve_out_sql`` predicate looked
     up Task rows via ``job_queue_items.metadata.message_id``.
 
-    Post-Option B (Phase 5 cutover): ``enqueue_message_job`` no longer
-    creates Task / MessageQueue rows — those are written lazily by
-    ``JobProcessor._process_next_job``'s message branch via
-    ``enqueue_message(work_id=job.job_id)``. The per-queue
-    ``concurrency_limit`` is the new enforcement point (via
-    ``start_job_atomic_with_lock``), and the per-instance Task guard
-    continues to enforce one-RUNNING-Task-per-instance at the worker
-    claim step.
+    Post-Option B: ``enqueue_message_job`` creates the Task +
+    MessageQueue rows synchronously, before the JobItem is enqueued.
+    The queue controls only the JobItem admission transition; the
+    worker pool's per-instance Task guard still serializes execution.
 
-    This test verifies the new contract:
+    This test verifies:
 
       * Two ``enqueue_message_job`` calls produce two distinct JobItem
-        rows with distinct UUID4 job_ids.
+        rows and two matching Task rows.
       * Each JobItem stays in ``admission_state='queued'`` (no eager
         activation).
-      * The ``result.message_id`` is ``None`` — ``enqueue_message_job``
-        no longer creates Task / MessageQueue rows; the ``message_id``
-        is minted by the message branch at dispatch time.
-      * The serialization contract itself (Task A RUNNING, Task B
-        PENDING) is exercised in
-        ``tests/job_queue/test_option_b_message_routing.py`` via the
-        full ``JobProcessor._process_next_job`` flow — the only place
-        where Task rows are actually written now.
+      * Both ``result.message_id`` values are real, non-null IDs minted
+        by the synchronous Task creation.
     """
 
     @pytest.mark.asyncio
@@ -430,7 +417,7 @@ class TestTwoMessageJobsSerialize:
                 source="api",
             )
 
-        # ── Result contract: distinct job_ids, message_id is None ──
+        # ── Result contract: distinct job_ids, message_ids are real ──
         assert result_A.job_id is not None
         assert result_B.job_id is not None
         assert result_A.job_id != result_B.job_id, (
@@ -440,36 +427,26 @@ class TestTwoMessageJobsSerialize:
         job_id_A = result_A.job_id
         job_id_B = result_B.job_id
 
-        # Post-Option B: ``enqueue_message_job`` returns
-        # ``message_id=None`` because the Task / MessageQueue rows
-        # (which carry ``message_id``) are written later by the
-        # ``JobProcessor`` message branch. The HTTP ``POST /messages``
-        # route no longer reads ``message_id`` from this return value;
-        # ``job_continue`` surfaces ``job_id`` as ``new_job_id``.
-        assert result_A.message_id is None, (
-            f"enqueue_message_job must return message_id=None post-Option-B "
-            f"(Task rows are written at dispatch time); got "
-            f"message_id={result_A.message_id!r}"
-        )
-        assert result_B.message_id is None, (
-            f"enqueue_message_job must return message_id=None post-Option-B; "
-            f"got message_id={result_B.message_id!r}"
-        )
+        # Option B synchronous Task contract: both message IDs are
+        # created by the pre-enqueue Task transaction.
+        assert result_A.message_id is not None
+        assert result_B.message_id is not None
+        assert result_A.message_id != result_B.message_id
 
-        # ── DB state: NO MessageQueue or Task rows yet (created at dispatch) ──
+        # ── DB state: Task + MessageQueue rows exist before dispatch ──
         mq_rows = _load_message_queues(engine, "inst-1")
-        assert len(mq_rows) == 0, (
-            f"enqueue_message_job must NOT create MessageQueue rows "
-            f"post-Option-B (created at dispatch time in the message branch); "
-            f"got {len(mq_rows)}"
+        assert len(mq_rows) == 2, (
+            f"enqueue_message_job must create MessageQueue rows before "
+            f"the JobItem is dispatched; got {len(mq_rows)}"
         )
 
         tasks = _load_tasks(engine, "inst-1")
-        assert len(tasks) == 0, (
-            f"enqueue_message_job must NOT create Task rows post-Option-B "
-            f"(created at dispatch time via enqueue_message); "
-            f"got {len(tasks)}"
+        assert len(tasks) == 2, (
+            f"enqueue_message_job must create Task rows before the "
+            f"JobItem is dispatched; got {len(tasks)}"
         )
+        assert {task.work_id for task in tasks} == {job_id_A, job_id_B}
+
 
         # ── DB state: 2 JobItem rows in 'queued' ──
         jobs = _load_message_job_items(engine)
@@ -495,16 +472,10 @@ class TestTwoMessageJobsSerialize:
             )
 
         # ── The serialization contract itself (Task A RUNNING, Task B PENDING) ──
-        # Post-Option-B: the per-instance Task guard is exercised by the
-        # full ``JobProcessor._process_next_job`` flow (not at
-        # ``enqueue_message_job`` time, because Task rows don't exist
-        # yet). That integration test lives in
-        # ``tests/job_queue/test_option_b_message_routing.py`` —
-        # ``test_concurrency_enforced_fifo`` runs the message branch
-        # twice for the same instance and asserts the second Task is
-        # blocked while the first runs. No additional in-file
-        # ``claim_pending_task`` probe here, since no Task rows exist
-        # yet at this layer.
+        # The pre-created Task rows are available immediately, while the
+        # JobProcessor still owns queue-slot admission. The full claim
+        # integration remains covered by
+        # ``tests/job_queue/test_option_b_message_routing.py``.
 
 
 # ──────────────────────────────────────────────────────────────────────────────

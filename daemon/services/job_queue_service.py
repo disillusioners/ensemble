@@ -556,6 +556,7 @@ class JobQueueService:
         idempotency_key: str | None = None,
         job_type: str = "task",
         instance_id: str | None = None,
+        job_id: str | None = None,
     ) -> JobItem:
         """Submit a job for processing.
 
@@ -570,7 +571,7 @@ class JobQueueService:
         returns the existing job instead of creating a duplicate.
 
         Phase 5 (Option B): ``job_type="message"`` is ACCEPTED. Messages
-        flow through the queue and route to ``enqueue_message`` via the
+        flow through the queue and route to the pre-created Task via the
         message branch in ``JobProcessor._process_next_job``.
 
         Args:
@@ -587,6 +588,9 @@ class JobQueueService:
             job_type: Job type — ``"task"`` (default) or ``"message"``.
             instance_id: Optional pre-set instance ID (for message jobs,
                         this is the existing target instance).
+            job_id: Optional explicit JobItem UUID. When supplied, the
+                    repository uses this exact ID; this is used by Option B
+                    to link ``JobItem.job_id`` to ``Task.work_id``.
 
         Returns:
             JobItem with PENDING status (or existing non-terminal job if idempotent).
@@ -673,6 +677,7 @@ class JobQueueService:
                 idempotency_key=idempotency_key,
                 job_type=job_type,
                 instance_id=instance_id,
+                job_id=job_id,
             )
 
             if not created and job is not None:
@@ -793,8 +798,9 @@ class JobQueueService:
             idempotency_key=idempotency_key,
             job_type=job_type,
             instance_id=instance_id,
+            job_id=job_id,
         )
-        
+
         # Notify dispatch bus of new job (for event-driven processing)
         if self._dispatch_bus is not None:
             self._dispatch_bus.notify_new_job(project_id)

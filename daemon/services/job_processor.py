@@ -724,14 +724,35 @@ class JobProcessor:
                         admission_states=[AdmissionState.ACTIVE.value]
                     )
                     for proc_job in (active_jobs or []):
-                        # NOTE: The legacy MESSAGE-specific orphan guard
-                        # was removed in D11. The unified dispatcher owns message
-                        # completion end-to-end — orphan PROCESSING rows are
-                        # resolved by the JobFeedbackObserver event subscription
-                        # (``_finalize_job``).
-                        # A stuck PROCESSING MESSAGE row that survives both paths
-                        # is recovered by ``JobRecoveryService`` at startup; we
-                        # no longer attempt inline re-spawn or fail here.
+                        # W1: skip message orphans. Message jobs target
+                        # an EXISTING instance — re-running
+                        # ``spawn_instance_with_mcp`` or
+                        # ``enqueue_message`` here would create a
+                        # duplicate instance + duplicate Task. The
+                        # synchronous Task contract
+                        # (``enqueue_message_job`` already wrote the
+                        # Task row) means the message branch in
+                        # ``_process_next_job`` is the only legitimate
+                        # dispatch path for message jobs. ACTIVE
+                        # message orphans whose Task is missing are
+                        # recovered by ``JobRecoveryService
+                        # .recover_on_startup`` (it checks Task
+                        # existence and resets stale rows to queued).
+                        if proc_job.job_type == "message":
+                            continue
+
+                        # NOTE: the legacy "inline MESSAGE-specific
+                        # orphan guard" was removed in D11. The W1
+                        # guard above now owns that responsibility
+                        # for the ACTIVE-admission loop: message jobs
+                        # are skipped up front because their target
+                        # instance already exists and the Task row is
+                        # already written by ``enqueue_message_job``.
+                        # A stuck ACTIVE MESSAGE row that survives
+                        # both the message branch and the W1 skip is
+                        # recovered by ``JobRecoveryService`` at
+                        # startup; we no longer attempt inline
+                        # re-spawn or fail here.
 
                         # Skip if instance already spawned (normal case).
                         # If instance_id is set but get_instance raises KeyError,
@@ -1004,84 +1025,69 @@ class JobProcessor:
                         f"admission_state={started_job.admission_state}"
                     )
 
-                    # Phase 5 (Option B): MESSAGE BRANCH.
-                    # Message jobs target an EXISTING instance — skip the
-                    # ``spawn_instance_with_mcp`` call (which would create
-                    # a duplicate instance) and route to ``enqueue_message``
-                    # to write the Task + MessageQueue rows. The existing
-                    # instance's instance_id is preserved by
-                    # ``start_job`` (see ``JobQueueService.start_job``'s
-                    # instance_id preservation for message jobs).
+                    # Phase 5 (Option B): MESSAGE BRANCH — wake-only.
+                    # Synchronous Task contract:
+                    #   - ``enqueue_message_job`` already created the
+                    #     Task + MessageQueue rows synchronously via
+                    #     ``_prepare_enqueued_message`` and stamped
+                    #     ``message_id`` onto the JobItem. The Task
+                    #     row is PENDING and visible to the worker pool.
+                    #   - This branch does NOT call ``enqueue_message``
+                    #     (would create a duplicate Task) and does NOT
+                    #     call ``spawn_instance_with_mcp`` (message
+                    #     jobs target an EXISTING instance — the
+                    #     ``start_job`` step preserved the
+                    #     ``instance_id`` from the original
+                    #     ``enqueue_message_job`` call).
+                    #   - We ONLY wake the worker pool so a worker
+                    #     thread can claim the pre-existing PENDING
+                    #     Task and route it to the existing instance.
+                    # ``JobFeedbackObserver`` owns the terminal
+                    # transition + slot-lock release.
                     if job.job_type == "message":
-                        # Fire-and-forget: after ``enqueue_message``
-                        # returns, ``_process_next_job`` moves on.
-                        # ``JobFeedbackObserver`` owns terminal transitions
-                        # and the slot lock release on instance completion.
-                        # We only call ``complete_job(FAILED)`` on the
-                        # enqueue_message failure path.
                         try:
-                            # Extract dispatch-time metadata (stored on the
-                            # JobItem's JSON ``job_metadata`` column at
-                            # ``enqueue_message_job`` time).
+                            # Extract dispatch-time metadata (stored on
+                            # the JobItem's JSON ``job_metadata`` column
+                            # at ``enqueue_message_job`` time). Kept
+                            # here as a no-op read — useful for
+                            # debugging via structured logs.
                             job_meta = job.job_metadata or {}
-                            result = await self._instance_manager.enqueue_message(
-                                instance_id=started_job.instance_id,
-                                message=job.message,
-                                source=job.source,
-                                images=job_meta.get("images"),
-                                metadata=job_meta,
-                                is_deferred=bool(job_meta.get("is_deferred", False)),
-                                is_background=bool(job_meta.get("is_background", False)),
-                                # ``work_id == job_id`` is the linkage
-                                # contract — ``enqueue_message`` stamps it
-                                # onto the Task row so F10 drift detection
-                                # and the work resolver can correlate
-                                # Task ↔ JobItem precisely.
-                                work_id=job.job_id,
+
+                            # Wake the worker pool so a worker thread
+                            # can claim the pre-existing PENDING Task.
+                            # The Task + MessageQueue rows were already
+                            # written by ``enqueue_message_job``; this
+                            # is a surface-only signal.
+                            worker_pool = getattr(
+                                self._instance_manager, "_worker_pool", None
                             )
-                            # Best-effort: stamp the message_id onto the
-                            # JobItem for the cross-system guard in
-                            # ``claim_pending_task``. Failure is non-fatal
-                            # — the dispatch has already succeeded.
-                            if result and result.message_id:
-                                try:
-                                    await asyncio.to_thread(
-                                        self._queue_service._repository.stamp_message_id,
-                                        job.job_id,
-                                        result.message_id,
-                                    )
-                                except Exception as stamp_err:
-                                    logger.warning(
-                                        f"JobProcessor (message branch): "
-                                        f"stamp_message_id failed for "
-                                        f"job {job.job_id[:8]}...: {stamp_err}"
-                                    )
+                            if worker_pool is not None:
+                                worker_pool.notify_work()
+
                             logger.info(
-                                f"JobProcessor (message branch): delivered "
-                                f"job {job.job_id[:8]}... to instance "
+                                f"JobProcessor (message branch): woke "
+                                f"worker pool for pre-existing Task on "
+                                f"job {job.job_id[:8]}... / instance "
                                 f"{started_job.instance_id[:8] if started_job.instance_id else 'N/A'}..."
                             )
                             # S1 fix: clear the in-progress tracking
-                            # entry on the SUCCESS path too. Prior code
-                            # only cleared it on the enqueue_message
-                            # failure branch (the ``except`` block
-                            # below), which meant every successful
-                            # message job leaked an entry in
-                            # ``_last_in_progress`` /
-                            # ``_in_progress_since`` — over time the
-                            # dicts grew without bound. The dispatch
-                            # itself succeeds, the JobItem stays
-                            # ``active`` until
-                            # ``JobFeedbackObserver`` releases the
-                            # slot, so the cleanup is safe here.
+                            # entry on the SUCCESS path. Prior code only
+                            # cleared it on the enqueue_message failure
+                            # branch, which leaked entries in
+                            # ``_last_in_progress`` / ``_in_progress_since``
+                            # over time. The dispatch itself succeeds;
+                            # the JobItem stays ``active`` until
+                            # ``JobFeedbackObserver`` releases the slot.
                             self._cleanup_in_progress_tracking(job.job_id)
                         except Exception as e:
                             logger.error(
-                                f"Failed to enqueue message for job "
-                                f"{job.job_id[:8]}...: {e}"
+                                f"Failed to wake worker pool for "
+                                f"message job {job.job_id[:8]}...: {e}"
                             )
                             await self._queue_service.complete_job(
-                                job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                                job.job_id,
+                                demand_state=DemandState.FAILED,
+                                error=f"Failed to wake worker pool for message job: {e}",
                             )
                             self._cleanup_in_progress_tracking(job.job_id)
                         # Skip the task-path spawn below — message jobs

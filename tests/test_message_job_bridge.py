@@ -311,20 +311,26 @@ class TestEnqueueMessageJobRoutesThroughEnqueue:
     """``enqueue_message_job()`` routes the message through
     ``JobQueueService.enqueue(job_type='message', ...)`` (Phase 5 /
     Option B cutover) — the JobItem is created via the queue path
-    (real slot-based concurrency enforcement) and the Task +
-    ``MessageQueue`` rows are created **at dispatch time** inside the
-    JobProcessor's message branch.
+    (real slot-based concurrency enforcement) AND the Task +
+    ``MessageQueue`` rows are created **synchronously** inside
+    ``enqueue_message_job`` itself (via
+    ``_prepare_enqueued_message``).
 
-    The AsyncMessageResult contract changes:
+    The AsyncMessageResult contract:
 
-    * ``message_id`` is ``None`` — minted only inside ``enqueue_message``
-      at dispatch time, not at submission time.
-    * ``job_id`` is the JobItem's UUID4 minted by enqueue.
+    * ``message_id`` is a non-null string (the Task row's
+      ``message_id`` column) — created at submission time, not at
+      dispatch time. The HTTP ``POST /messages`` route can return the
+      real ``message_id`` immediately.
+    * ``job_id`` is the JobItem's UUID4 minted by ``enqueue``.
     * ``status`` is ``"queued"`` — waiting for slot, not running.
+    * The Task row's ``work_id`` matches the JobItem's ``job_id`` (the
+      linkage contract maintained via
+      ``_prepare_enqueued_message(work_id=job_id)``).
 
-    No ``MessageQueue`` / ``Task`` rows are written at this point:
-    those come from the JobProcessor message branch when the slot
-    is acquired.
+    The JobProcessor's message branch is reduced to a wake-only step
+    (``worker_pool.notify_work()``) — the Task is already in PENDING
+    by the time the JobProcessor picks up the JobItem.
     """
 
     @pytest.mark.asyncio
@@ -333,6 +339,9 @@ class TestEnqueueMessageJobRoutesThroughEnqueue:
     ):
         manager = _build_manager(
             engine, instance_repository, write_guard, job_repository, queue_repository
+        )
+        job_repository.stamp_message_id = MagicMock(
+            wraps=job_repository.stamp_message_id
         )
 
         messaging_service = InstanceMessagingService(
@@ -357,13 +366,19 @@ class TestEnqueueMessageJobRoutesThroughEnqueue:
                 source="api",
             )
 
-        # ── AsyncMessageResult contract (Option B) ──
+        # ── AsyncMessageResult contract (Option B, sync Task) ──
         assert result.status == "queued"
-        # Phase 5 cutover: message_id is created at dispatch time, NOT
-        # at submission time — it is None on the queue result.
-        assert result.message_id is None, (
-            f"enqueue_message_job must return message_id=None "
-            f"(created at dispatch time); got {result.message_id!r}"
+        # Option B (synchronous Task contract): message_id is created
+        # SYNCHRONOUSLY in enqueue_message_job via
+        # ``_prepare_enqueued_message`` — not None, not deferred.
+        assert result.message_id is not None, (
+            f"enqueue_message_job must return a real message_id "
+            f"(created synchronously via _prepare_enqueued_message); "
+            f"got {result.message_id!r}"
+        )
+        assert isinstance(result.message_id, str), (
+            f"enqueue_message_job must return a str message_id; "
+            f"got {type(result.message_id).__name__}"
         )
         assert result.instance_id == "inst-1"
         assert result.job_id is not None, "enqueue_message_job must mint a job_id"
@@ -384,21 +399,39 @@ class TestEnqueueMessageJobRoutesThroughEnqueue:
             f"got message={enqueue_kwargs.get('message')!r}"
         )
         assert enqueue_kwargs.get("source") == "api"
+        assert enqueue_kwargs.get("job_id") == result.job_id, (
+            "enqueue_message_job must pass its minted UUID through to "
+            "JobQueueService.enqueue unchanged"
+        )
+        job_repository.stamp_message_id.assert_called_once_with(
+            result.job_id, result.message_id
+        )
 
-        # ── No Task / MessageQueue rows created at submission time ──
-        # The Task + MessageQueue rows are created at dispatch time
-        # inside the JobProcessor message branch. At this point
-        # (post enqueue_message_job) only the JobItem exists in the
-        # queue (mocked via the AsyncMock).
+        # ── Task + MessageQueue rows ARE created synchronously ──
+        # Option B (synchronous Task contract): the Task +
+        # ``MessageQueue`` rows are written by
+        # ``_prepare_enqueued_message`` INSIDE ``enqueue_message_job``,
+        # before the call returns. The HTTP response carries the real
+        # ``message_id`` (Task row's column) immediately.
         mq_rows = _load_message_queues(engine, "inst-1")
-        assert len(mq_rows) == 0, (
-            f"enqueue_message_job must NOT create MessageQueue rows "
-            f"(those are created at dispatch time); got {len(mq_rows)}"
+        assert len(mq_rows) == 1, (
+            f"enqueue_message_job must create the MessageQueue row "
+            f"synchronously (Option B contract); got {len(mq_rows)}"
+        )
+        assert mq_rows[0].content == "hello from option-b path", (
+            f"MessageQueue.content must carry the submitted message; "
+            f"got {mq_rows[0].content!r}"
         )
         task_rows = _load_tasks(engine, "inst-1")
-        assert len(task_rows) == 0, (
-            f"enqueue_message_job must NOT create Task rows "
-            f"(those are created at dispatch time); got {len(task_rows)}"
+        assert len(task_rows) == 1, (
+            f"enqueue_message_job must create the Task row "
+            f"synchronously (Option B contract); got {len(task_rows)}"
+        )
+        # ── Linkage contract: Task.work_id == JobItem.job_id ──
+        assert task_rows[0].work_id == result.job_id, (
+            f"Task.work_id must equal JobItem.job_id (the linkage "
+            f"contract); got Task.work_id={task_rows[0].work_id!r}, "
+            f"JobItem.job_id={result.job_id!r}"
         )
         # The mock's enqueue is the only writer of the JobItem — the
         # DB-side repo is NOT called directly (the enqueue path goes
@@ -410,29 +443,11 @@ class TestEnqueueMessageJobRoutesThroughEnqueue:
             f"sole writer; got {len(all_jobs)} JobItem rows"
         )
 
-        # ── worker_pool.notify_work() NOT called at submission time ──
-        # The dispatch happens via the JobProcessor's message branch
-        # (slot acquisition), not via the legacy worker wake-up at
-        # submission time. This is the core Phase 5 invariant — double
-        # dispatch would race the slot lock.
+        # ── worker_pool.notify_work() is deferred to the JobProcessor ──
         manager._worker_pool.notify_work.assert_not_called(), (
-            "enqueue_message_job must NOT call worker_pool.notify_work() — "
-            "dispatch is deferred to the JobProcessor message branch. "
-            "A spurious notify_work() would race the slot lock and cause "
-            "double dispatch."
+            "enqueue_message_job must not wake the worker pool before "
+            "JobProcessor slot admission"
         )
-
-        # ── stamp_message_id NOT called at submission time ──
-        # The message_id is None at this point and is stamped onto the
-        # JobItem AFTER Task creation in the message branch.
-        # ``stamp_message_id`` is a real method on the repo; wrap it
-        # so the assertion can read the call history.
-        original_stamp = job_repository.stamp_message_id
-        job_repository.stamp_message_id = MagicMock(wraps=original_stamp)
-        try:
-            job_repository.stamp_message_id.assert_not_called()
-        finally:
-            job_repository.stamp_message_id = original_stamp
 
 
 # ──────────────────────────────────────────────────────────────────────────────

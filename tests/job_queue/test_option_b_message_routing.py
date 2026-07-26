@@ -477,11 +477,15 @@ class TestMessageContentDelivered:
 
 
 class TestProcessorRoutesMessage:
-    """The JobProcessor's message branch routes the job to
-    ``enqueue_message`` instead of ``spawn_instance_with_mcp``."""
+    """The JobProcessor's message branch routes the job to a wake-only
+    step (``worker_pool.notify_work()``) instead of calling
+    ``enqueue_message`` (the Task + MessageQueue are already written
+    by ``enqueue_message_job``) and skips the
+    ``spawn_instance_with_mcp`` call (message jobs target an EXISTING
+    instance)."""
 
     @pytest.mark.asyncio
-    async def test_processor_routes_message_to_enqueue_message(
+    async def test_processor_routes_message_to_wake_only(
         self,
         engine,
         job_repository,
@@ -490,8 +494,9 @@ class TestProcessorRoutesMessage:
         job_queue_service,
     ):
         """Create a message-type JobItem and call
-        ``_process_next_job``. Verify ``enqueue_message`` was called
-        and ``spawn_instance_with_mcp`` was NOT called."""
+        ``_process_next_job``. Verify ``worker_pool.notify_work()``
+        was called (Task is pre-existing), ``enqueue_message`` was
+        NOT called, and ``spawn_instance_with_mcp`` was NOT called."""
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
         parallel_queue = queue_repository.get_by_name("test-project", "system_parallel_queue")
         job = _seed_message_job(
@@ -514,10 +519,14 @@ class TestProcessorRoutesMessage:
             instance_id="inst-1",
             status=InstanceStatus.IDLE.value,
         )
-        # enqueue_message must return something with .message_id.
-        async_result = MagicMock()
-        async_result.message_id = "msg-stub-123"
-        instance_manager.enqueue_message = AsyncMock(return_value=async_result)
+        # Worker pool mock — message branch calls
+        # ``worker_pool.notify_work()`` to surface the pre-existing
+        # Task to a worker thread.
+        instance_manager._worker_pool = MagicMock()
+        instance_manager._worker_pool.notify_work = MagicMock()
+        # enqueue_message must NOT be called (the Task is pre-existing
+        # in the new contract).
+        instance_manager.enqueue_message = AsyncMock()
         instance_manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-1")
         instance_manager.get_instance = AsyncMock(return_value=MagicMock())
 
@@ -550,24 +559,21 @@ class TestProcessorRoutesMessage:
         job_queue_service._repository.list_by_queue = MagicMock(
             return_value=([], 0)
         )
-        # Ensure stamp_message_id does not raise against the real repo.
-        # (It's a real method on the real JobRepository.)
 
         await processor._process_next_job()
 
-        # ── The message branch routed to enqueue_message ──
-        instance_manager.enqueue_message.assert_awaited_once()
-        call_kwargs = instance_manager.enqueue_message.call_args.kwargs
-        assert call_kwargs.get("instance_id") == "inst-1", (
-            f"enqueue_message must target the existing instance; got "
-            f"kwargs={call_kwargs!r}"
+        # ── The message branch woke the worker pool (Task is pre-existing) ──
+        instance_manager._worker_pool.notify_work.assert_called_once_with(), (
+            "the message branch must wake the worker pool so a worker "
+            "thread can claim the pre-existing Task "
+            "(Option B synchronous Task contract)"
         )
-        assert call_kwargs.get("message") == "processor message branch test"
-        # The work_id linkage contract — ``work_id == job.job_id``.
-        assert call_kwargs.get("work_id") == job.job_id, (
-            f"enqueue_message must thread work_id == job.job_id so the "
-            f"Task row carries the linkage; got "
-            f"work_id={call_kwargs.get('work_id')!r}"
+
+        # ── enqueue_message was NOT called (Task is pre-existing) ──
+        instance_manager.enqueue_message.assert_not_awaited(), (
+            "the message branch must NOT call enqueue_message — the "
+            "Task + MessageQueue rows are already written by "
+            "enqueue_message_job (Option B synchronous Task contract)"
         )
 
         # ── spawn_instance_with_mcp was NOT called (message branch skips it) ──

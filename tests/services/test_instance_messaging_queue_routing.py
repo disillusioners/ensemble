@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,6 +42,7 @@ from daemon.manager import InstanceManager
 from daemon.services.instance_messaging import (
     InstanceMessagingService,
 )
+from daemon.services.project_normalizer import normalize_project_id
 
 
 # ============================================================
@@ -54,6 +56,54 @@ _DEFAULT_QUEUE_ID = "default-queue-id-0001"
 _VALID_QUEUE_ID = "valid-queue-id-0002"
 _OTHER_PROJECT_QUEUE_ID = "other-project-queue-id-0003"
 _NONEXISTENT_QUEUE_ID = "nonexistent-queue-id-9999"
+
+
+# ── Engine fixture (Option B synchronous Task contract) ─────────
+# The new ``enqueue_message_job`` writes Task + MessageQueue rows
+# synchronously via ``_prepare_enqueued_message``; that helper needs
+# a real SQLAlchemy engine. The queue-routing tests are unit-level
+# (no DB) so we provision a per-test in-memory SQLite with the
+# minimal table set required.
+from sqlmodel import SQLModel, create_engine
+from sqlalchemy.pool import StaticPool
+
+
+@pytest.fixture
+def routing_engine():
+    """In-memory SQLite engine with Instance + Task + MessageQueue
+    + JobItem tables. The Option B synchronous Task contract
+    requires ``_prepare_enqueued_message`` to write to a real DB;
+    the routing tests arrange a minimal engine so that call can
+    succeed while the actual queue + job repos remain mocked.
+    """
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    # Importing the models registers them on SQLModel.metadata.
+    from daemon.repositories.event.models import Event  # noqa: F401
+    from daemon.repositories.instance.models import (
+        Instance,  # noqa: F401
+        InstanceStatus,  # noqa: F401
+    )
+    from daemon.repositories.job_queue.models import (  # noqa: F401
+        AdmissionState,
+        JobItem,
+    )
+    from daemon.repositories.message_queue.models import (  # noqa: F401
+        MessageQueue,
+        MessageStatus,
+        MessageType,
+    )
+    from daemon.repositories.task.models import (  # noqa: F401
+        Task,
+        TaskStatus,
+        TaskType,
+    )
+    SQLModel.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
 
 
 def _make_queue(
@@ -122,6 +172,7 @@ def _make_manager(
     queue_repo: MagicMock,
     job_repo: MagicMock,
     project_id: str = _PROJECT_ID,
+    engine: Any = None,
 ) -> MagicMock:
     """Build a manager mock with the queue + job repositories wired
     to the supplied stubs.
@@ -132,6 +183,14 @@ def _make_manager(
     The queue_repo and job_repo mocks are still wired in case the
     resolution code touches them, but the primary observable side
     effect is the ``queue_id`` kwarg passed to ``enqueue``.
+
+    Option B (synchronous Task contract): ``enqueue_message_job``
+    ALSO calls ``_prepare_enqueued_message(work_id=job_id)`` to
+    create the ``MessageQueue`` + ``Task`` rows synchronously. That
+    call needs a real engine (writes to ``message_queue`` /
+    ``task`` / ``instance`` tables) — if the caller does not supply
+    one, ``engine=None`` and the test should arrange a real engine
+    via the ``engine`` fixture (the conftest provides one).
     """
     instance_meta = SimpleNamespace(
         instance_id="inst-1",
@@ -162,9 +221,15 @@ def _make_manager(
     fake_job.instance_id = "inst-1"
     manager._job_queue_service.enqueue = AsyncMock(return_value=fake_job)
     manager._live_hub = MagicMock()
-    manager._live_hub.stream_status_change = MagicMock()
+    manager._live_hub.stream_status_change = AsyncMock()
     manager._worker_pool = MagicMock()
     manager._worker_pool.notify_work = MagicMock()
+    # Engine + write_guard — needed by ``_prepare_enqueued_message``
+    # (synchronous Task contract). If the caller does not supply an
+    # engine, we attribute-error inside ``_prepare_enqueued_message``;
+    # the test must arrange one or patch the helper.
+    manager.engine = engine
+    manager.write_guard = MagicMock()
     return manager
 
 
@@ -190,6 +255,7 @@ async def _invoke_enqueue(
     queue_repo: MagicMock,
     job_repo: MagicMock,
     project_id: str = _PROJECT_ID,
+    engine: Any = None,
 ):
     """Drive :meth:`enqueue_message_job` once with the supplied
     ``queue_id`` and ``queue_repo`` / ``job_repo`` stubs, yielding
@@ -202,15 +268,46 @@ async def _invoke_enqueue(
     Option B cutover: the observable side effect is the ``queue_id``
     kwarg passed to ``JobQueueService.enqueue`` (not
     ``JobRepository.create``).
+
+    Option B (synchronous Task contract): ``enqueue_message_job``
+    ALSO calls ``_prepare_enqueued_message(work_id=job_id)`` to
+    create the ``MessageQueue`` + ``Task`` rows synchronously. That
+    call needs a real engine and a seeded ``Instance`` row in the
+    real DB. The ``engine`` fixture provides the engine; the helper
+    seeds the instance automatically.
     """
+    # Seed the instance in the real DB so
+    # ``_prepare_enqueued_message`` can flip the status / write
+    # the Task + MessageQueue rows. If no engine is supplied, the
+    # helper skips the seed (the test must arrange it itself).
+    if engine is not None:
+        from sqlmodel import Session
+        from daemon.repositories.instance.models import (
+            Instance,
+            InstanceStatus,
+        )
+        with Session(engine) as session:
+            session.add(Instance(
+                instance_id="inst-1",
+                agent_id="leader",
+                agent_dir="/path/to/leader",
+                project_id=project_id,
+                status=InstanceStatus.IDLE.value,
+                instance_metadata={"project_id": project_id},
+            ))
+            session.commit()
+
     manager = _make_manager(
         queue_repo=queue_repo,
         job_repo=job_repo,
         project_id=project_id,
+        engine=engine,
     )
     svc = _make_service(manager)
 
-    with patch("daemon.registry.get_registry") as mock_get_registry:
+    with patch(
+        "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
+    ), patch("daemon.registry.get_registry") as mock_get_registry:
         registry = MagicMock()
         registry.get_resolved = MagicMock(
             return_value=SimpleNamespace(
@@ -259,7 +356,7 @@ class TestEnqueueMessageJobQueueIdResolution:
     """
 
     async def test_queue_id_none_uses_default_queue(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, routing_engine
     ) -> None:
         """``queue_id=None`` (omitted) — backward-compatible default
         resolution. The code resolves
@@ -285,6 +382,7 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=None,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
+                engine=routing_engine,
             ) as (captured_job_queue_service, captured_queue_repo):
                 resolved = _captured_queue_id(captured_job_queue_service)
 
@@ -301,7 +399,7 @@ class TestEnqueueMessageJobQueueIdResolution:
         ), f"Unexpected WARNING: {[r.getMessage() for r in caplog.records]}"
 
     async def test_queue_id_empty_string_uses_default_queue(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, routing_engine
     ) -> None:
         """``queue_id=""`` (empty string, treated like None) — the
         truthiness check on ``queue_id.strip()`` collapses whitespace
@@ -317,6 +415,7 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id="",
                 queue_repo=queue_repo,
                 job_repo=job_repo,
+                engine=routing_engine,
             ) as (captured_job_queue_service, captured_queue_repo):
                 resolved = _captured_queue_id(captured_job_queue_service)
 
@@ -330,7 +429,7 @@ class TestEnqueueMessageJobQueueIdResolution:
         )
 
     async def test_valid_queue_id_in_project_is_used(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, routing_engine
     ) -> None:
         """``queue_id=<valid id in project>`` — happy path. The
         supplied id is validated via ``queue_repo.get`` and the
@@ -358,6 +457,7 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_VALID_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
+                engine=routing_engine,
             ) as (captured_job_queue_service, captured_queue_repo):
                 resolved = _captured_queue_id(captured_job_queue_service)
 
@@ -373,7 +473,7 @@ class TestEnqueueMessageJobQueueIdResolution:
         )
 
     async def test_queue_id_from_other_project_falls_back_to_default(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, routing_engine
     ) -> None:
         """``queue_id=<id from different project>`` — graceful
         degradation. The queue exists but its ``project_id`` does not
@@ -403,6 +503,7 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_OTHER_PROJECT_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
+                engine=routing_engine,
             ) as (captured_job_queue_service, captured_queue_repo):
                 resolved = _captured_queue_id(captured_job_queue_service)
 
@@ -423,7 +524,7 @@ class TestEnqueueMessageJobQueueIdResolution:
         ), f"WARNING did not mention the rejected id: {[r.getMessage() for r in warnings]}"
 
     async def test_nonexistent_queue_id_falls_back_to_default(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, routing_engine
     ) -> None:
         """``queue_id=<nonexistent id>`` — graceful degradation. The
         supplied id is not found in the repository (``get`` returns
@@ -449,6 +550,7 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_NONEXISTENT_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
+                engine=routing_engine,
             ) as (captured_job_queue_service, captured_queue_repo):
                 resolved = _captured_queue_id(captured_job_queue_service)
 
@@ -467,7 +569,7 @@ class TestEnqueueMessageJobQueueIdResolution:
         ), f"WARNING did not mention the rejected id: {[r.getMessage() for r in warnings]}"
 
     async def test_repo_get_error_falls_back_to_default(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, routing_engine
     ) -> None:
         """``queue_repo.get`` raises — the resolution code folds the
         exception into the same fallback path and falls through to
@@ -489,6 +591,7 @@ class TestEnqueueMessageJobQueueIdResolution:
                 queue_id=_VALID_QUEUE_ID,
                 queue_repo=queue_repo,
                 job_repo=job_repo,
+                engine=routing_engine,
             ) as (captured_job_queue_service, captured_queue_repo):
                 resolved = _captured_queue_id(captured_job_queue_service)
 
@@ -500,6 +603,55 @@ class TestEnqueueMessageJobQueueIdResolution:
         captured_queue_repo.get_by_name.assert_called_once_with(
             _PROJECT_ID, "system_parallel_queue"
         )
+
+    async def test_project_less_instance_triggers_dispatch_bus_notify_all(
+        self, routing_engine
+    ) -> None:
+        """A project-less instance wakes all dispatch waiters as a fallback."""
+        from sqlmodel import Session
+        from daemon.repositories.instance.models import Instance, InstanceStatus
+
+        queue_repo = _build_queue_repo()
+        job_repo = MagicMock()
+        with Session(routing_engine) as session:
+            session.add(Instance(
+                instance_id="inst-1",
+                agent_id="leader",
+                agent_dir="/path/to/leader",
+                project_id=None,
+                status=InstanceStatus.IDLE.value,
+                instance_metadata={"project_id": None},
+            ))
+            session.commit()
+
+        manager = _make_manager(
+            queue_repo=queue_repo,
+            job_repo=job_repo,
+            project_id=None,
+            engine=routing_engine,
+        )
+        dispatch_bus = MagicMock()
+        manager._job_queue_service._dispatch_bus = dispatch_bus
+        fake_job = MagicMock()
+        manager._job_queue_service.enqueue = AsyncMock(return_value=fake_job)
+        svc = _make_service(manager)
+
+        with patch(
+            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
+        ), patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(id="leader", path="/path/to/leader")
+            )
+            mock_get_registry.return_value = registry
+
+            await svc.enqueue_message_job(instance_id="inst-1", message="hello")
+
+        manager._job_queue_service.enqueue.assert_awaited_once()
+        _, kwargs = manager._job_queue_service.enqueue.call_args
+        assert kwargs["project_id"] == normalize_project_id(None)
+        dispatch_bus.notify_all.assert_called_once()
+        dispatch_bus.notify_new_job.assert_not_called()
 
     async def test_manager_wrapper_forwards_queue_id(self) -> None:
         manager = object.__new__(InstanceManager)
@@ -523,6 +675,172 @@ class TestEnqueueMessageJobQueueIdResolution:
             is_background=False,
             queue_id="queue-abc",
         )
+
+
+# ============================================================
+# W2: project-less instance dispatch_bus fallback
+# ============================================================
+#
+# The W2 fix in ``daemon/services/instance_messaging.py`` widens the
+# wakeup path for instances whose raw ``project_id`` is ``None``. The
+# code tracks ``raw_project_was_none`` BEFORE normalization at
+# ``instance_messaging.py:1383`` (init) / ``:1391`` (clear) and, when
+# the flag stays True, falls back to
+# ``dispatch_bus.notify_all()`` at ``instance_messaging.py:1553-1561``
+# — because ``notify_new_job(None)`` silently early-returns on a
+# project-less JobItem. This test class guards that contract:
+# a project-less instance MUST wake every dispatcher waiter even when
+# the underlying ``notify_new_job`` call would have been a no-op.
+
+
+@pytest.mark.asyncio
+class TestEnqueueMessageJobProjectlessFallback:
+    """Regression test for the W2 dispatch-bus fallback.
+
+    The test seeds a project-less instance, drives
+    :meth:`InstanceMessagingService.enqueue_message_job`, and asserts
+    that:
+
+    * ``manager._job_queue_service.enqueue`` is awaited exactly once
+      with ``project_id`` normalized to the system default (i.e. the
+      call still completes through the queue path).
+    * ``dispatch_bus.notify_all()`` is called exactly once — the W2
+      fallback fires because ``raw_project_was_none`` is True.
+    * ``dispatch_bus.notify_new_job`` is NOT called — that path is
+      owned by ``enqueue`` internally, NOT by the W2 branch.
+    """
+
+    async def test_project_less_instance_triggers_dispatch_bus_notify_all(
+        self, routing_engine
+    ) -> None:
+        """A project-less instance wakes all dispatch waiters as a fallback.
+
+        Setup mirrors :class:`TestEnqueueMessageJobQueueIdResolution`:
+
+        * ``routing_engine`` (SQLite in-memory) is required because
+          ``_prepare_enqueued_message`` writes MessageQueue + Task rows
+          synchronously during ``enqueue_message_job``.
+        * The Instance row is seeded with ``project_id=None`` so the
+          production code's ``raw_project_was_none`` flag stays True.
+        * ``manager._instance_repository.get`` returns a SimpleNamespace
+          mirroring the seeded Instance.
+        * ``manager._job_queue_service._dispatch_bus`` is a MagicMock so
+          we can assert the ``notify_all`` / ``notify_new_job`` calls.
+        * ``manager._job_queue_service.enqueue`` is an AsyncMock returning
+          a fake JobItem carrying ``job_id``, ``job_type="message"``,
+          and ``instance_id`` attributes (the production code does not
+          read these off the returned JobItem, but matching the real
+          surface makes the test fail loudly if the contract drifts).
+
+        Assertions:
+
+        * ``enqueue`` awaited exactly once.
+        * ``enqueue`` received ``project_id=normalize_project_id(None)``
+          — i.e. the system default project id.
+        * ``dispatch_bus.notify_all`` called exactly once (W2 fallback
+          fires).
+        * ``dispatch_bus.notify_new_job`` was NOT called (owned by
+          ``enqueue`` internally, not by the W2 branch — verifying this
+          keeps the fallback's responsibility narrowly scoped).
+        """
+        from sqlmodel import Session
+        from daemon.repositories.instance.models import (
+            Instance,
+            InstanceStatus,
+        )
+
+        queue_repo = _build_queue_repo()
+        job_repo = MagicMock()
+
+        # Seed the project-less Instance row so
+        # ``_prepare_enqueued_message`` (called synchronously inside
+        # ``enqueue_message_job``) finds it and can update status /
+        # last_activity_at without raising. ``project_id=None`` is the
+        # W2 trigger condition.
+        with Session(routing_engine) as session:
+            session.add(Instance(
+                instance_id="inst-projectless",
+                agent_id="leader",
+                agent_dir="/path/to/leader",
+                project_id=None,
+                status=InstanceStatus.IDLE.value,
+                instance_metadata={"project_id": None},
+            ))
+            session.commit()
+
+        # ``_make_manager(..., project_id=None)`` builds the
+        # SimpleNamespace that ``manager._instance_repository.get``
+        # returns — matching ``project_id=None`` here keeps the mock
+        # consistent with the seeded DB row above.
+        manager = _make_manager(
+            queue_repo=queue_repo,
+            job_repo=job_repo,
+            project_id=None,
+            engine=routing_engine,
+        )
+
+        # Wire the dispatch bus mock onto the job queue service. The
+        # W2 fallback reaches for ``_dispatch_bus`` via getattr so the
+        # MagicMock here is exactly what the production code reads.
+        dispatch_bus = MagicMock()
+        manager._job_queue_service._dispatch_bus = dispatch_bus
+
+        # Replace the default ``enqueue`` AsyncMock from ``_make_manager``
+        # with one that returns a fake JobItem carrying the attributes
+        # the production JobItem would expose (``job_id``, ``job_type``,
+        # ``instance_id``). The production code does not currently read
+        # these off the return value, but matching the real surface
+        # keeps the test honest if the contract ever changes.
+        fake_job = MagicMock()
+        fake_job.job_id = "job-projectless-stub"
+        fake_job.job_type = "message"
+        fake_job.instance_id = "inst-projectless"
+        manager._job_queue_service.enqueue = AsyncMock(return_value=fake_job)
+
+        svc = _make_service(manager)
+
+        with patch(
+            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
+        ), patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(
+                    id="leader",
+                    path="/path/to/leader",
+                )
+            )
+            mock_get_registry.return_value = registry
+
+            await svc.enqueue_message_job(
+                instance_id="inst-projectless",
+                message="hello",
+                source="api",
+            )
+
+        # 1. ``enqueue`` was awaited exactly once.
+        manager._job_queue_service.enqueue.assert_awaited_once()
+
+        # 2. ``enqueue`` received ``project_id`` normalized to the
+        # system default — proving the project-less instance still
+        # completes through the queue path (just with a synthetic
+        # project id).
+        _, kwargs = manager._job_queue_service.enqueue.call_args
+        assert kwargs["project_id"] == normalize_project_id(None), (
+            f"Expected project_id to be normalized to system default "
+            f"({normalize_project_id(None)!r}), got {kwargs.get('project_id')!r}"
+        )
+
+        # 3. The W2 fallback fired — ``notify_all`` was called once so
+        # every dispatcher waiter wakes up even though
+        # ``notify_new_job(None)`` would have early-returned.
+        dispatch_bus.notify_all.assert_called_once()
+
+        # 4. ``notify_new_job`` is NOT called by the W2 branch — it is
+        # owned by ``JobQueueService.enqueue`` internally. Asserting
+        # ``assert_not_called`` here locks the responsibility split:
+        # the W2 fallback is a wake-all safety net, NOT a duplicate
+        # notify path.
+        dispatch_bus.notify_new_job.assert_not_called()
 
 
 # ============================================================
