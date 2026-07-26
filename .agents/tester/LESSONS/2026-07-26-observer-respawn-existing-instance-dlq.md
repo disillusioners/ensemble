@@ -1,43 +1,48 @@
-# Lesson: Observer Re-Spawns Existing Instance → UniqueViolation → DLQ
+# Lesson: Observer Re-Spawns Existing Instance → UniqueViolation → DLQ [RESOLVED]
 **Date:** 2026-07-26
 **Surfaced during:** FIFO concurrency fix validation (Part B) on commit `67eb16b1`
-**Severity:** Pre-existing bug, orthogonal to the FIFO fix — but causes false job-failure/DLQ when a queued message job eventually starts
-**Status:** NOT FIXED — recommended follow-up (architecture-level, out of scope for the FIFO fix)
+**Resolved by:** commit `b6d4953f` — `fix: prevent observer re-spawn UniqueViolation for message jobs`
+**Status:** ✅ **RESOLVED** (validated 2026-07-26, see RESULTS/2026-07-26-observer-respawn-fix-validation.md)
 
-## Problem
+## Problem (before the fix)
 
-When a message job sits in a FIFO queue (correctly blocked by `concurrency_limit`) and later gets dispatched after the prior job releases its slot, the `job_feedback_observer` **re-attempts to spawn the instance** that was created at enqueue time. The instance already exists in the DB, so the spawn `INSERT INTO instances` raises:
+When a message job sat in a FIFO queue (correctly blocked by `concurrency_limit`) and later got dispatched after the prior job released its slot, the `job_feedback_observer` **re-attempted to spawn the instance** that was created at enqueue time. The instance already existed in the DB, so the spawn `INSERT INTO instances` raised:
 
 ```
 (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "instances_pkey"
 Key (instance_id)=(95cfe765...) already exists.
 ```
 
-Consequence: the job is reported `FAILED` and lands in the **DLQ** with `reason=MANUAL`, `admission_state=dead` — **even though the message itself executed correctly** (the instance responded "DONE").
+Consequence: the job was reported `FAILED` and landed in the **DLQ** with `reason=MANUAL`, `admission_state=dead` — **even though the message itself executed correctly** (the instance responded "DONE").
 
-## Why this surfaced now (and not before)
+## The fix (commit `b6d4953f`)
 
-This is a **pre-existing** bug, NOT caused by the FIFO fix (`67eb16b1` only touches `daemon/repositories/task/repository.py`). It surfaced during the FIFO validation only because the fix *correctly* serialized two messages — so Job B's dispatch happened *later* (after Job A released the slot), which triggered the observer's re-spawn attempt for B. Before the FIFO fix, both jobs would have run immediately (concurrency bypassed), so this observer path was not exercised for message jobs.
+The observer now detects message-type jobs and skips the spawn (the instance already exists, created at enqueue time). Instead it wakes the worker pool for the pre-existing Task directly:
 
-## Root cause hypothesis
+```
+Observer (message branch): woke worker pool for pre-existing Task on job 31ad7fc3...
+/ instance 6a37a176... (no spawn; instance already exists for this message job)
+```
 
-The `job_feedback_observer` spawn path assumes the instance does not yet exist when a job starts. For message-type jobs under Option B, the instance is created at **enqueue time** (`enqueue_message_job`), not at dispatch time. So when the observer's spawn logic runs on dispatch, it tries to `INSERT` a row that already exists.
+No `spawn_instance_with_mcp`, no `enqueue_message`, no `complete_job(FAILED)`. The JobItem transitions cleanly: `queued` → `active` → `done`.
 
-## Recommended fix (for a separate follow-up — NOT quick-fix eligible)
+## Validation (2026-07-26, commit `b6d4953f`)
 
-Guard the observer's spawn with an **existence check** before `INSERT INTO instances`. If the instance already exists (message-type job, instance created at enqueue), skip the spawn and proceed directly to `notify_work()` / task routing.
+Reproduced the exact scenario (FIFO `concurrency_limit=1`, 2 messages to 2 IDLE instances). All symptoms eliminated:
 
-Likely location: `job_feedback_observer.py` (the spawn path triggered around job start).
+| Pattern | Previous run (67eb16b1) | After fix (b6d4953f) |
+|---------|------------------------|----------------------|
+| `failed to spawn instance` | appeared | **gone** ✅ |
+| `duplicate key value violates unique constraint` | appeared | **gone** ✅ |
+| `UniqueViolation` | appeared | **gone** ✅ |
+| `released 0 lock(s)` (scenario jobs) | appeared | **gone** ✅ (now `released 1 lock(s)`) |
+| Job B in DLQ | yes (false `FAILED`) | **no** ✅ |
+| Job B `admission_state` stuck at `queued` | yes | **no** ✅ (now `active` → `done`) |
 
-## Reproduction
+E2E Release Gate: 4/4 PASS (no regressions). See `RESULTS/2026-07-26-observer-respawn-fix-validation.md`.
 
-1. Create a FIFO queue with `concurrency_limit=1`.
-2. Send 2 messages to 2 different IDLE instances in that queue (short prompts).
-3. Observe: while Job A runs, Job B is correctly blocked (the FIFO fix works).
-4. When Job A finishes and Job B starts → Job B lands in DLQ with `reason=MANUAL` despite the instance responding correctly.
+## Key distinction (still relevant for DLQ triage)
 
-## Key distinction (for future debugging)
-
-- The **message execution succeeds** at the instance level (instance status → running → completed, correct response emitted).
-- The **job-level tracking fails** (job → DLQ → `admission_state=dead`) because the observer's spawn-INSERT throws.
-- So the symptom is a **false job-failure**, not a real execution failure. Any DLQ triage should cross-check instance-level success before treating these as real failures.
+- The **message execution succeeds** at the instance level (correct response emitted).
+- The **job-level tracking** is now also correct (job → `done`, not DLQ).
+- Any DLQ triage should still cross-check instance-level success before treating entries as real failures — but the specific false-DLQ-from-observer-respawn path is now closed.
