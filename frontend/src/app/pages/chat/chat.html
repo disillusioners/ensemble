@@ -155,6 +155,17 @@
       }
 
       @if (currentInstance() && !instanceNotFound()) {
+        <!-- Subtle inline indicator shown when the backend accepted a
+             message but did not dispatch it to the running agent. The
+             signal is cleared by the SSE effects in ChatComponent as
+             soon as the agent picks the message up (thinking event,
+             first assistant message, or status → running). -->
+        @if (queuedMessage() !== null) {
+          <div class="queued-indicator" role="status" aria-live="polite">
+            <mat-icon class="queued-icon">schedule</mat-icon>
+            <span class="queued-label">⏳ Queued: "{{ queuedSnippet() }}" — waiting for slot</span>
+          </div>
+        }
         <app-message-input
           (sendMessage)="onSendMessage($event)"
           [disabled]="isSending()"

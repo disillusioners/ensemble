@@ -1410,13 +1410,13 @@ class InstanceMessagingService:
 
         # 1c. Resolve queue_id (cross-project guard).
         queue_id_for_job: str | None = None
+        queue_repo = getattr(
+            getattr(self._manager, "_job_queue_service", None),
+            "_queue_repo",
+            None,
+        )
         queue_id_supplied = bool(queue_id and queue_id.strip())
         if project_id_for_job is not None:
-            queue_repo = getattr(
-                getattr(self._manager, "_job_queue_service", None),
-                "_queue_repo",
-                None,
-            )
             if queue_repo is not None:
                 try:
                     if queue_id_supplied:
@@ -1531,6 +1531,51 @@ class InstanceMessagingService:
             job_id=job_id,
         )
 
+        # Snapshot queue capacity synchronously after the JobItem exists. The
+        # newly-created item is still in the ``queued`` admission bucket, so it
+        # is deliberately excluded from ``active_count``. This avoids relying
+        # on the JobProcessor's later queued -> active claim timing.
+        queued = False
+        if queue_repo is None or queue_id_for_job is None:
+            logger.warning(
+                "enqueue_message_job: unable to snapshot queue capacity for "
+                "job %s (queue repository or queue_id unavailable); "
+                "defaulting queued=False",
+                job_id[:8],
+            )
+        else:
+            try:
+                queue = await asyncio.to_thread(queue_repo.get, queue_id_for_job)
+                concurrency_limit = (
+                    getattr(queue, "concurrency_limit", None)
+                    if queue is not None
+                    else None
+                )
+                if concurrency_limit is None:
+                    logger.warning(
+                        "enqueue_message_job: queue %s missing or has no "
+                        "concurrency_limit; defaulting queued=False for job %s",
+                        queue_id_for_job,
+                        job_id[:8],
+                    )
+                else:
+                    admission_counts = await asyncio.to_thread(
+                        queue_repo.count_jobs_by_admission,
+                        queue_id_for_job,
+                    )
+                    active_count = int(admission_counts.get("active", 0))
+                    queued = active_count >= int(concurrency_limit)
+            except Exception as capacity_err:
+                logger.warning(
+                    "enqueue_message_job: failed to snapshot queue capacity "
+                    "for queue %s and job %s: %s: %s; defaulting queued=False",
+                    queue_id_for_job,
+                    job_id[:8],
+                    type(capacity_err).__name__,
+                    capacity_err,
+                )
+                queued = False
+
         # Stamp the message_id onto the JobItem for cross-system correlation.
         # This remains best-effort for compatibility with the historical path:
         # Task + MessageQueue creation and queue admission have already succeeded.
@@ -1576,6 +1621,7 @@ class InstanceMessagingService:
             instance_id=instance_id,
             status="queued",
             job_id=job_id,
+            queued=queued,
         )
 
     async def _process_message_with_tracking(

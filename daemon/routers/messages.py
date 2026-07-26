@@ -333,7 +333,9 @@ async def send_message(
                 message=f"Failed to enqueue message: {str(e)}",
             ).model_dump(),
         )
-    
+
+    queued = getattr(result, "queued", False)
+
     response_data = MessageResponse(
         message_id=result.message_id,
         role="assistant",
@@ -348,6 +350,7 @@ async def send_message(
         # is set to the JobItem mirror (when the flag is ON) or to the shared
         # Task work_id (flag OFF). Both are opaque UUID4 strings.
         job_id=result.job_id,
+        queued=queued,
     ).model_dump()
     
     response_data["auto_resumed"] = False

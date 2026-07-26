@@ -539,7 +539,7 @@ class LoopBreakerConfig(BaseSettings):
     enabled: bool = Field(default=True, description="Enable general hallucination loop breaker")
     threshold: int = Field(default=3, description="Consecutive identical tool calls required to trigger detection")
     max_repairs: int = Field(default=3, description="Maximum repair attempts per instance before giving up")
-    summarization_timeout_seconds: int = Field(default=30, description="Timeout for the repair LLM summarization call")
+    summarization_timeout_seconds: int = Field(default=120, description="Timeout for the repair LLM summarization call")
     excluded_tools: list[str] = Field(default_factory=list, description="Tool names to skip during detection (e.g. legitimately polled resources)")
 
 

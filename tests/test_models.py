@@ -194,6 +194,39 @@ class TestMessageResponse:
         response = MessageResponse(**data)
         assert response.content is None
 
+    def test_message_response_queued_defaults_to_false(self):
+        """``queued`` snapshot defaults to ``False`` when not supplied.
+
+        Backward-compat contract: pre-existing callers that construct
+        ``MessageResponse`` without the new ``queued`` kwarg continue
+        to serialize with ``queued=False``. Matches the router's
+        fail-safe default when the JobItem lookup is unavailable.
+        """
+        data = {
+            "message_id": "msg-queued-default",
+            "role": "assistant",
+            "content": "ok",
+            "created_at": datetime(2024, 1, 1, 0, 0, 0),
+        }
+
+        response = MessageResponse(**data)
+        assert response.queued is False
+        assert response.model_dump()["queued"] is False
+
+    def test_message_response_queued_serializes_when_true(self):
+        """``queued=True`` round-trips through ``model_dump`` for the FE."""
+        data = {
+            "message_id": "msg-queued-true",
+            "role": "assistant",
+            "content": None,
+            "created_at": datetime(2024, 1, 1, 0, 0, 0),
+            "queued": True,
+        }
+
+        response = MessageResponse(**data)
+        assert response.queued is True
+        assert response.model_dump()["queued"] is True
+
 
 class TestErrorResponse:
     """Tests for ErrorResponse model."""

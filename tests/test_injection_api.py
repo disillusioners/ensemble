@@ -103,6 +103,7 @@ def _make_manager(
     enqueue_result = MagicMock()
     enqueue_result.message_id = "msg-enqueued"
     enqueue_result.job_id = "job-enqueued"
+    enqueue_result.queued = False
     manager.enqueue_message_job = AsyncMock(return_value=enqueue_result)
 
     # resume_instance_cascade (async) — used by the PAUSED path.
@@ -359,6 +360,48 @@ class TestEnqueuePath:
         client.post("/instances/inst-abc/messages", json={"content": "x"})
 
         manager.set_injection.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ``queued`` field on the NORMAL-path response
+# ---------------------------------------------------------------------------
+
+
+class TestQueuedField:
+    """The NORMAL response propagates the enqueue-time capacity snapshot."""
+
+    @pytest.mark.parametrize("queued", [False, True])
+    def test_queued_value_is_propagated(self, client_and_state, queued):
+        """The router uses ``AsyncMessageResult.queued`` without another DB read."""
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        manager.enqueue_message_job.return_value.queued = queued
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is queued
+        assert resp.json()["job_id"] == "job-enqueued"
+
+    def test_queued_defaults_false_for_older_result_object(self, client_and_state):
+        """Older enqueue results without ``queued`` remain backward compatible."""
+        client, state = client_and_state
+        manager = _make_manager(status="idle")
+        legacy_result = type(
+            "LegacyAsyncMessageResult",
+            (),
+            {"message_id": "msg-enqueued", "job_id": "job-enqueued"},
+        )()
+        manager.enqueue_message_job.return_value = legacy_result
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post("/instances/inst-abc/messages", json={"content": "hi"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued"] is False
 
 
 # ---------------------------------------------------------------------------
