@@ -302,19 +302,17 @@ class TestNoPrefsRowNullHandling:
             f"above a pinned instance."
         )
 
-    def test_explicit_false_sorts_above_null_prefs(self, repo, engine_factory):
-        """Edge case in NULLS LAST semantics: an instance with an explicit
-        ``pinned=False`` prefs row is NOT equivalent to an instance with no
-        prefs row (``pinned=NULL``).
+    def test_explicit_false_treated_same_as_null_prefs(self, repo, engine_factory):
+        """An instance with an explicit ``pinned=False`` prefs row is treated
+        EQUIVALENTLY to an instance with no prefs row (``pinned=NULL``) — both
+        are "unpinned" and tiebreak purely on ``created_at DESC``.
 
-        Under ``ORDER BY pinned DESC NULLS LAST`` the concrete ``False``
-        (``0``) sorts ABOVE ``NULL``. So an explicitly-unpinned instance
-        precedes a never-touched instance even when the never-touched one is
-        newer by ``created_at``. This documents the actual SQL behaviour — it
-        is intentional NULLS LAST semantics, not a bug (the feature contract
-        is "pinned first; everything else by created_at", and a pinned=False
-        row is a concrete non-pinned value that legitimately sorts above the
-        NULL of an untouched row)."""
+        The new ``CASE`` expression maps both ``pinned=False`` and ``pinned=NULL``
+        to tier 0; only ``pinned=True`` floats to tier 1. So a NEWER
+        never-touched instance now wins over an OLDER explicitly-unpinned one
+        — the legacy DESC-NULLS-LAST behaviour that pushed unpinned-but-touched
+        rows above never-touched rows was a bug confirmed against production.
+        """
         _, engine = engine_factory()
         repo = SQLModelInstanceRepository(engine)
 
@@ -329,13 +327,13 @@ class TestNoPrefsRowNullHandling:
         ids = [i.instance_id for i in instances]
 
         assert total == 2
-        # pinned=False (0) sorts above pinned=NULL under DESC NULLS LAST, so the
-        # explicit-unpinned row wins over the newer no-prefs row. Both are
-        # still non-pinned, so they land below any pinned instance (covered by
-        # the other scenario-3 tests).
-        assert ids == ["explicit-unpinned", "no-prefs"], (
-            f"Expected explicit pinned=False to sort above NULL pinned (NULLS LAST); "
-            f"got {ids}. NOTE: both are non-pinned and sort below pinned instances."
+        # Both are tier 0 (unpinned); order comes purely from created_at DESC,
+        # so the NEWER no-prefs instance wins over the older explicit-unpinned one.
+        assert ids == ["no-prefs", "explicit-unpinned"], (
+            f"Expected explicit pinned=False and no-prefs (NULL) to be treated "
+            f"equivalently (both unpinned) and tiebreak on created_at DESC; "
+            f"got {ids}. The newer no-prefs instance must come before the "
+            f"older explicit-unpinned one."
         )
 
 
@@ -399,4 +397,57 @@ class TestMultiplePinnedOrdering:
         assert ids == ["a-created-early", "b-created-late"], (
             f"pinned_at DESC must dominate created_at DESC among pinned instances; "
             f"got {ids}. Expected a-created-early (later pinned_at) first."
+        )
+
+
+# =============================================================================
+# Scenario 5 — Mixed TRUE / FALSE / NULL (the exact bug scenario)
+# =============================================================================
+
+
+class TestMixedTrueFalseNullBugFix:
+    """The confirmed production bug: explicit ``pinned=False`` rows sorted
+    above ``pinned=NULL`` rows under DESC NULLS LAST, pushing newer never-
+    pinned instances to page 2.
+
+    The ``CASE`` fix maps only ``pinned=True`` to tier 1; both
+    ``pinned=False`` and ``pinned=NULL`` are tier 0 and tiebreak on
+    ``created_at DESC``."""
+
+    def test_mixed_true_false_null_true_floats_then_created_at(self, repo, engine_factory):
+        """Three instances:
+        1. pinned=True   (OLDEST created_at)
+        2. pinned=False  (MIDDLE created_at)
+        3. pinned=NULL   (NEWEST created_at — no prefs row)
+
+        Expected order: [TRUE, NULL-newest, FALSE-middle]
+
+        The TRUE instance floats to tier 1 regardless of created_at.
+        Among tier-0 (unpinned), order comes purely from created_at DESC,
+        so the newest (NULL) comes before the middle (FALSE).
+        """
+        _, engine = engine_factory()
+        repo = SQLModelInstanceRepository(engine)
+
+        # Instance 1: pinned=True, OLDEST created_at.
+        _make_instance(repo, "is-pinned", created_at=_iso(2026, 1, 1))
+        _set_pref(engine, "is-pinned", pinned=True, pinned_at=_iso(2026, 7, 1))
+
+        # Instance 2: pinned=False, MIDDLE created_at.
+        _make_instance(repo, "is-false", created_at=_iso(2026, 2, 1))
+        _set_pref(engine, "is-false", pinned=False, pinned_at=None)
+
+        # Instance 3: no prefs row (pinned=NULL), NEWEST created_at.
+        _make_instance(repo, "is-null", created_at=_iso(2026, 3, 1))
+
+        instances, total = repo.list(exclude_kb=False)
+        ids = [i.instance_id for i in instances]
+
+        assert total == 3
+        # TRUE floats to top (tier 1); the two tier-0 unpinned instances
+        # order by created_at DESC: is-null (newest) before is-false (middle).
+        assert ids == ["is-pinned", "is-null", "is-false"], (
+            f"Expected [TRUE, NULL-newest, FALSE-middle]; got {ids}. "
+            f"pinned=True must float to top; unpinned instances (FALSE and NULL) "
+            f"must tiebreak by created_at DESC, not by prefs-row existence."
         )

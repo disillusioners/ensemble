@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import bindparam, delete as sql_delete, func, not_, text
+from sqlalchemy import bindparam, case, delete as sql_delete, func, literal, not_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -385,16 +385,19 @@ class SQLModelInstanceRepository:
 
                 total = db_session.exec(count_stmt).one()
 
-                # NOTE: under DESC NULLS LAST, pinned sorts true > false > NULL, so an explicit
-                # pinned=False row ranks above an untouched (pinned=NULL) instance. Both are
-                # "unpinned" and tiebreak on created_at then instance_id.
+                # NOTE: only pinned=True floats to the top. An explicit pinned=False and a
+                # never-pinned (NULL) row are treated equivalently as "unpinned" (both map to
+                # tier 0 via the CASE), then tiebreak on created_at DESC then instance_id.
                 stmt = (
                     stmt.outerjoin(
                         InstanceUiPrefs,
                         col(Instance.instance_id) == col(InstanceUiPrefs.instance_id),
                     )
                     .order_by(
-                        col(InstanceUiPrefs.pinned).desc().nulls_last(),
+                        case(
+                            (col(InstanceUiPrefs.pinned).is_(True), literal(1)),
+                            else_=literal(0),
+                        ).desc(),
                         col(InstanceUiPrefs.pinned_at).desc().nulls_last(),
                         col(Instance.created_at).desc(),
                         col(Instance.instance_id).asc(),  # stable final tiebreaker
@@ -432,16 +435,19 @@ class SQLModelInstanceRepository:
             if exclude_kb:
                 root_stmt = root_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
 
-            # NOTE: under DESC NULLS LAST, pinned sorts true > false > NULL, so an explicit
-            # pinned=False row ranks above an untouched (pinned=NULL) instance. Both are
-            # "unpinned" and tiebreak on created_at then instance_id.
+            # NOTE: only pinned=True floats to the top. An explicit pinned=False and a
+            # never-pinned (NULL) row are treated equivalently as "unpinned" (both map to
+            # tier 0 via the CASE), then tiebreak on created_at DESC then instance_id.
             root_stmt = (
                 root_stmt.outerjoin(
                     InstanceUiPrefs,
                     col(Instance.instance_id) == col(InstanceUiPrefs.instance_id),
                 )
                 .order_by(
-                    col(InstanceUiPrefs.pinned).desc().nulls_last(),
+                    case(
+                        (col(InstanceUiPrefs.pinned).is_(True), literal(1)),
+                        else_=literal(0),
+                    ).desc(),
                     col(InstanceUiPrefs.pinned_at).desc().nulls_last(),
                     col(Instance.created_at).desc(),
                     col(Instance.instance_id).asc(),  # stable final tiebreaker
