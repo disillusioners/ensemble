@@ -385,7 +385,19 @@ class SQLModelInstanceRepository:
 
                 total = db_session.exec(count_stmt).one()
 
-                stmt = stmt.order_by(col(Instance.created_at).desc()).offset(offset).limit(limit)
+                stmt = (
+                    stmt.outerjoin(
+                        InstanceUiPrefs,
+                        col(Instance.instance_id) == col(InstanceUiPrefs.instance_id),
+                    )
+                    .order_by(
+                        col(InstanceUiPrefs.pinned).desc().nulls_last(),
+                        col(InstanceUiPrefs.pinned_at).desc().nulls_last(),
+                        col(Instance.created_at).desc(),
+                    )
+                    .offset(offset)
+                    .limit(limit)
+                )
                 instances = list(db_session.exec(stmt))
                 return self._enrich_instances(db_session, instances), total
 
@@ -417,7 +429,15 @@ class SQLModelInstanceRepository:
                 root_stmt = root_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
 
             root_stmt = (
-                root_stmt.order_by(col(Instance.created_at).desc())
+                root_stmt.outerjoin(
+                    InstanceUiPrefs,
+                    col(Instance.instance_id) == col(InstanceUiPrefs.instance_id),
+                )
+                .order_by(
+                    col(InstanceUiPrefs.pinned).desc().nulls_last(),
+                    col(InstanceUiPrefs.pinned_at).desc().nulls_last(),
+                    col(Instance.created_at).desc(),
+                )
                 .offset(offset)
                 .limit(limit)
             )
