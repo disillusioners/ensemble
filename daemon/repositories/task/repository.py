@@ -477,6 +477,17 @@ class TaskRepository:
         # The cross-system guard fragment itself is built once by
         # :meth:`_admitted_task_carve_out_sql` (shared with the
         # busy-instance probe so P1 and F11 can never diverge).
+        #
+        # ``_orphan_json_extract`` is the SAME dialect-aware helper used
+        # by the carve-out; reusing it keeps the new orphan-exclusion
+        # filter (added by the FIFO concurrency fix, 2026-07-26)
+        # portable to PostgreSQL — a hardcoded
+        # ``CAST(json_extract(...) AS TEXT)`` would crash on PG (no
+        # ``json_extract`` function in PG/JSONB) and break the primary
+        # production backend.
+        _orphan_json_extract = self._json_extract_text_sql(
+            column="j.metadata", key="message_id"
+        )
 
         # Cross-system guard scope: the report lane (PROCESS_REPORT)
         # bypasses the job-coordination exclusion entirely — reports
@@ -589,6 +600,49 @@ class TaskRepository:
                             -- its non-background lanes.
                         )
                     )
+                    -- Queue-awareness guard (FIFO concurrency fix,
+                    -- 2026-07-26). The Task-claim path is
+                    -- queue-concurrency-blind by default: a Task's
+                    -- PENDING status is independent of whether its
+                    -- linked JobItem holds a ``concurrency_limit``
+                    -- slot. Without this guard, a FIFO-denied
+                    -- JobItem (admission_state='queued', slot
+                    -- denied by ``start_job_atomic_with_lock``)
+                    -- would let the Task race the slot and bypass
+                    -- the queue's concurrency enforcement.
+                    --
+                    -- Contract: a Task is claimable only when its
+                    -- linked JobItem (matched via
+                    -- ``job_queue_items.job_id == task.work_id``)
+                    -- is ``admission_state='active'`` (slot held)
+                    -- or there is no linked JobItem at all (the
+                    -- legacy / report-task path). A queued linked
+                    -- JobItem means the slot is denied — the Task
+                    -- MUST wait for the slot to free up (the
+                    -- sibling job to complete, which triggers
+                    -- ``notify_work`` and re-evaluates the claim).
+                    --
+                    -- The carve-out in
+                    -- ``_admitted_task_carve_out_sql`` Branch 1
+                    -- handles the cross-system blocker case for the
+                    -- SAME instance (a queued stuck-mirror JobItem
+                    -- with a matching message_id Task releases the
+                    -- guard). The FIFO concurrency fix added the new
+                    -- orphan-exclusion filter at the end of the
+                    -- blocking set to release truly-orphaned mirrors
+                    -- (queued JobItem with NO matching Task at all).
+                    -- This Part 2 guard is task-scoped (checks
+                    -- ``work_id`` directly) and is independent of
+                    -- the instance-scoped cross-system guard — both
+                    -- are needed because they filter on different
+                    -- axes (cross-system: instance_id + message_id;
+                    -- Part 2: work_id).
+                    AND NOT EXISTS (
+                        SELECT 1 FROM job_queue_items _qi
+                        WHERE _qi.job_id = task.work_id
+                          AND _qi.admission_state = :status_queued_admission
+                          AND _qi.deleted_at IS NULL
+                    )
                     AND instance_id NOT IN (
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
@@ -685,6 +739,28 @@ class TaskRepository:
                               -- busy-instance probe via
                               -- :meth:`_admitted_task_carve_out_sql`.
                               AND {self._admitted_task_carve_out_sql("j")}
+                              -- Orphan exclusion (FIFO concurrency
+                              -- fix, 2026-07-26, strategy a):
+                              -- exclude ``queued`` JobItems that have
+                              -- NO matching Task at all. These are
+                              -- truly orphaned mirrors — the Task
+                              -- was deleted, or never existed
+                              -- because the Task transaction was
+                              -- rolled back. They cannot be
+                              -- coordinating any in-flight work, so
+                              -- they must not block the instance.
+                              -- This is the "genuinely orphaned
+                              -- mirror" carve-out from strategy
+                              -- (a); the FIFO-denied bypass is
+                              -- handled at the task scope by the
+                              -- Part 2 queue-awareness guard above.
+                              AND NOT (
+                                  j.admission_state = :status_queued_admission
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM task _orphan_check
+                                      WHERE _orphan_check.message_id = {_orphan_json_extract}
+                                  )
+                              )
                         )
                     )
                   ORDER BY created_at ASC LIMIT 1
@@ -839,12 +915,26 @@ class TaskRepository:
             # removing it from the active path.
             f"({json_extract} IS NOT NULL\n"
             f"                AND (\n"
-            # Branch 1 — ``queued`` JobItem (stuck mirror, F1 case):
-            # any Task with matching message_id (regardless of Task
-            # status) releases the guard. The JobItem is stuck and
-            # never drove astream; a COMPLETED Task from the prior
-            # cycle is sufficient evidence that the mirror is
-            # orphaned.
+            # Branch 1 — ``queued`` JobItem (F1 stuck-mirror case,
+            # 2026-07-03): any Task with matching message_id
+            # (regardless of Task status) releases the guard. The
+            # JobItem is stuck and never drove astream; a COMPLETED
+            # Task from the prior cycle is sufficient evidence that
+            # the mirror is orphaned.
+            #
+            # Strategy (a) "truly no Task" — IMPLEMENTED as a
+            # separate WHERE-clause filter on the blocking set
+            # (see the ``AND NOT`` exclusion below the carve-out)
+            # rather than inverting Branch 1. Inverting Branch 1
+            # would make the cross-system guard block the entire
+            # instance for any queued JobItem with a matching Task
+            # — which is too broad because the cross-system guard
+            # is instance-scoped. The FIFO-denied bypass is
+            # correctly handled at the task scope by the Part 2
+            # queue-awareness guard in ``claim_pending_task``, so
+            # the cross-system guard only needs to release orphans
+            # (truly no matching Task) without flipping the
+            # stuck-mirror semantics.
             f"                    ({job_alias}.admission_state = :status_queued_admission\n"
             f"                     AND NOT EXISTS (\n"
             f"                         SELECT 1 FROM task _admitted\n"

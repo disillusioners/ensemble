@@ -1151,6 +1151,540 @@ class TestTaskClaiming:
         assert claimed.id == t1.id
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# FIFO concurrency bypass fix (2026-07-26)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestFifoConcurrencyBypass:
+    """FIFO ``concurrency_limit`` bypass via Task-claim path (Phase 5
+    Option B, 2026-07-26).
+
+    The pre-fix behavior: when a FIFO queue denies the slot for a
+    message's JobItem (``start_job_atomic_with_lock`` returns None and
+    the JobItem stays in ``admission_state='queued'``), the Task-claim
+    path was queue-concurrency-blind. The cross-system guard's
+    ``_admitted_task_carve_out_sql`` Branch 1 released the guard for
+    any queued JobItem with a matching Task row, which let the Task
+    race the slot and bypass ``concurrency_limit``.
+
+    The fix has two parts:
+      * Part 1 — A new "genuinely orphaned mirror" exclusion inside
+        the cross-system guard's WHERE clause (see the ``AND NOT``
+        block at the end of the blocking set in
+        ``claim_pending_task``). It excludes ``queued`` JobItems that
+        have NO matching Task at all (Task was deleted, or never
+        existed because the Task transaction was rolled back). These
+        are real orphans — they cannot be coordinating any in-flight
+        work, so they must not block the instance. ``Branch 1`` of
+        :meth:`_admitted_task_carve_out_sql` was NOT changed; it
+        still releases for any ``queued`` JobItem with a matching
+        Task (the F1 stuck-mirror case from 2026-07-03).
+      * Part 2 — A new queue-awareness guard in
+        ``claim_pending_task`` blocks claiming a Task whose linked
+        JobItem (``work_id == job_queue_items.job_id``) is in
+        ``admission_state='queued'``. The Task is claimable only when
+        the linked JobItem is ``active`` (slot held) or has no
+        linkage (the legacy / report-task path).
+
+    These tests pin both layers of the fix.
+    """
+
+    def _seed_instance(self, engine, instance_id: str, status: str = "running") -> None:
+        """Insert a minimal ``instances`` row required for the
+        per-instance guards in ``claim_pending_task``."""
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.instance.models import Instance
+
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id=instance_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status=status,
+            ))
+            session.commit()
+
+    def _seed_message_job_item(
+        self,
+        engine,
+        *,
+        job_id: str,
+        instance_id: str,
+        message_id: str,
+        admission_state: str,
+    ) -> None:
+        """Insert a ``job_queue_items`` row for a message-type job.
+
+        ``job_id`` is the shared linkage UUID4 — it matches
+        ``Task.work_id`` so the queue-awareness guard can correlate
+        the Task with its JobItem.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            session.add(JobItem(
+                job_id=job_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="test message",
+                source="api",
+                admission_state=admission_state,
+                job_type="message",
+                instance_id=instance_id,
+                job_metadata={"message_id": message_id},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+    def test_msg1_active_claimable_msg2_queued_blocked(
+        self, repository, engine
+    ):
+        """Test 1 — FIFO concurrency enforcement at Task-claim time.
+
+        Setup: two messages on the same instance.
+          * msg1: JobItem ``admission_state='active'`` (slot acquired),
+            Task PENDING.
+          * msg2: JobItem ``admission_state='queued'`` (slot denied by
+            ``start_job_atomic_with_lock``), Task PENDING.
+
+        Expected:
+          * msg1's Task is claimable (slot held, Part 2 guard allows
+            active linked JobItems).
+          * msg2's Task is NOT claimable (slot denied, Part 2 guard
+            blocks queued linked JobItems). This is the FIFO bypass
+            fix.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.task.models import Task, TaskStatus, TaskType
+
+        self._seed_instance(engine, instance_id="fifo-inst-1")
+
+        # msg1: active JobItem + PENDING Task (shared work_id="fifo-w-1")
+        self._seed_message_job_item(
+            engine,
+            job_id="fifo-w-1",
+            instance_id="fifo-inst-1",
+            message_id="fifo-msg-1",
+            admission_state="active",
+        )
+        with SQLModelSession(engine) as session:
+            session.add(Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id="fifo-inst-1",
+                work_id="fifo-w-1",
+                message_id="fifo-msg-1",
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            ))
+            session.commit()
+
+        # msg2: queued JobItem + PENDING Task (shared work_id="fifo-w-2")
+        self._seed_message_job_item(
+            engine,
+            job_id="fifo-w-2",
+            instance_id="fifo-inst-1",
+            message_id="fifo-msg-2",
+            admission_state="queued",
+        )
+        with SQLModelSession(engine) as session:
+            session.add(Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id="fifo-inst-1",
+                work_id="fifo-w-2",
+                message_id="fifo-msg-2",
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            ))
+            session.commit()
+
+        # Claim should pick msg1 (active JobItem → Part 2 guard allows).
+        claimed_1 = repository.claim_pending_task(worker_id="fifo-w-1")
+        assert claimed_1 is not None, (
+            "msg1's Task must be claimable: its JobItem holds the slot "
+            "(admission_state='active'). The Part 2 queue-awareness "
+            "guard only blocks queued linked JobItems."
+        )
+        assert claimed_1.work_id == "fifo-w-1"
+
+        # Second claim must NOT pick msg2: its JobItem is queued
+        # (slot denied) → Part 2 guard blocks.
+        claimed_2 = repository.claim_pending_task(worker_id="fifo-w-2")
+        assert claimed_2 is None, (
+            "FIFO concurrency bypass regression: msg2's Task was "
+            "claimable while its JobItem was queued (slot denied by "
+            "start_job_atomic_with_lock). The Part 2 queue-awareness "
+            "guard must block queued linked JobItems."
+        )
+
+    def test_msg2_claimable_after_slot_frees(
+        self, repository, engine
+    ):
+        """Test 2 — FIFO recovery: once msg1 finishes and msg2's
+        JobItem transitions to ``active``, msg2's Task becomes
+        claimable.
+
+        SCOPE: this is a **repository-state test**, not an
+        end-to-end dispatch test. It applies three state
+        transitions manually in a single block (msg1 Task →
+        COMPLETED, msg1 JobItem → done, msg2 JobItem → active) and
+        then asserts that the predicate accepts msg2's Task under
+        the resulting post-transition state. It does NOT verify
+        the real ``JobProcessor`` dispatch / observer ordering
+        that would produce those transitions in production — the
+        observer's finalize sweep is a separate concern tested
+        elsewhere (see ``job_feedback_observer`` tests). What this
+        test pins is: given the IDEAL post-recovery state
+        (sibling terminal, target active, per-instance guard
+        cleared), the ``claim_pending_task`` SQL predicate
+        correctly releases msg2.
+
+        Setup: two messages on the same instance, msg1 already
+        RUNNING (so the per-instance guard would normally block
+        msg2). But after simulating msg1's completion (set Task to
+        COMPLETED, transition msg2's JobItem from queued to active)
+        and clearing the per-instance RUNNING guard, msg2's Task
+        must become claimable.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.task.models import Task, TaskStatus, TaskType
+
+        self._seed_instance(engine, instance_id="fifo-inst-2")
+
+        # msg1: active JobItem + RUNNING Task (already claimed)
+        self._seed_message_job_item(
+            engine,
+            job_id="fifo-w-3",
+            instance_id="fifo-inst-2",
+            message_id="fifo-msg-3",
+            admission_state="active",
+        )
+        with SQLModelSession(engine) as session:
+            session.add(Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id="fifo-inst-2",
+                work_id="fifo-w-3",
+                message_id="fifo-msg-3",
+                status=TaskStatus.RUNNING.value,
+                started_at=datetime.now(timezone.utc),
+                worker_id="fifo-worker-1",
+                created_at=datetime.now(timezone.utc),
+            ))
+            session.commit()
+
+        # msg2: queued JobItem + PENDING Task (slot denied, blocked)
+        self._seed_message_job_item(
+            engine,
+            job_id="fifo-w-4",
+            instance_id="fifo-inst-2",
+            message_id="fifo-msg-4",
+            admission_state="queued",
+        )
+        with SQLModelSession(engine) as session:
+            session.add(Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id="fifo-inst-2",
+                work_id="fifo-w-4",
+                message_id="fifo-msg-4",
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            ))
+            session.commit()
+
+        # Sanity: msg2 is NOT claimable while queued (slot denied).
+        assert repository.claim_pending_task(worker_id="fifo-w-sanity") is None, (
+            "Pre-transition sanity: msg2's Task must not be claimable "
+            "while its JobItem is queued."
+        )
+
+        # Simulate msg1 completion: Task → COMPLETED, msg1's
+        # JobItem → done (the observer finalizes the mirror), and
+        # msg2's JobItem → active (slot now free and claimed by
+        # msg2). All three transitions must happen for the FIFO
+        # recovery to work: the cross-system guard's Branch 2
+        # (``active AND NOT EXISTS(matching Task in pending/running)``)
+        # blocks when msg1's JobItem is still active with a
+        # COMPLETED Task — that is the stuck-mirror case which is
+        # a recovery concern, not a claim-time concern. The
+        # observer's finalize sweep is what clears the mirror.
+        with SQLModelSession(engine) as session:
+            from sqlalchemy import text
+            session.execute(
+                text(
+                    "UPDATE task SET status = :completed, completed_at = :now "
+                    "WHERE work_id = :work_id"
+                ),
+                {
+                    "completed": TaskStatus.COMPLETED.value,
+                    "now": datetime.now(timezone.utc),
+                    "work_id": "fifo-w-3",
+                },
+            )
+            session.execute(
+                text(
+                    "UPDATE job_queue_items SET admission_state = :done "
+                    "WHERE job_id = :job_id"
+                ),
+                {"done": "done", "job_id": "fifo-w-3"},
+            )
+            session.execute(
+                text(
+                    "UPDATE job_queue_items SET admission_state = :active "
+                    "WHERE job_id = :job_id"
+                ),
+                {"active": "active", "job_id": "fifo-w-4"},
+            )
+            session.commit()
+
+        # Now msg2's Task must be claimable: linked JobItem is
+        # active (Part 2 guard allows), per-instance RUNNING guard
+        # cleared (msg1 completed), cross-system guard's
+        # _admitted_task_carve_out_sql Branch 2 releases (active
+        # JobItem with matching PENDING Task).
+        claimed = repository.claim_pending_task(worker_id="fifo-w-final")
+        assert claimed is not None, (
+            "FIFO recovery regression: msg2's Task was not claimable "
+            "after msg1 completed and msg2's JobItem transitioned to "
+            "active. The Part 2 guard must allow active linked "
+            "JobItems, and the cross-system guard's Branch 2 must "
+            "release for an active JobItem with a matching PENDING "
+            "Task."
+        )
+        assert claimed.work_id == "fifo-w-4"
+
+    def test_orphaned_queued_jobitem_no_matching_task_recovers(
+        self, repository, engine
+    ):
+        """Test 3 — F1 orphan case preservation.
+
+        A queued JobItem with NO matching Task (truly orphaned
+        mirror) must not block the claim. The Task is claimable
+        because the mirror cannot be coordinating any in-flight
+        work — there is no Task row for it to block.
+
+        This is the "genuinely orphaned mirror" carve-out: the
+        F1 case from commit ``386a22be`` (stuck mirror that never
+        drove astream because the PG constraint rejected eager
+        activation) is now restricted to the truly-orphaned
+        sub-case where the Task row was deleted or never existed.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.task.models import Task, TaskStatus, TaskType
+
+        self._seed_instance(engine, instance_id="orphan-inst-1")
+
+        # Orphaned queued JobItem — no matching Task row exists.
+        # ``work_id="orphan-w-1"`` is deliberately not used by any
+        # Task to simulate the "Task was deleted / never existed"
+        # scenario.
+        self._seed_message_job_item(
+            engine,
+            job_id="orphan-w-1",
+            instance_id="orphan-inst-1",
+            message_id="orphan-msg-1",
+            admission_state="queued",
+        )
+
+        # A Task for a DIFFERENT message on the SAME instance. The
+        # cross-system guard's ``_admitted_task_carve_out_sql`` Branch
+        # 1 fires when ``admission_state='queued' AND NOT EXISTS(
+        # matching Task)``. The orphan has NO matching Task → Branch
+        # 1 is FALSE → the orphan is excluded from the blocking set
+        # (the orphan is a non-blocker). The Task below carries a
+        # DIFFERENT message_id so it cannot match the orphan's
+        # message_id even if Branch 1 evaluated it; the per-instance
+        # guards and the per-Task Part 2 guard both allow the claim
+        # because the orphan does not block.
+        with SQLModelSession(engine) as session:
+            session.add(Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id="orphan-inst-1",
+                work_id="orphan-task-w-1",
+                message_id="orphan-msg-2",
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            ))
+            session.commit()
+
+        # The Task must be claimable: the orphaned mirror does not
+        # block (no matching Task → carve-out releases), the
+        # per-instance RUNNING guard is clear (no RUNNING task),
+        # and Part 2 guard allows (the orphan's work_id
+        # "orphan-w-1" does NOT match the Task's work_id
+        # "orphan-task-w-1").
+        claimed = repository.claim_pending_task(worker_id="orphan-w-final")
+        assert claimed is not None, (
+            "F1 orphan regression: an orphaned queued JobItem "
+            "(no matching Task row) must not block a Task with a "
+            "non-matching message_id. The cross-system guard's "
+            "Branch 1 releases orphans because Branch 1 requires "
+            "EXISTS(matching Task) — the orphan has no Task, so "
+            "Branch 1 is FALSE and the orphan is excluded from "
+            "the blocking set."
+        )
+        assert claimed.work_id == "orphan-task-w-1"
+
+    def test_queued_mirror_with_completed_matching_task_does_not_block_fresh_task(
+        self, repository, engine
+    ):
+        """F1 regression — the actual F1 scenario, not just the
+        "no Task" orphan sub-case.
+
+        Production scenario (F1, 2026-07-03): a message's JobItem
+        mirror is stuck in ``admission_state='queued'`` (PG
+        ``trg_job_queue_items_active_lock_guard`` rejected the
+        eager activation because MESSAGE-type rows have no
+        ``job_locks`` row). The Task from the prior cycle has
+        already completed (e.g. the LangGraph astream finished
+        and the observer marked the Task COMPLETED) but the
+        mirror was never finalised — it sits as a queued
+        stuck-mirror. A fresh message arrives for the same
+        instance; its Task is created with a NEW work_id and
+        message_id. The fresh Task MUST be claimable: the
+        stuck-mirror is for the prior cycle (different work_id)
+        and cannot be coordinating the new message.
+
+        Pre-fix carve-out (Branch 1, 2026-07-03): any queued
+        JobItem with a matching Task (regardless of Task
+        status) releases the guard. The COMPLETED Task from the
+        prior cycle matches the mirror's message_id, so the
+        guard releases — but the release is keyed on the
+        PRIOR cycle's Task, not the new cycle's. The fresh
+        Task (different work_id, different message_id) is
+        claimable.
+
+        Why this differs from Test 3: Test 3 covers the
+        "no Task at all" sub-case (truly orphaned mirror —
+        Task was deleted, never existed). This test covers
+        the more common production case: the Task DID exist
+        and completed, but the mirror was never finalised.
+        The F1 fix from 2026-07-03 must still hold for this
+        case after the 2026-07-26 FIFO concurrency fix.
+
+        The 2026-07-26 fix added:
+          * a new "no matching Task" orphan-exclusion WHERE
+            filter (covered by Test 3), AND
+          * the Part 2 queue-awareness guard that blocks
+            claimed Tasks whose linked JobItem is queued
+            (covered by Test 1).
+
+        Part 2 must NOT block the fresh Task here because
+        the fresh Task's work_id does NOT match the queued
+        mirror's job_id (different UUIDs) — the queued
+        mirror is from a prior cycle and is not the
+        fresh Task's linked JobItem.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.task.models import Task, TaskStatus, TaskType
+
+        self._seed_instance(engine, instance_id="f1-inst-1")
+
+        # Prior cycle: queued stuck-mirror + COMPLETED Task sharing
+        # the same message_id "f1-prior-msg" and the same work_id
+        # "f1-prior-w". The mirror never transitioned to active
+        # (PG trigger rejected eager activation for MESSAGE-type
+        # rows) so it remains queued even after the Task completed.
+        self._seed_message_job_item(
+            engine,
+            job_id="f1-prior-w",
+            instance_id="f1-inst-1",
+            message_id="f1-prior-msg",
+            admission_state="queued",
+        )
+        prior_completed = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="f1-inst-1",
+            message_id="f1-prior-msg",
+            status=TaskStatus.COMPLETED.value,
+        )
+        # Stamp the prior Task's work_id so the linkage matches
+        # the mirror's job_id. ``_create_task_with_status`` mints
+        # a fresh work_id; we overwrite it so the prior Task is
+        # correctly identified as the mirror's linked Task.
+        with SQLModelSession(engine) as session:
+            session.execute(
+                text("UPDATE task SET work_id = :work_id WHERE id = :id"),
+                {"work_id": "f1-prior-w", "id": prior_completed.id},
+            )
+            session.commit()
+
+        # New cycle: a fresh PENDING Task with a NEW work_id and
+        # a NEW message_id. The fresh Task is for a different
+        # message on the same instance — the queued stuck-mirror
+        # from the prior cycle must NOT block it.
+        with SQLModelSession(engine) as session:
+            session.add(Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id="f1-inst-1",
+                work_id="f1-fresh-w",
+                message_id="f1-fresh-msg",
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            ))
+            session.commit()
+
+        # The fresh Task MUST be claimable. The stuck-mirror
+        # (work_id "f1-prior-w", message_id "f1-prior-msg") is
+        # excluded from the blocking set by:
+        #   1. the new orphan-exclusion filter — wait, the
+        #      stuck-mirror HAS a matching Task (the prior
+        #      COMPLETED Task), so the orphan-exclusion does
+        #      NOT fire.
+        #   2. Branch 1 of the carve-out — a queued JobItem
+        #      WITHOUT a matching Task releases; but the
+        #      stuck-mirror HAS a matching Task. The branch
+        #      fires only when ``NOT EXISTS(matching Task)``,
+        #      which is FALSE here. So Branch 1 does NOT
+        #      release the stuck-mirror.
+        #   3. Branch 2 of the carve-out — needs
+        #      admission_state='active', so it does NOT
+        #      apply to a queued mirror.
+        # So the stuck-mirror IS in the blocking set per the
+        # cross-system guard. The fresh Task is unblocked
+        # because:
+        #   * the per-instance RUNNING guard is clear (the
+        #     prior Task is COMPLETED, not RUNNING);
+        #   * the Part 2 queue-awareness guard does NOT fire
+        #     because the fresh Task's work_id
+        #     ("f1-fresh-w") does NOT match any queued
+        #     JobItem's job_id — the queued mirror's
+        #     job_id is "f1-prior-w", not "f1-fresh-w";
+        #   * the cross-system guard's "blocking set" only
+        #     blocks the FRESH Task if the fresh Task
+        #     matches the stuck-mirror's message_id
+        #     ("f1-prior-msg") — but the fresh Task has
+        #     message_id "f1-fresh-msg", so the stuck-mirror
+        #     does not block the fresh Task.
+        claimed = repository.claim_pending_task(worker_id="f1-fresh-w")
+        assert claimed is not None, (
+            "F1 regression: a fresh Task for the same instance "
+            "must be claimable even when a prior-cycle "
+            "stuck-mirror JobItem (admission_state='queued') "
+            "with a matching COMPLETED Task still exists. The "
+            "queued mirror is for the prior cycle (different "
+            "work_id, different message_id) and cannot be "
+            "coordinating the fresh Task. The Part 2 guard "
+            "correctly does NOT fire because the fresh Task's "
+            "work_id does not match any queued JobItem's "
+            "job_id."
+        )
+        assert claimed.work_id == "f1-fresh-w"
+        assert claimed.message_id == "f1-fresh-msg"
+
+        # And the prior Task remains untouched (COMPLETED, not
+        # re-claimed) — the fresh Task is the one the worker
+        # pool picks up.
+        db_prior = repository.get(prior_completed.id)
+        assert db_prior is not None
+        assert db_prior.status == TaskStatus.COMPLETED.value
+        assert db_prior.work_id == "f1-prior-w"
+
+
 class TestDeferQueueGate:
     """Tests for the defer queue idle gate (Phase 3 Part B2, 2026-06-27).
 
