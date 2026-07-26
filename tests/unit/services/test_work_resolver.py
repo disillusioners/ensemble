@@ -423,6 +423,32 @@ class TestResolveWork:
         # Sanity-check the underlying row really is what we asked for.
         assert job_repo.get(jid) is not None
 
+    def test_queued_message_job_with_stamped_instance_stays_pending(
+        self, engine, resolver
+    ):
+        """Queued message jobs must not inherit their target instance status."""
+        instance_id = _seed_instance(
+            engine, instance_id="inst-busy", status="running"
+        )
+        queued_jid = _seed_job(
+            engine,
+            instance_id=instance_id,
+            status=AdmissionState.QUEUED.value,
+        )
+        active_jid = _seed_job(
+            engine,
+            instance_id=instance_id,
+            status=AdmissionState.ACTIVE.value,
+        )
+
+        queued_record = resolver.resolve_work(queued_jid)
+        active_record = resolver.resolve_work(active_jid)
+
+        assert queued_record is not None
+        assert queued_record.status == "pending"
+        assert active_record is not None
+        assert active_record.status == "processing"
+
     def test_resolve_work_task_returns_task_record(
         self, engine, resolver, task_repo
     ):

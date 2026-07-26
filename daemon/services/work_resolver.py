@@ -1291,7 +1291,14 @@ class WorkResolverService:
             # * ``job.instance_id is not None`` but the Instance row
             #   is missing (orphan / deleted) — same fallback to the
             #   ``admission_state`` map, canonicalized.
-            if job.instance_id is not None:
+            # Only read the instance status when the job is ACTIVELY running.
+            # A queued message job already has instance_id stamped (set at
+            # enqueue time), but it is NOT running yet — it must show
+            # "pending", not the target instance's status.
+            if (
+                job.admission_state == AdmissionState.ACTIVE.value
+                and job.instance_id is not None
+            ):
                 if instance is None:
                     instance = self._lookup_instance(job.instance_id)
                 if instance is not None:
@@ -1303,10 +1310,8 @@ class WorkResolverService:
                         )
                     )
             else:
-                # Job is queued, not yet dequeued to an instance.
-                # Use admission_state as the source of truth so the
-                # WorkRecord's ``status`` reflects the actual queue
-                # state instead of the frozen ``status`` column.
+                # When admission_state == "queued", fall through to the
+                # admission-state mapping, which correctly returns "pending".
                 status = canonicalize_status(
                     _ADMISSION_TO_LEGACY_STATUS.get(
                         job.admission_state, "pending"
