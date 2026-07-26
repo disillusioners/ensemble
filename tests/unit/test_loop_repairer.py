@@ -46,6 +46,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import (
     AIMessage,
+    BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
@@ -180,7 +181,7 @@ def _make_context(
     graph: MagicMock | None = None,
     llm_config: dict | None = None,
     system_prompt: str = "You are a helpful agent.",
-    injected_msg: HumanMessage | None = None,
+    injected_msg: list[BaseMessage] | None = None,
     summarization_timeout_seconds: int = 30,
 ) -> RepairContext:
     """Build a fully-populated :class:`RepairContext` with sensible defaults."""
@@ -562,14 +563,14 @@ class TestRepairInjectedMessageReappend:
         with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
             result = await LoopRepairer().repair(_make_context(
                 graph=graph,
-                injected_msg=injected,
+                injected_msg=[injected],
             ))
 
         assert result.success is True
         # The injected HumanMessage MUST be the LAST item in the list.
         assert len(result.repaired_messages) == 3
-        assert result.repaired_messages[0] == "state-msg-A"
-        assert result.repaired_messages[1] == "state-msg-B"
+        assert result.repaired_messages[0].id == "state-msg-A"
+        assert result.repaired_messages[1].id == "state-msg-B"
         assert result.repaired_messages[2] is injected
 
     @pytest.mark.asyncio
