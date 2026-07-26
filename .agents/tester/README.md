@@ -19,6 +19,6 @@
 
 ## ensure.md
 - Status: ✅ ACTIVE — `.agents/tester/rules/ensure.md` exists with Core + Release Gate requirements
-- E2E Release Gate (4 tests): last run **2026-07-26 on `feature/queue-dispatch-option-b` @ `b6d4953f` (observer re-spawn fix)** → ✅ PASS (4/4). happy_path 41s, pause+resume 38s, terminate+revive 41s, 3-level cascade 97s. No regressions. **FIFO + observer scenario also validated:** concurrency_limit=1 serializes messages AND the observer message-branch fix eliminates the UniqueViolation/spurious-DLQ/stuck-queued symptoms from the prior run (5-pattern log grep: 0 error matches). Observer bug (LESSONS) now RESOLVED.
+- E2E Release Gate (4 tests): last run **2026-07-26 on `feature/queue-dispatch-option-b` @ `3279e5df` (job status UI fix)** → ✅ PASS (4/4). happy_path 45s, pause+resume 42s, terminate+revive 35s, 3-level cascade 107s. No regressions. **FIFO status scenario also validated:** queued message job shows `status=pending` (NOT `processing`) across 11 polls while waiting; transitions to `processing` once dispatched. Used the `sleep 20` prompt technique to hold the FIFO slot for clear observation.
 - Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)
 - **Note:** dev mode (`./dev.sh`) logs to stdout (no `.log` file) — use the process buffer for log grep, not `tail -f daemon.log`.
