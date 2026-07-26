@@ -202,6 +202,59 @@ class TestSetQuestionPack:
         for opt in pack.questions[0].options:
             assert isinstance(opt, str)
 
+    def test_set_question_pack_normalizes_unusable_dict_and_bare_string_options(self):
+        """Empty/text-less dicts collapse to ``""``; bare strings wrap to a 1-element list.
+
+        Two regressions covered together because both target the friendly
+        normalizer helpers (``_normalize_option`` / ``_normalize_options``):
+
+          * ``{"text": None}`` and ``{}`` must normalize to ``""`` rather
+            than leaking Python ``{...}`` / ``'None'`` reprs to the UI as
+            chip labels.
+          * A bare string ``options`` (LLM forgot the wrapping list) must
+            become a single-element list rather than getting
+            character-split into a 1-character-per-chip garbage strip.
+
+        The manager contract is ``list[str]`` and never-raises; these
+        inputs must satisfy that contract cleanly.
+        """
+        mgr = QuestionManager()
+        pack = mgr.set_question_pack(
+            "inst-edge",
+            [
+                {
+                    "text": "Edge cases",
+                    "options": [
+                        {"text": None},
+                        {},
+                    ],
+                },
+                {
+                    "text": "Bare string",
+                    "options": "Single string option",
+                },
+            ],
+        )
+        assert pack is not None
+
+        # Question 1: empty dicts / None text → "" (NOT reprs).
+        first_opts = pack.questions[0].options
+        assert first_opts == ["", ""], first_opts
+        for opt in first_opts:
+            assert isinstance(opt, str)
+            # Guard against the exact buggy strings these cases used to leak.
+            assert opt != "{'text': None}"
+            assert opt != "{}"
+            assert opt != "None"
+
+        # Question 2: bare string wraps to 1-element list (NOT char-split).
+        second_opts = pack.questions[1].options
+        assert second_opts == ["Single string option"], second_opts
+        # Defensive: explicitly confirm we did not character-split.
+        assert "S" not in second_opts
+        assert " " not in second_opts
+        assert len(second_opts) == 1
+
 
 # =============================================================================
 # Get question pack

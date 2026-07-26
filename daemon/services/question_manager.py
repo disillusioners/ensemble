@@ -55,9 +55,12 @@ def _normalize_option(value: Any) -> str:
     a friendly normalization:
 
       * ``str`` → returned as-is (the common case).
-      * ``dict`` with a ``"text"`` key → the extracted text value,
+      * ``dict`` with a usable ``"text"`` key → the extracted text value,
         recursively normalized so a nested object also collapses to a
         string.
+      * ``dict`` with no usable ``"text"`` (``None``, missing, or empty
+        after coercion) → ``""`` so we don't leak a Python
+        ``{...}`` repr to the UI as a chip label.
       * Anything else → ``str(value)`` so the field is never silently
         dropped.
 
@@ -68,27 +71,41 @@ def _normalize_option(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        text = value.get("text")
-        if text is not None:
-            return _normalize_option(text)
+        raw = value.get("text")
+        if raw is None:
+            return ""
+        text = _normalize_option(raw)
+        return text if text else ""
     return str(value)
 
 
 def _normalize_options(values: Any) -> list[str]:
     """Normalize an ``options`` field to a fresh ``list[str]``.
 
-    Mirrors the existing ``list(q.get("options", []) or [])`` pattern:
-    a missing, ``None``, or non-iterable value collapses to ``[]``,
-    and any iterable produces a fresh list of normalized entries.
+    Behavior:
+
+      * ``None`` / missing / empty → ``[]`` (mirrors the existing
+        ``list(q.get("options", []) or [])`` collapse).
+      * ``list`` / ``tuple`` / ``set`` → iterate and normalize each
+        element.
+      * ``str`` → wrap into a single-element list rather than
+        character-splitting (``list("Approach A")`` produced 10 garbage
+        chips per option, which would otherwise leak to the UI).
+      * Any other non-iterable scalar (e.g. ``int``) → wrap into a
+        single-element list as a friendly fallback.
+
     Always returns a new list (no shared mutable state with the input).
+    Never raises.
     """
     if not values:
         return []
-    try:
-        iterable = list(values)
-    except TypeError:
-        return []
-    return [_normalize_option(item) for item in iterable]
+    if isinstance(values, str):
+        return [_normalize_option(values)]
+    if isinstance(values, (list, tuple, set)):
+        return [_normalize_option(item) for item in values]
+    # Non-iterable scalar (e.g. int) — wrap as a single option rather
+    # than dropping it on the floor.
+    return [_normalize_option(values)]
 
 
 @dataclass
