@@ -263,6 +263,60 @@ class TestPaginationCorrectness:
             f"Pagination did not cover all instances exactly once: {all_ids}"
         )
 
+    def test_pagination_10plus_false_and_null_unpinned_on_page1(
+        self, repo, engine_factory
+    ):
+        """10+ instances across multiple pages. Pinned concentrated on page 1;
+        page 1 ALSO contains newer unpinned of BOTH kinds (explicit FALSE and
+        NULL) after the pinned block — they tiebreak purely on created_at DESC.
+
+        This closes the gap left by ``test_pinned_concentrated_on_page1``
+        (6 instances, page-1 = pinned-only, no FALSE/NULL mix on page 1).
+        """
+        _, engine = engine_factory()
+        repo = SQLModelInstanceRepository(engine)
+
+        # 12 instances, created oldest→newest so created_at DESC = newest first.
+        for i in range(12):
+            _make_instance(repo, f"inst-{i:02d}", created_at=_iso(2026, 1, 1, i))
+
+        # Pin the two OLDEST (inst-00, inst-01) — they must float to page 1.
+        _set_pref(engine, "inst-00", pinned=True, pinned_at=_iso(2026, 7, 2))
+        _set_pref(engine, "inst-01", pinned=True, pinned_at=_iso(2026, 7, 1))
+
+        # Mark inst-05..inst-09 as explicit pinned=False; the rest stay NULL.
+        for i in range(5, 10):
+            _set_pref(engine, f"inst-{i:02d}", pinned=False, pinned_at=None)
+
+        page1, total = repo.list(limit=5, offset=0, exclude_kb=False)
+        ids_p1 = [i.instance_id for i in page1]
+        assert total == 12, f"expected total=12, got {total}"
+        # [pinned inst-00, inst-01] then newest unpinned by created_at DESC:
+        # inst-11 (NULL), inst-10 (NULL), inst-09 (explicit FALSE).
+        assert ids_p1 == ["inst-00", "inst-01", "inst-11", "inst-10", "inst-09"], (
+            f"Page 1 must start with pinned, then newest unpinned incl. an "
+            f"explicit FALSE (inst-09) alongside NULL (inst-11/inst-10); got "
+            f"{ids_p1}."
+        )
+
+        # Pinned must NOT leak onto later pages.
+        page2, _ = repo.list(limit=5, offset=5, exclude_kb=False)
+        ids_p2 = [i.instance_id for i in page2]
+        assert "inst-00" not in ids_p2 and "inst-01" not in ids_p2, (
+            f"Pinned instances leaked onto page 2: {ids_p2}"
+        )
+        page3, _ = repo.list(limit=5, offset=10, exclude_kb=False)
+        ids_p3 = [i.instance_id for i in page3]
+        assert "inst-00" not in ids_p3 and "inst-01" not in ids_p3, (
+            f"Pinned instances leaked onto page 3: {ids_p3}"
+        )
+
+        # All 12 instances covered exactly once across the 3 pages.
+        all_ids = ids_p1 + ids_p2 + ids_p3
+        assert sorted(all_ids) == [f"inst-{i:02d}" for i in range(12)], (
+            f"Pagination did not cover all 12 instances exactly once: {all_ids}"
+        )
+
 
 # =============================================================================
 # Scenario 3 — No prefs row (NULL handling)
@@ -450,4 +504,50 @@ class TestMixedTrueFalseNullBugFix:
             f"Expected [TRUE, NULL-newest, FALSE-middle]; got {ids}. "
             f"pinned=True must float to top; unpinned instances (FALSE and NULL) "
             f"must tiebreak by created_at DESC, not by prefs-row existence."
+        )
+
+
+# =============================================================================
+# Scenario 6 — Stable tiebreaker: FALSE + NULL with identical created_at
+# =============================================================================
+
+
+class TestFalseNullTiebreakerSameCreatedAt:
+    """When an explicit ``pinned=False`` and a never-pinned (``pinned=NULL``)
+    instance share the SAME ``created_at``, both are tier 0 and the order is
+    decided by the final stable tiebreaker ``instance_id ASC``.
+
+    This is the one gap in the existing FALSE-vs-NULL coverage: the prior test
+    (``test_explicit_false_treated_same_as_null_prefs``) used DISTINCT
+    created_at values, so it exercised created_at DESC but never the
+    instance_id ASC final tiebreak between the two unpinned kinds."""
+
+    def test_false_and_null_same_created_at_tiebreak_instance_id_asc(
+        self, repo, engine_factory
+    ):
+        """Two instances, identical created_at:
+        - ``id-before``: explicit pinned=False
+        - ``id-after``:  no prefs row (pinned=NULL)
+
+        With identical tier (0) and identical created_at, ``instance_id ASC``
+        is the only remaining sort key, so ``id-before`` precedes
+        ``id-after`` regardless of pinned-state (FALSE vs NULL).
+        """
+        _, engine = engine_factory()
+        repo = SQLModelInstanceRepository(engine)
+
+        same_created = _iso(2026, 3, 1)
+        _make_instance(repo, "id-before", created_at=same_created)
+        _set_pref(engine, "id-before", pinned=False, pinned_at=None)
+
+        _make_instance(repo, "id-after", created_at=same_created)
+
+        instances, total = repo.list(exclude_kb=False)
+        ids = [i.instance_id for i in instances]
+
+        assert total == 2
+        # instance_id ASC: "id-after" < "id-before" lexicographically → id-after first.
+        assert ids == ["id-after", "id-before"], (
+            f"With identical created_at, FALSE vs NULL must tiebreak by "
+            f"instance_id ASC; got {ids}. Expected id-after < id-before."
         )
