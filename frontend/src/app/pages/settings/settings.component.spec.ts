@@ -1044,6 +1044,29 @@ describe('SettingsComponent', () => {
       expect(component.applyingEditor()).toBe(false);
     });
 
+    // Regression: a code-server crash log surfaces as multi-line text (e.g.
+    // "code-server exited (code=1)\n--- tail ---\nline1\nline2"). The CSS rule
+    // in settings.component.scss depends on the snackbar still being tagged
+    // `error-snackbar` AND the message preserving its newlines — if production
+    // ever strips them, this test fails.
+    it('should preserve newlines in the snackbar message and apply error-snackbar panel class', () => {
+      const multilineDetail =
+        'code-server exited (code=1)\n--- tail ---\nline1\nline2';
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'VS Code server failed to start', detail: multilineDetail } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(multilineDetail);
+      expect(MockMatSnackBar.lastOpen?.options).toEqual({
+        duration: 5000,
+        panelClass: 'error-snackbar',
+      });
+    });
+
     it('should show generic failed-to-start hint when 503 detail omits explanation', () => {
       service.setEditorPreference.mockReturnValue(
         throwError(() => ({

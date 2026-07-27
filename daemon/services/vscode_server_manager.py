@@ -652,6 +652,34 @@ class VSCodeServerManager:
                 self._process is not None
                 and self._process.returncode is not None
             ):
+                # Record exit_code and last_error BEFORE flipping status
+                # so the crash is observable via get_status() / the API,
+                # not just via the exception string. Mirrors the
+                # watchdog's behavior on unexpected runtime exits. Status
+                # stays "stopped" (NOT "crashed") for consistency with the
+                # spawn-failure paths.
+                self.state.exit_code = self._process.returncode
+                self.state.last_error = (
+                    f"code-server exited during startup "
+                    f"(code={self._process.returncode})"
+                )
+
+                # Mark state stopped before raising so callers and the
+                # watchdog don't leave the manager stuck in "starting".
+                self.state.status = "stopped"
+
+                # Cancel the reader task so it doesn't outlive the
+                # manager on this crash path (CancelledError is re-raised
+                # in _reader_loop, which is the normal teardown shape).
+                if (
+                    self.state.reader_task is not None
+                    and not self.state.reader_task.done()
+                ):
+                    self.state.reader_task.cancel()
+                    await asyncio.gather(
+                        self.state.reader_task, return_exceptions=True
+                    )
+
                 # Surface the crash output so the operator can see why
                 # code-server failed (e.g. bind error, missing dependency).
                 # Decode the in-memory log buffer and take the tail of the
@@ -682,31 +710,6 @@ class VSCodeServerManager:
                         .decode("utf-8", errors="replace")
                         + "\n... [truncated]"
                     )
-
-                # Record exit_code and last_error BEFORE flipping status
-                # so the crash is observable via get_status() / the API,
-                # not just via the exception string. Mirrors the
-                # watchdog's behavior on unexpected runtime exits. Status
-                # stays "stopped" (NOT "crashed") for consistency with the
-                # spawn-failure paths.
-                self.state.exit_code = self._process.returncode
-                self.state.last_error = (
-                    f"code-server exited during startup "
-                    f"(code={self._process.returncode})"
-                )
-
-                # Mark state stopped before raising so callers and the
-                # watchdog don't leave the manager stuck in "starting".
-                self.state.status = "stopped"
-
-                # Cancel the reader task so it doesn't outlive the
-                # manager on this crash path (CancelledError is re-raised
-                # in _reader_loop, which is the normal teardown shape).
-                if (
-                    self.state.reader_task is not None
-                    and not self.state.reader_task.done()
-                ):
-                    self.state.reader_task.cancel()
 
                 logger.error(
                     "code-server exited during startup (code=%s)"

@@ -1392,10 +1392,17 @@ class TestVSCodeServerManager:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """On startup crash, the still-running reader task is cancelled
+        AND awaited via ``asyncio.gather(..., return_exceptions=True)``
         so it doesn't outlive the manager on this path.
 
         ``_wait_for_port()`` MUST call ``.cancel()`` on
-        ``state.reader_task`` when the task is present and not done.
+        ``state.reader_task`` when the task is present and not done,
+        then ``await asyncio.gather(...)`` to observe the
+        ``CancelledError`` re-raised by ``_reader_loop`` (captured by
+        ``return_exceptions=True``). The fake reader task MUST be a real
+        awaitable because ``asyncio.gather`` only accepts coroutines,
+        Futures, or awaitables — a plain ``done()``/``cancel()`` mock
+        is not.
         """
         manager = make_manager(tmp_path)
         monkeypatch.setattr(
@@ -1403,19 +1410,15 @@ class TestVSCodeServerManager:
             0.001,
         )
 
-        # Build a fake reader task that records cancel() calls and
-        # reports itself as not-yet-done so the cancel branch is taken.
-        class FakeTask:
-            def __init__(self) -> None:
-                self.cancelled = False
-
-            def done(self) -> bool:
-                return False
-
-            def cancel(self) -> None:
-                self.cancelled = True
-
-        fake_task = FakeTask()
+        # Real pending ``asyncio.Future`` (the event loop is running in
+        # this async test, so ``asyncio.Future()`` binds to it). For a
+        # pending future:
+        #   - ``.done()`` returns False (guard passes),
+        #   - ``.cancel()`` cancels it,
+        #   - ``asyncio.gather(future, return_exceptions=True)`` is a
+        #     valid await (Future is an awaitable) and captures the
+        #     ``CancelledError`` instead of propagating it.
+        fake_task: asyncio.Future = asyncio.Future()
         manager.state.reader_task = fake_task  # type: ignore[assignment]
 
         fake_proc = FakeProcess(pid=12345, returncode=2)
@@ -1425,9 +1428,15 @@ class TestVSCodeServerManager:
         with pytest.raises(VSCodeServerStartError):
             await manager._wait_for_port()
 
-        assert fake_task.cancelled is True, (
-            "reader_task.cancel() must be called when the process "
-            "exits during startup"
+        # ``.cancel()`` was called on the task and ``asyncio.gather``
+        # observed the resulting ``CancelledError`` (captured, not
+        # re-raised). The future ends up in the cancelled state.
+        assert fake_task.cancelled() is True, (
+            "reader_task.cancel() must be called and awaited when the "
+            "process exits during startup"
+        )
+        assert fake_task.done() is True, (
+            "reader_task must be awaited via asyncio.gather after cancel"
         )
 
     async def test_wait_for_port_crash_logs_error(

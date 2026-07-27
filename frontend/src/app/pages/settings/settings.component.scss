@@ -98,6 +98,15 @@ $accent-cyan: #10a7f7;
 ::ng-deep .error-snackbar {
   --mdc-snackbar-container-color: #f44336;
   --mdc-snackbar-supporting-text-color: white;
+
+  // Error messages (e.g. code-server crash log tail) can be many lines long.
+  // Preserve newlines and make the label scrollable when it exceeds the
+  // viewport height so the user can actually read the diagnostic.
+  .mat-mdc-snack-bar-label {
+    white-space: pre-wrap;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
 }
 ::ng-deep .success-snackbar {
   --mdc-snackbar-container-color: #4caf50;
