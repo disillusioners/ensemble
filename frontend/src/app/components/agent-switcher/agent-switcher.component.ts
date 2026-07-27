@@ -164,6 +164,7 @@ export class AgentSwitcherComponent {
    *  changes. The parent updates `selectedVersionTag` from the emit, so
    *  the next "create instance" call forwards the chosen tag. */
   onVersionTagChange(tag: string | null): void {
+    // Deliberately re-emits `agentChange` (not a separate `versionChange`) to preserve the single output channel — see AgentSelectorComponent for the alternative pattern.
     this.selectedVersionTag.set(tag);
     const sel = this.selectedAgent();
     if (sel) {
