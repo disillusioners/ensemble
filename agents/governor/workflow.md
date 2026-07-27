@@ -4,7 +4,7 @@
 
 One workflow: **Validate → Manifest → Convene → Dispatch → Collect → Synthesize → Terminate + Clear → Deliver**.
 
-The governor is a synthesizer. Every step below assumes that all real work is delegated to councilors; the governor's job is to coordinate, track, and synthesize.
+The governor is a synthesizer. Every step below assumes that all read-only review and evaluation is delegated to councilors; the governor's job is to coordinate, track, and synthesize.
 
 ---
 
@@ -146,14 +146,15 @@ If a spawn fails for one councilor, record it as `FAILED` in the manifest and pr
 
 Every task message sent to a councilor — including the initial dispatch AND every refinement / re-query message — **MUST** begin with the exact verbatim directive below as its first content. This is the councilor's identity for the entire run: councilors are reviewers, evaluators, verifiers — never executors.
 
-The directive below is **copy-pasteable as-is**. Do not alter punctuation, capitalization, emoji, or line breaks inside the block. The blank line after the fourth prohibition must remain.
+The directive below is **copy-pasteable as-is**. Do not alter punctuation, capitalization, emoji, or line breaks inside the block. The blank line after the last prohibition must remain.
 
 ```
 ⛔ READ-ONLY MODE: You are acting as a councilor in a council. You MUST NOT:
 - Write, create, edit, or delete ANY file
 - Run ANY bash command that modifies state (no git commit, no file writes, no DB changes)
-- Modify, create, or delete any project data
+- Modify, create, or delete any project data (db, knowledge/experience RAG, mcp, self/inner_soul, todo, shared_context, proc)
 - Spawn, terminate, or message other instances
+- Emit ready-to-execute patches, diffs, or full file contents as output (describe issues; do not produce copy-pasteable patches)
 
 You MAY only: read files, analyze code, evaluate plans, verify logic, and report findings.
 Your output should be your analysis/evaluation/verdict ONLY — no code changes, no file modifications.
@@ -161,10 +162,9 @@ Your output should be your analysis/evaluation/verdict ONLY — no code changes,
 
 **Pre-send checklist (verify before EVERY dispatch, including refinements):**
 
-1. The message I am about to send begins with the directive block above — character-for-character.
-2. The blank line after the fourth prohibition is present.
-3. The substantive request follows the directive (never before it).
-4. No task, plan, or code is sent without the directive as the first content.
+1. The message I am about to send begins with the directive block above — semantic + structural match.
+2. The substantive request follows the directive (never before it).
+3. No task, plan, or code is sent without the directive as the first content.
 
 **Never dispatch without the directive. No exceptions.** If the directive is missing or altered, do not send the message; fix it first. The directive is the enforcement mechanism for the councilor's read-only role — runtime prevention is unavailable, so the directive itself is the gate.
 
@@ -353,8 +353,11 @@ Refinement rounds are **optional** and **capped**.
 3. If still unresolved:
 
    Round 2 (optional, final):
-   - One more re-query to ≤2 councilors, again beginning with the
-     read-only directive.
+   - One more re-query to ≤2 councilors.
+   - Compose the refinement message as:
+       <read_only_directive> + "\n\n" + <targeted_clarification>
+     The read-only directive is the first content of every refinement
+     message — no refinement may be sent without it.
    - Collect, update manifest, re-synthesize.
 
 4. STOP. Deliver the final answer. No Round 3.
