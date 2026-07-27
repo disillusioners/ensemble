@@ -286,6 +286,14 @@ async def list_instances(
     offset: int = 0,
     project_id: str | None = Query(None, description="Filter instances by project ID"),
     exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
+    search: str | None = Query(
+        None,
+        description=(
+            "Case-insensitive substring filter matched against "
+            "instance_metadata.title, agent_name, and agent_id. "
+            "% and _ are treated as literals."
+        ),
+    ),
 ) -> InstanceListResponse:
     """List instances with pagination.
 
@@ -300,6 +308,9 @@ async def list_instances(
         project_id: Filter instances by project ID (optional).
         exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
             Applies to both root counting and descendant loading.
+        search: Optional case-insensitive substring filter against
+            ``instance_metadata.title``, ``agent_name``, and ``agent_id``
+            (optional). When omitted/empty, no text filter is applied.
     """
     manager = _get_manager(request)
 
@@ -313,6 +324,7 @@ async def list_instances(
         project_id=project_id,
         exclude_kb=exclude_kb,
         include_descendants=True,
+        search=search,
     )
 
     # Merge UI preferences (pin + color tag + icon tag) into each

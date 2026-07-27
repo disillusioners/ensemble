@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import bindparam, case, delete as sql_delete, func, literal, not_, text
+from sqlalchemy import bindparam, case, delete as sql_delete, func, literal, not_, or_, String, text
+from sqlalchemy import cast as sa_cast
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -39,10 +40,10 @@ MAX_DESCENDANTS_PER_PAGE = 500
 
 def get_agent_name(agent_dir: str) -> str:
     """Derive agent name from agent directory path.
-    
+
     Args:
         agent_dir: Path to the agent directory.
-        
+
     Returns:
         Agent name in Title Case (e.g., "Coder", "Designer").
     """
@@ -87,6 +88,44 @@ class SQLModelInstanceRepository:
     ) -> list[Instance]:
         """Hook for subclasses/tests to enrich freshly-read instances. Default returns unchanged."""
         return instances
+
+    def _build_search_condition(self, db_session: SQLModelSession, search: str | None):
+        """Build a dialect-aware ``or_`` predicate for substring search.
+
+        Matches the (escaped) ``search`` term against:
+        * ``instance_metadata.title`` (JSONB on PostgreSQL, JSON on SQLite)
+        * ``agent_name`` (column)
+        * ``agent_id`` (column)
+
+        Returns ``None`` when ``search`` is falsy (no filter to apply).
+
+        The ``%`` and ``_`` wildcards in user input are escaped to literals
+        via a backslash so a search like ``50%`` doesn't accidentally match
+        arbitrary text. ``escape="\\"`` is the LIKE escape character and is
+        required on both SQLite and PostgreSQL for the backslash to be
+        interpreted correctly.
+        """
+        if not search:
+            return None
+
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_term = f"%{escaped}%"
+
+        # Dialect-aware title expression: PG casts the JSONB-extracted text
+        # value to VARCHAR; SQLite uses json_extract and casts to TEXT.
+        # The cast lets ILIKE behave like a string compare (rather than JSON
+        # comparator semantics) on both backends.
+        is_postgres = db_session.bind.dialect.name == "postgresql"
+        if is_postgres:
+            title_expr = sa_cast(Instance.instance_metadata["title"], String)
+        else:
+            title_expr = sa_cast(func.json_extract(Instance.instance_metadata, "$.title"), String)
+
+        return or_(
+            title_expr.ilike(search_term, escape="\\"),
+            Instance.agent_name.ilike(search_term, escape="\\"),
+            Instance.agent_id.ilike(search_term, escape="\\"),
+        )
 
     # --------------------------------------------------------
     # CREATE
@@ -306,6 +345,7 @@ class SQLModelInstanceRepository:
         offset: int = 0,
         exclude_kb: bool = True,
         include_descendants: bool = False,
+        search: str | None = None,
     ) -> tuple[list[Instance], int]:
         """List instances with optional root-based pagination and full tree loading.
 
@@ -345,6 +385,9 @@ class SQLModelInstanceRepository:
           ``next_level_ids``. KB agents are still traversed *through* (so their
           non-KB children are reachable) and then stripped from the final
           result.
+        * ``search`` is applied to the root count, root query, and the BFS
+          child query (defense-in-depth, mirroring ``project_id``). Like
+          ``%`` / ``_`` wildcards in user input are escaped to literals.
 
         Args:
             status: Optional status filter. For ``include_descendants=True``,
@@ -359,6 +402,10 @@ class SQLModelInstanceRepository:
             include_descendants: When False (default), return a flat paginated
                 list of all matching instances. When True, paginate by root and
                 BFS-load all descendants of each root in the current page.
+            search: Optional case-insensitive substring filter. Matches the
+                escaped term against ``instance_metadata.title``, ``agent_name``,
+                and ``agent_id``. ``%`` and ``_`` in the search term are treated
+                as literals.
 
         Returns:
             Tuple of (flat list of instances, total count). In
@@ -382,6 +429,10 @@ class SQLModelInstanceRepository:
                 if exclude_kb:
                     count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
                     stmt = stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+                search_cond = self._build_search_condition(db_session, search)
+                if search_cond is not None:
+                    count_stmt = count_stmt.where(search_cond)
+                    stmt = stmt.where(search_cond)
 
                 total = db_session.exec(count_stmt).one()
 
@@ -412,6 +463,10 @@ class SQLModelInstanceRepository:
         # Root-based pagination + BFS descendant loading (API path).
         # ────────────────────────────────────────────────────────────────
         with SQLModelSession(self.engine) as db_session:
+            # Build the search condition once and reuse across root count,
+            # root query, and BFS child queries.
+            search_cond = self._build_search_condition(db_session, search)
+
             # 1. Count root instances only (parent_id IS NULL OR empty).
             count_stmt = select(func.count()).select_from(Instance).where(
                 (Instance.parent_id.is_(None)) | (Instance.parent_id == "")
@@ -422,6 +477,8 @@ class SQLModelInstanceRepository:
                 count_stmt = count_stmt.where(Instance.project_id == project_id)
             if exclude_kb:
                 count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+            if search_cond is not None:
+                count_stmt = count_stmt.where(search_cond)
             total = db_session.exec(count_stmt).one()
 
             # 2. Paginate root instances (ORDER BY created_at DESC).
@@ -434,6 +491,8 @@ class SQLModelInstanceRepository:
                 root_stmt = root_stmt.where(Instance.project_id == project_id)
             if exclude_kb:
                 root_stmt = root_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+            if search_cond is not None:
+                root_stmt = root_stmt.where(search_cond)
 
             # NOTE: only pinned=True floats to the top. An explicit pinned=False and a
             # never-pinned (NULL) row are treated equivalently as "unpinned" (both map to
@@ -484,13 +543,15 @@ class SQLModelInstanceRepository:
                 if not current_level_ids:
                     break
 
-                # Only project_id is applied mid-traversal (defense-in-depth).
+                # Only project_id and search are applied mid-traversal (defense-in-depth).
                 # exclude_kb and status are handled outside the loop.
                 child_stmt = select(Instance).where(
                     col(Instance.parent_id).in_(current_level_ids)
                 )
                 if project_id is not None:
                     child_stmt = child_stmt.where(Instance.project_id == project_id)
+                if search_cond is not None:
+                    child_stmt = child_stmt.where(search_cond)
 
                 children = list(db_session.exec(child_stmt))
                 if not children:

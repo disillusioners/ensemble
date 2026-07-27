@@ -2732,6 +2732,7 @@ class InstanceLifecycleService:
         project_id: str | None = None,
         exclude_kb: bool = True,
         include_descendants: bool = False,
+        search: str | None = None,
     ) -> tuple[list[dict], int]:
         """List instances with pagination.
 
@@ -2753,6 +2754,9 @@ class InstanceLifecycleService:
                 when True (default: True).
             include_descendants: When True, paginate by root and BFS-load all
                 descendants of each root in the current page (default: False).
+            search: Optional case-insensitive substring filter against
+                ``instance_metadata.title``, ``agent_name``, and ``agent_id``
+                (default: None).
 
         Returns:
             Tuple of (list of instance info dictionaries, total count).
@@ -2766,6 +2770,7 @@ class InstanceLifecycleService:
             project_id=project_id,
             exclude_kb=exclude_kb,
             include_descendants=include_descendants,
+            search=search,
         )
         # Convert Instance objects to dicts for backward compatibility, then
         # populate ``children`` from the canonical ``instance_hierarchy`` junction
