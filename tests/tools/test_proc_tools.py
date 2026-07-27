@@ -2054,3 +2054,305 @@ class TestStopProcessDefenseLayers:
             f"Expected exactly 1 send_signal call across both stops, "
             f"got: {proc.send_signal.call_count}"
         )
+
+
+class TestVerifyPidOwnershipProcfs:
+    """Layer 3 Linux backend — ``_verify_pid_ownership_procfs``.
+
+    Reads ``/proc/{pid}/environ`` (NUL-separated ``KEY=VALUE`` entries)
+    and decides owned / recycled / fail-open. These tests exercise the
+    ACTUAL parser (no patching of the helper) and feed it synthetic
+    ``/proc/{pid}/environ`` blobs via a mocked ``builtins.open``.
+
+    Contract:
+        True  → marker present with matching value (safe to kill)
+        False → marker absent OR present with a different value (recycled)
+        None  → file unreadable / process gone / permission denied
+    """
+
+    def _make_environ_blob(self, entries: list[tuple[str, str]]) -> bytes:
+        """Build a ``/proc/{pid}/environ``-style blob: NUL-separated ``K=V``."""
+        return "\x00".join(f"{k}={v}" for k, v in entries).encode("utf-8")
+
+    def test_correct_tracking_id_returns_true(self):
+        """Blob contains our marker with the matching value → owned."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        tracking_id = "proc-deadbeef"
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                ("HOME", "/home/tester"),
+                ("ENSEMBLE_PROC_TRACKING_ID", tracking_id),
+                ("LANG", "en_US.UTF-8"),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, tracking_id)
+
+        assert result is True, (
+            f"Expected True for matching tracking id, got: {result!r}"
+        )
+
+    def test_wrong_tracking_id_returns_false(self):
+        """Blob contains the marker key but with a DIFFERENT value → recycled."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                ("ENSEMBLE_PROC_TRACKING_ID", "proc-different"),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for mismatched tracking id, got: {result!r}"
+        )
+
+    def test_missing_env_var_returns_false(self):
+        """Blob has env vars but NOT our marker → recycled (abort)."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                ("HOME", "/home/tester"),
+                ("LANG", "en_US.UTF-8"),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for absent marker, got: {result!r}"
+        )
+
+    def test_marker_as_substring_of_other_value_returns_false(self):
+        """Marker text appears as a substring inside another env var's
+        VALUE — must NOT false-positive match. This is the bug the
+        NUL-split fix prevents (the original ``if needle in data``
+        substring search would incorrectly report owned here).
+        """
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        # An env var whose value CONTAINS the marker string as a substring
+        # but is NOT an exact ``ENSEMBLE_PROC_TRACKING_ID=proc-deadbeef``
+        # entry.
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                (
+                    "SOME_BLOB",
+                    "garbageENSEMBLE_PROC_TRACKING_ID=proc-deadbeefmore_garbage",
+                ),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for marker-as-substring case, got: {result!r}. "
+            f"This indicates the procfs parser regressed to substring match."
+        )
+
+    def test_file_not_found_returns_none(self):
+        """``/proc/{pid}/environ`` missing → fail-open (None)."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        # ``open`` raises ``FileNotFoundError`` directly (not via __enter__).
+        with patch(
+            "builtins.open",
+            side_effect=FileNotFoundError(
+                "[Errno 2] No such file or directory: '/proc/12345/environ'"
+            ),
+            create=True,
+        ):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is None, (
+            f"Expected None for missing file (fail-open), got: {result!r}"
+        )
+
+
+class TestVerifyPidOwnershipPs:
+    """Layer 3 macOS / BSD backend — ``_verify_pid_ownership_ps``.
+
+    Runs ``ps eww -p <pid>`` (env block) and a heuristic
+    ``ps -p <pid> -o command=`` to detect the macOS "env not surfaced"
+    case. These tests patch ``subprocess.run`` and feed synthetic
+    outputs.
+
+    Note: ``_verify_pid_ownership_ps`` may call ``subprocess.run`` twice —
+    once for ``ps eww`` and once for the heuristic ``ps -o command=``.
+    Tests use ``side_effect`` to return different values per call.
+
+    Contract:
+        True  → marker found in env block (owned)
+        False → env block surfaced but marker absent / wrong value (recycled)
+        None  → process gone (ps exit≠0), ps unavailable, timeout, or
+                env block not surfaced (macOS limitation for non-bundled
+                CLI children) — fail-open.
+    """
+
+    def test_correct_tracking_id_returns_true(self):
+        """``ps eww`` output contains our marker → owned."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_ps
+
+        tracking_id = "proc-deadbeef"
+        # Realistic ``ps eww`` output: header line + command + env block.
+        ps_eww = (
+            "  PID   TT  STAT      TIME COMMAND\n"
+            "12345   ??  S      0:00.01 /bin/sleep 30 "
+            "PATH=/usr/bin:/bin HOME=/tmp "
+            f"ENSEMBLE_PROC_TRACKING_ID={tracking_id} "
+            "LANG=en_US.UTF-8\n"
+        )
+        # Heuristic ``ps -o command=`` strips env; we don't surface it.
+        ps_cmd = "/bin/sleep 30\n"
+
+        completed_eww = MagicMock()
+        completed_eww.returncode = 0
+        completed_eww.stdout = ps_eww
+        completed_cmd = MagicMock()
+        completed_cmd.returncode = 0
+        completed_cmd.stdout = ps_cmd
+
+        with patch(
+            "daemon.tools.proc_tools.subprocess.run",
+            side_effect=[completed_eww, completed_cmd],
+        ):
+            result = _verify_pid_ownership_ps(12345, tracking_id)
+
+        assert result is True, (
+            f"Expected True for matching marker in ps eww, got: {result!r}"
+        )
+
+    def test_wrong_tracking_id_returns_false(self):
+        """Env block is surfaced but the marker has a different value."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_ps
+
+        ps_eww = (
+            "  PID   TT  STAT      TIME COMMAND\n"
+            "12345   ??  S      0:00.01 /bin/sleep 30 "
+            "PATH=/usr/bin:/bin "
+            "ENSEMBLE_PROC_TRACKING_ID=proc-different\n"
+        )
+        ps_cmd = "/bin/sleep 30\n"
+
+        completed_eww = MagicMock()
+        completed_eww.returncode = 0
+        completed_eww.stdout = ps_eww
+        completed_cmd = MagicMock()
+        completed_cmd.returncode = 0
+        completed_cmd.stdout = ps_cmd
+
+        with patch(
+            "daemon.tools.proc_tools.subprocess.run",
+            side_effect=[completed_eww, completed_cmd],
+        ):
+            result = _verify_pid_ownership_ps(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for mismatched marker (recycled), got: {result!r}"
+        )
+
+    def test_process_not_found_returns_none(self):
+        """``ps`` exits non-zero (process gone) → fail-open (None)."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_ps
+
+        # The heuristic call may still happen AFTER eww; on the
+        # "process gone" path we return early, but provide a fallback
+        # for either ordering.
+        completed_eww = MagicMock()
+        completed_eww.returncode = 1  # ps: process not found
+        completed_eww.stdout = ""
+        completed_fallback = MagicMock()
+        completed_fallback.returncode = 1
+        completed_fallback.stdout = ""
+
+        with patch(
+            "daemon.tools.proc_tools.subprocess.run",
+            side_effect=[completed_eww, completed_fallback],
+        ):
+            result = _verify_pid_ownership_ps(12345, "proc-deadbeef")
+
+        assert result is None, (
+            f"Expected None for ps exit≠0 (fail-open), got: {result!r}"
+        )
+
+
+class TestVerifyPidOwnershipDispatch:
+    """``_verify_pid_ownership`` dispatches to the platform-specific
+    backend based on ``sys.platform``. These tests verify the
+    dispatch wiring without exercising the real backends.
+    """
+
+    def test_linux_dispatches_to_procfs(self):
+        """``sys.platform == 'linux'`` → ``_verify_pid_ownership_procfs``."""
+        from daemon.tools.proc_tools import (
+            _verify_pid_ownership,
+            _verify_pid_ownership_procfs,
+        )
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership_procfs",
+            return_value=True,
+        ) as mock_procfs, patch(
+            "daemon.tools.proc_tools.sys.platform", "linux"
+        ):
+            result = _verify_pid_ownership(12345, "proc-deadbeef")
+
+        mock_procfs.assert_called_once_with(12345, "proc-deadbeef")
+        assert result is True, (
+            f"Expected True (procfs mock return), got: {result!r}"
+        )
+        # Sanity: confirm we patched the right symbol.
+        assert _verify_pid_ownership_procfs is not None
+
+    def test_macos_dispatches_to_ps(self):
+        """``sys.platform == 'darwin'`` → ``_verify_pid_ownership_ps``."""
+        from daemon.tools.proc_tools import (
+            _verify_pid_ownership,
+            _verify_pid_ownership_ps,
+        )
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership_ps",
+            return_value=True,
+        ) as mock_ps, patch(
+            "daemon.tools.proc_tools.sys.platform", "darwin"
+        ):
+            result = _verify_pid_ownership(12345, "proc-deadbeef")
+
+        mock_ps.assert_called_once_with(12345, "proc-deadbeef")
+        assert result is True, (
+            f"Expected True (ps mock return), got: {result!r}"
+        )
+        # Sanity: confirm we patched the right symbol.
+        assert _verify_pid_ownership_ps is not None
