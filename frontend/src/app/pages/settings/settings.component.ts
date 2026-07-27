@@ -284,14 +284,15 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
   /**
    * Begin polling VS Code status every 2s. The interval auto-stops once we
-   * observe `running: true` (terminal state) so we don't keep hitting the API
-   * after the user has a working editor.
+   * observe a terminal status so we don't keep hitting the API after startup
+   * has completed.
    */
   private startStatusPolling(): void {
     this.stopStatusPolling();
-    // Fire one immediate request so the badge isn't blank during the 2s wait.
-    this.pollStatus();
+    // Start the interval before the immediate request so a synchronous terminal
+    // response can clear it.
     this.statusPollTimer = setInterval(() => this.pollStatus(), STATUS_POLL_INTERVAL_MS);
+    this.pollStatus();
   }
 
   private stopStatusPolling(): void {
@@ -305,7 +306,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.settingsService.getVscodeStatus().subscribe({
       next: (status) => {
         this.vscodeStatus.set(status);
-        if (status?.running) {
+        if (status?.status === 'running' || status?.status === 'stopped' || status?.status === 'crashed') {
           // Terminal state — stop polling to avoid hammering the API.
           this.stopStatusPolling();
         }
@@ -313,41 +314,47 @@ export class SettingsComponent implements OnInit, OnDestroy {
       error: () => {
         // Treat status fetch errors as "stopped" rather than letting the badge
         // flicker. The next poll will retry.
-        this.vscodeStatus.set({ running: false, port: null, allow_remote: false });
+        this.vscodeStatus.set({ status: 'stopped' });
       },
     });
   }
 
   /**
-   * Map a status badge key to a human label. Returns empty when no status has
-   * been fetched yet so the badge hides instead of rendering an empty state.
+   * Map a status badge key to a human label.
    */
   vscodeStatusLabel(): string {
-    const status = this.vscodeStatus();
-    if (!status) {
-      return '';
+    const status = this.vscodeStatus()?.status;
+    switch (status) {
+      case 'running':
+        return 'Running';
+      case 'starting':
+        return 'Starting...';
+      case 'stopping':
+        return 'Stopping...';
+      case 'stopped':
+        return 'Stopped';
+      case 'crashed':
+        return 'Crashed';
+      default:
+        return 'Not started';
     }
-    if (status.running) {
-      return status.port !== null ? `Running on port ${status.port}` : 'Running';
-    }
-    // Distinguish "still spinning up" from "fully stopped". Without an
-    // explicit `starting` flag from the backend we treat a non-running,
-    // non-null status as the intermediate state — but only show it once the
-    // backend has actually responded (vscodeStatus is non-null).
-    const isStarting = this.statusPollTimer !== null && !status.running;
-    return isStarting ? 'Starting' : 'Stopped';
   }
 
   vscodeStatusClass(): string {
-    const status = this.vscodeStatus();
-    if (!status) {
-      return '';
+    switch (this.vscodeStatus()?.status) {
+      case 'running':
+        return 'running';
+      case 'starting':
+        return 'starting';
+      case 'stopping':
+        return 'stopping';
+      case 'stopped':
+        return 'stopped';
+      case 'crashed':
+        return 'crashed';
+      default:
+        return '';
     }
-    if (status.running) {
-      return 'running';
-    }
-    const isStarting = this.statusPollTimer !== null && !status.running;
-    return isStarting ? 'starting' : 'stopped';
   }
 
   editorLabel(editor: EditorType): string {

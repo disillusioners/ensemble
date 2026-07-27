@@ -308,12 +308,25 @@ class VSCodeServerManager:
                 name="vscode-watchdog",
             )
 
-            # Persist PID file for crash recovery (atomic write)
-            self._write_pid_file()
-
-            # Mark running
+            # Mark running FIRST — server IS running, PID file is for crash
+            # recovery only. Setting status before the (best-effort) PID
+            # write ensures the server is not reported as stuck in
+            # "starting" if the PID write fails (disk full, permission
+            # issue, etc.). A missing PID file does NOT mean the server
+            # isn't running.
             self.state.status = "running"
             self.state.started_at = datetime.now(timezone.utc)
+
+            # Persist PID file for crash recovery (atomic write).
+            # Best-effort: a failed write does NOT mean the server isn't
+            # running — log and continue rather than re-raising and
+            # leaving state misaligned with reality.
+            try:
+                self._write_pid_file()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to write VS Code server PID file: %s", exc
+                )
 
             logger.info(
                 "code-server started: pid=%d port=%d workdir=%s",
