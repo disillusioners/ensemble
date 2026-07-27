@@ -37,6 +37,7 @@ import pytest
 from daemon.config import VSCodeConfig
 from daemon.constants import VSCODE_PID_FILENAME
 from daemon.services.vscode_server_manager import (
+    _CODESERVER_STRIP_ENV,
     VSCODE_CRASH_LOG_TAIL_MAX_BYTES,
     VSCodeServerManager,
     VSCodeServerNotInstalledError,
@@ -1640,3 +1641,137 @@ class TestVSCodeServerManager:
         assert "code=137" in manager.state.last_error
         # Status stays "stopped" (NOT "crashed") per the constraint.
         assert manager.state.status == "stopped"
+
+    # ── Child environment: strip code-server-sensitive vars ───────────────
+
+    async def test_start_strips_port_from_child_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``$PORT`` from the daemon's environment is stripped from the
+        child env passed to code-server.
+
+        code-server reads ``$PORT`` to override ``--bind-addr``'s port,
+        so the daemon's own ``PORT`` (its listen port) would otherwise
+        make code-server try to bind to the same address. Verify the
+        captured ``env`` kwarg on the spawn call does NOT carry ``PORT``.
+        """
+        # Seed a ``PORT`` that would otherwise collide with the daemon.
+        monkeypatch.setenv("PORT", "9797")
+
+        manager = make_manager(tmp_path)
+        fake_proc = FakeProcess()
+        patch_resolve_binary(monkeypatch, manager)
+        calls = patch_create_subprocess(monkeypatch, fake_proc)
+        patch_process_signals(monkeypatch, fake_proc)
+        monkeypatch.setattr("os.getpgid", lambda pid: pid + 1000)
+        patch_port_wait(monkeypatch, manager)
+        slow_down_health_check(monkeypatch)
+
+        await manager.start()
+
+        assert len(calls) == 1
+        child_env = calls[0]["kwargs"].get("env")
+        assert child_env is not None, (
+            "start() must pass an explicit env= to create_subprocess_exec "
+            "so the parent daemon's PORT cannot bleed through"
+        )
+        assert "PORT" not in child_env, (
+            f"PORT must be stripped from child env to prevent "
+            f"code-server from binding the daemon's listen port; got: "
+            f"{child_env!r}"
+        )
+
+        await manager.cleanup()
+
+    async def test_start_passes_standard_env_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Standard env vars (HOME, PATH, etc.) are passed through to the
+        child. Only the code-server-sensitive vars are stripped — we
+        don't sanitize the entire environment.
+        """
+        # Set at least one value we can check survives untouched.
+        monkeypatch.setenv("HOME", "/tmp/fake-home-for-test")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        # Also seed a sensitive var so the strip path is exercised in
+        # the same call (regression guard against the strip block being
+        # accidentally skipped if the env build is refactored).
+        monkeypatch.setenv("PORT", "9797")
+
+        manager = make_manager(tmp_path)
+        fake_proc = FakeProcess()
+        patch_resolve_binary(monkeypatch, manager)
+        calls = patch_create_subprocess(monkeypatch, fake_proc)
+        patch_process_signals(monkeypatch, fake_proc)
+        monkeypatch.setattr("os.getpgid", lambda pid: pid + 1000)
+        patch_port_wait(monkeypatch, manager)
+        slow_down_health_check(monkeypatch)
+
+        await manager.start()
+
+        child_env = calls[0]["kwargs"].get("env")
+        assert child_env is not None
+        # Standard vars are preserved.
+        assert child_env.get("HOME") == "/tmp/fake-home-for-test"
+        assert child_env.get("PATH") == "/usr/bin:/bin"
+        # Sensitive var is still stripped in the same call.
+        assert "PORT" not in child_env
+
+        await manager.cleanup()
+
+    async def test_start_strips_other_codeserver_sensitive_vars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All non-``PORT`` vars in ``_CODESERVER_STRIP_ENV`` are stripped
+        from the child env passed to code-server.
+
+        ``PORT`` has its own dedicated test (``test_start_strips_port_from_child_env``).
+        The remaining vars — ``PASSWORD``, ``HASHED_PASSWORD``,
+        ``GITHUB_TOKEN``, ``CODE_SERVER_CONFIG_FILE``,
+        ``CODE_SERVER_COOKIE_SUFFIX``, ``CS_DISABLE_FILE_DOWNLOADS``,
+        ``CS_DISABLE_GETTING_STARTED_OVERRIDE`` — are code-server
+        env vars that must not leak from the daemon. Asserting against
+        the constant itself keeps the test self-maintaining: adding a
+        var to ``_CODESERVER_STRIP_ENV`` automatically adds coverage here.
+        """
+        # Seed every var in the constant so the strip path is exercised
+        # in a single spawn; ``PORT`` is included below for symmetry but
+        # is the dedicated target of the sibling PORT test.
+        seeded = {
+            "PORT": "9797",
+            "PASSWORD": "leaked-pw",
+            "HASHED_PASSWORD": "leaked-hash",
+            "GITHUB_TOKEN": "ghp_leaked",
+            "CODE_SERVER_CONFIG_FILE": "/etc/passwd",
+            "CODE_SERVER_COOKIE_SUFFIX": "leaked-suffix",
+            "CS_DISABLE_FILE_DOWNLOADS": "1",
+            "CS_DISABLE_GETTING_STARTED_OVERRIDE": "true",
+        }
+        for key, value in seeded.items():
+            monkeypatch.setenv(key, value)
+
+        manager = make_manager(tmp_path)
+        fake_proc = FakeProcess()
+        patch_resolve_binary(monkeypatch, manager)
+        calls = patch_create_subprocess(monkeypatch, fake_proc)
+        patch_process_signals(monkeypatch, fake_proc)
+        monkeypatch.setattr("os.getpgid", lambda pid: pid + 1000)
+        patch_port_wait(monkeypatch, manager)
+        slow_down_health_check(monkeypatch)
+
+        await manager.start()
+
+        child_env = calls[0]["kwargs"].get("env")
+        assert child_env is not None
+        # Iterate the constant directly. Regression guard: if a new var
+        # is added to ``_CODESERVER_STRIP_ENV`` without updating this
+        # test, ``seeded`` above will cover it and the assert below will
+        # fail loudly.
+        for key in _CODESERVER_STRIP_ENV:
+            assert key not in child_env, (
+                f"{key} must be stripped from child env to prevent the "
+                f"daemon's value from changing code-server behavior; "
+                f"got child_env={child_env!r}"
+            )
+
+        await manager.cleanup()
