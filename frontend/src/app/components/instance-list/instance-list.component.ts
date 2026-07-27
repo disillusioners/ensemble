@@ -103,6 +103,14 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
   // Manual refresh state
   readonly isRefreshing = signal(false);
 
+  // Raw text the user is typing into the search box. Bound to the input
+  // via (input) -> onSearchInput(); the debounced effect below mirrors
+  // it into instanceService.searchQuery() after a 300ms idle window.
+  readonly searchInput = signal<string>('');
+
+  // Debounce timer — cleared in ngOnDestroy.
+  private _searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Phase 3: default version tag per agent. Surfaced to the AgentSwitcher so
   // its `selectAgent` emits the tag the parent requested via the picker.
   readonly defaultAgentVersions = signal<Record<string, string | null>>({});
@@ -170,6 +178,29 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
         });
       }
     });
+
+    // Debounce searchInput -> service.searchQuery.
+    // On a non-empty value: wait 300ms after the user stops typing,
+    //   push to the service, and reload from offset 0.
+    // On an empty value: clear the debounce and immediately reset
+    //   (the user pressed the X button or fully cleared the box — we
+    //   don't want to delay that).
+    effect(() => {
+      const value = this.searchInput();
+      if (this._searchDebounceTimer) clearTimeout(this._searchDebounceTimer);
+      if (value.trim().length === 0) {
+        // Instant reset path: clear search right now, no debounce.
+        if (this.instanceService.searchQuery().length > 0) {
+          this.instanceService.setSearchQuery('');
+          this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined);
+        }
+        return;
+      }
+      this._searchDebounceTimer = setTimeout(() => {
+        this.instanceService.setSearchQuery(value);
+        this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined);
+      }, 300);
+    });
   }
 
   ngOnInit(): void {
@@ -193,6 +224,7 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.instanceListContainer?.nativeElement?.removeEventListener('scroll', this.scrollHandler);
+    if (this._searchDebounceTimer) clearTimeout(this._searchDebounceTimer);
   }
 
   readonly statusColors: Record<string, { bg: string; text: string }> = {
@@ -340,6 +372,27 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
     this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined).finally(() => {
       this.isRefreshing.set(false);
     });
+  }
+
+  /**
+   * Bind to the search input's (input) event. Trims nothing here —
+   * the effect debouncer reads the raw signal so the user sees their
+   * own text in the field as they type, even if we end up searching
+   * with a trimmed version.
+   */
+  onSearchInput(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.searchInput.set(target.value);
+  }
+
+  /**
+   * Clear button handler — same as the user emptying the box, but
+   * explicit. No debounce.
+   */
+  onClearSearch(): void {
+    this.searchInput.set('');
+    // The effect above fires synchronously when searchInput changes,
+    // so setSearchQuery + loadInstances already happen inside the effect.
   }
 
   /**

@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, WritableSignal, effect } from '@angular/core';
+import { Injectable, inject, signal, WritableSignal, Signal, computed, effect } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import { ApiService } from './api.service';
 import { SseService } from './sse.service';
@@ -31,6 +31,7 @@ export class InstanceService {
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
   private _currentProjectId: string | null = null;
   private currentOffset: number = 0;
+  private _loadSeq = 0;
 
   /**
    * The currently active project filter. Returns null if showing all instances.
@@ -46,6 +47,13 @@ export class InstanceService {
   readonly loading: WritableSignal<boolean> = signal(false);
   readonly showKb: WritableSignal<boolean> = signal(false);
 
+  // Search term (trimmed). Driven by the debounced effect in
+  // InstanceListComponent; read here inside loadInstances() so the
+  // active filter is automatically threaded into every fetch (initial
+  // load, pagination, and the 60s polling tick).
+  readonly searchQuery: WritableSignal<string> = signal('');
+  readonly isSearching: Signal<boolean> = computed(() => this.searchQuery().trim().length > 0);
+
   // Backend returns has_more directly in the list response (root-based pagination).
   // Each page contains N root instances + all their descendants, so we cannot compute
   // hasMoreInstances locally from instances().length vs totalInstances() (descendants
@@ -54,6 +62,19 @@ export class InstanceService {
 
   toggleKb(): void {
     this.showKb.update(v => !v);
+  }
+
+  /**
+   * Set the search term and reset pagination offset.
+   * The component calls this AFTER its debounce timer fires.
+   * Caller is responsible for invoking loadInstances() to fetch fresh results.
+   */
+  setSearchQuery(query: string): void {
+    const trimmed = query.trim();
+    if (this.searchQuery() === trimmed) return;
+    this.searchQuery.set(trimmed);
+    // Reset offset so the next non-append load starts at the beginning of the filtered set.
+    this.currentOffset = 0;
   }
 
   constructor() {
@@ -224,6 +245,7 @@ export class InstanceService {
   private mergeInstances(local: InstanceInfo[], apiInstances: InstanceInfo[]): InstanceInfo[] {
     const localById = new Map(local.map(i => [i.instance_id, i]));
     const result: InstanceInfo[] = [];
+    const isSearching = this.searchQuery().trim().length > 0;
 
     for (const apiInstance of apiInstances) {
       const localInstance = localById.get(apiInstance.instance_id);
@@ -259,6 +281,10 @@ export class InstanceService {
       localById.delete(apiInstance.instance_id);
     }
 
+    if (isSearching) {
+      return sortByCreatedAtDesc(result);
+    }
+
     // Prepend any local-only instances that weren't in the API response.
     // These are newer than everything in the API response (since API returns newest first),
     // so they should appear at the top to maintain correct sort order.
@@ -271,6 +297,8 @@ export class InstanceService {
    * @param append If true, append to existing instances; otherwise replace
    */
   async loadInstances(projectId?: string, append = false): Promise<void> {
+    const seq = ++this._loadSeq;
+
     if (append) {
       this.isLoadingMore.set(true);
     } else {
@@ -280,8 +308,18 @@ export class InstanceService {
 
     try {
       const response = await firstValueFrom(
-        this.api.listInstances(PAGE_SIZE, this.currentOffset, projectId, !this.showKb())
+        this.api.listInstances(
+          PAGE_SIZE,
+          this.currentOffset,
+          projectId,
+          !this.showKb(),
+          this.searchQuery() || undefined,
+        )
       );
+
+      if (seq !== this._loadSeq) {
+        return;
+      }
 
       if (append) {
         // Deduplicate when appending
@@ -304,8 +342,10 @@ export class InstanceService {
     } catch (err) {
       console.error('Failed to load instances:', err);
     } finally {
-      this.loading.set(false);
-      this.isLoadingMore.set(false);
+      if (seq === this._loadSeq) {
+        this.loading.set(false);
+        this.isLoadingMore.set(false);
+      }
     }
   }
 
@@ -335,7 +375,7 @@ export class InstanceService {
     // Immediate load
     this.loadInstances(projectId);
 
-    // Start polling interval
+    // Start polling interval (loadInstances reads searchQuery() each tick, so the active filter is reapplied automatically).
     this.pollingIntervalId = setInterval(() => {
       this.loadInstances(projectId);
     }, this.POLLING_INTERVAL);

@@ -27,8 +27,40 @@
         </button>
       </div>
     </div>
+
+    <!-- Search row. Sits between the title row and the subtitle so it
+         never competes with the action buttons and can flow on its own
+         line on narrow screens. The wrapper flexes to fill the row, so
+         the icon and clear button stay anchored at the edges. -->
+    <div class="search-row">
+      <mat-icon class="search-icon">search</mat-icon>
+      <input
+        type="text"
+        class="search-input"
+        placeholder="Search instances..."
+        [value]="searchInput()"
+        (input)="onSearchInput($event)"
+        aria-label="Search instances"
+      />
+      @if (searchInput().trim().length > 0) {
+        <button
+          type="button"
+          class="search-clear"
+          (click)="onClearSearch()"
+          aria-label="Clear search"
+          title="Clear search"
+        >
+          <mat-icon>close</mat-icon>
+        </button>
+      }
+    </div>
+
     <p class="subtitle">
-      {{ instances().length }} active instance{{ instances().length !== 1 ? 's' : '' }}
+      @if (instanceService.isSearching()) {
+        {{ instanceService.totalInstances() }} result{{ instanceService.totalInstances() !== 1 ? 's' : '' }} for '{{ instanceService.searchQuery() }}'
+      } @else {
+        {{ instances().length }} active instance{{ instances().length !== 1 ? 's' : '' }}
+      }
       <label class="kb-toggle">
         <input
           type="checkbox"

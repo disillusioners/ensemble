@@ -36,6 +36,93 @@
   gap: 8px;
 }
 
+// Search row. Sits between .header-top and .subtitle so it has its
+// own line. Wrapper holds the icon/input/clear button on a single
+// rounded pill — same border-radius vocabulary as the action buttons
+// (8px) and load-more-btn, but slightly taller for comfortable touch
+// input. Border + subtle background echo the dark surface tokens.
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 0 10px;
+  height: 36px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background-color: #1e293b;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+
+  &:focus-within {
+    border-color: #475569;
+    background-color: #1e293b;
+  }
+}
+
+.search-icon {
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;          // allow shrinking inside flex parent
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 14px;
+  font-family: inherit;
+
+  &::placeholder {
+    color: #64748b;
+  }
+}
+
+.search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: transparent;
+  color: #64748b;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    background-color: #334155;
+    color: #cbd5e1;
+  }
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+// Narrow viewports: keep the search row full-width and let the
+// header-actions cluster wrap below it. No horizontal scroll.
+@media (max-width: 480px) {
+  .header-top {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .search-row {
+    margin-bottom: 10px;
+  }
+}
+
 .title {
   font-size: 18px;
   font-weight: 600;
