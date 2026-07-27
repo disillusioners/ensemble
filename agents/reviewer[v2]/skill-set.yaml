@@ -1,0 +1,32 @@
+agent_id: reviewer
+skills:
+  - name: review-strategy
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "Review scope assessment, blast-radius analysis, dispatch planning, council decision"
+  - name: code-review
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Code correctness, safety, structure, clarity analysis"
+  - name: plan-review
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Plan completeness, feasibility, clarity, risks analysis"
+  - name: architecture-review
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Architecture patterns, boundaries, scalability, integration analysis"
+  - name: security-review
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Security vulnerabilities, injection, auth/authz, data exposure"
+  - name: pr-review
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "PR diff analysis, merge readiness, regression risk"
