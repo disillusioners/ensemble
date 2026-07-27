@@ -7,6 +7,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { SettingsService } from '../../services/settings.service';
+import { WorkspaceService } from '../../services/workspace.service';
 import type { EditorType, VSCodeStatus } from '../../models';
 import {
   SearchableSelectComponent,
@@ -55,6 +56,7 @@ const DEFAULT_EDITOR: EditorType = 'builtin';
 })
 export class SettingsComponent implements OnInit, OnDestroy {
   private readonly settingsService = inject(SettingsService);
+  private readonly workspaceService = inject(WorkspaceService);
   private readonly snackBar = inject(MatSnackBar);
 
   readonly languages = PREDEFINED_LANGUAGES;
@@ -232,6 +234,11 @@ export class SettingsComponent implements OnInit, OnDestroy {
         this.savedEditor.set(confirmed);
         this.persistEditorToStorage(confirmed);
         this.applyingEditor.set(false);
+        // Propagate the new mode to any open workspace so the editor switch
+        // takes effect immediately instead of waiting for the next
+        // WorkspaceService construction. `confirmed` is the authoritative
+        // server-confirmed value, not the user's pre-save selection.
+        this.workspaceService.setEditorMode(confirmed);
         this.snackBar.open(`Editor preference set to ${this.editorLabel(confirmed)}`, 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar',

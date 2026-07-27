@@ -8,6 +8,7 @@ import {
   OnInit,
   Output,
   ViewChild,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -77,18 +78,20 @@ import {
   template: `
     <div class="workspace-container">
       <mat-sidenav-container class="sidenav-container">
-        <mat-sidenav mode="side" opened class="file-tree-sidenav">
-          <div class="tree-header">
-            <mat-icon>folder_open</mat-icon>
-            <span>Files</span>
-          </div>
-          <app-file-tree
-            [projectId]="projectId"
-            [openPaths]="workspace.openFiles().map(f => f.path)"
-            [activePath]="workspace.activeFilePath()"
-            (fileSelected)="onFileSelected($event)"
-          ></app-file-tree>
-        </mat-sidenav>
+        @if (editorMode() === 'builtin') {
+          <mat-sidenav mode="side" opened class="file-tree-sidenav">
+            <div class="tree-header">
+              <mat-icon>folder_open</mat-icon>
+              <span>Files</span>
+            </div>
+            <app-file-tree
+              [projectId]="projectId"
+              [openPaths]="workspace.openFiles().map(f => f.path)"
+              [activePath]="workspace.activeFilePath()"
+              (fileSelected)="onFileSelected($event)"
+            ></app-file-tree>
+          </mat-sidenav>
+        }
 
         <mat-sidenav-content class="content-area">
           <mat-toolbar class="content-toolbar">
@@ -206,7 +209,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   private readonly snackBar = inject(MatSnackBar);
   private readonly http = inject(HttpClient);
 
-  @ViewChild(FileTreeComponent, { static: true }) private fileTree!: FileTreeComponent;
+  @ViewChild(FileTreeComponent, { static: false }) private fileTree?: FileTreeComponent;
   @ViewChild(CodeViewerComponent) codeViewer?: CodeViewerComponent;
 
   /**
@@ -288,6 +291,51 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    * by an empty input assignment.
    */
   private _initialised = false;
+
+  /**
+   * Captured expansion paths from the FileTreeComponent at the moment we
+   * leave builtin mode. Restored when (and if) the user comes back. We
+   * capture on the builtin -> vscode transition so the values reflect
+   * whatever the user had expanded in builtin mode just before the
+   * @if tore down the FileTreeComponent.
+   */
+  private _savedExpandedPaths: string[] = [];
+
+  constructor() {
+    let prevMode: 'builtin' | 'vscode' = this.editorMode();
+    effect(() => {
+      const currentMode = this.editorMode();
+      const prev = prevMode;
+      prevMode = currentMode;
+      // Skip the initial run (prev === current); only act on transitions.
+      if (prev === currentMode) return;
+
+      if (prev === 'builtin' && currentMode === 'vscode') {
+        // Switching FROM builtin TO vscode: capture expanded paths BEFORE the
+        // @if destroys the <app-file-tree>. `fileTree` may be undefined if
+        // static-false resolution hasn't fired yet (it WILL be defined here
+        // because we're transitioning AWAY from the builtin branch).
+        this._savedExpandedPaths = this.fileTree?.getExpandedPaths() ?? [];
+      } else if (prev === 'vscode' && currentMode === 'builtin') {
+        // Switching FROM vscode TO builtin: the @if recreates <app-file-tree>.
+        // Defer one microtask so @ViewChild has a chance to resolve to the
+        // freshly-created child before we touch it. `setTree()` must come
+        // before `restoreExpandedPaths()` because setTree clears
+        // `_expandedPaths`.
+        const paths = this._savedExpandedPaths;
+        queueMicrotask(() => {
+          if (!this.fileTree) return;
+          const tree = this.workspace.currentTree();
+          if (tree) {
+            this.fileTree.setTree(tree);
+          }
+          if (paths.length > 0) {
+            this.fileTree.restoreExpandedPaths(paths);
+          }
+        });
+      }
+    });
+  }
 
   ngOnInit(): void {
     // Fallback: if no input was set, read from the route. The input
@@ -646,9 +694,15 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
       if (restored) {
         this.viewMode.set(restored.viewMode);
         if (restored.tree) {
-          this.fileTree.setTree(restored.tree);
-          if (restored.expandedPaths.length > 0) {
-            this.fileTree.restoreExpandedPaths(restored.expandedPaths);
+          // If the FileTreeComponent isn't currently mounted (the user is
+          // in vscode mode), skip the setTree call; the effect above
+          // will re-apply the cached tree + expanded paths the next
+          // time they switch back to builtin mode.
+          if (this.fileTree) {
+            this.fileTree.setTree(restored.tree);
+            if (restored.expandedPaths.length > 0) {
+              this.fileTree.restoreExpandedPaths(restored.expandedPaths);
+            }
           }
         }
 
@@ -699,7 +753,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     this.workspace
       .getFileTree(projectId)
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((res) => this.fileTree.setTree(res.tree));
+      .subscribe((res) => this.fileTree?.setTree(res.tree));
     this.workspace.connectSSE(projectId);
     this.loadValidatedWorkdir(projectId);
   }

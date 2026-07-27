@@ -291,7 +291,60 @@ describe('WorkspaceComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  // ── 2) ngOnInit extracts projectId and loads tree ─────────────
+  it('renders app-file-tree when editorMode is builtin', () => {
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('app-file-tree')).toBeTruthy();
+    flushInitialTree();
+  });
+
+  it('removes app-file-tree from DOM when editorMode is vscode', () => {
+    workspaceService.setEditorMode('vscode');
+    fixture.detectChanges();
+    flushInitialTree();
+
+    expect(fixture.nativeElement.querySelector('app-file-tree')).toBeNull();
+  });
+
+  it('preserves expanded paths across mode switch', async () => {
+    fixture.detectChanges();
+    flushInitialTree();
+
+    const getExpandedPathsSpy = jest
+      .spyOn(FileTreeComponent.prototype, 'getExpandedPaths')
+      .mockReturnValue(['src', 'src/app']);
+    const restoreExpandedPathsSpy = jest.spyOn(
+      FileTreeComponent.prototype,
+      'restoreExpandedPaths',
+    );
+    const setTreeSpy = jest.spyOn(FileTreeComponent.prototype, 'setTree');
+
+    workspaceService.setEditorMode('vscode');
+    fixture.detectChanges();
+    TestBed.flushEffects();
+    workspaceService.setEditorMode('builtin');
+    fixture.detectChanges();
+    TestBed.flushEffects();
+    await Promise.resolve();
+
+    expect(getExpandedPathsSpy).toHaveBeenCalledWith();
+    expect(restoreExpandedPathsSpy).toHaveBeenCalledWith(['src', 'src/app']);
+    expect(setTreeSpy).toHaveBeenCalled();
+    getExpandedPathsSpy.mockRestore();
+    restoreExpandedPathsSpy.mockRestore();
+    setTreeSpy.mockRestore();
+  });
+
+  it('does not throw when accessing fileTree in vscode mode', () => {
+    fixture.detectChanges();
+    flushInitialTree();
+    workspaceService.setEditorMode('vscode');
+    fixture.detectChanges();
+
+    expect(() => component.ngOnInit()).not.toThrow();
+    flushInitialTree();
+  });
+
 
   describe('ngOnInit', () => {
     it('should extract projectId from the route snapshot', () => {

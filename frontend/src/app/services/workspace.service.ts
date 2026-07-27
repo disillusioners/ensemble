@@ -135,6 +135,17 @@ export class WorkspaceService implements OnDestroy {
   readonly editorMode = signal<EditorType>('builtin');
 
   /**
+   * Update the active editor mode in-place so any open workspace that
+   * reads `editorMode()` reacts immediately. Callers (e.g. the Settings
+   * page after a successful save) own the timing — this method does not
+   * persist the preference. The underlying signal is reused so existing
+   * readers in WorkspaceComponent pick up the change without re-subscription.
+   */
+  setEditorMode(mode: EditorType): void {
+    this.editorMode.set(mode);
+  }
+
+  /**
    * Open file tabs in display order, with live `dirty` flags merged in
    * from the dirty-path set. Computed so consumers always see the
    * latest dirty state without having to re-query.
