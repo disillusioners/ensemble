@@ -48,6 +48,7 @@ import glob
 import logging
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -110,6 +111,12 @@ _STOP_TAIL_LINES: int = 20
 #: Number of hex chars in a process_id. ``8`` → ``proc-a3b2c1d4``.
 _PROCESS_ID_HEX_LEN: int = 4  # token_hex(4) yields 8 hex chars
 
+#: Environment variable name used to tag spawned subprocesses so that
+#: ``proc_stop`` can verify the PID at kill time still belongs to us
+#: (defense against PID reuse — see ``_verify_pid_ownership``).
+#: The value is the same as the ``process_id`` (e.g. ``proc-a3b2c1d4``).
+_TRACKING_ENV_VAR: str = "ENSEMBLE_PROC_TRACKING_ID"
+
 
 # ---------------------------------------------------------------------------
 # ProcessInfo + BackgroundProcessManager
@@ -149,6 +156,11 @@ class ProcessInfo:
             stop supersedes any exit-code signal mapping.
         last_error: Last error string surfaced by the reader / killer
             (informational; for ``proc_status``).
+        tracking_id: PID-reuse defense tag. Same value as
+            ``process_id`` (e.g. ``proc-a3b2c1d4``). Injected into the
+            child environment as ``ENSEMBLE_PROC_TRACKING_ID`` at spawn
+            time and verified before each kill. Empty string on older
+            ``ProcessInfo`` instances (fail-open: skip verification).
     """
 
     process_id: str
@@ -174,6 +186,14 @@ class ProcessInfo:
     timed_out: bool = False
     user_stopped: bool = False
     last_error: Optional[str] = None
+    # PID-reuse defense: tag written into the child environment as
+    # ``ENSEMBLE_PROC_TRACKING_ID=<tracking_id>`` at spawn time. Before
+    # any kill we read this back from the live process and refuse to
+    # signal if the PID has been recycled to an unrelated process.
+    # Defaults to ``""`` for backwards compatibility — old ``ProcessInfo``
+    # instances constructed without it (e.g. in tests) skip the
+    # ownership verification by design (fail-open).
+    tracking_id: str = ""
     # C1 fix: tracks whether the spill file's last byte is ``\n``.
     # Used by ``_get_recent_lines`` to detect the split-line at the
     # memory/file boundary and stitch the partial line correctly.
@@ -185,6 +205,298 @@ class ProcessInfo:
 def _new_process_id() -> str:
     """Return a fresh ``proc-{8 hex chars}`` id."""
     return f"proc-{token_hex(_PROCESS_ID_HEX_LEN)}"
+
+
+# ---------------------------------------------------------------------------
+# PID ownership verification (Layer 3 of defense-in-depth kill safety)
+# ---------------------------------------------------------------------------
+# After a tracked subprocess exits, the OS is free to RECYCLE its PID to
+# a brand-new, unrelated process. If we then call ``killpg(getpgid(pid),
+# SIGKILL)`` we would hit that unrelated process. Defense Layer 3 reads
+# back the environment variable we injected at spawn time and aborts the
+# kill if it doesn't match.
+#
+# Return contract for ``_verify_pid_ownership``:
+#   True  → env var present and matches ``tracking_id`` — safe to kill.
+#   False → env var absent or has a DIFFERENT value — PID was recycled;
+#           ABORT the kill (PID does not belong to us).
+#   None  → undetermined (unsupported OS, EPERM, ENOENT, command failed,
+#           etc.) — fail-open: log a warning and let the kill proceed.
+#           Layers 1 (status gate) and 2 (poll) still gate us.
+
+
+def _verify_pid_ownership(pid: int, tracking_id: str) -> "Optional[bool]":
+    """Check whether ``pid`` still belongs to our tracked process.
+
+    Defense Layer 3 — PID reuse guard. The child was spawned with
+    ``ENSEMBLE_PROC_TRACKING_ID=<tracking_id>`` in its environment. We
+    read that value back from the live process and compare it to the
+    ``tracking_id`` we recorded. If the OS has recycled the PID to an
+    unrelated process, the env var will be absent or carry a different
+    value — we then abort the kill.
+
+    Cross-platform strategy:
+      * Linux: read ``/proc/{pid}/environ`` (null-byte-separated
+        ``KEY=VALUE`` entries). Cheap, no subprocess, no parsing issues.
+      * macOS / BSD: ``ps eww -p <pid>`` (BSD-style — lowercase ``e``,
+        ``ww``, ``-p <pid>``) prints the full env block after the
+        command; we grep for the marker. Has the usual caveats of
+        parsing ps output (locale, whitespace, quoting) but it's the
+        only portable way without a C extension. The actual invocation
+        in :func:`_verify_pid_ownership_ps` is
+        ``["ps", "eww", "-p", str(pid)]``.
+      * Windows / unknown: fail-open (``None``). The status gate and
+        poll check already cover normal exit races; PID reuse on
+        Windows is also much rarer in practice (PIDs are 32-bit and
+        the kernel is more conservative about reuse).
+
+    Never raises — every failure mode returns ``None`` and logs a
+    warning. The kill path treats ``None`` as "proceed" so a buggy
+    verification never blocks a legitimate stop.
+    """
+    if not tracking_id:
+        # No tracking tag was recorded (legacy ProcessInfo, or test
+        # stub). Skip verification — fail-open.
+        return None
+
+    if sys.platform.startswith("linux"):
+        return _verify_pid_ownership_procfs(pid, tracking_id)
+    if sys.platform == "darwin" or sys.platform.startswith("freebsd"):
+        return _verify_pid_ownership_ps(pid, tracking_id)
+    # Windows / other platforms: fail-open.
+    logger.warning(
+        "PID ownership verification not supported on platform %s; "
+        "proceeding with kill (status gate + poll check still apply).",
+        sys.platform,
+    )
+    return None
+
+
+def _verify_pid_ownership_procfs(
+    pid: int, tracking_id: str
+) -> "Optional[bool]":
+    """Linux backend: read ``/proc/{pid}/environ`` and check the tracker.
+
+    On Linux each running process has a ``/proc/{pid}/environ`` file
+    whose contents are the initial environment, encoded as null-byte
+    separated ``KEY=VALUE`` entries. The file is readable by the owning
+    user (and root). Returns ``None`` if the file is missing, unreadable,
+    or the data is malformed.
+    """
+    needle = f"{_TRACKING_ENV_VAR}={tracking_id}".encode("utf-8")
+    try:
+        # ``/proc/{pid}/environ`` is a virtual file; ``open()`` works
+        # without ``os.path.exists`` checks. If the PID doesn't exist
+        # we'll get ``FileNotFoundError`` (or ``ProcessLookupError``).
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            data = fh.read()
+    except FileNotFoundError:
+        # Process gone between ``poll()`` and here — raced to exit.
+        # Treat as undetermined; the status gate / poll already covers
+        # the "already exited" case.
+        logger.warning(
+            "PID ownership verification: /proc/%d/environ not found "
+            "(process may have exited). Proceeding with kill.",
+            pid,
+        )
+        return None
+    except PermissionError:
+        logger.warning(
+            "PID ownership verification: /proc/%d/environ not readable "
+            "(EPERM). Proceeding with kill (fail-open).",
+            pid,
+        )
+        return None
+    except OSError as exc:
+        logger.warning(
+            "PID ownership verification: /proc/%d/environ read failed "
+            "(%s). Proceeding with kill (fail-open).",
+            pid,
+            exc,
+        )
+        return None
+
+    # The environ entries are NUL-separated. A literal ``=`` in the
+    # value would only cause a false positive (we'd report "owned"
+    # when the env is actually different), but since the tracking_id
+    # is generated by ``token_hex`` it contains no ``=`` or NUL, so
+    # exact substring search is safe.
+    if needle in data:
+        return True
+    # The MARKER is present but the value differs → PID was recycled
+    # to a process that happened to have the same env var set (very
+    # unlikely with our unique token, but we still check).
+    marker_present = _TRACKING_ENV_VAR.encode("utf-8") + b"=" in data
+    if marker_present:
+        logger.warning(
+            "PID ownership verification: marker %s present at PID %d "
+            "but value differs (PID likely recycled). Aborting kill.",
+            _TRACKING_ENV_VAR,
+            pid,
+        )
+        return False
+    # Marker absent entirely. Most likely the PID was recycled to a
+    # process that doesn't have our env var at all. ABORT — this is
+    # the dangerous case.
+    logger.warning(
+        "PID ownership verification: %s not found in env of PID %d "
+        "(PID may have been recycled). Aborting kill.",
+        _TRACKING_ENV_VAR,
+        pid,
+    )
+    return False
+
+
+def _verify_pid_ownership_ps(
+    pid: int, tracking_id: str
+) -> "Optional[bool]":
+    """macOS / BSD backend: use ``ps eww -p {pid}`` to dump env.
+
+    On macOS and the BSDs, the BSD-style flag ``ps eww -p <pid>`` (no
+    leading dash) appends the env block after the command line. The
+    ``-ww`` removes column-width limits so long env values aren't
+    truncated.
+
+    Important caveat: macOS ``ps(1)`` only shows env vars for SOME
+    processes (typically GUI / app-bundle processes where the env
+    is captured into the process's debug info). For ordinary CLI
+    children (``sleep``, ``sh``, simple Python, etc.) the env block
+    is empty in the ``ps`` output. We detect this case and return
+    ``None`` (fail-open) — the status gate and poll check still
+    provide protection.
+
+    Important: do NOT use the POSIX-style ``-e`` flag. On macOS/BSD
+    ``-e`` selects "every process" — it would dump the whole process
+    table. The lowercase ``e`` (no dash) is the BSD-style "show env
+    after command" flag.
+
+    We only invoke this on a SANE PID (numeric, positive) to avoid
+    ``ps`` misinterpreting flags.
+
+    Fail-open vs fail-CLOSED contract (INTENTIONAL — do not soften):
+
+    * **Fail-open (return ``None``)** — when we CANNOT DETERMINE
+      ownership: ``ps`` not available, subprocess timeout, ``ps``
+      exit non-zero (process likely gone between our checks and
+      here), permission denied, or ``ps eww`` simply did not surface
+      any env vars at all (the macOS limitation for non-bundled
+      CLI children). In all of these cases verification is
+      UNDETERMINED, so we let the kill proceed. Layers 1 (status
+      gate) and 2 (poll) still gate us on the common
+      already-exited race.
+
+    * **Fail-CLOSED (return ``False``)** — when we CAN determine
+      ownership and it is NOT ours: env vars ARE visible in the
+      ``ps eww`` output (we confirmed via the command-only heuristic
+      that env was actually surfaced), but our tracking marker is
+      absent or carries a different value. This is PID-recycle
+      detection and the kill MUST be aborted — sending a signal to
+      an unrelated process would be a safety violation.
+
+    The distinction matters: fail-open is a "we don't know" answer
+    (proceed cautiously), fail-CLOSED is a "we checked and it isn't
+    ours" answer (abort). Do NOT collapse these into a single
+    soft-warn-and-proceed path — that would defeat Layer 3.
+    """
+    if pid <= 0:
+        return None
+    needle = f"{_TRACKING_ENV_VAR}={tracking_id}"
+    try:
+        # BSD-style flags: ``e`` = append env, ``ww`` = unlimited
+        # width, ``-p PID`` = restrict to this PID. Order matters —
+        # put ``-p`` last so the parser doesn't confuse the digit
+        # string with a flag.
+        completed = subprocess.run(
+            ["ps", "eww", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "PID ownership verification via ps failed for PID %d (%s). "
+            "Proceeding with kill (fail-open).",
+            pid,
+            exc,
+        )
+        return None
+
+    if completed.returncode != 0:
+        # ``ps`` returns non-zero when the PID doesn't exist. That's
+        # a "process gone" signal — the kill will hit nothing; abort
+        # verification (fail-open to keep the kill path safe).
+        logger.warning(
+            "PID ownership verification: ps exit=%d for PID %d "
+            "(process likely gone). Proceeding with kill.",
+            pid,
+            completed.returncode,
+        )
+        return None
+
+    output = completed.stdout
+
+    # Fast path: marker present → owned.
+    if needle in output:
+        return True
+
+    # Detect the macOS-specific "env vars not shown" case. We do
+    # this by comparing the eww output against the command-only
+    # output (``ps -p <pid> -o command=``). If the eww output adds
+    # nothing beyond the command line, ``ps`` did not surface any
+    # env vars — we cannot verify, so we fail-open with a warning.
+    try:
+        cmd_proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if cmd_proc.returncode == 0:
+            cmd = cmd_proc.stdout.strip()
+            # Heuristic: does the eww output contain anything
+            # beyond the command line itself? If ``cmd`` is empty
+            # (race — process exited) we cannot tell; fail-open.
+            if cmd and cmd in output:
+                trailing = output.split(cmd, 1)[1].strip()
+                if not trailing:
+                    logger.warning(
+                        "PID ownership verification: ps eww did not "
+                        "surface env vars for PID %d (macOS limitation "
+                        "for non-bundled processes). Proceeding with "
+                        "kill (fail-open).",
+                        pid,
+                    )
+                    return None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        # Heuristic failed — fall through to the conservative
+        # "aborted" branch. We don't want to silently fail-open
+        # if our detection method itself is broken.
+        pass
+
+    # Marker absent AND env vars were shown → PID was likely recycled.
+    logger.warning(
+        "PID ownership verification: %s not found in ps output for "
+        "PID %d (PID may have been recycled). Aborting kill.",
+        _TRACKING_ENV_VAR,
+        pid,
+    )
+    return False
+
+
+def _build_child_env(process_id: str) -> dict:
+    """Build the child environment with the tracking id injected.
+
+    Always starts from a copy of ``os.environ`` so the child inherits
+    PATH, HOME, LANG, etc. (the parent-daemon's environment). The
+    tracking id is added — if it is ALREADY in the parent env (e.g. a
+    test that pre-sets it), ours overwrites it so the child gets the
+    authoritative value tied to ``process_id``.
+    """
+    env = os.environ.copy()
+    env[_TRACKING_ENV_VAR] = process_id
+    return env
 
 
 class BackgroundProcessManager:
@@ -518,6 +830,12 @@ class BackgroundProcessManager:
         Marks ``info.timed_out = True`` so :func:`_drain_exit_code`
         reports ``"killed"`` rather than ``"exited"`` when the timeout
         fires (preserves diagnostic signal for the agent).
+
+        Defense-in-depth: applies the same Layers 1+2+3 checks as
+        :func:`stop_process` before sending SIGKILL. If a previous
+        owner already exited the process, the timeout fires but the
+        killed PID may have been recycled — the verification aborts
+        the kill in that case.
         """
         try:
             await asyncio.sleep(seconds)
@@ -529,12 +847,58 @@ class BackgroundProcessManager:
         proc = info.proc
         if proc is None:
             return
+
+        # Layer 1: status gate. If the drain task already updated
+        # ``info.status`` to a terminal value, there's nothing to kill.
+        if info.status != "running":
+            return
+
+        # Layer 2: poll. The process may have exited between the
+        # status check and now (drain task hasn't caught up yet).
         if proc.returncode is not None:
             return  # already exited naturally
 
         info.timed_out = True
         try:
-            proc.kill()
+            # Layer 3: PID ownership. If the PID was recycled, ABORT.
+            # Wrapped in the same try/except as the kill below for
+            # defense in depth: ``_verify_pid_ownership`` documents
+            # "never raises" but we don't want a future backend addition
+            # to silently break the timeout killer — if verify raises,
+            # fall through to the helper which will still attempt the
+            # kill with its own internal Layer 1/2/3.
+            if info.tracking_id and proc.pid is not None:
+                ownership = _verify_pid_ownership(proc.pid, info.tracking_id)
+                if ownership is False:
+                    logger.warning(
+                        "timeout-kill: PID ownership check failed for %s "
+                        "(PID %d); ABORTING timeout-kill — PID may have "
+                        "been recycled.",
+                        info.process_id,
+                        proc.pid,
+                    )
+                    return
+                # ``True`` or ``None`` → proceed.
+
+            # Fix: route through the centralized helper instead of
+            # ``proc.kill()``. Two wins:
+            #   1. ``killpg`` semantics — the WHOLE process group is
+            #      signalled, so grandchildren spawned by the child
+            #      (e.g. a shell that forked a worker) are also killed.
+            #      This matches ``start_new_session=True`` intent.
+            #   2. Layers 1+2 re-run inside the helper — they should
+            #      be no-ops here (we already passed them above) but
+            #      the helper enforces them consistently across all
+            #      kill paths.
+            # ``ProcessLookupError`` handling stays the same: the helper
+            # swallows it internally; we keep the outer except for the
+            # (very unlikely) case where verify raises it.
+            self._attempt_kill_signal(
+                info,
+                signal.SIGKILL,
+                sys.platform != "win32",
+                "SIGKILL (timeout)",
+            )
         except ProcessLookupError:
             # Process already reaped between our check and kill —
             # benign race.
@@ -546,6 +910,128 @@ class BackgroundProcessManager:
                 info.process_id,
                 exc,
             )
+
+    def _attempt_kill_signal(
+        self,
+        info: ProcessInfo,
+        sig: int,
+        is_unix: bool,
+        signal_label: str,
+    ) -> str:
+        """Run defense Layers 1+2+3 and send one signal.
+
+        Centralizes the kill-signal decision so ``stop_process`` and
+        ``_timeout_killer`` don't drift apart. Performs these checks
+        IN ORDER, returning the FIRST that triggers a skip/abort:
+
+        * **Layer 1 — status gate**: if ``info.status`` is already
+          terminal (``exited`` | ``killed`` | ``error``), there's
+          nothing to kill. Returns ``"skipped_terminal"``.
+        * **Layer 2 — liveness check**: if ``proc.returncode`` is not
+          ``None`` (the OS has reaped the process), the process has
+          already exited. Update ``info.status`` to the appropriate
+          terminal state (do not raise) and return ``"skipped_exited"``
+          so the caller proceeds to the post-kill settle.
+
+          Note: ``asyncio.subprocess.Process`` does NOT expose
+          ``poll()`` (unlike ``subprocess.Popen``). The equivalent is
+          inspecting ``proc.returncode`` — it's ``None`` while
+          running and set to the exit code once the OS reaps the
+          process. This is the same pattern the existing code uses
+          (``if proc.returncode is None: return``).
+        * **Layer 3 — ownership**: if the tracking id was set and
+          :func:`_verify_pid_ownership` returns ``False``, the PID was
+          recycled — ABORT the kill. Returns ``"aborted_recycled"``.
+          Verification returning ``None`` (fail-open) → proceed.
+        * Else: send the signal via :func:`os.killpg` (Unix) or
+          :func:`proc.send_signal` (Windows). Returns ``"sent"``.
+
+        The ``signal_label`` is just for logging — e.g. ``"SIGTERM"``
+        or ``"SIGKILL"`` so the CRITICAL warning from Layer 3 reads
+        clearly in the log.
+
+        Never raises — the caller's flow must continue regardless of
+        what comes back.
+        """
+        # Layer 1: status gate.
+        if info.status != "running":
+            return "skipped_terminal"
+
+        proc = info.proc
+        if proc is None:
+            return "skipped_no_handle"
+
+        # Layer 2: liveness check. ``proc.returncode`` is ``None``
+        # while the process is running; set to the exit code once
+        # the OS reaps it. This is the asyncio equivalent of
+        # ``Popen.poll()``.
+        if proc.returncode is not None:
+            rc = proc.returncode
+            # Update status promptly so concurrent ``proc_status``
+            # callers see the real state without waiting for the
+            # drain task to wake up.
+            info.exit_code = rc
+            # Apply the same precedence used in :func:`_drain_exit_code`:
+            # user_stopped / timed_out are authoritative; otherwise
+            # map signal-style exit codes to "killed".
+            if info.user_stopped or info.timed_out:
+                info.status = "killed"
+            elif rc in (-signal.SIGKILL, -signal.SIGTERM):
+                info.status = "killed"
+            else:
+                info.status = "exited"
+            return "skipped_exited"
+
+        # Layer 3: PID ownership verification. Skip if no tracking
+        # tag was set (legacy / test ProcessInfo → fail-open).
+        if info.tracking_id and proc.pid is not None:
+            ownership = _verify_pid_ownership(proc.pid, info.tracking_id)
+            if ownership is False:
+                logger.warning(
+                    "PID ownership check failed for %s (PID %d, "
+                    "tracking_id=%s); ABORTING %s — PID may have "
+                    "been recycled. THIS IS A SAFETY EVENT; the "
+                    "intended kill was not delivered.",
+                    info.process_id,
+                    proc.pid,
+                    info.tracking_id,
+                    signal_label,
+                )
+                return "aborted_recycled"
+            # ``True`` or ``None`` (fail-open) → proceed.
+
+        # All gates passed — deliver the signal.
+        if is_unix:
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except OSError:
+                # ``ProcessLookupError`` is a subclass of ``OSError``.
+                # Process group gone — try a direct signal as a
+                # fallback. Broaden to ``OSError`` so non-benign
+                # failures (e.g. ``PermissionError``) get a WARNING
+                # instead of silently passing — the helper's docstring
+                # promises "never raises" so we should not lose
+                # visibility on unexpected OS errors.
+                try:
+                    proc.send_signal(sig)
+                except OSError as exc:
+                    if isinstance(exc, ProcessLookupError):
+                        # Already gone — expected benign race.
+                        pass
+                    else:
+                        logger.warning(
+                            "killpg+fallback: send_signal(%s) for PID %d "
+                            "failed: %s",
+                            sig,
+                            proc.pid,
+                            exc,
+                        )
+        else:
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
+        return "sent"
 
     # -- public lifecycle API ----------------------------------------------
 
@@ -619,6 +1105,13 @@ class BackgroundProcessManager:
                 instance_id=instance_id,
                 command=command,
             )
+            # Layer 3: tag the process with a tracking token BEFORE
+            # spawning so we can later verify the PID still belongs to
+            # us before killing. The token is the same as the
+            # ``process_id`` (a unique 8-hex-char value) — no need for
+            # a separate UUID. Empty-string for legacy / test
+            # ``ProcessInfo`` instances → fail-open at verify-time.
+            info.tracking_id = process_id
             bucket[process_id] = info
 
         # Spawn outside the lock — subprocess creation is slow and we
@@ -635,6 +1128,13 @@ class BackgroundProcessManager:
         if sys.platform != "win32":
             subproc_kwargs["start_new_session"] = True
 
+        # Layer 3: inject the tracking env var into the child so we
+        # can later verify the PID wasn't recycled. Inherits the
+        # parent env (PATH, HOME, LANG, …) and adds the tracking id.
+        # ``_build_child_env`` always overrides any existing value
+        # so the child gets the authoritative tag for THIS process_id.
+        child_env = _build_child_env(process_id)
+
         try:
             if isinstance(command, list):
                 proc = await asyncio.create_subprocess_exec(
@@ -643,6 +1143,7 @@ class BackgroundProcessManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=workdir,
+                    env=child_env,
                     **subproc_kwargs,
                 )
             else:
@@ -652,6 +1153,7 @@ class BackgroundProcessManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=workdir,
+                    env=child_env,
                     **subproc_kwargs,
                 )
         except FileNotFoundError as exc:
@@ -702,6 +1204,23 @@ class BackgroundProcessManager:
             bucket_after = self._processes.get(instance_id, {})
             if process_id not in bucket_after:
                 # We were cleaned up during spawn. Kill the orphan.
+                # SAFETY NOTE: bypassing ``_attempt_kill_signal`` here.
+                # The process was spawned microseconds ago in this same
+                # function — PID reuse is essentially impossible. The
+                # inline ``proc.kill()`` (the original C2 implementation)
+                # is preserved verbatim for two reasons:
+                #   1. Uniformity of behavior with the test fixture
+                #      ``TestSpawnWindowRace.test_cleanup_during_spawn_kills_orphan``
+                #      which mocks ``proc.kill`` to assert the orphan was
+                #      killed. The helper routes via ``send_signal``
+                #      instead of ``kill`` for portability across signal
+                #      types; for SIGKILL-only kill at this microsecond
+                #      window the semantics are equivalent.
+                #   2. ``info.proc`` is set but the reader_task /
+                #      exit_task / timeout_task were JUST scheduled and
+                #      are cancelled immediately below — the helper's
+                #      Layer 1 (status gate) and Layer 2 (poll) checks
+                #      add no value here because we know the state.
                 try:
                     if sys.platform != "win32":
                         try:
@@ -753,9 +1272,19 @@ class BackgroundProcessManager:
             to SIGKILL. The ``force`` flag skips SIGTERM entirely and
             goes straight to SIGKILL.
 
+        Defense-in-depth (see :meth:`_attempt_kill_signal`):
+            Every signal attempt runs through three layers before
+            being delivered — status gate (skip if terminal),
+            liveness check (skip if already exited), and PID
+            ownership verification (ABORT if the PID was recycled
+            to an unrelated process). The third layer is fail-open
+            on Windows / unsupported OS.
+
         Returns:
-            Human-readable result string. Errors (process not found,
-            already exited) are surfaced as ``"Error: ..."`` strings.
+            Human-readable result string. Errors (process not found)
+            are surfaced as ``"Error: ..."`` strings. If the process
+            is already in a terminal state, returns a success-style
+            "already stopped" message (idempotent — does NOT raise).
         """
         async with self._lock:
             bucket = self._processes.get(instance_id, {})
@@ -765,10 +1294,15 @@ class BackgroundProcessManager:
                 f"Error: process {process_id!r} not found for instance "
                 f"{instance_id}. Use proc_list() to see active ids."
             )
+
+        # Layer 1 entry-check: idempotent stop. If the process is
+        # already in a terminal state, return a success message
+        # instead of an error — this matches the spec ("skip the
+        # kill entirely and return success/idempotently").
         if info.status != "running":
             return (
-                f"Process {process_id} is not running "
-                f"(status={info.status}). Nothing to stop."
+                f"Process {process_id} is already stopped "
+                f"(status={info.status}); nothing to do."
             )
 
         proc = info.proc
@@ -792,72 +1326,59 @@ class BackgroundProcessManager:
             info.user_stopped = True
             info.timed_out = False  # user-initiated, not timeout
 
+            # Track whether the kill was aborted by Layer 3 (PID
+            # reuse). We surface this in the response so the agent
+            # can investigate. The OS still has no signal attached
+            # to our intent in that case.
+            pid_recycled = False
+
             if force:
-                # Skip SIGTERM; SIGKILL immediately.
-                if is_unix:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except OSError:
-                        # Fallback to direct kill if pgid lookup
-                        # failed (e.g. process already reaped).
-                        try:
-                            proc.kill()
-                        except ProcessLookupError:
-                            pass
-                else:
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
+                # Skip SIGTERM; SIGKILL immediately. The helper
+                # runs Layers 1+2+3 before delivering the signal.
+                sig_result = self._attempt_kill_signal(
+                    info, signal.SIGKILL, is_unix, "SIGKILL (force)"
+                )
+                if sig_result == "aborted_recycled":
+                    pid_recycled = True
+                # Whether sent, skipped, or aborted, the OS will
+                # have reaped the process by the time we await
+                # ``proc.wait()``. Bound the wait so we never block
+                # ``proc_stop`` indefinitely.
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=2.0)
                 except asyncio.TimeoutError:
-                    # Last-ditch: still alive after SIGKILL — leave
-                    # the drain task to settle it asynchronously.
+                    # Even with Layer 3 abort, the process may
+                    # still be running (the kill was skipped). If
+                    # we sent the signal, SIGKILL should have
+                    # finished the job within 2s; if we didn't,
+                    # there's nothing more we can do.
                     logger.warning(
-                        "proc %s did not exit within 2s of SIGKILL",
+                        "proc %s did not exit within 2s of SIGKILL "
+                        "(sig_result=%s)",
                         process_id,
+                        sig_result,
                     )
             else:
                 # Polite stop → SIGTERM → grace → SIGKILL.
-                if is_unix:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    except OSError:
-                        try:
-                            proc.send_signal(signal.SIGTERM)
-                        except ProcessLookupError:
-                            return (
-                                f"Error: process {process_id} already "
-                                "exited before stop could be sent."
-                            )
-                else:
-                    try:
-                        proc.send_signal(signal.SIGTERM)
-                    except ProcessLookupError:
-                        return (
-                            f"Error: process {process_id} already "
-                            "exited before stop could be sent."
-                        )
+                sig_result = self._attempt_kill_signal(
+                    info, signal.SIGTERM, is_unix, "SIGTERM"
+                )
+                if sig_result == "aborted_recycled":
+                    pid_recycled = True
 
                 try:
                     await asyncio.wait_for(
                         proc.wait(), timeout=_STOP_GRACE_SECONDS
                     )
                 except asyncio.TimeoutError:
-                    # Grace expired — escalate.
-                    try:
-                        if is_unix:
-                            try:
-                                os.killpg(
-                                    os.getpgid(proc.pid), signal.SIGKILL
-                                )
-                            except OSError:
-                                proc.kill()
-                        else:
-                            proc.kill()
-                    except ProcessLookupError:
-                        pass
+                    # Grace expired — escalate to SIGKILL via the
+                    # helper so Layers 1+2+3 run again (status may
+                    # have changed during the grace wait).
+                    sig_result = self._attempt_kill_signal(
+                        info, signal.SIGKILL, is_unix, "SIGKILL (escalation)"
+                    )
+                    if sig_result == "aborted_recycled":
+                        pid_recycled = True
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=2.0)
                     except asyncio.TimeoutError:
@@ -900,7 +1421,11 @@ class BackgroundProcessManager:
         # ``info.status`` may still be ``"running"`` if the drain task
         # was cancelled or never ran — promote it now that the
         # process is definitively gone and ``user_stopped`` is True.
-        if info.status == "running":
+        # The ``pid_recycled`` guard prevents the promotion when Layer 3
+        # aborted the kill: in that case no signal was sent and the
+        # process may still be alive under a recycled PID, so reporting
+        # ``"killed"`` would be a lie.
+        if info.status == "running" and not pid_recycled:
             info.status = "killed"
 
         # Return the last ``_STOP_TAIL_LINES`` lines of captured
@@ -913,6 +1438,17 @@ class BackgroundProcessManager:
             f"(force={force}, status={info.status}, "
             f"exit_code={info.exit_code})."
         )
+        if pid_recycled:
+            # Layer 3 aborted the kill. Surface this clearly so the
+            # agent knows the kill was NOT actually delivered and
+            # the PID may now belong to an unrelated process.
+            header += (
+                "\n\nWARNING: PID ownership verification failed — "
+                "the kill was ABORTED because the PID at the time "
+                "of the kill no longer carried this process's "
+                "tracking marker. The PID may have been recycled "
+                "to an unrelated process. No signal was sent."
+            )
         if tail:
             return f"{header}\n\nLast {_STOP_TAIL_LINES} lines:\n{tail}"
         return header
@@ -1046,32 +1582,26 @@ class BackgroundProcessManager:
                         pid,
                     )
 
-            # Force-kill the process. If it already exited, this is a
-            # no-op.
-            proc = info.proc
-            if proc is not None and proc.returncode is None:
-                try:
-                    if sys.platform != "win32":
-                        try:
-                            os.killpg(
-                                os.getpgid(proc.pid), signal.SIGKILL
-                            )
-                        except OSError:
-                            try:
-                                proc.kill()
-                            except ProcessLookupError:
-                                pass
-                    else:
-                        try:
-                            proc.kill()
-                        except ProcessLookupError:
-                            pass
-                except Exception as exc:  # pragma: no cover — defensive
-                    logger.warning(
-                        "cleanup: force-kill for %s failed: %s",
-                        pid,
-                        exc,
-                    )
+            # Fix: route the kill through the centralized helper so the
+            # three defense layers (status gate / liveness check / PID
+            # ownership) ALL apply. Previously this block bypassed the
+            # helper and went straight to ``killpg``/``proc.kill`` —
+            # meaning a recycled PID on a recently-exited process could
+            # hit an unrelated process during instance cleanup. The
+            # helper short-circuits on terminal status so this is a
+            # no-op for already-exited entries.
+            is_unix = sys.platform != "win32"
+            try:
+                self._attempt_kill_signal(
+                    info, signal.SIGKILL, is_unix, "SIGKILL (cleanup)"
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                # The helper promises "never raises"; defense-in-depth.
+                logger.warning(
+                    "cleanup: force-kill helper raised for %s: %s",
+                    pid,
+                    exc,
+                )
             # Close + unlink the spill file. We created it with
             # ``delete=False`` so this is our responsibility.
             # M2 fix: use the centralized helper so close + null is
