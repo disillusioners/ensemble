@@ -1015,25 +1015,42 @@ sources:
 # daemon/sources/credentials.py
 from cryptography.fernet import Fernet
 import json
-import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Central helper defined in this module: get_encryption_key()
+# reads SYSTEM_ENCRYPTION_KEY first, then the deprecated SOURCE_CREDENTIAL_KEY
+# (emits a WARNING), returns None if neither is set.
 
 class CredentialManager:
     def __init__(self, encryption_key: bytes | None = None):
         # Prefers SYSTEM_ENCRYPTION_KEY; falls back to the deprecated
-        # SOURCE_CREDENTIAL_KEY (with a WARNING) for backward compatibility.
-        key = encryption_key or os.environ.get("SYSTEM_ENCRYPTION_KEY") \
-            or os.environ.get("SOURCE_CREDENTIAL_KEY")
-        if not key:
-            # Generate key for first run: Fernet.generate_key()
-            raise ValueError("SYSTEM_ENCRYPTION_KEY environment variable required")
-        self._fernet = Fernet(key if isinstance(key, bytes) else key.encode())
+        # SOURCE_CREDENTIAL_KEY (with a WARNING) via get_encryption_key().
+        key = encryption_key or get_encryption_key()
+        if key:
+            self._fernet = Fernet(key if isinstance(key, bytes) else key.encode())
+        else:
+            # Graceful degradation: log a warning and store credentials
+            # unencrypted rather than refusing to start.
+            logger.warning(
+                "No SYSTEM_ENCRYPTION_KEY provided, credentials will be "
+                "stored unencrypted"
+            )
+            self._fernet = None
     
     def encrypt(self, credentials: dict) -> str:
         """Encrypt credentials dict to string."""
+        if self._fernet is None:
+            # No encryption - return json
+            return json.dumps(credentials)
         return self._fernet.encrypt(json.dumps(credentials).encode()).decode()
     
     def decrypt(self, encrypted: str) -> dict:
         """Decrypt string back to credentials dict."""
+        if self._fernet is None:
+            # No encryption - parse json
+            return json.loads(encrypted)
         return json.loads(self._fernet.decrypt(encrypted.encode()).decode())
 
 # Usage in SourcePersistence:
