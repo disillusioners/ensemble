@@ -265,10 +265,13 @@ class TestableSettingsComponent {
               message = 'VS Code editor (code-server) is not installed. Install code-server and try again.';
               break;
             case 'VS Code server failed to start':
-              message = detail?.detail ?? 'VS Code server failed to start. Check server logs for details.';
+              message = detail?.detail?.trim() || 'VS Code server failed to start. Check server logs for details.';
               break;
             case 'VS Code server manager not initialized':
               message = 'VS Code server manager not initialized. Try restarting the daemon.';
+              break;
+            case 'Project repository not initialized':
+              message = 'VS Code settings cannot be saved — project repository is not initialized. Restart the daemon.';
               break;
             default:
               // Malformed/missing detail — fall back to the historical generic hint.
@@ -1025,6 +1028,7 @@ describe('SettingsComponent', () => {
       expect(MockMatSnackBar.lastOpen?.message).toBe(
         'VS Code editor (code-server) is not installed. Install code-server and try again.',
       );
+      expect(component.applyingEditor()).toBe(false);
     });
 
     it('should show backend explanation on 503 with VS Code server failed to start', () => {
@@ -1037,6 +1041,7 @@ describe('SettingsComponent', () => {
       component.onEditorSelectionChange('vscode');
       component.saveEditor();
       expect(MockMatSnackBar.lastOpen?.message).toBe('code-server exited with code 1');
+      expect(component.applyingEditor()).toBe(false);
     });
 
     it('should show generic failed-to-start hint when 503 detail omits explanation', () => {
@@ -1051,6 +1056,7 @@ describe('SettingsComponent', () => {
       expect(MockMatSnackBar.lastOpen?.message).toBe(
         'VS Code server failed to start. Check server logs for details.',
       );
+      expect(component.applyingEditor()).toBe(false);
     });
 
     it('should show restart-daemon hint on 503 with VS Code server manager not initialized', () => {
@@ -1065,6 +1071,7 @@ describe('SettingsComponent', () => {
       expect(MockMatSnackBar.lastOpen?.message).toBe(
         'VS Code server manager not initialized. Try restarting the daemon.',
       );
+      expect(component.applyingEditor()).toBe(false);
     });
 
     it('should fall back to generic install hint on 503 with malformed detail', () => {
@@ -1076,6 +1083,37 @@ describe('SettingsComponent', () => {
       expect(MockMatSnackBar.lastOpen?.message).toBe(
         'VS Code editor is not installed. Install code-server and try again.',
       );
+      expect(component.applyingEditor()).toBe(false);
+    });
+
+    it('should show restart-daemon hint on 503 with Project repository not initialized', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'Project repository not initialized' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code settings cannot be saved — project repository is not initialized. Restart the daemon.',
+      );
+      expect(component.applyingEditor()).toBe(false);
+    });
+
+    it('should fall back to generic install hint on 503 with unexpected detail.error', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'some unexpected string' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code editor is not installed. Install code-server and try again.',
+      );
+      expect(component.applyingEditor()).toBe(false);
     });
 
     it('should show generic error snackbar on non-503 error', () => {

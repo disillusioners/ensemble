@@ -259,10 +259,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
               message = 'VS Code editor (code-server) is not installed. Install code-server and try again.';
               break;
             case 'VS Code server failed to start':
-              message = detail?.detail ?? 'VS Code server failed to start. Check server logs for details.';
+              message = detail?.detail?.trim() || 'VS Code server failed to start. Check server logs for details.';
               break;
             case 'VS Code server manager not initialized':
               message = 'VS Code server manager not initialized. Try restarting the daemon.';
+              break;
+            case 'Project repository not initialized':
+              message = 'VS Code settings cannot be saved — project repository is not initialized. Restart the daemon.';
               break;
             default:
               // Malformed/missing detail — fall back to the historical generic hint.

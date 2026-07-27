@@ -618,7 +618,7 @@ class VSCodeServerManager:
         ]
         for path in fallback_paths:
             if os.path.isfile(path) and os.access(path, os.X_OK):
-                logger.debug("Resolved code-server via fallback path: %s", path)
+                logger.info("Resolved code-server via fallback path: %s", path)
                 return path
         searched = ", ".join(fallback_paths)
         raise VSCodeServerNotInstalledError(
