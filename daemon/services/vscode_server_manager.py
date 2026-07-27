@@ -64,6 +64,21 @@ logger = logging.getLogger(__name__)
 # 16 KB is generous for a "why did it die" diagnostic.
 VSCODE_CRASH_LOG_TAIL_MAX_BYTES: int = 16 * 1024  # 16 KB
 
+# Env vars code-server reads (see ``code-server --help``) that must NOT
+# leak from the daemon into the child. ``PORT`` causes EADDRINUSE by
+# overriding ``--bind-addr``'s port; the auth/token vars are
+# defense-in-depth against an ``--auth none`` regression.
+_CODESERVER_STRIP_ENV: frozenset[str] = frozenset({
+    "PORT",
+    "PASSWORD",
+    "HASHED_PASSWORD",
+    "GITHUB_TOKEN",
+    "CODE_SERVER_CONFIG_FILE",
+    "CODE_SERVER_COOKIE_SUFFIX",
+    "CS_DISABLE_FILE_DOWNLOADS",
+    "CS_DISABLE_GETTING_STARTED_OVERRIDE",
+})
+
 
 # ---------------------------------------------------------------------------
 # Custom exceptions
@@ -226,10 +241,8 @@ class VSCodeServerManager:
             # could similarly collide; keep everything else (PATH, HOME,
             # etc.) intact.
             child_env = os.environ.copy()
-            child_env.pop("PORT", None)
-            child_env.pop("CODE_SERVER_CONFIG_FILE", None)
-            child_env.pop("CS_DISABLE_FILE_DOWNLOADS", None)
-            child_env.pop("CS_DISABLE_GETTING_STARTED_OVERRIDE", None)
+            for key in _CODESERVER_STRIP_ENV:
+                child_env.pop(key, None)
 
             try:
                 self._process = await asyncio.create_subprocess_exec(

@@ -37,6 +37,7 @@ import pytest
 from daemon.config import VSCodeConfig
 from daemon.constants import VSCODE_PID_FILENAME
 from daemon.services.vscode_server_manager import (
+    _CODESERVER_STRIP_ENV,
     VSCODE_CRASH_LOG_TAIL_MAX_BYTES,
     VSCodeServerManager,
     VSCodeServerNotInstalledError,
@@ -1721,17 +1722,32 @@ class TestVSCodeServerManager:
     async def test_start_strips_other_codeserver_sensitive_vars(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``CODE_SERVER_CONFIG_FILE``, ``CS_DISABLE_FILE_DOWNLOADS``, and
-        ``CS_DISABLE_GETTING_STARTED_OVERRIDE`` are all stripped from
-        the child env. Each is a code-server env var that could change
-        behavior in surprising ways if the daemon's value leaked in.
+        """All non-``PORT`` vars in ``_CODESERVER_STRIP_ENV`` are stripped
+        from the child env passed to code-server.
+
+        ``PORT`` has its own dedicated test (``test_start_strips_port_from_child_env``).
+        The remaining vars — ``PASSWORD``, ``HASHED_PASSWORD``,
+        ``GITHUB_TOKEN``, ``CODE_SERVER_CONFIG_FILE``,
+        ``CODE_SERVER_COOKIE_SUFFIX``, ``CS_DISABLE_FILE_DOWNLOADS``,
+        ``CS_DISABLE_GETTING_STARTED_OVERRIDE`` — are code-server
+        env vars that must not leak from the daemon. Asserting against
+        the constant itself keeps the test self-maintaining: adding a
+        var to ``_CODESERVER_STRIP_ENV`` automatically adds coverage here.
         """
-        sensitive_vars = {
+        # Seed every var in the constant so the strip path is exercised
+        # in a single spawn; ``PORT`` is included below for symmetry but
+        # is the dedicated target of the sibling PORT test.
+        seeded = {
+            "PORT": "9797",
+            "PASSWORD": "leaked-pw",
+            "HASHED_PASSWORD": "leaked-hash",
+            "GITHUB_TOKEN": "ghp_leaked",
             "CODE_SERVER_CONFIG_FILE": "/etc/passwd",
+            "CODE_SERVER_COOKIE_SUFFIX": "leaked-suffix",
             "CS_DISABLE_FILE_DOWNLOADS": "1",
             "CS_DISABLE_GETTING_STARTED_OVERRIDE": "true",
         }
-        for key, value in sensitive_vars.items():
+        for key, value in seeded.items():
             monkeypatch.setenv(key, value)
 
         manager = make_manager(tmp_path)
@@ -1747,7 +1763,11 @@ class TestVSCodeServerManager:
 
         child_env = calls[0]["kwargs"].get("env")
         assert child_env is not None
-        for key in sensitive_vars:
+        # Iterate the constant directly. Regression guard: if a new var
+        # is added to ``_CODESERVER_STRIP_ENV`` without updating this
+        # test, ``seeded`` above will cover it and the assert below will
+        # fail loudly.
+        for key in _CODESERVER_STRIP_ENV:
             assert key not in child_env, (
                 f"{key} must be stripped from child env to prevent the "
                 f"daemon's value from changing code-server behavior; "
