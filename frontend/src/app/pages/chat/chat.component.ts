@@ -342,6 +342,18 @@ export class ChatComponent implements OnInit, OnDestroy {
           const savedAgent = response.agents.find(a => a.id === savedAgentId);
           if (savedAgent) {
             this.selectedAgent.set(savedAgent);
+            // Seed selectedVersionTag from persisted defaults so the detail
+            // page's "create instance" button uses the saved version rather
+            // than always falling back to the base version.
+            this.api.getDefaultAgentVersions().subscribe({
+              next: (resp) => {
+                const defaults = resp.default_versions ?? {};
+                this.selectedVersionTag.set(defaults[savedAgent.id] ?? null);
+              },
+              error: () => {
+                // Leave selectedVersionTag at its current value on error.
+              },
+            });
           }
         }
       },
