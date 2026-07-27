@@ -1059,6 +1059,36 @@ describe('SettingsComponent', () => {
       expect(component.applyingEditor()).toBe(false);
     });
 
+    it('should show generic failed-to-start hint when 503 detail.detail is an empty string', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'VS Code server failed to start', detail: '' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code server failed to start. Check server logs for details.',
+      );
+      expect(component.applyingEditor()).toBe(false);
+    });
+
+    it('should show generic failed-to-start hint when 503 detail.detail is whitespace only', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'VS Code server failed to start', detail: '   \t  ' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code server failed to start. Check server logs for details.',
+      );
+      expect(component.applyingEditor()).toBe(false);
+    });
+
     it('should show restart-daemon hint on 503 with VS Code server manager not initialized', () => {
       service.setEditorPreference.mockReturnValue(
         throwError(() => ({
