@@ -904,17 +904,24 @@ class TestVSCodeServerManager:
     async def test_start_raises_not_installed_when_binary_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Both ``binary_path`` and PATH lookup fail → exception raised."""
+        """Both ``binary_path``, PATH lookup, and fallbacks fail → exception raised."""
         manager = make_manager(tmp_path, binary_path=None)
         monkeypatch.setattr("shutil.which", lambda _: None)
+        # Stub out the fallback paths so the test environment's real
+        # code-server install (if any) doesn't get picked up.
+        monkeypatch.setattr("os.path.isfile", lambda path: False)
 
         with pytest.raises(VSCodeServerNotInstalledError) as exc_info:
             await manager.start()
 
-        # Error message includes install instructions for the user.
+        # Error message includes install instructions and lists the
+        # fallback locations that were searched.
         msg = str(exc_info.value).lower()
         assert "code-server" in msg
         assert "install" in msg or "code-server.dev" in msg
+        assert "/opt/homebrew/bin/code-server" in msg
+        assert "/usr/local/bin/code-server" in msg
+        assert "/usr/bin/code-server" in msg
         # State reverted to stopped.
         assert manager.state.status == "stopped"
 
@@ -955,6 +962,53 @@ class TestVSCodeServerManager:
         resolved = manager._resolve_binary()
 
         assert resolved == str(bin_path)
+
+    async def test_resolve_binary_uses_fallback_when_not_on_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fallback common locations are probed when shutil.which returns None."""
+        # Simulate an executable at the Homebrew fallback path by patching
+        # isfile/access, isolating the test from any real code-server on
+        # the host.
+        fallback_to_return = "/opt/homebrew/bin/code-server"
+
+        def fake_isfile(path: str) -> bool:
+            return path == fallback_to_return
+
+        monkeypatch.setattr("os.path.isfile", fake_isfile)
+        monkeypatch.setattr("os.access", lambda path, mode: True)
+        monkeypatch.setattr("shutil.which", lambda *a, **kw: None)
+
+        manager = make_manager(tmp_path)  # no configured binary_path
+
+        resolved = manager._resolve_binary()
+
+        assert resolved == fallback_to_return
+
+    async def test_resolve_binary_raises_with_searched_paths_listed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Error message lists every fallback path that was checked."""
+        # Force every fallback probe to look missing.
+        monkeypatch.setattr("shutil.which", lambda *a, **kw: None)
+        monkeypatch.setattr("os.path.isfile", lambda path: False)
+        # Don't override expanduser: the error message should contain the
+        # literal "~/.local/bin/code-server" so users see what was tried.
+
+        manager = make_manager(tmp_path)
+
+        with pytest.raises(VSCodeServerNotInstalledError) as exc_info:
+            manager._resolve_binary()
+
+        msg = str(exc_info.value)
+        # Original install hint is preserved.
+        assert "code-server.dev/install.sh" in msg
+        # Every fallback location is named in the error. The user-local
+        # entry is expanded from "~" to the actual home directory.
+        assert "/opt/homebrew/bin/code-server" in msg
+        assert "/usr/local/bin/code-server" in msg
+        assert ".local/bin/code-server" in msg
+        assert "/usr/bin/code-server" in msg
 
     # ── Port detection ────────────────────────────────────────────────────
 

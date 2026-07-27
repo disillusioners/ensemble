@@ -246,12 +246,34 @@ export class SettingsComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         this.applyingEditor.set(false);
-        // 503 indicates the code-server backend isn't available yet — give the
-        // user a hint to install it. All other failures get a generic message.
+        // 503 indicates the code-server backend isn't available yet — surface the
+        // specific reason from the backend's `detail.error` so the user can act on
+        // it (install binary, check logs, restart daemon) instead of a single
+        // catch-all hint. All other failures get a generic message.
         const isUnavailable = err?.status === 503;
-        const message = isUnavailable
-          ? 'VS Code editor is not installed. Install code-server and try again.'
-          : 'Failed to save editor preference';
+        let message: string;
+        if (isUnavailable) {
+          const detail = err?.error?.detail;
+          switch (detail?.error) {
+            case 'code-server binary not found':
+              message = 'VS Code editor (code-server) is not installed. Install code-server and try again.';
+              break;
+            case 'VS Code server failed to start':
+              message = detail?.detail?.trim() || 'VS Code server failed to start. Check server logs for details.';
+              break;
+            case 'VS Code server manager not initialized':
+              message = 'VS Code server manager not initialized. Try restarting the daemon.';
+              break;
+            case 'Project repository not initialized':
+              message = 'VS Code settings cannot be saved — project repository is not initialized. Restart the daemon.';
+              break;
+            default:
+              // Malformed/missing detail — fall back to the historical generic hint.
+              message = 'VS Code editor is not installed. Install code-server and try again.';
+          }
+        } else {
+          message = 'Failed to save editor preference';
+        }
         this.snackBar.open(message, 'Dismiss', {
           duration: 5000,
           panelClass: 'error-snackbar',
