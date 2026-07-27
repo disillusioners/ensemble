@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 201 packs
-- Unit: 161 | Integration: 9 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
+- Total: 203 packs
+- Unit: 162 | Integration: 10 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -188,6 +188,7 @@
 | integration_test | test/packs/integration_test.sh | All integration tests (require OPENAI_API_KEY, auto-skip without) | 5 min | 2026-04-24 | ❌ FAIL (37 passed, 6 failed — PRE-EXISTING, not system_default_project) |
 | loop_breaker_integration_test | test/packs/loop_breaker_integration_test.sh | Loop breaker full integration: detection→repair→LLM re-invoke (repaired msgs reach LLM, distinct from originals), max repairs cap (stops after 3, continuation with originals), config disable (enabled=False skips entirely), repair failure graceful degradation (success=False → originals, no record), loop_breaker_slot=None safe, GII throttle coexistence (both fire, sleep+repair simultaneous), _maybe_repair_loop helper via real agent_node, 5 cleanup paths (_cleanup_instance_state, terminate, hard_delete, cancel_graph_task, pause_cascade) | 5 min | 2026-07-17 | ✅ PASS (16/16, feature/general-hallucination-fix, commit c705a85a, 0 failures) |
 | gii_throttle_regression_test | test/packs/gii_throttle_regression_test.sh | GII throttle + loop breaker coexistence regression: ToolThrottleSlot delegation (getattr None-safety), delay progression (180/300/600/900s, cap holds), agent_node GII detection (counts 3/4/5/6/7+), no-slot-safe, parallel tool calls, error/HumanMessage/non-gii reset, 5 cleanup paths (_loop_breaker_state popped in _cleanup_instance_state, terminate_instance, hard_delete zombie sweep, cancel_graph_task done-branch, pause_instance_cascade), stub attribute sync (_loop_breaker_state declared on all stubs) | 2 min | 2026-07-17 | ✅ PASS (40/40, feature/general-hallucination-fix, 0 failures) |
+| auto_kill_integration_test | tests/tools/test_auto_kill_integration.py | Auto-kill orchestration: tiered cleanup (tier1+tier2 sweep), process tree isolation (siblings/root/children), real-process kills (bash/proc/nohup/setsid orphans), registry error handlers (H1/H2/H3), concurrent cleanup_instance safety, idempotency & no-op edge cases | 2 min | 2026-07-27 | ✅ PASS (27/27 in 6.88s, feature/proc-pid-safety @ fe6a0f21, macOS Apple Silicon, 0 failures) |
 
 ## Mock Test Packs
 
@@ -496,4 +497,3 @@ VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | authz_auto_derive_unit_test | test/packs/authz_auto_derive_unit_test.sh | Spawn/team-member authorization: `_check_team_membership` auto-derive (knowledge→explorer, non-matching category→deny, deny-by-default), ari no-spawn contract (empty team_members + no instance tool). 3 core claim scenarios covered. | 2 min | 2026-07-25 | ✅ PASS (72/72 in ~2s, feature/tool-authz-auto-derive @ b81e455d, 0 failures. +1 NEW test `test_non_agent_backed_category_implies_nothing`. Pack script NEW commit b81e455d) |
-ool). 3 core claim scenarios covered. | 2 min | 2026-07-25 | ✅ PASS (72/72 in ~2s, feature/tool-authz-auto-derive @ b81e455d, 0 failures. +1 NEW test `test_non_agent_backed_category_implies_nothing`. Pack script NEW commit b81e455d) |

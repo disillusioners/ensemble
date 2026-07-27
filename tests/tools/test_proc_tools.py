@@ -62,6 +62,7 @@ import os
 import re
 import sys
 import tempfile
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -1278,3 +1279,1080 @@ class TestMultiChunkSpillover:
                 os.unlink(script_path)
             except OSError:
                 pass
+
+
+# =============================================================================
+# Group 13: PID safety — defense-in-depth kill gates (Layer 1/2/3)
+# =============================================================================
+#
+# ``stop_process`` routes every kill through ``_attempt_kill_signal``, which
+# applies three defense layers BEFORE delivering any signal:
+#
+#   Layer 1 (status gate)   — skip if ``info.status`` is already terminal.
+#   Layer 2 (liveness)      — skip if ``proc.returncode`` is set (OS reaped).
+#   Layer 3 (PID ownership) — ABORT if the PID was recycled to an unrelated
+#                             process (verified via the tracking env var).
+#
+# These tests exercise each layer in isolation by constructing mock
+# ``ProcessInfo`` entries and patching OS-level functions. The mock ``proc``
+# object exposes ``.returncode``, ``.pid``, ``.send_signal``, ``.kill``
+# (``MagicMock`` spies) and ``.wait`` (``AsyncMock``). Tests assert on the
+# spies to verify whether a kill signal was delivered.
+
+
+def _make_pid_safety_info(
+    process_id: str = "proc-deadbeef",
+    instance_id: str = "pid-safety-test",
+    status: str = "running",
+    returncode: int | None = None,
+    tracking_id: str = "",
+    pid: int = 12345,
+):
+    """Build a ``ProcessInfo`` with a fully mocked ``proc`` for PID safety tests.
+
+    The mock ``proc`` exposes ``.returncode``, ``.pid``, ``.send_signal``,
+    ``.kill`` (``MagicMock`` spies), and ``.wait`` (``AsyncMock``). Tests
+    assert on the spies to verify whether a kill signal was delivered.
+    """
+    from daemon.tools.proc_tools import ProcessInfo
+
+    info = ProcessInfo(
+        process_id=process_id,
+        instance_id=instance_id,
+        command="test-command",
+    )
+    info.status = status
+    info.tracking_id = tracking_id
+
+    proc = MagicMock()
+    proc.pid = pid
+    proc.returncode = returncode
+    proc.send_signal = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(
+        return_value=returncode if returncode is not None else 0
+    )
+    info.proc = proc
+
+    return info
+
+
+class TestPIDSafetyStatusGate:
+    """Layer 1 — status gate: ``stop_process`` must skip the kill entirely
+    when ``info.status`` is already terminal.
+
+    Terminal states: ``"exited"``, ``"killed"``, ``"error"``. In all these
+    cases ``stop_process`` returns a success-style idempotency message and
+    does NOT call ``_attempt_kill_signal`` — so no signal of any kind
+    reaches the (possibly recycled) PID.
+    """
+
+    async def test_stop_when_already_exited(self):
+        """``status='exited'`` → idempotent stop, no kill signal sent."""
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(status="exited", returncode=0)
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        # No Error: success-style idempotency message.
+        assert "Error:" not in result, f"Expected success, got: {result}"
+        assert "already stopped" in result.lower(), (
+            f"Expected idempotent message, got: {result}"
+        )
+        # No kill signal sent (any path).
+        assert not mock_killpg.called, (
+            "os.killpg must not be called when status is already terminal"
+        )
+        assert not proc.send_signal.called, (
+            "proc.send_signal must not be called when status is terminal"
+        )
+        assert not proc.kill.called, (
+            "proc.kill must not be called when status is terminal"
+        )
+
+    async def test_stop_when_already_killed(self):
+        """``status='killed'`` → idempotent stop, no kill signal sent."""
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="killed", returncode=-9, tracking_id="proc-deadbeef"
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        assert "Error:" not in result, f"Expected success, got: {result}"
+        assert "already stopped" in result.lower(), (
+            f"Expected idempotent message, got: {result}"
+        )
+        assert not mock_killpg.called
+        assert not proc.send_signal.called
+        assert not proc.kill.called
+
+    async def test_stop_when_already_error(self):
+        """``status='error'`` → idempotent stop, no kill signal sent."""
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="error", returncode=None, tracking_id="proc-deadbeef"
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        assert "Error:" not in result, f"Expected success, got: {result}"
+        assert "already stopped" in result.lower(), (
+            f"Expected idempotent message, got: {result}"
+        )
+        assert not mock_killpg.called
+        assert not proc.send_signal.called
+        assert not proc.kill.called
+
+
+class TestPIDSafetyLiveness:
+    """Layer 2 — liveness check: even when ``status='running'``, if
+    ``proc.returncode`` is already set (the OS has reaped the process),
+    ``_attempt_kill_signal`` must skip the kill, update status to a
+    terminal state, and record the exit code.
+    """
+
+    async def test_stop_when_returncode_set_skips_kill(self):
+        """``status='running'`` but ``proc.returncode=0`` → Layer 2
+        intercepts, no kill signal, status/exit_code updated.
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="running",
+            returncode=0,
+            tracking_id="proc-deadbeef",
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        # Success (no "Error:").
+        assert "Error:" not in result, f"Expected success, got: {result}"
+        # No kill signal sent (Layer 2 intercepted before delivery).
+        assert not mock_killpg.called, (
+            "os.killpg must not be called when returncode is already set"
+        )
+        assert not proc.send_signal.called
+        assert not proc.kill.called
+        # Status updated to terminal.
+        assert info.status in ("exited", "killed"), (
+            f"Expected terminal status, got: {info.status}"
+        )
+        # Exit code recorded.
+        assert info.exit_code == 0, (
+            f"Expected exit_code=0, got: {info.exit_code}"
+        )
+
+    async def test_stop_when_returncode_negative(self):
+        """``status='running'`` but ``proc.returncode=-15`` (SIGTERM) →
+        Layer 2 intercepts, status updated to terminal, exit_code=-15.
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="running",
+            returncode=-15,
+            tracking_id="proc-deadbeef",
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        assert "Error:" not in result, f"Expected success, got: {result}"
+        assert not mock_killpg.called
+        assert not proc.send_signal.called
+        assert not proc.kill.called
+        assert info.status in ("exited", "killed"), (
+            f"Expected terminal status, got: {info.status}"
+        )
+        assert info.exit_code == -15, (
+            f"Expected exit_code=-15, got: {info.exit_code}"
+        )
+
+
+class TestPIDOwnershipVerification:
+    """Layer 3 — PID ownership verification: before sending a kill signal,
+    ``_attempt_kill_signal`` reads back the tracking env var from the live
+    process. If the PID was recycled (env var absent or mismatched), the
+    kill is ABORTED.
+
+    Patch target: ``daemon.tools.proc_tools._verify_pid_ownership``
+    (module-level function called directly by ``_attempt_kill_signal``).
+    Return contract:
+        True  → owned (safe to kill)
+        False → recycled (ABORT kill)
+        None  → undetermined (fail-open, proceed)
+    """
+
+    async def test_recycled_pid_aborts_kill(self):
+        """``_verify_pid_ownership`` returns ``False`` → kill is ABORTED,
+        no signal sent, result surfaces the recycled-PID warning.
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="running",
+            returncode=None,
+            tracking_id="proc-deadbeef",
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=False,
+        ) as mock_verify, \
+             patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        # Layer 3 verification was invoked.
+        assert mock_verify.called, (
+            "_verify_pid_ownership should be called when tracking_id is set"
+        )
+        # NO kill signal sent (any path).
+        assert not mock_killpg.called, (
+            "os.killpg must not be called when PID ownership verification "
+            "reports the PID as recycled"
+        )
+        assert not proc.send_signal.called, (
+            "proc.send_signal must not be called when PID is recycled"
+        )
+        assert not proc.kill.called, (
+            "proc.kill must not be called when PID is recycled"
+        )
+        # Result surfaces the critical/recycled warning.
+        assert "WARNING" in result or "ABORT" in result, (
+            f"Expected PID-recycled warning in result, got: {result}"
+        )
+        # info.status should NOT become "killed" — the kill was aborted,
+        # the process may still be alive. (NOTE: this assertion encodes
+        # the safety contract; if it fails it reveals a bug in
+        # stop_process's post-kill status promotion.)
+        assert info.status != "killed", (
+            f"status should NOT be 'killed' when kill was aborted "
+            f"(PID recycled), got: {info.status}"
+        )
+
+    async def test_undetermined_proceeds_fail_open(self):
+        """``_verify_pid_ownership`` returns ``None`` → fail-open, kill
+        proceeds, status becomes "killed".
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="running",
+            returncode=None,
+            tracking_id="proc-deadbeef",
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=None,
+        ) as mock_verify, \
+             patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        # Layer 3 was consulted.
+        assert mock_verify.called
+        # Kill DOES proceed (fail-open on undetermined).
+        assert mock_killpg.called or info.proc.send_signal.called, (
+            "Expected kill signal on fail-open (None); neither killpg "
+            "nor send_signal was called"
+        )
+        # No false-positive recycled warning.
+        assert "PID ownership verification failed" not in result, (
+            f"Recycled warning should NOT appear on fail-open, got: {result}"
+        )
+        # Status becomes "killed".
+        assert info.status == "killed", (
+            f"Expected status='killed' on fail-open, got: {info.status}"
+        )
+
+    async def test_owned_proceeds_with_kill(self):
+        """``_verify_pid_ownership`` returns ``True`` → PID is ours, kill
+        proceeds, status becomes "killed".
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="running",
+            returncode=None,
+            tracking_id="proc-deadbeef",
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=True,
+        ) as mock_verify, \
+             patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            result = await manager.stop_process(instance_id, process_id)
+
+        # Layer 3 was consulted.
+        assert mock_verify.called
+        # Kill proceeds.
+        assert mock_killpg.called or info.proc.send_signal.called, (
+            "Expected kill signal on owned PID; neither killpg nor "
+            "send_signal was called"
+        )
+        # No false-positive recycled warning.
+        assert "PID ownership verification failed" not in result, (
+            f"Recycled warning should NOT appear on owned PID, got: {result}"
+        )
+        # Status becomes "killed".
+        assert info.status == "killed", (
+            f"Expected status='killed' on owned PID, got: {info.status}"
+        )
+
+
+class TestIdempotentStop:
+    """Double-stopping a process must be safe: the second call returns
+    success without raising or sending another signal.
+    """
+
+    async def test_double_stop_safe(self):
+        """First ``stop_process`` kills the process (status → killed);
+        second ``stop_process`` returns idempotently WITHOUT sending
+        another signal.
+        """
+        from daemon.tools.proc_tools import BackgroundProcessManager
+
+        manager = BackgroundProcessManager()
+        info = _make_pid_safety_info(
+            status="running",
+            returncode=None,
+            tracking_id="proc-deadbeef",
+        )
+        instance_id = info.instance_id
+        process_id = info.process_id
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=True,
+        ), \
+             patch("os.killpg") as mock_killpg, \
+             patch("os.getpgid", return_value=12345):
+            # First stop — kills the process.
+            result1 = await manager.stop_process(instance_id, process_id)
+            assert "Error:" not in result1, f"First stop failed: {result1}"
+            assert info.status == "killed", (
+                f"Expected status='killed' after first stop, got: "
+                f"{info.status}"
+            )
+            calls_after_first = mock_killpg.call_count
+            assert calls_after_first >= 1, (
+                "First stop should have sent at least one kill signal"
+            )
+
+            # Second stop — must be idempotent.
+            result2 = await manager.stop_process(instance_id, process_id)
+            assert "Error:" not in result2, (
+                f"Second stop should be idempotent, got: {result2}"
+            )
+            assert "already stopped" in result2.lower(), (
+                f"Second stop should return idempotent message, got: "
+                f"{result2}"
+            )
+
+            # No additional kill signal sent on the second call.
+            assert mock_killpg.call_count == calls_after_first, (
+                f"Second stop should not send another kill signal: "
+                f"calls={calls_after_first} → {mock_killpg.call_count}"
+            )
+
+
+# =============================================================================
+# Group 13: stop_process defense layers
+# =============================================================================
+
+
+class TestStopProcessDefenseLayers:
+    """Unit tests for the three defense layers in :meth:`stop_process`.
+
+    Each test instantiates a fresh :class:`BackgroundProcessManager`
+    and a real :class:`ProcessInfo`, injects the info into
+    ``manager._processes``, and patches ``sys.platform = "win32"`` so
+    the kill path routes through ``proc.send_signal`` (which we can
+    assert on) rather than ``os.killpg``.
+
+    Layers exercised:
+
+    * **L1 status gate** — already-terminal processes skip the kill.
+    * **L2 liveness check** — ``proc.returncode`` set means already
+      exited; no signal needed.
+    * **L3 ownership check** — ``_verify_pid_ownership`` returns
+      ``True`` / ``None`` (proceed) or ``False`` (abort).
+    """
+
+    async def test_stop_terminal_status_is_idempotent(self):
+        """L1: ``info.status='exited'`` → stop returns idempotently, no signal."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        instance_id = f"test-stop-def-{os.urandom(4).hex()}"
+        process_id = "proc-terminal01"
+
+        proc = MagicMock()
+        proc.pid = 9999
+        proc.send_signal = MagicMock()
+        proc.wait = AsyncMock(return_value=-9)
+        proc.returncode = 0
+
+        info = ProcessInfo(
+            process_id=process_id,
+            instance_id=instance_id,
+            command="echo done",
+            proc=proc,
+            status="exited",
+            exit_code=0,
+        )
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools.BackgroundProcessManager._attempt_kill_signal"
+        ) as helper:
+            with patch("daemon.tools.proc_tools.sys.platform", "win32"):
+                result = await manager.stop_process(
+                    instance_id=instance_id,
+                    process_id=process_id,
+                    force=True,
+                )
+
+        assert "Error:" not in result, f"Unexpected error: {result}"
+        assert "already stopped" in result.lower(), (
+            f"Expected idempotent message, got: {result}"
+        )
+        assert info.status == "exited", (
+            f"Status should remain 'exited', got: {info.status}"
+        )
+        proc.send_signal.assert_not_called()
+        helper.assert_not_called()
+
+    async def test_stop_running_with_returncode_set_reports_exit_code_42(self):
+        """L2: ``proc.returncode=42`` → Layer 2 short-circuits, no signal, status terminal."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        instance_id = f"test-stop-def-{os.urandom(4).hex()}"
+        process_id = "proc-rccode42"
+
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.send_signal = MagicMock()
+        proc.wait = AsyncMock(return_value=42)
+        proc.returncode = 42
+
+        info = ProcessInfo(
+            process_id=process_id,
+            instance_id=instance_id,
+            command="exit 42",
+            proc=proc,
+            status="running",
+        )
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch("daemon.tools.proc_tools.sys.platform", "win32"):
+            result = await manager.stop_process(
+                instance_id=instance_id,
+                process_id=process_id,
+                force=True,
+            )
+
+        assert "Error:" not in result, f"Unexpected error: {result}"
+        assert info.exit_code == 42, (
+            f"Expected exit_code=42, got: {info.exit_code}"
+        )
+        assert info.status in ("exited", "killed"), (
+            f"Expected terminal status, got: {info.status}"
+        )
+        proc.send_signal.assert_not_called()
+
+    async def test_stop_aborts_on_pid_recycling(self, caplog):
+        """L3=False: abort/recycling reported; status MUST NOT be 'killed'.
+
+        The hard ``status != 'killed'`` assertion is intentional — it
+        flags the source bug where ``stop_process`` falls through to
+        ``info.status = "killed"`` even after
+        ``_attempt_kill_signal`` returned ``"aborted_recycled"``. The
+        correct behavior is to leave status untouched so the agent can
+        see that no kill was actually delivered.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        instance_id = f"test-stop-def-{os.urandom(4).hex()}"
+        process_id = "proc-deadbeef"
+        tracking_id = "proc-deadbeef"
+
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.send_signal = MagicMock()
+        proc.wait = AsyncMock(return_value=-9)
+        proc.returncode = None
+
+        info = ProcessInfo(
+            process_id=process_id,
+            instance_id=instance_id,
+            command="sleeper",
+            proc=proc,
+            status="running",
+            tracking_id=tracking_id,
+        )
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=False,
+        ):
+            with patch("daemon.tools.proc_tools.sys.platform", "win32"):
+                with caplog.at_level(
+                    "WARNING", logger="daemon.tools.proc_tools"
+                ):
+                    result = await manager.stop_process(
+                        instance_id=instance_id,
+                        process_id=process_id,
+                        force=True,
+                    )
+
+        proc.send_signal.assert_not_called()
+        text = (result + "\n" + caplog.text).lower()
+        assert "abort" in text or "recycl" in text, (
+            f"Expected abort/recycling mention in response or log, "
+            f"got response={result!r}, log={caplog.text!r}"
+        )
+        assert info.status != "killed", (
+            f"Status should not be 'killed' after PID-recycle abort, "
+            f"got: {info.status!r}"
+        )
+
+    async def test_stop_proceeds_when_verifier_returns_none(self):
+        """L3=None (fail-open): signal proceeds, status='killed'."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        instance_id = f"test-stop-def-{os.urandom(4).hex()}"
+        process_id = "proc-failopen"
+        tracking_id = "proc-failopen"
+
+        proc = MagicMock()
+        proc.pid = 23456
+        proc.send_signal = MagicMock()
+        proc.wait = AsyncMock(return_value=-9)
+        proc.returncode = None
+
+        info = ProcessInfo(
+            process_id=process_id,
+            instance_id=instance_id,
+            command="sleeper",
+            proc=proc,
+            status="running",
+            tracking_id=tracking_id,
+        )
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=None,
+        ):
+            with patch("daemon.tools.proc_tools.sys.platform", "win32"):
+                result = await manager.stop_process(
+                    instance_id=instance_id,
+                    process_id=process_id,
+                    force=True,
+                )
+
+        assert "Error:" not in result, f"Unexpected error: {result}"
+        proc.send_signal.assert_called_once()
+        assert info.status == "killed", (
+            f"Expected status='killed', got: {info.status}"
+        )
+
+    async def test_stop_proceeds_when_verifier_returns_true(self):
+        """L3=True (PID owned): signal proceeds, status='killed'."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        instance_id = f"test-stop-def-{os.urandom(4).hex()}"
+        process_id = "proc-owned"
+        tracking_id = "proc-owned"
+
+        proc = MagicMock()
+        proc.pid = 34567
+        proc.send_signal = MagicMock()
+        proc.wait = AsyncMock(return_value=-9)
+        proc.returncode = None
+
+        info = ProcessInfo(
+            process_id=process_id,
+            instance_id=instance_id,
+            command="sleeper",
+            proc=proc,
+            status="running",
+            tracking_id=tracking_id,
+        )
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=True,
+        ):
+            with patch("daemon.tools.proc_tools.sys.platform", "win32"):
+                result = await manager.stop_process(
+                    instance_id=instance_id,
+                    process_id=process_id,
+                    force=True,
+                )
+
+        assert "Error:" not in result, f"Unexpected error: {result}"
+        proc.send_signal.assert_called_once()
+        assert info.status == "killed", (
+            f"Expected status='killed', got: {info.status}"
+        )
+
+    async def test_double_stop_sends_one_signal(self):
+        """First stop → 1 signal + status killed; second stop idempotent + total count stays 1."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import (
+            BackgroundProcessManager,
+            ProcessInfo,
+        )
+
+        manager = BackgroundProcessManager()
+        instance_id = f"test-stop-def-{os.urandom(4).hex()}"
+        process_id = "proc-twostop"
+        tracking_id = "proc-twostop"
+
+        proc = MagicMock()
+        proc.pid = 45678
+        proc.send_signal = MagicMock()
+        proc.wait = AsyncMock(return_value=-9)
+        proc.returncode = None
+
+        info = ProcessInfo(
+            process_id=process_id,
+            instance_id=instance_id,
+            command="sleeper",
+            proc=proc,
+            status="running",
+            tracking_id=tracking_id,
+        )
+        manager._processes[instance_id] = {process_id: info}
+        proc = info.proc  # local: typed as MagicMock for assertion access
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership",
+            return_value=True,
+        ):
+            with patch("daemon.tools.proc_tools.sys.platform", "win32"):
+                first = await manager.stop_process(
+                    instance_id=instance_id,
+                    process_id=process_id,
+                    force=True,
+                )
+                assert "Error:" not in first, f"First stop error: {first}"
+                assert info.status == "killed", (
+                    f"Expected status='killed' after first stop, "
+                    f"got: {info.status}"
+                )
+
+                second = await manager.stop_process(
+                    instance_id=instance_id,
+                    process_id=process_id,
+                    force=True,
+                )
+
+        assert "Error:" not in second, f"Second stop error: {second}"
+        assert "already stopped" in second.lower(), (
+            f"Expected idempotent message on second stop, got: {second}"
+        )
+        assert proc.send_signal.call_count == 1, (
+            f"Expected exactly 1 send_signal call across both stops, "
+            f"got: {proc.send_signal.call_count}"
+        )
+
+
+class TestVerifyPidOwnershipProcfs:
+    """Layer 3 Linux backend — ``_verify_pid_ownership_procfs``.
+
+    Reads ``/proc/{pid}/environ`` (NUL-separated ``KEY=VALUE`` entries)
+    and decides owned / recycled / fail-open. These tests exercise the
+    ACTUAL parser (no patching of the helper) and feed it synthetic
+    ``/proc/{pid}/environ`` blobs via a mocked ``builtins.open``.
+
+    Contract:
+        True  → marker present with matching value (safe to kill)
+        False → marker absent OR present with a different value (recycled)
+        None  → file unreadable / process gone / permission denied
+    """
+
+    def _make_environ_blob(self, entries: list[tuple[str, str]]) -> bytes:
+        """Build a ``/proc/{pid}/environ``-style blob: NUL-separated ``K=V``."""
+        return "\x00".join(f"{k}={v}" for k, v in entries).encode("utf-8")
+
+    def test_correct_tracking_id_returns_true(self):
+        """Blob contains our marker with the matching value → owned."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        tracking_id = "proc-deadbeef"
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                ("HOME", "/home/tester"),
+                ("ENSEMBLE_PROC_TRACKING_ID", tracking_id),
+                ("LANG", "en_US.UTF-8"),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, tracking_id)
+
+        assert result is True, (
+            f"Expected True for matching tracking id, got: {result!r}"
+        )
+
+    def test_wrong_tracking_id_returns_false(self):
+        """Blob contains the marker key but with a DIFFERENT value → recycled."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                ("ENSEMBLE_PROC_TRACKING_ID", "proc-different"),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for mismatched tracking id, got: {result!r}"
+        )
+
+    def test_missing_env_var_returns_false(self):
+        """Blob has env vars but NOT our marker → recycled (abort)."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                ("HOME", "/home/tester"),
+                ("LANG", "en_US.UTF-8"),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for absent marker, got: {result!r}"
+        )
+
+    def test_marker_as_substring_of_other_value_returns_false(self):
+        """Marker text appears as a substring inside another env var's
+        VALUE — must NOT false-positive match. This is the bug the
+        NUL-split fix prevents (the original ``if needle in data``
+        substring search would incorrectly report owned here).
+        """
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        # An env var whose value CONTAINS the marker string as a substring
+        # but is NOT an exact ``ENSEMBLE_PROC_TRACKING_ID=proc-deadbeef``
+        # entry.
+        blob = self._make_environ_blob(
+            [
+                ("PATH", "/usr/bin:/bin"),
+                (
+                    "SOME_BLOB",
+                    "garbageENSEMBLE_PROC_TRACKING_ID=proc-deadbeefmore_garbage",
+                ),
+            ]
+        )
+
+        fake_fh = MagicMock()
+        fake_fh.read = MagicMock(return_value=blob)
+        fake_fh.__enter__ = MagicMock(return_value=fake_fh)
+        fake_fh.__exit__ = MagicMock(return_value=False)
+
+        with patch("builtins.open", return_value=fake_fh, create=True):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for marker-as-substring case, got: {result!r}. "
+            f"This indicates the procfs parser regressed to substring match."
+        )
+
+    def test_file_not_found_returns_none(self):
+        """``/proc/{pid}/environ`` missing → fail-open (None)."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_procfs
+
+        # ``open`` raises ``FileNotFoundError`` directly (not via __enter__).
+        with patch(
+            "builtins.open",
+            side_effect=FileNotFoundError(
+                "[Errno 2] No such file or directory: '/proc/12345/environ'"
+            ),
+            create=True,
+        ):
+            result = _verify_pid_ownership_procfs(12345, "proc-deadbeef")
+
+        assert result is None, (
+            f"Expected None for missing file (fail-open), got: {result!r}"
+        )
+
+
+class TestVerifyPidOwnershipPs:
+    """Layer 3 macOS / BSD backend — ``_verify_pid_ownership_ps``.
+
+    Runs ``ps eww -p <pid>`` (env block) and a heuristic
+    ``ps -p <pid> -o command=`` to detect the macOS "env not surfaced"
+    case. These tests patch ``subprocess.run`` and feed synthetic
+    outputs.
+
+    Note: ``_verify_pid_ownership_ps`` may call ``subprocess.run`` twice —
+    once for ``ps eww`` and once for the heuristic ``ps -o command=``.
+    Tests use ``side_effect`` to return different values per call.
+
+    Contract:
+        True  → marker found in env block (owned)
+        False → env block surfaced but marker absent / wrong value (recycled)
+        None  → process gone (ps exit≠0), ps unavailable, timeout, or
+                env block not surfaced (macOS limitation for non-bundled
+                CLI children) — fail-open.
+    """
+
+    def test_correct_tracking_id_returns_true(self):
+        """``ps eww`` output contains our marker → owned."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_ps
+
+        tracking_id = "proc-deadbeef"
+        # Realistic ``ps eww`` output: header line + command + env block.
+        ps_eww = (
+            "  PID   TT  STAT      TIME COMMAND\n"
+            "12345   ??  S      0:00.01 /bin/sleep 30 "
+            "PATH=/usr/bin:/bin HOME=/tmp "
+            f"ENSEMBLE_PROC_TRACKING_ID={tracking_id} "
+            "LANG=en_US.UTF-8\n"
+        )
+        # Heuristic ``ps -o command=`` strips env; we don't surface it.
+        ps_cmd = "/bin/sleep 30\n"
+
+        completed_eww = MagicMock()
+        completed_eww.returncode = 0
+        completed_eww.stdout = ps_eww
+        completed_cmd = MagicMock()
+        completed_cmd.returncode = 0
+        completed_cmd.stdout = ps_cmd
+
+        with patch(
+            "daemon.tools.proc_tools.subprocess.run",
+            side_effect=[completed_eww, completed_cmd],
+        ):
+            result = _verify_pid_ownership_ps(12345, tracking_id)
+
+        assert result is True, (
+            f"Expected True for matching marker in ps eww, got: {result!r}"
+        )
+
+    def test_wrong_tracking_id_returns_false(self):
+        """Env block is surfaced but the marker has a different value."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_ps
+
+        ps_eww = (
+            "  PID   TT  STAT      TIME COMMAND\n"
+            "12345   ??  S      0:00.01 /bin/sleep 30 "
+            "PATH=/usr/bin:/bin "
+            "ENSEMBLE_PROC_TRACKING_ID=proc-different\n"
+        )
+        ps_cmd = "/bin/sleep 30\n"
+
+        completed_eww = MagicMock()
+        completed_eww.returncode = 0
+        completed_eww.stdout = ps_eww
+        completed_cmd = MagicMock()
+        completed_cmd.returncode = 0
+        completed_cmd.stdout = ps_cmd
+
+        with patch(
+            "daemon.tools.proc_tools.subprocess.run",
+            side_effect=[completed_eww, completed_cmd],
+        ):
+            result = _verify_pid_ownership_ps(12345, "proc-deadbeef")
+
+        assert result is False, (
+            f"Expected False for mismatched marker (recycled), got: {result!r}"
+        )
+
+    def test_process_not_found_returns_none(self):
+        """``ps`` exits non-zero (process gone) → fail-open (None)."""
+        from daemon.tools.proc_tools import _verify_pid_ownership_ps
+
+        # The heuristic call may still happen AFTER eww; on the
+        # "process gone" path we return early, but provide a fallback
+        # for either ordering.
+        completed_eww = MagicMock()
+        completed_eww.returncode = 1  # ps: process not found
+        completed_eww.stdout = ""
+        completed_fallback = MagicMock()
+        completed_fallback.returncode = 1
+        completed_fallback.stdout = ""
+
+        with patch(
+            "daemon.tools.proc_tools.subprocess.run",
+            side_effect=[completed_eww, completed_fallback],
+        ):
+            result = _verify_pid_ownership_ps(12345, "proc-deadbeef")
+
+        assert result is None, (
+            f"Expected None for ps exit≠0 (fail-open), got: {result!r}"
+        )
+
+
+class TestVerifyPidOwnershipDispatch:
+    """``_verify_pid_ownership`` dispatches to the platform-specific
+    backend based on ``sys.platform``. These tests verify the
+    dispatch wiring without exercising the real backends.
+    """
+
+    def test_linux_dispatches_to_procfs(self):
+        """``sys.platform == 'linux'`` → ``_verify_pid_ownership_procfs``."""
+        from daemon.tools.proc_tools import (
+            _verify_pid_ownership,
+            _verify_pid_ownership_procfs,
+        )
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership_procfs",
+            return_value=True,
+        ) as mock_procfs, patch(
+            "daemon.tools.proc_tools.sys.platform", "linux"
+        ):
+            result = _verify_pid_ownership(12345, "proc-deadbeef")
+
+        mock_procfs.assert_called_once_with(12345, "proc-deadbeef")
+        assert result is True, (
+            f"Expected True (procfs mock return), got: {result!r}"
+        )
+        # Sanity: confirm we patched the right symbol.
+        assert _verify_pid_ownership_procfs is not None
+
+    def test_macos_dispatches_to_ps(self):
+        """``sys.platform == 'darwin'`` → ``_verify_pid_ownership_ps``."""
+        from daemon.tools.proc_tools import (
+            _verify_pid_ownership,
+            _verify_pid_ownership_ps,
+        )
+
+        with patch(
+            "daemon.tools.proc_tools._verify_pid_ownership_ps",
+            return_value=True,
+        ) as mock_ps, patch(
+            "daemon.tools.proc_tools.sys.platform", "darwin"
+        ):
+            result = _verify_pid_ownership(12345, "proc-deadbeef")
+
+        mock_ps.assert_called_once_with(12345, "proc-deadbeef")
+        assert result is True, (
+            f"Expected True (ps mock return), got: {result!r}"
+        )
+        # Sanity: confirm we patched the right symbol.
+        assert _verify_pid_ownership_ps is not None
