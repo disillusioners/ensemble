@@ -975,10 +975,18 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         Non-blocking: returns immediately with an async hint. The governor's
         completion report arrives as a new message to the caller.
         """
-        if councilor_skill is None or not councilor_skill.strip():
+        if councilor_skill is None:
             raise ValueError(
                 "councilor_skill is required for convene_council_with_skill"
             )
+        councilor_skill = councilor_skill.strip()
+        if not councilor_skill:
+            raise ValueError(
+                "councilor_skill is required for convene_council_with_skill"
+            )
+        # Reject newlines to prevent governor prompt injection
+        if "\n" in councilor_skill or "\r" in councilor_skill:
+            raise ValueError("councilor_skill must not contain newlines")
 
         from ..registry import get_registry
 
@@ -1376,6 +1384,7 @@ Returns:
         spawn_councilor,          # Phase 2: council category — governor-only
         clear_councilor_errors,   # Phase 2: council category — governor-only
         convene_council,          # Council category — team-membership authorized
+        convene_council_with_skill,  # Council category — team-membership authorized (skill-injection variant)
         send_message,
         terminate_instance,
         list_instances,
