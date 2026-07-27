@@ -54,6 +54,18 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+
+# Cap on the size of the log tail attached to crash diagnostic messages.
+# Bounds exception messages and the resulting 503 JSON response so a single
+# pathological multi-MB line from code-server cannot bloat the error payload.
+# 16 KB is generous for a "why did it die" diagnostic.
+VSCODE_CRASH_LOG_TAIL_MAX_BYTES: int = 16 * 1024  # 16 KB
+
+
+# ---------------------------------------------------------------------------
 # Custom exceptions
 # ---------------------------------------------------------------------------
 
@@ -640,10 +652,78 @@ class VSCodeServerManager:
                 self._process is not None
                 and self._process.returncode is not None
             ):
-                raise VSCodeServerStartError(
-                    "code-server exited during startup "
+                # Surface the crash output so the operator can see why
+                # code-server failed (e.g. bind error, missing dependency).
+                # Decode the in-memory log buffer and take the tail of the
+                # last ~50 lines. This buffer is bounded by
+                # VSCODE_LOG_BUFFER_LIMIT (with oldest-half spill), so it
+                # is always bounded in size.
+                log_tail = ""
+                if self.state.log_buffer:
+                    try:
+                        decoded = self.state.log_buffer.decode(
+                            "utf-8", errors="replace"
+                        )
+                        lines = decoded.strip().splitlines()
+                        log_tail = "\n".join(lines[-50:])
+                    except Exception as exc:
+                        log_tail = ""
+                        logger.debug(
+                            "vscode log buffer decode failed: %s", exc
+                        )
+
+                # Cap total tail size to avoid bloating the exception /
+                # 503 response with a single pathological multi-MB line.
+                # 16 KB is generous for a "why did it die" diagnostic.
+                tail_bytes = log_tail.encode("utf-8", errors="replace")
+                if len(tail_bytes) > VSCODE_CRASH_LOG_TAIL_MAX_BYTES:
+                    log_tail = (
+                        tail_bytes[:VSCODE_CRASH_LOG_TAIL_MAX_BYTES]
+                        .decode("utf-8", errors="replace")
+                        + "\n... [truncated]"
+                    )
+
+                # Record exit_code and last_error BEFORE flipping status
+                # so the crash is observable via get_status() / the API,
+                # not just via the exception string. Mirrors the
+                # watchdog's behavior on unexpected runtime exits. Status
+                # stays "stopped" (NOT "crashed") for consistency with the
+                # spawn-failure paths.
+                self.state.exit_code = self._process.returncode
+                self.state.last_error = (
+                    f"code-server exited during startup "
                     f"(code={self._process.returncode})"
                 )
+
+                # Mark state stopped before raising so callers and the
+                # watchdog don't leave the manager stuck in "starting".
+                self.state.status = "stopped"
+
+                # Cancel the reader task so it doesn't outlive the
+                # manager on this crash path (CancelledError is re-raised
+                # in _reader_loop, which is the normal teardown shape).
+                if (
+                    self.state.reader_task is not None
+                    and not self.state.reader_task.done()
+                ):
+                    self.state.reader_task.cancel()
+
+                logger.error(
+                    "code-server exited during startup (code=%s)"
+                    "\n--- code-server output (tail) ---\n%s",
+                    self._process.returncode,
+                    log_tail or "<empty>",
+                )
+
+                msg = (
+                    f"code-server exited during startup "
+                    f"(code={self._process.returncode})"
+                )
+                if log_tail:
+                    msg += (
+                        f"\n--- code-server output (tail) ---\n{log_tail}"
+                    )
+                raise VSCodeServerStartError(msg)
 
     async def _reader_loop(self) -> None:
         """Read merged stdout+stderr into memory + spill file. Parse port.

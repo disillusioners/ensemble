@@ -37,8 +37,10 @@ import pytest
 from daemon.config import VSCodeConfig
 from daemon.constants import VSCODE_PID_FILENAME
 from daemon.services.vscode_server_manager import (
+    VSCODE_CRASH_LOG_TAIL_MAX_BYTES,
     VSCodeServerManager,
     VSCodeServerNotInstalledError,
+    VSCodeServerStartError,
     VSCodeServerState,
     VSCodeServerTimeoutError,
 )
@@ -1288,3 +1290,344 @@ class TestVSCodeServerManager:
 
         assert manager.get_port() == 45678
         await manager.cleanup()
+
+    # ── _wait_for_port() crash path: log buffer surfaced on startup exit ──
+
+    async def test_wait_for_port_surfaces_log_buffer_on_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When code-server exits during startup, the crash exception
+        surfaces the last ~50 lines of the in-memory log buffer so the
+        operator can see WHY it died (bind error, missing dep, etc.).
+
+        Drives ``_wait_for_port()`` directly with a ``FakeProcess`` whose
+        ``returncode`` is already set on entry — first poll iteration
+        detects the exit and raises with the buffered output appended.
+        """
+        manager = make_manager(tmp_path)
+        # Tighten the poll interval so the test runs in milliseconds.
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Pre-populate the log buffer with content that should appear
+        # in the raised exception's message.
+        known = b"fatal: cannot bind port"
+        manager.state.log_buffer.extend(
+            b"some startup line\n" + known + b"\nanother diagnostic line\n"
+        )
+
+        # Fake process has already exited (returncode != None) on entry.
+        fake_proc = FakeProcess(pid=12345, returncode=137)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+        # Port is None → the while loop runs at least once.
+
+        with pytest.raises(VSCodeServerStartError) as exc_info:
+            await manager._wait_for_port()
+
+        msg = str(exc_info.value)
+        # The exception message includes both the exit-code header AND
+        # the buffered output, separated by the marker line.
+        assert "code-server output (tail)" in msg
+        assert known.decode() in msg
+        # Header line is preserved.
+        assert "code-server exited during startup" in msg
+
+    async def test_wait_for_port_empty_log_buffer_clean_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the log buffer is empty, the exception message stays clean
+        (no spurious ``--- code-server output (tail) ---`` marker).
+
+        Mirrors the populated-buffer test but with an empty buffer to
+        verify the conditional branch where ``log_tail`` is falsy.
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Log buffer is empty by default (bytearray factory).
+        assert len(manager.state.log_buffer) == 0
+
+        fake_proc = FakeProcess(pid=12345, returncode=1)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with pytest.raises(VSCodeServerStartError) as exc_info:
+            await manager._wait_for_port()
+
+        msg = str(exc_info.value)
+        # Header is still present.
+        assert "code-server exited during startup" in msg
+        # But the tail marker MUST NOT appear — empty buffer means no tail.
+        assert "code-server output (tail)" not in msg
+
+    async def test_wait_for_port_crash_resets_status_to_stopped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After the startup crash, ``state.status`` is ``"stopped"`` —
+        callers (and the watchdog) must not see the manager stuck in
+        ``"starting"`` forever after a failed spawn.
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        fake_proc = FakeProcess(pid=12345, returncode=139)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with pytest.raises(VSCodeServerStartError):
+            await manager._wait_for_port()
+
+        assert manager.state.status == "stopped"
+
+    async def test_wait_for_port_crash_cancels_reader_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On startup crash, the still-running reader task is cancelled
+        so it doesn't outlive the manager on this path.
+
+        ``_wait_for_port()`` MUST call ``.cancel()`` on
+        ``state.reader_task`` when the task is present and not done.
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Build a fake reader task that records cancel() calls and
+        # reports itself as not-yet-done so the cancel branch is taken.
+        class FakeTask:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def done(self) -> bool:
+                return False
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+        fake_task = FakeTask()
+        manager.state.reader_task = fake_task  # type: ignore[assignment]
+
+        fake_proc = FakeProcess(pid=12345, returncode=2)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with pytest.raises(VSCodeServerStartError):
+            await manager._wait_for_port()
+
+        assert fake_task.cancelled is True, (
+            "reader_task.cancel() must be called when the process "
+            "exits during startup"
+        )
+
+    async def test_wait_for_port_crash_logs_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        """The crash path emits a ``logger.error(...)`` carrying the exit
+        code (and the buffered output if non-empty) so operators have a
+        persistent log record, not just the in-flight exception.
+        """
+        import logging
+
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Pre-populate buffer so the log line carries the tail marker
+        # (this exercises the full log path, not just the empty branch).
+        manager.state.log_buffer.extend(
+            b"some diagnostic line\nfatal: cannot bind port\n"
+        )
+
+        fake_proc = FakeProcess(pid=12345, returncode=42)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with caplog.at_level(
+            logging.ERROR, logger="daemon.services.vscode_server_manager"
+        ):
+            with pytest.raises(VSCodeServerStartError):
+                await manager._wait_for_port()
+
+        # At least one ERROR record was emitted, and it carries BOTH the
+        # startup message and the exit code (42) so the operator can
+        # match it against logs. Asserting on both substrings prevents
+        # false positives from unrelated log lines that happen to
+        # contain "42".
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(error_records) >= 1
+        assert any(
+            "code-server exited during startup" in r.getMessage()
+            and "code=42" in r.getMessage()
+            for r in error_records
+        ), (
+            f"expected startup message + exit code in error log; got: "
+            f"{[r.getMessage() for r in error_records]}"
+        )
+
+    async def test_wait_for_port_crash_reader_task_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``state.reader_task`` is ``None`` at crash time, the
+        ``is not None`` guard prevents an ``AttributeError`` and the
+        crash path still raises ``VSCodeServerStartError``.
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # No reader task assigned (e.g. caller constructed a manager
+        # directly without going through start()).
+        manager.state.reader_task = None  # type: ignore[assignment]
+
+        fake_proc = FakeProcess(pid=12345, returncode=2)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        # MUST NOT raise AttributeError; the is-not-None guard takes the
+        # skip path and the function still raises VSCodeServerStartError.
+        with pytest.raises(VSCodeServerStartError):
+            await manager._wait_for_port()
+
+    async def test_wait_for_port_crash_reader_task_already_done(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the reader task is already ``done()`` at crash time, its
+        ``.cancel()`` MUST NOT be called — cancelling a finished task is
+        a no-op but can still raise ``InvalidStateError`` in some event
+        loop implementations and clutters cancellation accounting.
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Fake reader task that has already finished.
+        class DoneTask:
+            def __init__(self) -> None:
+                self.cancel_called = False
+
+            def done(self) -> bool:
+                return True
+
+            def cancel(self) -> None:
+                # If the guard is missing, this would be called and we
+                # would see the test fail.
+                self.cancel_called = True
+
+        fake_task = DoneTask()
+        manager.state.reader_task = fake_task  # type: ignore[assignment]
+
+        fake_proc = FakeProcess(pid=12345, returncode=2)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with pytest.raises(VSCodeServerStartError):
+            await manager._wait_for_port()
+
+        # ``not done()`` guard: cancel() is NOT called for a finished task.
+        assert fake_task.cancel_called is False, (
+            "reader_task.cancel() must NOT be called when the task is "
+            "already done"
+        )
+
+    async def test_wait_for_port_crash_caps_long_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pathological multi-MB line in the log buffer MUST be capped
+        so it cannot bloat the exception message / 503 HTTP response.
+
+        Verifies the ``VSCODE_CRASH_LOG_TAIL_MAX_BYTES`` cap and the
+        ``[truncated]`` marker on the tail.
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Single line that exceeds the cap by a wide margin.
+        huge_line = b"X" * (VSCODE_CRASH_LOG_TAIL_MAX_BYTES * 4)
+        manager.state.log_buffer.extend(huge_line + b"\n")
+
+        fake_proc = FakeProcess(pid=12345, returncode=99)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with pytest.raises(VSCodeServerStartError) as exc_info:
+            await manager._wait_for_port()
+
+        msg = str(exc_info.value)
+
+        # Truncation marker is present so the operator knows content
+        # was elided.
+        assert "[truncated]" in msg, (
+            f"exception message must contain [truncated] marker when "
+            f"tail exceeds cap; got first 200 chars: {msg[:200]!r}"
+        )
+
+        # The huge marker bytes (millions of X's) MUST NOT all appear in
+        # the message. The cap is a hard upper bound on the tail.
+        # We check that the message length is bounded well below the
+        # un-truncated size (which would be 64 KB just for the X's,
+        # plus header/marker).
+        assert len(msg) < VSCODE_CRASH_LOG_TAIL_MAX_BYTES + 512, (
+            f"exception message should be bounded by cap + small "
+            f"overhead; got len={len(msg)}, "
+            f"cap={VSCODE_CRASH_LOG_TAIL_MAX_BYTES}"
+        )
+        # Sanity: the X content is present (we kept up to the cap).
+        assert "X" in msg
+
+    async def test_wait_for_port_crash_sets_exit_code_and_last_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On the startup crash branch, ``state.exit_code`` MUST equal
+        the process returncode AND ``state.last_error`` MUST contain
+        the startup-exit message so the crash is observable via
+        ``get_status()`` / the API (mirroring the watchdog's runtime
+        crash behavior).
+        """
+        manager = make_manager(tmp_path)
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_PORT_DETECTION_POLL_S",
+            0.001,
+        )
+
+        # Sanity: clean state before the crash.
+        assert manager.state.exit_code is None
+        assert manager.state.last_error is None
+
+        fake_proc = FakeProcess(pid=12345, returncode=137)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.status = "starting"
+
+        with pytest.raises(VSCodeServerStartError):
+            await manager._wait_for_port()
+
+        # exit_code is the process returncode.
+        assert manager.state.exit_code == 137
+        # last_error carries the startup-exit message.
+        assert manager.state.last_error is not None
+        assert "code-server exited during startup" in (
+            manager.state.last_error
+        )
+        # And the exit code is embedded so operators can correlate.
+        assert "code=137" in manager.state.last_error
+        # Status stays "stopped" (NOT "crashed") per the constraint.
+        assert manager.state.status == "stopped"
