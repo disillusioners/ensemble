@@ -27,6 +27,7 @@ Critical assertions (per Phase 2 plan):
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -637,3 +638,422 @@ class TestGovernorCouncilToolsWiring:
             f"clear_councilor_errors must have _tool_category='council'; "
             f"got: {getattr(clear_errors, '_tool_category', None)!r}"
         )
+
+
+# =============================================================================
+# Tests for convene_council_with_skill
+# =============================================================================
+
+
+class TestConveneCouncilWithSkill:
+    """Behavior of the skill-passthrough council convening tool.
+
+    Mirrors :class:`TestConveneCouncil` for ``convene_council`` but adds a
+    REQUIRED ``councilor_skill`` parameter that is (a) validated up-front,
+    (b) forwarded to the governor's request message, and (c) echoed in the
+    result dict. An optional defensive skill-existence check emits a
+    WARNING (never blocks) when the named skill is absent from both the
+    ``skills`` and ``skill_bank`` tables.
+    """
+
+    async def test_convene_council_with_skill_happy_path(self):
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            result = await convene.coroutine(
+                councilor_agent_id="developer",
+                request="Audit security",
+                councilor_skill="code-review",
+            )
+
+        manager.spawn_instance.assert_called_once_with(
+            agent_id="governor",
+            parent_id="parent-instance-id",
+            instance_name=None,
+        )
+        manager.enqueue_message.assert_awaited_once()
+        enqueue_kwargs = manager.enqueue_message.await_args.kwargs
+        assert enqueue_kwargs["instance_id"] == "governor-instance-id"
+        assert "Councilor skill: code-review" in enqueue_kwargs["message"]
+        assert 'councilor_agent_id="developer"' in enqueue_kwargs["message"]
+        assert "Request: Audit security" in enqueue_kwargs["message"]
+        assert "all available" in enqueue_kwargs["message"]
+        assert "governor decides" in enqueue_kwargs["message"]
+        assert result["status"] == "convened"
+        assert result["governor_instance_id"] == "governor-instance-id"
+        assert result["councilor_skill"] == "code-review"
+        assert result["hint"]
+
+    async def test_convene_council_with_skill_non_blocking(self):
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            result = await convene.coroutine(
+                councilor_agent_id="developer",
+                request="Audit security",
+                councilor_skill="code-review",
+            )
+
+        assert result["status"] == "convened"
+        manager.spawn_instance.assert_called_once()
+        manager.enqueue_message.assert_awaited_once()
+        assert not any(
+            name.startswith(("wait_for_", "await_"))
+            for name, _args, _kwargs in manager.mock_calls
+        )
+
+    async def test_convene_council_with_skill_empty_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            with pytest.raises(ValueError, match="councilor_skill is required"):
+                await convene.coroutine(
+                    councilor_agent_id="developer",
+                    request="Audit security",
+                    councilor_skill="",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_convene_council_with_skill_whitespace_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            with pytest.raises(ValueError, match="councilor_skill is required"):
+                await convene.coroutine(
+                    councilor_agent_id="developer",
+                    request="Audit security",
+                    councilor_skill="   ",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_convene_council_with_skill_none_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            with pytest.raises(ValueError, match="councilor_skill is required"):
+                await convene.coroutine(
+                    councilor_agent_id="developer",
+                    request="Audit security",
+                    councilor_skill=None,
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_convene_council_with_skill_invalid_councilor_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with patch(
+            "daemon.registry.AgentRegistry.resolve_to_id",
+            return_value=None,
+        ):
+            with pytest.raises(ValueError, match="bad-councilor"):
+                await convene.coroutine(
+                    councilor_agent_id="bad-councilor",
+                    request="Audit security",
+                    councilor_skill="code-review",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_convene_council_with_skill_no_team_membership_raises(self):
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value="Error: not authorized",
+            ),
+        ):
+            with pytest.raises(ValueError, match="authorized"):
+                await convene.coroutine(
+                    councilor_agent_id="developer",
+                    request="Audit security",
+                    councilor_skill="code-review",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_convene_council_with_skill_optional_models_and_max(self):
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            await convene.coroutine(
+                councilor_agent_id="developer",
+                request="Audit security",
+                councilor_skill="code-review",
+                models=["gpt-4o", "claude-3-5-sonnet"],
+                max_councilors=3,
+                instance_name="my-council",
+            )
+
+        manager.spawn_instance.assert_called_once_with(
+            agent_id="governor",
+            parent_id="parent-instance-id",
+            instance_name="my-council",
+        )
+        manager.enqueue_message.assert_awaited_once()
+        enqueue_kwargs = manager.enqueue_message.await_args.kwargs
+        assert enqueue_kwargs["instance_id"] == "governor-instance-id"
+        assert "Models: gpt-4o, claude-3-5-sonnet" in enqueue_kwargs["message"]
+        assert "Max councilors: 3" in enqueue_kwargs["message"]
+        assert "Councilor skill: code-review" in enqueue_kwargs["message"]
+
+    async def test_convene_council_with_skill_special_chars(self):
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+        ):
+            result = await convene.coroutine(
+                councilor_agent_id="developer",
+                request="Audit security",
+                councilor_skill="code-review-v2!",
+            )
+
+        enqueue_kwargs = manager.enqueue_message.await_args.kwargs
+        assert "Councilor skill: code-review-v2!" in enqueue_kwargs["message"]
+        assert result["councilor_skill"] == "code-review-v2!"
+
+    async def test_convene_council_with_skill_missing_skill_warns_but_proceeds(
+        self, caplog
+    ):
+        """Defensive skill lookup finds nothing → WARNING logged, still convenes."""
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        manager._skill_repo = MagicMock()
+        manager._skill_repo.get_by_name = MagicMock(return_value=None)
+        manager._skill_bank_repo = MagicMock()
+        manager._skill_bank_repo.get_by_name_any_agent = MagicMock(
+            return_value=None
+        )
+        manager._instance_repository = MagicMock()
+        manager._instance_repository.get = MagicMock(
+            return_value=MagicMock(project_id="proj-1")
+        )
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+            caplog.at_level(logging.WARNING, logger="daemon.tools.instance"),
+        ):
+            result = await convene.coroutine(
+                councilor_agent_id="developer",
+                request="Audit security",
+                councilor_skill="nonexistent-skill",
+            )
+
+        # Does not raise; spawn + enqueue DID happen.
+        assert result["status"] == "convened"
+        manager.spawn_instance.assert_called_once()
+        manager.enqueue_message.assert_awaited_once()
+        # A warning containing the missing skill name was logged.
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "nonexistent-skill" in r.getMessage() for r in warning_records
+        ), (
+            f"Expected a WARNING mentioning 'nonexistent-skill'; "
+            f"got records: {[r.getMessage() for r in warning_records]}"
+        )
+
+    async def test_convene_council_with_skill_found_skill_no_warn(self, caplog):
+        """When the defensive lookup finds the skill, NO warning is logged."""
+        manager = _make_manager(spawn_result=("governor-instance-id", None))
+        manager.enqueue_message = AsyncMock()
+        manager._skill_repo = MagicMock()
+        manager._skill_repo.get_by_name = MagicMock(return_value=MagicMock())
+        manager._skill_bank_repo = MagicMock()
+        manager._skill_bank_repo.get_by_name_any_agent = MagicMock(
+            return_value=None
+        )
+        manager._instance_repository = MagicMock()
+        manager._instance_repository.get = MagicMock(
+            return_value=MagicMock(project_id="proj-1")
+        )
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with (
+            patch(
+                "daemon.registry.AgentRegistry.resolve_to_id",
+                return_value="developer",
+            ),
+            patch(
+                "daemon.tools.instance._check_team_membership",
+                return_value=None,
+            ),
+            caplog.at_level(logging.WARNING, logger="daemon.tools.instance"),
+        ):
+            result = await convene.coroutine(
+                councilor_agent_id="developer",
+                request="Audit security",
+                councilor_skill="code-review",
+            )
+
+        assert result["status"] == "convened"
+        manager.spawn_instance.assert_called_once()
+        manager.enqueue_message.assert_awaited_once()
+        # NO warning about a missing skill should be logged.
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert not any(
+            "not found in skills or skill_bank" in r.getMessage()
+            for r in warning_records
+        ), (
+            f"No skill-miss warning expected; got: "
+            f"{[r.getMessage() for r in warning_records]}"
+        )
+
+    def test_convene_council_with_skill_registered_as_council_category(self):
+        """Integration: both convene_council variants are registered tools."""
+        manager = _make_manager()
+
+        patches = _patch_heavy_helpers()
+        for p in patches:
+            p.start()
+        try:
+            from daemon.tools.instance import create_instance_tools
+
+            tools = create_instance_tools(
+                manager,
+                "parent-instance-id",
+                "leader",
+            )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        tool_names = [getattr(t, "name", None) for t in tools]
+        assert "convene_council_with_skill" in tool_names, (
+            f"convene_council_with_skill missing from tool list; "
+            f"got: {tool_names}"
+        )
+        assert "convene_council" in tool_names, (
+            f"convene_council must still be present (no conflict); "
+            f"got: {tool_names}"
+        )
+
+    async def test_convene_council_with_skill_skill_check_after_authorization(self):
+        """Order-of-validation: the councilor_skill check runs FIRST.
+
+        The implementation validates councilor_skill (ValueError) before
+        resolve_to_id and before _check_team_membership. Patching
+        _check_team_membership to return a blocking error string must NOT
+        surface that error when councilor_skill is empty — the
+        councilor_skill ValueError wins.
+        """
+        manager = _make_manager()
+        manager.enqueue_message = AsyncMock()
+        convene = _get_tool(manager, "convene_council_with_skill")
+
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value="blocked",
+        ):
+            with pytest.raises(ValueError, match="councilor_skill is required"):
+                await convene.coroutine(
+                    councilor_agent_id="developer",
+                    request="Audit security",
+                    councilor_skill="",
+                )
+
+        manager.spawn_instance.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
