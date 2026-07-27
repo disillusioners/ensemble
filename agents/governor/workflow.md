@@ -31,6 +31,14 @@ Before doing anything else, validate the inputs.
    - Must be clear and unambiguous
    - If unclear → ask the requester to clarify before proceeding
    - The same request will be forwarded to every councilor
+
+4. councilor_skill (OPTIONAL):
+   - Only present when the convening came through `convene_council_with_skill`
+   - Appears in the convening message as a line beginning with `Councilor skill:`
+   - If present: parse the skill name from that line and store it as `councilor_skill`
+   - If absent (regular `convene_council`): leave `councilor_skill` unset / None
+   - When set, the value MUST be passed as the `load_skill` parameter on
+     EVERY councilor dispatch `send_message` call (Step 2)
 ```
 
 If any validation fails, STOP. Do not proceed to Step 0.5. Do not persist a manifest.
@@ -173,7 +181,22 @@ Send the **same** composed request to every spawned councilor. Track every dispa
 ```raw
 For each councilor in manifest (status = SPAWNED):
   1. composed_message = <read_only_directive> + "\n\n" + <the request>
-  2. result = send_message(instance_id = <councilor_id>, message = composed_message)
+  2. Dispatch (skill-aware):
+     - If `councilor_skill` was set in Step 0 (convening came through
+       `convene_council_with_skill`):
+         result = send_message(
+             instance_id = <councilor_id>,
+             message     = composed_message,
+             load_skill  = councilor_skill
+         )
+       # The `load_skill` parameter MUST be passed on EVERY councilor dispatch
+       # when the convening message contained a "Councilor skill:" line —
+       # not just the first councilor, not just a subset. Apply it uniformly.
+     - Otherwise (regular `convene_council`, no skill directive):
+         result = send_message(
+             instance_id = <councilor_id>,
+             message     = composed_message
+         )
 
   3. If result indicates success:
      → Update manifest:
@@ -190,6 +213,27 @@ For each councilor in manifest (status = SPAWNED):
 
   5. Update shared_context_metadata
 ```
+
+**Skill-aware dispatch (mandatory when present):** If the convening message contained a `Councilor skill:` line (parsed into `councilor_skill` in Step 0), you MUST pass that skill name as the `load_skill` parameter in EVERY councilor dispatch `send_message` call — initial dispatch and every refinement / re-query message. Do not omit it for any councilor; do not omit it on later rounds. With-skill form:
+
+```
+result = send_message(
+    instance_id = <councilor_id>,
+    message     = composed_message,
+    load_skill  = councilor_skill
+)
+```
+
+Without-skill form (regular `convene_council`, no directive):
+
+```
+result = send_message(
+    instance_id = <councilor_id>,
+    message     = composed_message
+)
+```
+
+The two forms differ only in the `load_skill` parameter; everything else is identical.
 
 **W1 correction:** This is **validate-all-then-dispatch**, NOT a sequential spawn-send loop. All spawns complete first (Step 1), then all dispatches (Step 2). This allows per-state compensation if any step fails.
 

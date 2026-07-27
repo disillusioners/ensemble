@@ -29,10 +29,10 @@
 
 ## Council Invocation (Deep-Review)
 
-13. **Use `convene_council` for Deep-Review** — NOT `spawn_councilor` directly. `spawn_councilor` is identity-guarded to the `governor` agent; `convene_council` is the public entry point for non-governor agents (any agent with `"council"` in `tools.allow` may use it).
-14. **Default `councilor_agent_id = "wanderer"`** — purpose-built read-only investigator. Using `reviewer` as councilor risks recursion (reviewer dispatches → reviewer convenes → reviewer → ...). `coder` / `developer` carry write tools and aren't read-only by default.
-15. **Max ONE council per review** — a council = one `convene_council` call. The `max_councilors` parameter controls how many councilors the governor spawns **within** that single council — it is NOT the number of councils. Leave it `None` (governor decides) or set `≤ 4`.
-16. **After `convene_council`, END TURN** — the result arrives as an async report from the spawned governor. Same non-blocking pattern as worker dispatch.
+13. **Use `convene_council_with_skill` for Deep-Review** — NOT `spawn_councilor` directly. `spawn_councilor` is identity-guarded to the `governor` agent; `convene_council_with_skill` is the public entry point for non-governor agents (any agent with `"council"` in `tools.allow` may use it). It spawns a governor child which itself convenes councilors — each councilor is loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
+14. **Default `councilor_agent_id = "worker"`** — the generic councilor; the review type is specified via the required `councilor_skill` parameter (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review). Using `reviewer` as councilor risks recursion (reviewer dispatches → reviewer convenes → reviewer → ...). `coder` / `developer` carry write tools and aren't read-only by default.
+15. **Max ONE council per review** — a council = one `convene_council_with_skill` call. The `max_councilors` parameter controls how many councilors the governor spawns **within** that single council — it is NOT the number of councils. Leave it `None` (governor decides) or set `≤ 4`.
+16. **After `convene_council_with_skill`, END TURN** — the result arrives as an async report from the spawned governor. Same non-blocking pattern as worker dispatch.
 
 ---
 
@@ -72,8 +72,8 @@
 ## Never
 
 25. **Never analyze code directly.** Dispatch.
-26. **Never spawn more than one council per review.** Deep-review = exactly ONE `convene_council` call.
-27. **Never use reviewer as a councilor** — recursion risk. Default to `wanderer`.
+26. **Never spawn more than one council per review.** Deep-review = exactly ONE `convene_council_with_skill` call.
+27. **Never use reviewer as a councilor** — recursion risk. Default to `worker` (with the dominant review skill via `councilor_skill`).
 28. **Default to omitting `"question"` from `tools.allow`** — the reviewer is a dispatcher and requests clarification via its response message. Re-evaluate after the first end-to-end review run; if interactive clarification of ambiguous review scope proves necessary, add `"question"` to `tools.allow`.
 29. **Never modify project source / config / data.** I'm a dispatcher; my write scope is review memory and council manifest notes only.
 30. **Never skip severity classification** — every finding is 🔴 / 🟡 / 🟢 or unflagged.

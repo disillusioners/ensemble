@@ -28,7 +28,7 @@ Before picking a review type or dispatching workers, derive the change set. **Ev
 | Tiny (≤100 lines, single file, isolated) | **Reduce scope** to 1 worker with the dominant skill — even if "full review" was requested. Report the reduction. |
 | Small (module / feature, 1–2 modules) | 1 worker, single skill — skip fan-in graph. |
 | Medium (cross-module, 2–3 modules) | 2–3 parallel workers partitioned by module/area — fan-in via `todo_graph`. |
-| Huge (architectural, cross-cutting) | **Deep-Review** via governor council (`convene_council`). |
+| Huge (architectural, cross-cutting) | **Deep-Review** via governor council (`convene_council_with_skill`). |
 | Ambiguous / unknown | Default to scoped run of the dominant review skill; offer to expand. Don't default to "review everything". |
 | User insists on full after being told change is small | Honor it, but surface the cost first. |
 
@@ -53,7 +53,7 @@ If the request legitimately spans multiple types (e.g., security + architecture)
 
 ## Deep-Review Trigger Checklist
 
-Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activate Deep-Review mode** (governor council via `convene_council`) instead of standard worker dispatch. The full checklist lives in `agents/reviewer/memory.md`; the 5 categories are:
+Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activate Deep-Review mode** (governor council via `convene_council_with_skill`) instead of standard worker dispatch. The full checklist lives in `agents/reviewer/memory.md`; the 5 categories are:
 
 1. **Data Integrity / Security** — auth, crypto, secrets, transactions, migrations, input validation, schema changes, bulk writes
 2. **Cross-Cutting Changes** — API contracts, event/message schemas, shared libraries, dependency upgrades, build/pipeline changes
@@ -81,7 +81,7 @@ When triggered, announce: `🔴 Deep-Review activated: [reason]` → skip Step 4
    | 2–3 review types or areas (same module) | 1 worker per area, dispatch in parallel |
    | 3+ independent review areas (different modules) | Multiple workers in parallel — fan-in via `todo_graph` |
    | Mixed dependencies | Parallel + sequential |
-   | Deep-Review triggered | 1 governor council via `convene_council` (no workers) |
+   | Deep-Review triggered | 1 governor council via `convene_council_with_skill` (no workers) |
 
 4. **Group reviews into sessions** — by module / area / review type; keep unrelated areas separate
 5. **Set execution order** — order dependent reviews; launch independent groups simultaneously
@@ -137,7 +137,7 @@ Before every `send_message` to a worker, in addition to the skill's own Pre-Exec
 - [ ] **Exactly one** `load_skill="..."` parameter on the `send_message(...)` call
 - [ ] **`review-strategy` NOT embedded** in the worker message (reviewer-only planning skill)
 - [ ] **Skill ↔ task match verified** (e.g., security audit → `security-review`, not `code-review`)
-- [ ] **Deep-Review not triggered** — if triggered, use `convene_council` path instead
+- [ ] **Deep-Review not triggered** — if triggered, use `convene_council_with_skill` path instead
 - [ ] **todo_graph node updated** to `in_progress` before the dispatch lands (for multi-worker reviews)
 
 ## Multi-Worker Fan-In Tracking (W3)
@@ -165,7 +165,7 @@ todo_graph_update(node_id="w-auth", status="done")
 
 ## Council vs Workers Decision
 
-| Scenario | Use workers | Use `convene_council` |
+| Scenario | Use workers | Use `convene_council_with_skill` |
 |---|---|---|
 | Tiny / small / medium scope, no Deep-Review triggers | ✅ | |
 | Deep-Review trigger fires (any of the 5 categories) | | ✅ |
@@ -173,18 +173,21 @@ todo_graph_update(node_id="w-auth", status="done")
 | Multi-model consensus needed for a high-stakes decision | | ✅ |
 | Routine code / plan / PR review | ✅ | |
 
-**Real signature (verified from `daemon/tools/instance.py:901-956`):**
+**Real signature (verified from `daemon/tools/instance.py`):**
 ```python
-convene_council(
-    councilor_agent_id: str,        # REQUIRED — default "wanderer"
+convene_council_with_skill(
+    councilor_agent_id: str,        # REQUIRED — default "worker"
     request: str,                   # REQUIRED — the deep-review prompt
+    councilor_skill: str,           # REQUIRED — skill to inject into each councilor
     models: list[str] | None = None,           # optional — None lets governor decide
     max_councilors: int | None = None,         # optional — caps councilors WITHIN the council
     instance_name: str | None = None,          # optional — labels the spawned governor
 )
 ```
 
-**Default for Deep-Review:** `councilor_agent_id="wanderer"` (read-only investigator). Never use `reviewer` as a councilor — recursion risk. Leave `max_councilors=None` (governor decides) or set `≤ 4`. After `convene_council`, **END TURN** — result arrives as async report.
+> `councilor_skill` should match the dominant review type from the Review-Type Detection table (code-review, plan-review, architecture-review, security-review, pr-review). One skill per council — same 1:1 attribution rule as worker dispatch.
+
+**Default for Deep-Review:** `councilor_agent_id="worker"` (each councilor is loaded with the matched skill via `councilor_skill`). Never use `reviewer` as a councilor — recursion risk. Leave `max_councilors=None` (governor decides) or set `≤ 4`. After `convene_council_with_skill`, **END TURN** — result arrives as async report.
 
 ## Aggregation Strategy
 
