@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 198 packs
-- Unit: 159 | Integration: 9 | Mock: 7 | E2E: 12 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
+- Total: 200 packs
+- Unit: 160 | Integration: 9 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -445,6 +445,8 @@ Workspace Viewer feature (feature/workspace-viewer branch) — read-only file br
 | system_prompt_toggle_build_test | frontend/ (npm run build) | Frontend production build for system-prompt toggle feature (Angular strictTemplates). 0 TS/template errors. Artifact dist/frontend/browser/index.html. | 3 min | 2026-07-25 | ✅ PASS (exit 0 in 9.74s, feature/fe-toggle-system-prompt @ df56403b, pre-existing bundle budget warnings only) |
 | system_prompt_toggle_unit_test | frontend/ (`npx jest --ci`) | Frontend Jest regression for system-prompt toggle feature. Full suite (1798 tests / 51 suites). New showSystemPrompt signal + @Input did NOT break any ChatComponent/ChatInterfaceComponent specs. | 2 min | 2026-07-25 | ✅ PASS (1798/1798 in 8.3s, feature/fe-toggle-system-prompt @ df56403b, 0 failures) |
 | system_prompt_toggle_e2e_test | frontend/ (Playwright headless browser automation) | Browser E2E: 📋 System toggle in chat header — button present next to 💭 Think + 🔧 Tools, click toggles `.system-btn`↔`.system-btn active` (green bg), localStorage `ensemble-show-system-prompt` persists `"true"` across reload, Think/Tools toggles still work (no regression). Step 6 show/hide of system msgs SKIP (no live agent run producing role:system msgs). 0 page errors. | 3 min | 2026-07-25 | ✅ PASS (7/8 steps PASS, 1 expected SKIP, feature/fe-toggle-system-prompt @ df56403b, ~11s) |
+| agent_switcher_unit_test | frontend/src/app/components/agent-switcher/agent-switcher.component.spec.ts (scoped run: `npx jest --testPathPatterns="agent-switcher"`) | AgentSwitcherComponent search/filter logic, system-agent exclusion, focusedIndex clamping, dedup W8, defaultVersions, onSearchInput. **Regression check after version-picker addition** (selectedVersionTag signal, shouldShowVersionPicker computed, VersionPickerComponent import). | 2 min | 2026-07-27 | ✅ PASS (26/26 in 1.5s, fix/instance-detail-version-select @ 77cc0362, 0 failures) |
+| instance_detail_version_picker_e2e_test | frontend/ (Playwright + dev servers :8079/:4199) | Browser E2E: version picker on instance detail (chat) page. Developer (multi-version `[null,'v2']`) → picker renders, select Base→v2 reflects; Leader (single-version `[null]`) → picker absent. Dual-layer confidence (Playwright assertions + vision screenshot inspection). | 5 min | 2026-07-27 | ✅ PASS (8/8 steps, fix/instance-detail-version-select @ 77cc0362, 0 console errors) |
 
 ## E2E Release Gate Packs (2026-07-22)
 
