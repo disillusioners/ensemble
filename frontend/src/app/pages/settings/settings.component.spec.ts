@@ -1,5 +1,6 @@
 import { signal } from '@angular/core';
 import { of, throwError } from 'rxjs';
+import type { VSCodeStatusState } from '../../models';
 
 // Storage key matching the component
 const STORAGE_KEY = 'settings-language-preference';
@@ -27,9 +28,7 @@ const DEFAULT_EDITOR: EditorType = 'builtin';
 type EditorType = 'builtin' | 'vscode';
 
 interface VSCodeStatus {
-  running: boolean;
-  port: number | null;
-  allow_remote: boolean;
+  status: VSCodeStatusState;
 }
 
 // localStorage mock helpers
@@ -290,8 +289,8 @@ class TestableSettingsComponent {
 
   private startStatusPolling(): void {
     this.stopStatusPolling();
-    this.pollStatus();
     this.statusPollTimer = setInterval(() => this.pollStatus(), STATUS_POLL_INTERVAL_MS);
+    this.pollStatus();
   }
 
   private stopStatusPolling(): void {
@@ -305,38 +304,49 @@ class TestableSettingsComponent {
     this.settingsService.getVscodeStatus().subscribe({
       next: (status: VSCodeStatus) => {
         this.vscodeStatus.set(status);
-        if (status?.running) {
+        if (status?.status === 'running' || status?.status === 'stopped' || status?.status === 'crashed') {
           this.stopStatusPolling();
         }
       },
       error: () => {
-        this.vscodeStatus.set({ running: false, port: null, allow_remote: false });
+        this.vscodeStatus.set({ status: 'stopped' });
       },
     });
   }
 
   vscodeStatusLabel(): string {
-    const status = this.vscodeStatus();
-    if (!status) {
-      return '';
+    const status = this.vscodeStatus()?.status;
+    switch (status) {
+      case 'running':
+        return 'Running';
+      case 'starting':
+        return 'Starting...';
+      case 'stopping':
+        return 'Stopping...';
+      case 'stopped':
+        return 'Stopped';
+      case 'crashed':
+        return 'Crashed';
+      default:
+        return 'Not started';
     }
-    if (status.running) {
-      return status.port !== null ? `Running on port ${status.port}` : 'Running';
-    }
-    const isStarting = this.statusPollTimer !== null && !status.running;
-    return isStarting ? 'Starting' : 'Stopped';
   }
 
   vscodeStatusClass(): string {
-    const status = this.vscodeStatus();
-    if (!status) {
-      return '';
+    switch (this.vscodeStatus()?.status) {
+      case 'running':
+        return 'running';
+      case 'starting':
+        return 'starting';
+      case 'stopping':
+        return 'stopping';
+      case 'stopped':
+        return 'stopped';
+      case 'crashed':
+        return 'crashed';
+      default:
+        return '';
     }
-    if (status.running) {
-      return 'running';
-    }
-    const isStarting = this.statusPollTimer !== null && !status.running;
-    return isStarting ? 'starting' : 'stopped';
   }
 
   editorLabel(editor: EditorType): string {
@@ -435,7 +445,7 @@ describe('SettingsComponent', () => {
     // editor behavior override these mocks explicitly.
     service.getEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
     service.getVscodeStatus.mockReturnValue(
-      of({ running: false, port: null, allow_remote: false }),
+      of({ status: 'starting' }),
     );
     service.setEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
   });
@@ -892,7 +902,7 @@ describe('SettingsComponent', () => {
       service.getLanguagePreference.mockReturnValue(of({ language: 'English' }));
       service.getEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
       service.getVscodeStatus.mockReturnValue(
-        of({ running: false, port: null, allow_remote: false }),
+        of({ status: 'starting' }),
       );
       component = new TestableSettingsComponent(service, snackBar);
       component.ngOnInit();
@@ -1180,7 +1190,7 @@ describe('SettingsComponent', () => {
       jest.useFakeTimers();
       service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
       service.getVscodeStatus.mockReturnValue(
-        of({ running: false, port: null, allow_remote: false }),
+        of({ status: 'starting' }),
       );
       component.onEditorSelectionChange('vscode');
       component.saveEditor();
@@ -1195,7 +1205,7 @@ describe('SettingsComponent', () => {
       jest.useFakeTimers();
       // Start in vscode state with active polling
       service.getVscodeStatus.mockReturnValue(
-        of({ running: false, port: null, allow_remote: false }),
+        of({ status: 'starting' }),
       );
       service.setEditorPreference.mockReturnValue(of({ editor: 'builtin' }));
       component.onEditorSelectionChange('builtin');
@@ -1223,49 +1233,78 @@ describe('SettingsComponent', () => {
     });
 
     it('should populate vscodeStatus from a poll response', () => {
-      service.getVscodeStatus.mockReturnValue(
-        of({ running: false, port: null, allow_remote: false }),
-      );
+      service.getVscodeStatus.mockReturnValue(of({ status: 'starting' }));
       jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
-      expect(component.vscodeStatus()).toEqual({
-        running: false,
-        port: null,
-        allow_remote: false,
-      });
+      expect(component.vscodeStatus()).toEqual({ status: 'starting' });
       expect(component.vscodeStatusClass()).toBe('starting');
     });
 
-    it('should mark status as running and stop polling when status.running=true', () => {
-      service.getVscodeStatus.mockReturnValue(
-        of({ running: true, port: 8080, allow_remote: true }),
-      );
+    it('should continue polling while status is starting', () => {
+      service.getVscodeStatus.mockReturnValue(of({ status: 'starting' }));
       jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
-      expect(component.vscodeStatus()).toEqual({
-        running: true,
-        port: 8080,
-        allow_remote: true,
-      });
-      expect(component.vscodeStatusLabel()).toBe('Running on port 8080');
+      const callsBefore = service.getVscodeStatus.mock.calls.length;
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore + 1);
+    });
+
+    it('should continue polling while status is stopping', () => {
+      service.getVscodeStatus.mockReturnValue(of({ status: 'stopping' }));
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      const callsBefore = service.getVscodeStatus.mock.calls.length;
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore + 1);
+    });
+
+    it.each([
+      ['running', 'Running', 'running'],
+      ['starting', 'Starting...', 'starting'],
+      ['stopping', 'Stopping...', 'stopping'],
+      ['stopped', 'Stopped', 'stopped'],
+      ['crashed', 'Crashed', 'crashed'],
+    ])('should label and classify status=%s', (status, label, statusClass) => {
+      component.vscodeStatus.set({ status });
+      expect(component.vscodeStatusLabel()).toBe(label);
+      expect(component.vscodeStatusClass()).toBe(statusClass);
+    });
+
+    it('should return Not started when no status has been fetched', () => {
+      component.vscodeStatus.set(null);
+      expect(component.vscodeStatusLabel()).toBe('Not started');
+      expect(component.vscodeStatusClass()).toBe('');
+    });
+
+    it('should mark terminal running status and stop polling', () => {
+      service.getVscodeStatus.mockReturnValue(of({ status: 'running' }));
+      jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
+      expect(component.vscodeStatus()).toEqual({ status: 'running' });
+      expect(component.vscodeStatusLabel()).toBe('Running');
       expect(component.vscodeStatusClass()).toBe('running');
-      // Polling stopped — advancing the timer should not trigger another call
       const callsBefore = service.getVscodeStatus.mock.calls.length;
       jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 5);
       expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore);
     });
 
+    it('should stop polling for stopped and crashed statuses', () => {
+      for (const status of ['stopped', 'crashed']) {
+        component.ngOnDestroy();
+        service.getVscodeStatus.mockReturnValue(of({ status }));
+        component = new TestableSettingsComponent(service, snackBar);
+        component.ngOnInit();
+        const callsBefore = service.getVscodeStatus.mock.calls.length;
+        jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 2);
+        expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore);
+      }
+    });
+
     it('should fall back to stopped status on poll error', () => {
       service.getVscodeStatus.mockReturnValue(throwError(() => new Error('Status failed')));
       jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);
-      expect(component.vscodeStatus()).toEqual({
-        running: false,
-        port: null,
-        allow_remote: false,
-      });
+      expect(component.vscodeStatus()).toEqual({ status: 'stopped' });
     });
 
     it('should clear polling interval on ngOnDestroy', () => {
       service.getVscodeStatus.mockReturnValue(
-        of({ running: false, port: null, allow_remote: false }),
+        of({ status: 'starting' }),
       );
       // Confirm polling is active
       jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS);

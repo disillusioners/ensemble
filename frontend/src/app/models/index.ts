@@ -413,10 +413,10 @@ export interface MigrationLogEntry {
 }
 
 // Editor settings types
+export type VSCodeStatusState = 'starting' | 'running' | 'stopped' | 'crashed' | 'stopping';
+
 export interface VSCodeStatus {
-  running: boolean;
-  port: number | null;
-  allow_remote: boolean;
+  status: VSCodeStatusState;
 }
 
 export type EditorType = 'builtin' | 'vscode';

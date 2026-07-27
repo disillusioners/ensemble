@@ -1220,6 +1220,47 @@ class TestVSCodeServerManager:
 
         assert not pid_file.exists()
 
+    async def test_start_marks_running_when_pid_write_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PID-write failure must not leave the server stuck in 'starting'.
+
+        Regression: the ``_write_pid_file()`` call runs AFTER
+        ``state.status = "running"`` and ``state.started_at`` so that a
+        failing write (e.g. disk full, permission denied) is logged as a
+        warning but does NOT prevent the server from being reported as
+        running. The PID file is purely for crash recovery — its absence
+        does not mean the server isn't running.
+        """
+        manager = make_manager(tmp_path)
+        fake_proc = FakeProcess(pid=12345)
+        patch_resolve_binary(monkeypatch, manager)
+        patch_create_subprocess(monkeypatch, fake_proc)
+        patch_process_signals(monkeypatch, fake_proc)
+        monkeypatch.setattr("os.getpgid", lambda pid: pid + 1000)
+        patch_port_wait(monkeypatch, manager)
+        slow_down_health_check(monkeypatch)
+
+        def fake_write_pid_file_raises() -> None:
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(
+            manager, "_write_pid_file", fake_write_pid_file_raises
+        )
+
+        result = await manager.start()
+
+        assert result.status == "running"
+        assert result.started_at is not None
+        assert result.pid == 12345
+
+        # The PID file should NOT exist (write was forced to fail),
+        # but the manager must report a running state anyway.
+        pid_file = tmp_path / VSCODE_PID_FILENAME
+        assert not pid_file.exists()
+
+        await manager.cleanup()
+
     # ── Snapshot / status helpers ────────────────────────────────────────
 
     async def test_get_status_returns_snapshot(
