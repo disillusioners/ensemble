@@ -112,7 +112,7 @@ For each canonical model in the validated model list (up to 4):
   1. spawn_councilor(
        councilor_agent_id = <validated agent_id>,
        model              = <this model>,
-       initial_message    = <the request>,
+       initial_message    = "You have been spawned as a councilor. Await the dispatch message for your task.",
        instance_name      = "councilor-<model-short-name>"
      )
    2. Record in manifest:
@@ -136,22 +136,51 @@ For each canonical model in the validated model list (up to 4):
 
 If a spawn fails for one councilor, record it as `FAILED` in the manifest and proceed with the remaining councilors. Do not abort the whole council because of one failed spawn.
 
+**⚠️ Step 1 initial_message must NOT carry the task request.** Use a neutral spawn message such as: `"You have been spawned as a councilor. Await the dispatch message for your task."` The actual task request — with the read-only directive prepended — is sent in Step 2 only. This ensures every task dispatch is guarded.
+
 ---
 
 ## Step 2: Dispatch Request (REVISED — structured tracking W1/W2)
 
-Send the **same** request to every spawned councilor. Track every dispatch outcome.
+### ⛔ MANDATORY READ-ONLY ENFORCEMENT (NON-NEGOTIABLE)
+
+Every task message sent to a councilor — including the initial dispatch AND every refinement / re-query message — **MUST** begin with the exact verbatim directive below as its first content. This is the councilor's identity for the entire run: councilors are reviewers, evaluators, verifiers — never executors.
+
+The directive below is **copy-pasteable as-is**. Do not alter punctuation, capitalization, emoji, or line breaks inside the block. The blank line after the fourth prohibition must remain.
+
+```
+⛔ READ-ONLY MODE: You are acting as a councilor in a council. You MUST NOT:
+- Write, create, edit, or delete ANY file
+- Run ANY bash command that modifies state (no git commit, no file writes, no DB changes)
+- Modify, create, or delete any project data
+- Spawn, terminate, or message other instances
+
+You MAY only: read files, analyze code, evaluate plans, verify logic, and report findings.
+Your output should be your analysis/evaluation/verdict ONLY — no code changes, no file modifications.
+```
+
+**Pre-send checklist (verify before EVERY dispatch, including refinements):**
+
+1. The message I am about to send begins with the directive block above — character-for-character.
+2. The blank line after the fourth prohibition is present.
+3. The substantive request follows the directive (never before it).
+4. No task, plan, or code is sent without the directive as the first content.
+
+**Never dispatch without the directive. No exceptions.** If the directive is missing or altered, do not send the message; fix it first. The directive is the enforcement mechanism for the councilor's read-only role — runtime prevention is unavailable, so the directive itself is the gate.
+
+Send the **same** composed request to every spawned councilor. Track every dispatch outcome.
 
 ```raw
 For each councilor in manifest (status = SPAWNED):
-  1. result = send_message(instance_id = <councilor_id>, message = <the request>)
+  1. composed_message = <read_only_directive> + "\n\n" + <the request>
+  2. result = send_message(instance_id = <councilor_id>, message = composed_message)
 
-  2. If result indicates success:
+  3. If result indicates success:
      → Update manifest:
        councilor.status          = "RUNNING"
        councilor.dispatch_status = "DISPATCHED"
 
-  3. If result indicates error (W2):
+  4. If result indicates error (W2):
      → Update manifest:
        councilor.status          = "FAILED"
        councilor.dispatch_status = "FAILED"
@@ -159,7 +188,7 @@ For each councilor in manifest (status = SPAWNED):
      → Do NOT retry silently
      → Proceed with remaining councilors
 
-  4. Update shared_context_metadata
+  5. Update shared_context_metadata
 ```
 
 **W1 correction:** This is **validate-all-then-dispatch**, NOT a sequential spawn-send loop. All spawns complete first (Step 1), then all dispatches (Step 2). This allows per-state compensation if any step fails.
@@ -314,14 +343,18 @@ Refinement rounds are **optional** and **capped**.
    Round 1 (optional):
    - Select ≤2 councilors to re-query (the ones whose views I disagree with,
      or whose views I most want to test).
-   - Send a targeted clarification.
+   - Compose the refinement message as:
+       <read_only_directive> + "\n\n" + <targeted_clarification>
+     The read-only directive is the first content of every refinement
+     message — no refinement may be sent without it.
    - Collect, update manifest, re-synthesize.
    - Up to 2 councilors re-queried per round.
 
 3. If still unresolved:
 
    Round 2 (optional, final):
-   - One more re-query to ≤2 councilors.
+   - One more re-query to ≤2 councilors, again beginning with the
+     read-only directive.
    - Collect, update manifest, re-synthesize.
 
 4. STOP. Deliver the final answer. No Round 3.
