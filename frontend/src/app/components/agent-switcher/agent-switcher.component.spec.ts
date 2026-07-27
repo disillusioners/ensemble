@@ -184,46 +184,7 @@ describe('AgentSwitcherComponent', () => {
       expect(emitted).toHaveBeenCalledWith({ agent: planner, versionTag: null });
     });
   });
-
-  // ── onVersionTagChange re-emit path ─────────────────────────────────────
-  // `onVersionTagChange` deliberately re-emits the existing `agentChange`
-  // output (see comment in agent-switcher.component.ts) — verify the
-  // re-emit payload and the `if (sel)` guard.
-  describe('onVersionTagChange', () => {
-    it('re-emits agentChange with the user-picked version tag', () => {
-      const someAgent: Agent = {
-        id: 'multi', agent_id: 'multi', name: 'Multi', description: 'd',
-        icon: 'code', color: 'accent-blue',
-        available_versions: [null, 'v1', 'v2'],
-      };
-      // Mirror what the parent does on the initial `agentChange`: push
-      // the selected agent back into the `selectedAgent` input so the
-      // `if (sel)` guard inside `onVersionTagChange` passes.
-      fixture.componentRef.setInput('selectedAgent', someAgent);
-      fixture.detectChanges();
-
-      const emitted = jest.fn();
-      component.agentChange.subscribe(emitted);
-
-      // Seed `selectedVersionTag` via `selectAgent` (which emits first);
-      // we assert against the LAST emission below.
-      component.selectAgent(someAgent);
-      component.onVersionTagChange('v2');
-
-      expect(emitted).toHaveBeenLastCalledWith({ agent: someAgent, versionTag: 'v2' });
-    });
-
-    it('does NOT emit agentChange when no agent is selected (if-sel guard)', () => {
-      // beforeEach sets `selectedAgent` to null — no need to change it.
-      const emitted = jest.fn();
-      component.agentChange.subscribe(emitted);
-
-      component.onVersionTagChange('v2');
-
-      expect(emitted).not.toHaveBeenCalled();
-    });
-  });
-
+  // ── Deduplication (Phase 3 W8) ─────────────────────────────────────────
   // ── Deduplication (Phase 3 W8) ─────────────────────────────────────────
   describe('deduplicatedAgents (W8)', () => {
     it('deduplicates entries with the same id, keeping the base version', () => {

@@ -5,7 +5,6 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { Agent } from '../../models';
 import { deduplicateAgentsById } from '../../utils/agent-dedup';
-import { VersionPickerComponent } from '../version-picker/version-picker.component';
 
 const colorMap: Record<string, string> = {
   'accent-amber': '#f59e0b',
@@ -22,7 +21,7 @@ const colorMap: Record<string, string> = {
 @Component({
   selector: 'app-agent-switcher',
   standalone: true,
-  imports: [CommonModule, MatButtonModule, MatIconModule, MatMenuModule, VersionPickerComponent],
+  imports: [CommonModule, MatButtonModule, MatIconModule, MatMenuModule],
   templateUrl: './agent-switcher.html',
   styleUrl: './agent-switcher.scss'
 })
@@ -41,21 +40,6 @@ export class AgentSwitcherComponent {
   isOpen = signal(false);
   focusedIndex = signal(-1);
   searchQuery = signal('');
-
-  /** Currently selected version tag (Phase 3). Seeded from `defaultVersions`
-   *  inside `selectAgent()` whenever the picked agent changes so a new
-   *  agent never inherits the previous selection's tag. */
-  readonly selectedVersionTag = signal<string | null>(null);
-
-  /** Show the version picker only when the selected agent has more than one
-   *  available version. Mirrors `AgentSelectorComponent.shouldShowVersionPicker`
-   *  so both pickers behave consistently. */
-  readonly shouldShowVersionPicker = computed(() => {
-    const sel = this.selectedAgent();
-    if (!sel) return false;
-    const versions = sel.available_versions ?? [];
-    return versions.length > 1;
-  });
 
   // Filter out system agents from selection
   readonly selectableAgents = computed(() =>
@@ -150,26 +134,11 @@ export class AgentSwitcherComponent {
   }
 
   selectAgent(agent: Agent): void {
-    this.selectedVersionTag.set(this.defaultVersions()[agent.id] ?? null);
-    this.agentChange.emit({ agent, versionTag: this.selectedVersionTag() });
+    const versionTag = this.defaultVersions()[agent.id] ?? null;
+    this.agentChange.emit({ agent, versionTag });
     this.isOpen.set(false);
     this.focusedIndex.set(-1);
     this.searchQuery.set('');
-  }
-
-  /** User picked a new version from the picker. Record the tag and notify
-   *  the parent by re-emitting `agentChange` with the currently-selected
-   *  agent — this matches the existing emit shape so all three callers
-   *  (chat / instances / instance-list) keep working without any payload
-   *  changes. The parent updates `selectedVersionTag` from the emit, so
-   *  the next "create instance" call forwards the chosen tag. */
-  onVersionTagChange(tag: string | null): void {
-    // Deliberately re-emits `agentChange` (not a separate `versionChange`) to preserve the single output channel — see AgentSelectorComponent for the alternative pattern.
-    this.selectedVersionTag.set(tag);
-    const sel = this.selectedAgent();
-    if (sel) {
-      this.agentChange.emit({ agent: sel, versionTag: tag });
-    }
   }
 
   closeDropdown(): void {
