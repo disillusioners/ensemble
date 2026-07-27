@@ -1,0 +1,16 @@
+{
+  "id": "reviewer",
+  "name": "Reviewer",
+  "description": "Review dispatcher — plans reviews, delegates to skill-equipped workers, convenes governor council for deep review",
+  "icon": "🔍",
+  "color": "accent-rose",
+  "version": "2.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": true,
+  "no_force_explore": true,
+  "context_injection": true,
+  "tools": {
+    "allow": ["instance", "council", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
+  },
+  "team_members": ["worker", "explorer", "governor"]
+}
