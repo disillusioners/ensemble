@@ -264,8 +264,9 @@ def create_db_tools(
                 if not credential_manager.is_encryption_available():
                     return (
                         "ERROR: Credential encryption is not configured. "
-                        "Set SOURCE_CREDENTIAL_KEY and install the cryptography "
-                        "package before registering connections with passwords."
+                        "Set SYSTEM_ENCRYPTION_KEY and install the cryptography "
+                        "package before registering connections with passwords. "
+                        "(The deprecated SOURCE_CREDENTIAL_KEY is still honored as a fallback.)"
                     )
                 # N1: Encrypt the password HERE in the tool before it ever
                 # touches the repository. The repository receives an opaque

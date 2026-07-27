@@ -1019,10 +1019,13 @@ import os
 
 class CredentialManager:
     def __init__(self, encryption_key: bytes | None = None):
-        key = encryption_key or os.environ.get("SOURCE_CREDENTIAL_KEY")
+        # Prefers SYSTEM_ENCRYPTION_KEY; falls back to the deprecated
+        # SOURCE_CREDENTIAL_KEY (with a WARNING) for backward compatibility.
+        key = encryption_key or os.environ.get("SYSTEM_ENCRYPTION_KEY") \
+            or os.environ.get("SOURCE_CREDENTIAL_KEY")
         if not key:
             # Generate key for first run: Fernet.generate_key()
-            raise ValueError("SOURCE_CREDENTIAL_KEY environment variable required")
+            raise ValueError("SYSTEM_ENCRYPTION_KEY environment variable required")
         self._fernet = Fernet(key if isinstance(key, bytes) else key.encode())
     
     def encrypt(self, credentials: dict) -> str:

@@ -18,14 +18,18 @@ def conn(monkeypatch):
     # Disable Fernet encryption for the persistence-layer unit tests.
     # ``daemon.sources.persistence._row_to_dict`` instantiates a
     # ``CredentialManager`` on every read which reads
-    # ``SOURCE_CREDENTIAL_KEY`` from the environment. Developers have
-    # this set in their ``.env`` (real Fernet key), so without this
-    # unset the manager would try to decrypt the plain JSON
-    # credentials these tests store (``'{"bot_token": "abc123"}'``)
-    # and raise ``InvalidToken`` / ``binascii.Error: Incorrect
-    # padding``. These tests exercise the persistence layer only —
-    # the encryption round-trip is covered by ``tests/test_db_tools.py``
-    # via the ``fernet_key`` / ``credential_manager`` fixtures.
+    # ``SYSTEM_ENCRYPTION_KEY`` from the environment (with the deprecated
+    # ``SOURCE_CREDENTIAL_KEY`` as a fallback). Developers have this set
+    # in their ``.env`` (real Fernet key), so without this unset the
+    # manager would try to decrypt the plain JSON credentials these
+    # tests store (``'{"bot_token": "abc123"}'``) and raise
+    # ``InvalidToken`` / ``binascii.Error: Incorrect padding``. These
+    # tests exercise the persistence layer only — the encryption
+    # round-trip is covered by ``tests/test_db_tools.py`` via the
+    # ``fernet_key`` / ``credential_manager`` fixtures.
+    monkeypatch.delenv("SYSTEM_ENCRYPTION_KEY", raising=False)
+    # Defensive: also clear the deprecated alias so a stale value from
+    # the developer's environment can't accidentally re-enable Fernet.
     monkeypatch.delenv("SOURCE_CREDENTIAL_KEY", raising=False)
 
     fd, path = tempfile.mkstemp(suffix='.db')

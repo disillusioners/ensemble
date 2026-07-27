@@ -80,6 +80,10 @@ _TRACKED_ENV_PREFIXES = [
 _TRACKED_ENV_EXACT = [
     "DATABASE_URL_POSTGRES",
     "POSTGRES_URL",
+    # Canonical name. Legacy deployments may still set SOURCE_CREDENTIAL_KEY;
+    # SYSTEM_ENCRYPTION_KEY_ENV (in daemon.sources.credentials) handles the
+    # fallback automatically.
+    "SYSTEM_ENCRYPTION_KEY",
     "SOURCE_CREDENTIAL_KEY",
     "RAG_IS_REQUIRED",
     "TEMP",
@@ -88,7 +92,11 @@ _TRACKED_ENV_EXACT = [
 
 # Explicit env var names that are ALWAYS masked (unless nomask=True),
 # even if they don't match the suffix patterns above (e.g. LIGHT_RAG_*).
+# Both the canonical SYSTEM_ENCRYPTION_KEY and the legacy
+# SOURCE_CREDENTIAL_KEY are listed so values are redacted regardless of
+# which name an operator has configured.
 _SECRET_ENV_VARS: frozenset[str] = frozenset({
+    "SYSTEM_ENCRYPTION_KEY",
     "SOURCE_CREDENTIAL_KEY",
     "LIGHTRAG_API_KEY",
     "POSTGRES_URL",
@@ -374,7 +382,8 @@ starts with one of the tracked prefixes (``ENSEMBLE_``, ``OPENAI_``,
 ``POSTGRES_``, ``RAG_IS_REQUIRED``, ``MCP_``, ``LIGHTRAG_``,
 ``QUEUE_DISCARD_ON_STARTUP``) OR equals one of the
 tracked exact names (``DATABASE_URL_POSTGRES``, ``POSTGRES_URL``,
-``SOURCE_CREDENTIAL_KEY``, ``RAG_IS_REQUIRED``, ``TEMP``, ``TMP``).
+``SYSTEM_ENCRYPTION_KEY``, ``SOURCE_CREDENTIAL_KEY`` (deprecated
+fallback), ``RAG_IS_REQUIRED``, ``TEMP``, ``TMP``).
 
 Args:
     prefix: Optional case-insensitive filter. When non-empty, only
@@ -388,10 +397,11 @@ Args:
 Masking policy (applied when ``nomask=False``):
 
 * The value is returned as ``"[REDACTED]"`` if the variable name is in
-  the explicit secret allow-list (``SOURCE_CREDENTIAL_KEY``,
-  ``LIGHTRAG_API_KEY``, ``POSTGRES_URL``,
-  ``DATABASE_URL_POSTGRES``) OR if its name ends with any of
-  ``_API_KEY``, ``_TOKEN``, ``_PASSWORD``, ``_SECRET``, ``_HEADERS``.
+  the explicit secret allow-list (``SYSTEM_ENCRYPTION_KEY``,
+  ``SOURCE_CREDENTIAL_KEY`` (legacy alias), ``LIGHTRAG_API_KEY``,
+  ``POSTGRES_URL``, ``DATABASE_URL_POSTGRES``) OR if its name ends
+  with any of ``_API_KEY``, ``_TOKEN``, ``_PASSWORD``, ``_SECRET``,
+  ``_HEADERS``.
 * Otherwise, if the value parses as a URL with an embedded password
   (``scheme://user:pass@host/...``), only the password component is
   replaced with ``[REDACTED]`` while the rest of the URL is preserved.
