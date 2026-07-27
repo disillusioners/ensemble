@@ -14,6 +14,17 @@ _full_docs: dict[str, str] = {}
 # Tool metadata registry: tool_name -> {category, short_doc, full_doc}
 _tool_metadata: dict[str, dict[str, Any]] = {}
 
+# These tools are created by per-instance factories rather than registered during
+# module import. They are nevertheless valid names in agent allow/deny config,
+# so startup validation must know them before an instance is built.
+DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
+    "rag_insert_text",
+    "rag_track_status",
+    "tool_help",
+    "explore",
+    "experience",
+})
+
 
 def register_tool_category(category: str):
     """Decorator to mark a tool with its category.

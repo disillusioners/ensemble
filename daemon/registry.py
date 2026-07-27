@@ -570,6 +570,7 @@ class AgentRegistry:
             scan_tools_for_full_docs,
             _tool_metadata,
             CATEGORY_MODULES,
+            DYNAMIC_TOOL_NAMES,
         )
         from daemon.tools.instance import resolve_tool_filter
         
@@ -591,6 +592,7 @@ class AgentRegistry:
         all_tool_names: set[str] = set()
         for tools in available_categories.values():
             all_tool_names.update(tools)
+        all_tool_names.update(DYNAMIC_TOOL_NAMES)
         
         # Known categories come from CATEGORY_MODULES (includes categories that may not have
         # tools registered yet, e.g., dynamically created tools)
