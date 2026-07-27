@@ -218,6 +218,19 @@ class VSCodeServerManager:
             if sys.platform != "win32":
                 subproc_kwargs["start_new_session"] = True
 
+            # Build child env. Inheriting the daemon's environment as-is
+            # causes ``EADDRINUSE`` on startup: code-server reads ``$PORT``
+            # to override ``--bind-addr``'s port, so the daemon's own
+            # ``PORT`` (its listen port) makes code-server try to bind to
+            # the same address. Strip vars that code-server reads and that
+            # could similarly collide; keep everything else (PATH, HOME,
+            # etc.) intact.
+            child_env = os.environ.copy()
+            child_env.pop("PORT", None)
+            child_env.pop("CODE_SERVER_CONFIG_FILE", None)
+            child_env.pop("CS_DISABLE_FILE_DOWNLOADS", None)
+            child_env.pop("CS_DISABLE_GETTING_STARTED_OVERRIDE", None)
+
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     *command,
@@ -225,6 +238,7 @@ class VSCodeServerManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=workdir,
+                    env=child_env,
                     **subproc_kwargs,
                 )
             except FileNotFoundError as exc:
