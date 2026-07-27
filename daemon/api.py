@@ -91,6 +91,7 @@ from daemon.models import ErrorCodes, ErrorResponse, HealthResponse
 from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
+from daemon.services.editor_utils import get_editor_preference
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon.repositories.instance.models import InstanceStatus
 from daemon import constants
@@ -646,6 +647,11 @@ async def lifespan(app: FastAPI):
 
         logger.info("VS Code proxy mounted at /vscode")
 
+        # Auto-start code-server if the user's stored editor preference is
+        # "vscode". Non-fatal: a failure here MUST NOT prevent the daemon
+        # from booting. The helper swallows any exception and logs it.
+        await _auto_start_vscode_if_preferred(manager, vscode_manager)
+
     # Store dead letter service for router injection
     from daemon.routers.dlq import set_dead_letter_service
     set_dead_letter_service(dead_letter_service)
@@ -814,6 +820,50 @@ async def lifespan(app: FastAPI):
 
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
+
+
+async def _auto_start_vscode_if_preferred(
+    manager: "InstanceManager",
+    vscode_manager: "VSCodeServerManager",
+) -> None:
+    """Boot code-server at daemon startup if the user's editor preference is "vscode".
+
+    Reads the editor preference from the system default project metadata KV
+    via ``get_editor_preference``. If the stored value is ``"vscode"``, calls
+    ``vscode_manager.ensure_running()`` (idempotent — no-op if already
+    running) and logs the assigned port.
+
+    Non-fatal contract: any exception raised here (binary missing, port
+    timeout, DB error while reading the preference, etc.) is logged as a
+    warning and swallowed so the daemon continues to boot. The user can
+    still start code-server manually via ``PUT /api/settings/editor`` once
+    the daemon is up.
+
+    Args:
+        manager: The live ``InstanceManager`` (provides ``_project_repository``
+            for the editor-preference lookup).
+        vscode_manager: The constructed ``VSCodeServerManager``. Must be
+            non-None — the caller (``lifespan``) guards this with an
+            ``if vscode_manager is not None`` check before invoking.
+    """
+    try:
+        editor_pref = await get_editor_preference(manager._project_repository)
+        if editor_pref == "vscode":
+            logger.info(
+                "Editor preference is 'vscode' — auto-starting code-server at boot"
+            )
+            await vscode_manager.ensure_running()
+            logger.info(
+                f"code-server auto-started on port {vscode_manager.get_port()}"
+            )
+        else:
+            logger.debug(
+                f"Editor preference is '{editor_pref}' — skipping code-server auto-start"
+            )
+    except Exception as autostart_err:
+        logger.warning(
+            f"VS Code auto-start failed (daemon will continue): {autostart_err}"
+        )
 
 
 async def _periodic_drift_reconcile_loop(
