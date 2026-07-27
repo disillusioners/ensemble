@@ -101,9 +101,11 @@ class MockSettingsService {
   stopVscodeServer = jest.fn();
 }
 
+class MockWorkspaceService {
+  setEditorMode = jest.fn();
+}
 // Testable SettingsComponent (mirrors actual component for testing)
 class TestableSettingsComponent {
-  readonly languages = PREDEFINED_LANGUAGES;
   readonly customOptionValue = CUSTOM_OPTION_VALUE;
   readonly selectedLanguage = signal<string>('Auto');
   readonly customLanguage = signal<string>('');
@@ -122,6 +124,7 @@ class TestableSettingsComponent {
   constructor(
     private settingsService: MockSettingsService,
     private snackBar: MockMatSnackBar,
+    private workspaceService: MockWorkspaceService = new MockWorkspaceService(),
   ) {}
 
   ngOnInit(): void {
@@ -238,6 +241,7 @@ class TestableSettingsComponent {
         this.editorDirty.set(false);
         this.persistEditorToStorage(confirmed);
         this.applyingEditor.set(false);
+        this.workspaceService.setEditorMode(confirmed);
         this.snackBar.open(`Editor preference set to ${this.editorLabel(confirmed)}`, 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar',
@@ -962,12 +966,24 @@ describe('SettingsComponent', () => {
       jest.clearAllMocks();
     });
 
+    it('should call workspaceService.setEditorMode on success', () => {
+      const workspaceService = new MockWorkspaceService();
+      component = new TestableSettingsComponent(service, snackBar, workspaceService);
+      component.onEditorSelectionChange('vscode');
+      service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
+
+      component.saveEditor();
+
+      expect(workspaceService.setEditorMode).toHaveBeenCalledWith('vscode');
+    });
+
     it('should call setEditorPreference with the working selection', () => {
       service.setEditorPreference.mockReturnValue(of({ editor: 'vscode' }));
       component.onEditorSelectionChange('vscode');
       component.saveEditor();
       expect(service.setEditorPreference).toHaveBeenCalledWith('vscode');
     });
+
 
     it('should set applyingEditor=true during save', () => {
       let capturedApplyingDuringEmit: boolean | null = null;

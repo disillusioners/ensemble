@@ -78,6 +78,7 @@ async def mock_manager():
         instance_id="test-instance-id",
         status="queued",
         job_id="test-job-id",
+        queued=False,
     ))
     # Mock the RAM-injection primitives so the router's "existing content"
     # branch dereferences cleanly. Without these, ``existing.get("content")``
@@ -854,6 +855,7 @@ async def test_send_message_success(client, mock_manager):
         message="Hello, agent!",
         source="api",
         images=None,
+        queue_id=None,
     )
 
 
@@ -1246,3 +1248,101 @@ async def test_webhook_registry_not_available(client, mock_manager):
     data = response.json()
     assert data["detail"]["code"] == "INTERNAL_ERROR"
     assert "registry not available" in data["detail"]["message"].lower()
+
+
+# ==================== VS Code Auto-Start Tests ====================
+# These tests verify the ``_auto_start_vscode_if_preferred`` helper that runs
+# during daemon lifespan startup (after the /vscode proxy mount). The helper
+# is the implementation of the "auto-start code-server at boot if editor
+# preference is vscode" feature.
+#
+# Test strategy: drive the helper directly with MagicMock manager + vscode
+# manager, patching ``get_editor_preference`` at the ``daemon.api`` module
+# binding (it's a top-level import). This avoids driving the full FastAPI
+# lifespan (which requires Postgres, agents, langgraph, etc.) and exercises
+# the exact code path the lifespan runs.
+
+
+@pytest.mark.asyncio
+async def test_auto_start_vscode_calls_ensure_running_when_preference_is_vscode():
+    """When preference is 'vscode', ensure_running() IS called during boot."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from daemon import api as api_module
+
+    manager = MagicMock(name="manager")
+    manager._project_repository = MagicMock(name="project_repo")
+    vscode_manager = MagicMock(name="vscode_manager")
+    vscode_manager.ensure_running = AsyncMock(name="ensure_running")
+    vscode_manager.get_port = MagicMock(return_value=8080)
+
+    get_editor_pref_mock = AsyncMock(name="get_editor_preference", return_value="vscode")
+    with patch.object(api_module, "get_editor_preference", get_editor_pref_mock):
+        await api_module._auto_start_vscode_if_preferred(manager, vscode_manager)
+
+    vscode_manager.ensure_running.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_auto_start_vscode_skips_ensure_running_when_preference_is_builtin():
+    """When preference is 'builtin', ensure_running() is NOT called."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from daemon import api as api_module
+
+    manager = MagicMock(name="manager")
+    manager._project_repository = MagicMock(name="project_repo")
+    vscode_manager = MagicMock(name="vscode_manager")
+    vscode_manager.ensure_running = AsyncMock(name="ensure_running")
+    vscode_manager.get_port = MagicMock(return_value=8080)
+
+    get_editor_pref_mock = AsyncMock(name="get_editor_preference", return_value="builtin")
+    with patch.object(api_module, "get_editor_preference", get_editor_pref_mock):
+        await api_module._auto_start_vscode_if_preferred(manager, vscode_manager)
+
+    vscode_manager.ensure_running.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_start_vscode_swallows_ensure_running_failure():
+    """If ensure_running() raises, the daemon still boots (no exception propagates)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from daemon import api as api_module
+
+    manager = MagicMock(name="manager")
+    manager._project_repository = MagicMock(name="project_repo")
+    vscode_manager = MagicMock(name="vscode_manager")
+    vscode_manager.ensure_running = AsyncMock(
+        name="ensure_running",
+        side_effect=RuntimeError("code-server binary not found"),
+    )
+    vscode_manager.get_port = MagicMock(return_value=8080)
+
+    get_editor_pref_mock = AsyncMock(name="get_editor_preference", return_value="vscode")
+    with patch.object(api_module, "get_editor_preference", get_editor_pref_mock):
+        # Must NOT raise — the helper's contract is non-fatal.
+        await api_module._auto_start_vscode_if_preferred(manager, vscode_manager)
+
+    vscode_manager.ensure_running.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_auto_start_vscode_passes_project_repository_to_get_editor_preference():
+    """get_editor_preference is called with manager._project_repository."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from daemon import api as api_module
+
+    manager = MagicMock(name="manager")
+    project_repo = MagicMock(name="project_repo")
+    manager._project_repository = project_repo
+    vscode_manager = MagicMock(name="vscode_manager")
+    vscode_manager.ensure_running = AsyncMock(name="ensure_running")
+    vscode_manager.get_port = MagicMock(return_value=8080)
+
+    get_editor_pref_mock = AsyncMock(name="get_editor_preference", return_value="builtin")
+    with patch.object(api_module, "get_editor_preference", get_editor_pref_mock):
+        await api_module._auto_start_vscode_if_preferred(manager, vscode_manager)
+
+    get_editor_pref_mock.assert_called_once_with(project_repo)

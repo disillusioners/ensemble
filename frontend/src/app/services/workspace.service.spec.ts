@@ -85,7 +85,12 @@ describe('WorkspaceService', () => {
     httpTesting.verify();
   });
 
-  it("should get the file tree with the default path '.'", (done) => {
+  it('setEditorMode updates editorMode signal', () => {
+    service.setEditorMode('vscode');
+
+    expect(service.editorMode()).toBe('vscode');
+  });
+  it('should get the file tree with the default path \'.\'', (done) => {
     const response = makeTreeResponse();
 
     service.getFileTree('project-1').subscribe({
