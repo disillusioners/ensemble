@@ -250,12 +250,33 @@ class TestableSettingsComponent {
           this.vscodeStatus.set(null);
         }
       },
-      error: (err: { status?: number }) => {
+      error: (err: { status?: number; error?: { detail?: { error?: string; detail?: string } } }) => {
         this.applyingEditor.set(false);
+        // Mirror of the production error handler — surface the specific reason
+        // from the backend's `detail.error` so the user can act on it
+        // (install binary, check logs, restart daemon) instead of a single
+        // catch-all hint. All other failures get a generic message.
         const isUnavailable = err?.status === 503;
-        const message = isUnavailable
-          ? 'VS Code editor is not installed. Install code-server and try again.'
-          : 'Failed to save editor preference';
+        let message: string;
+        if (isUnavailable) {
+          const detail = err?.error?.detail;
+          switch (detail?.error) {
+            case 'code-server binary not found':
+              message = 'VS Code editor (code-server) is not installed. Install code-server and try again.';
+              break;
+            case 'VS Code server failed to start':
+              message = detail?.detail ?? 'VS Code server failed to start. Check server logs for details.';
+              break;
+            case 'VS Code server manager not initialized':
+              message = 'VS Code server manager not initialized. Try restarting the daemon.';
+              break;
+            default:
+              // Malformed/missing detail — fall back to the historical generic hint.
+              message = 'VS Code editor is not installed. Install code-server and try again.';
+          }
+        } else {
+          message = 'Failed to save editor preference';
+        }
         this.snackBar.open(message, 'Dismiss', {
           duration: 5000,
           panelClass: 'error-snackbar',
@@ -992,7 +1013,61 @@ describe('SettingsComponent', () => {
       expect(component.applyingEditor()).toBe(false);
     });
 
-    it('should show install hint snackbar on 503 error', () => {
+    it('should show install hint snackbar on 503 with code-server binary not found', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'code-server binary not found', detail: 'shutil.which missed code-server in PATH' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code editor (code-server) is not installed. Install code-server and try again.',
+      );
+    });
+
+    it('should show backend explanation on 503 with VS Code server failed to start', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'VS Code server failed to start', detail: 'code-server exited with code 1' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe('code-server exited with code 1');
+    });
+
+    it('should show generic failed-to-start hint when 503 detail omits explanation', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'VS Code server failed to start' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code server failed to start. Check server logs for details.',
+      );
+    });
+
+    it('should show restart-daemon hint on 503 with VS Code server manager not initialized', () => {
+      service.setEditorPreference.mockReturnValue(
+        throwError(() => ({
+          status: 503,
+          error: { detail: { error: 'VS Code server manager not initialized' } },
+        })),
+      );
+      component.onEditorSelectionChange('vscode');
+      component.saveEditor();
+      expect(MockMatSnackBar.lastOpen?.message).toBe(
+        'VS Code server manager not initialized. Try restarting the daemon.',
+      );
+    });
+
+    it('should fall back to generic install hint on 503 with malformed detail', () => {
       service.setEditorPreference.mockReturnValue(
         throwError(() => ({ status: 503, message: 'Service Unavailable' })),
       );

@@ -586,7 +586,8 @@ class VSCodeServerManager:
         Order:
             1. ``config.binary_path`` if set (must exist and be executable).
             2. ``shutil.which("code-server")`` (PATH lookup).
-            3. Raise :class:`VSCodeServerNotInstalledError`.
+            3. Fallback common install locations (Homebrew, system, user-local).
+            4. Raise :class:`VSCodeServerNotInstalledError`.
 
         Returns:
             Absolute path to the code-server binary.
@@ -606,8 +607,23 @@ class VSCodeServerManager:
         found = shutil.which("code-server")
         if found:
             return found
+        # Fallback: daemon process PATH may miss common install locations
+        # (e.g. Homebrew on Apple Silicon). Probe well-known paths before
+        # giving up so a real install is not misreported as missing.
+        fallback_paths = [
+            "/opt/homebrew/bin/code-server",
+            "/usr/local/bin/code-server",
+            os.path.expanduser("~/.local/bin/code-server"),
+            "/usr/bin/code-server",
+        ]
+        for path in fallback_paths:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                logger.debug("Resolved code-server via fallback path: %s", path)
+                return path
+        searched = ", ".join(fallback_paths)
         raise VSCodeServerNotInstalledError(
-            "code-server not found in PATH. "
+            "code-server not found in PATH or common install locations. "
+            f"Searched: {searched}. "
             "Install: curl -fsSL https://code-server.dev/install.sh | sh"
         )
 
