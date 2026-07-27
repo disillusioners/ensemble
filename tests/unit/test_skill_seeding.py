@@ -946,3 +946,179 @@ skills:
         # New innate body picked up via re-resolve.
         assert "New invariant." in alpha_v2.content
         assert "Old invariant." not in alpha_v2.content
+
+
+# ============================================================================
+# C1 regression: versioned agent dirs (``name[vN]``) must seed under the
+# parsed base id so spawned instances (which resolve to the base id) can
+# find their auto-loaded skills via ``get_auto_load_by_agent(base_id)``.
+# ============================================================================
+
+
+class TestSeedAllVersionedAgentDirs:
+    """Regression guard for C1 (skill-seed version-tag mismatch).
+
+    Versioned directories like ``reviewer[v2]`` previously had their
+    ``skill-set.yaml`` skills seeded into the bank with
+    ``agent_id == "reviewer[v2]"`` (literal directory name). Because
+    spawned instances resolve to the base id ``"reviewer"`` via
+    ``registry.resolve_to_id()`` and ``get_auto_load_by_agent`` does an
+    exact ``WHERE agent_id == ?`` match (no cross-agent fallback),
+    those skills silently never loaded.
+
+    The fix parses the version tag in
+    :func:`daemon.services.skill_seed_service.seed_all` and seeds under
+    the base id. These tests are the first regression guard for that
+    contract.
+    """
+
+    def test_versioned_dir_seeds_under_base_agent_id(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """A ``reviewer[v2]`` directory seeds skills with
+        ``agent_id == "reviewer"`` (not ``"reviewer[v2]"``)."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+
+        # Versioned agent dir name — literally contains "[v2]".
+        reviewer_v2_dir = agents_root / "reviewer[v2]"
+        _write_skill_set_yaml(reviewer_v2_dir, _VALID_FM_ONE)
+        _write_template(reviewer_v2_dir, "alpha-skill")
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        summary = service.seed_all()
+
+        assert summary["new"] == 1
+        assert summary["errors"] == 0
+
+        # Bank row must be tagged with the BASE id, not the literal
+        # dir name. This is the contract that makes
+        # ``get_auto_load_by_agent("reviewer")`` work for instances
+        # spawned against the resolved base id.
+        alpha = repository.get_by_name_and_agent("alpha-skill", "reviewer")
+        assert alpha is not None, (
+            "expected bank row under base agent_id='reviewer'; "
+            "got None — versioned dir likely seeded under literal name"
+        )
+        assert alpha.agent_id == "reviewer"
+        # The literal, bracket-containing dir name must NOT have been
+        # used as the agent_id.
+        assert repository.get_by_name_and_agent(
+            "alpha-skill", "reviewer[v2]"
+        ) is None
+        # Category still follows the ``{agent_id}-skill-set`` convention.
+        assert alpha.category == "reviewer-skill-set"
+
+    def test_versioned_dir_auto_load_queryable_by_base_id(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """After seeding, ``get_auto_load_by_agent(base_id)`` must
+        return the auto-loaded skill for the versioned dir."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+
+        reviewer_v2_dir = agents_root / "reviewer[v2]"
+        _write_skill_set_yaml(reviewer_v2_dir, _VALID_FM_ONE)
+        _write_template(reviewer_v2_dir, "alpha-skill")
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        service.seed_all()
+
+        # Spawned instances resolve to "reviewer" — query with the
+        # base id and the auto-loaded skill must come back.
+        auto_loaded = repository.get_auto_load_by_agent("reviewer")
+        assert len(auto_loaded) == 1
+        assert auto_loaded[0].name == "alpha-skill"
+        assert auto_loaded[0].auto_load is True
+        assert auto_loaded[0].agent_id == "reviewer"
+
+        # Querying with the literal, bracket-containing dir name
+        # must return nothing — no row should exist under that key.
+        auto_loaded_literal = repository.get_auto_load_by_agent(
+            "reviewer[v2]"
+        )
+        assert auto_loaded_literal == []
+
+    def test_non_versioned_dir_unchanged(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """Plain (non-versioned) agent dirs seed exactly as before —
+        ``_parse_agent_dir_name`` returns ``(dir_name, None)`` and the
+        bank row's ``agent_id`` equals the dir name. This guards
+        against accidental regression of the non-versioned path."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+
+        plain_dir = agents_root / "plain-agent"
+        _write_skill_set_yaml(plain_dir, _VALID_FM_ONE)
+        _write_template(plain_dir, "alpha-skill")
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        summary = service.seed_all()
+
+        assert summary["new"] == 1
+        assert summary["errors"] == 0
+        # Same agent_id == dir_name contract as before the fix.
+        row = repository.get_by_name_and_agent("alpha-skill", "plain-agent")
+        assert row is not None
+        assert row.agent_id == "plain-agent"
+        assert row.category == "plain-agent-skill-set"
+
+    def test_versioned_and_plain_dirs_coexist(
+        self, repository: SkillBankRepository, tmp_path: Path
+    ) -> None:
+        """A versioned ``reviewer[v2]`` and a plain ``reviewer`` (in
+        a different agents tree) do not collide when only one is
+        present — but if both were ever in the same tree, each would
+        still seed under its own base id. This guards against the
+        versioned-dir path accidentally shadowing a plain dir or
+        producing duplicate bank rows."""
+        agents_root = tmp_path / "agents"
+        agents_root.mkdir()
+
+        # Plain sibling with one skill
+        plain_dir = agents_root / "plain-agent"
+        plain_fm = """\
+skills:
+  - name: beta-skill
+    version: "1.0.0"
+    auto_load: true
+    category: execution
+    description: "Plain beta"
+"""
+        _write_skill_set_yaml(plain_dir, plain_fm)
+        _write_template(plain_dir, "beta-skill")
+
+        # Versioned sibling with a different skill (avoids
+        # (name, agent_id) collision — they target different base ids).
+        versioned_dir = agents_root / "reviewer[v2]"
+        _write_skill_set_yaml(versioned_dir, _VALID_FM_ONE)
+        _write_template(versioned_dir, "alpha-skill")
+
+        service = SkillSeedService(
+            skill_bank_repo=repository, agents_dir=agents_root
+        )
+        summary = service.seed_all()
+
+        # Two agents → two new rows. No errors, no duplicates.
+        assert summary["new"] == 2
+        assert summary["errors"] == 0
+
+        # Versioned dir → base id "reviewer"
+        alpha = repository.get_by_name_and_agent("alpha-skill", "reviewer")
+        assert alpha is not None
+        assert alpha.agent_id == "reviewer"
+        # Plain dir → its own name
+        beta = repository.get_by_name_and_agent("beta-skill", "plain-agent")
+        assert beta is not None
+        assert beta.agent_id == "plain-agent"
+
+        # Both agents expose auto-loaded skills under their base ids.
+        assert len(repository.get_auto_load_by_agent("reviewer")) == 1
+        assert len(repository.get_auto_load_by_agent("plain-agent")) == 1

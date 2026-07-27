@@ -21,6 +21,7 @@ from pathlib import Path
 
 import yaml
 
+from ..registry import _parse_agent_dir_name
 from ..repositories.skill.skill_bank_repository import SkillBankRepository
 from .skill_include_resolver import resolve_includes
 
@@ -256,7 +257,12 @@ class SkillSeedService:
             if skill_set_path is None:
                 continue
 
-            agent_id = agent_dir.name
+            # Parse version tags so versioned dirs (e.g. "reviewer[v2]") seed
+            # under the resolved base id ("reviewer"). Instances run with the
+            # base id; seeding under the literal dir name causes auto_load
+            # skills to silently miss. For non-versioned dirs the parser
+            # returns ``(dir_name, None)`` — unchanged behavior.
+            agent_id, _version_tag = _parse_agent_dir_name(agent_dir.name)
             try:
                 result = self.seed_agent(agent_id, agent_dir, skill_set_path)
                 for key in summary:
