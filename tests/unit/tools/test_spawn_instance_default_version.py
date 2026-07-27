@@ -153,63 +153,69 @@ class TestResolveDefaultVersionTag:
     the resolved ``version_tag``.
     """
 
-    def test_1_default_configured_for_agent(
+    async def test_1_default_configured_for_agent(
         self, repo, engine, system_default_project_id
     ):
         """Default configured: {"developer": "v2"} → resolves to "v2"."""
         _create_project_row(engine, system_default_project_id)
         _seed_default_versions(repo, system_default_project_id, {"developer": "v2"})
+        registry = MagicMock()
+        registry.get_version.return_value = MagicMock()
 
-        result = _resolve_default_version_tag(repo, "developer")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
 
         assert result == "v2"
 
-    def test_2_no_default_configured(
+    async def test_2_no_default_configured(
         self, repo, engine, system_default_project_id
     ):
         """No default configured (missing record) → returns None."""
         _create_project_row(engine, system_default_project_id)
         # No metadata seeded: get_metadata_record returns None.
+        registry = MagicMock()
 
-        result = _resolve_default_version_tag(repo, "developer")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
 
         assert result is None
 
-    def test_3_default_explicitly_null(
+    async def test_3_default_explicitly_null(
         self, repo, engine, system_default_project_id
     ):
         """Default explicitly null: {"developer": None} → returns None."""
         _create_project_row(engine, system_default_project_id)
         _seed_default_versions(repo, system_default_project_id, {"developer": None})
+        registry = MagicMock()
 
-        result = _resolve_default_version_tag(repo, "developer")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
 
         assert result is None
 
-    def test_4_default_for_other_agent_only(
+    async def test_4_default_for_other_agent_only(
         self, repo, engine, system_default_project_id
     ):
         """Default set for tester only; spawn developer → None."""
         _create_project_row(engine, system_default_project_id)
         _seed_default_versions(repo, system_default_project_id, {"tester": "v2"})
+        registry = MagicMock()
 
-        result = _resolve_default_version_tag(repo, "developer")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
 
         assert result is None
 
-    def test_5_corrupt_json_returns_none(
+    async def test_5_corrupt_json_returns_none(
         self, repo, engine, system_default_project_id
     ):
         """Corrupt JSON in meta_value → resolver returns None, no exception."""
         _create_project_row(engine, system_default_project_id)
         _seed_corrupt_default_versions(engine, system_default_project_id, "{not json")
+        registry = MagicMock()
 
         # Must not raise.
-        result = _resolve_default_version_tag(repo, "developer")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
 
         assert result is None
 
-    def test_system_default_project_id_none_returns_none(self, repo):
+    async def test_system_default_project_id_none_returns_none(self, repo):
         """When SYSTEM_DEFAULT_PROJECT_ID is None (daemon not booted) → None.
 
         The helper must not touch the repo. Sanity check that this
@@ -217,13 +223,14 @@ class TestResolveDefaultVersionTag:
         """
         original = constants.SYSTEM_DEFAULT_PROJECT_ID
         constants.SYSTEM_DEFAULT_PROJECT_ID = None
+        registry = MagicMock()
         try:
-            result = _resolve_default_version_tag(repo, "developer")
+            result = await _resolve_default_version_tag(repo, "developer", registry)
             assert result is None
         finally:
             constants.SYSTEM_DEFAULT_PROJECT_ID = original
 
-    def test_db_error_returns_none(
+    async def test_db_error_returns_none(
         self, system_default_project_id
     ):
         """If the repo raises on get_metadata_record, helper returns None.
@@ -235,9 +242,43 @@ class TestResolveDefaultVersionTag:
         repo.engine = MagicMock()
         # Force Session(...) to succeed but the get_metadata_record call to raise.
         repo.get_metadata_record.side_effect = RuntimeError("simulated DB outage")
+        registry = MagicMock()
 
-        result = _resolve_default_version_tag(repo, "developer")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
 
+        assert result is None
+
+    async def test_stale_configured_tag_returns_none(
+        self, repo, engine, system_default_project_id
+    ):
+        """W2: a configured tag that no longer exists in the registry → None (graceful base fallback)."""
+        _create_project_row(engine, system_default_project_id)
+        _seed_default_versions(repo, system_default_project_id, {"developer": "v99"})
+        registry = MagicMock()
+        registry.get_version.return_value = None  # stale tag
+        result = await _resolve_default_version_tag(repo, "developer", registry)
+        assert result is None
+
+    async def test_valid_configured_tag_passes_registry_check(
+        self, repo, engine, system_default_project_id
+    ):
+        """W2: a configured tag that still exists → returned (regression guard)."""
+        _create_project_row(engine, system_default_project_id)
+        _seed_default_versions(repo, system_default_project_id, {"developer": "v2"})
+        registry = MagicMock()
+        registry.get_version.return_value = MagicMock()  # truthy → tag exists
+        result = await _resolve_default_version_tag(repo, "developer", registry)
+        assert result == "v2"
+
+    async def test_registry_error_returns_none(
+        self, repo, engine, system_default_project_id
+    ):
+        """W2: registry itself raises → None (never propagate)."""
+        _create_project_row(engine, system_default_project_id)
+        _seed_default_versions(repo, system_default_project_id, {"developer": "v2"})
+        registry = MagicMock()
+        registry.get_version.side_effect = RuntimeError("registry boom")
+        result = await _resolve_default_version_tag(repo, "developer", registry)
         assert result is None
 
 
@@ -299,9 +340,18 @@ class TestSpawnInstanceForwardsTag:
                 t for t in tools if getattr(t, "name", "") == "spawn_instance"
             )
 
-            result = await spawn_tool.coroutine(
-                agent_id="developer", project_id=None
-            )
+            # W2: the tool body now calls ``get_registry()`` to validate
+            # the resolved tag. Patch it narrowly around the coroutine
+            # invocation ONLY — NOT around ``create_instance_tools(...)``
+            # (construction also calls ``get_registry()`` via
+            # ``create_inner_soul_tool`` for growth-rules loading; mocking
+            # it there breaks ``_load_growth_rules``'s ``re.search``).
+            fake_registry = MagicMock()
+            fake_registry.get_version.return_value = MagicMock()  # truthy → "v2" valid
+            with patch("daemon.registry.get_registry", return_value=fake_registry):
+                result = await spawn_tool.coroutine(
+                    agent_id="developer", project_id=None
+                )
 
         # Assert manager.spawn_instance was called with version_tag="v2"
         assert manager.spawn_instance.called, (
@@ -349,7 +399,10 @@ class TestSpawnInstanceForwardsTag:
             spawn_tool = next(
                 t for t in tools if getattr(t, "name", "") == "spawn_instance"
             )
-            await spawn_tool.coroutine(agent_id="developer", project_id=None)
+            # W2: patch ``get_registry`` narrowly around the coroutine
+            # invocation only (see test_6 for rationale).
+            with patch("daemon.registry.get_registry", return_value=MagicMock()):
+                await spawn_tool.coroutine(agent_id="developer", project_id=None)
 
         call_kwargs = manager.spawn_instance.call_args.kwargs
         assert call_kwargs.get("version_tag") is None

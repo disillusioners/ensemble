@@ -12,6 +12,7 @@ from sqlmodel import Session
 
 if TYPE_CHECKING:
     from daemon.repositories.project.repository import SQLModelProjectRepository
+    from daemon.registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -251,9 +252,10 @@ def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> st
     return None
 
 
-def _resolve_default_version_tag(
+async def _resolve_default_version_tag(
     project_repo: "SQLModelProjectRepository",
     agent_id: str,
+    registry: "AgentRegistry | None",
 ) -> str | None:
     """Look up the per-project default version_tag for ``agent_id``.
 
@@ -264,49 +266,74 @@ def _resolve_default_version_tag(
 
     Always reads from the SYSTEM DEFAULT project — the default-version
     feature is a single global scope (mirrors ``routers/settings.py``).
-    Never raises: corrupt JSON, missing record, missing key, or DB error → ``None``.
+    Never raises: corrupt JSON, missing record, missing key, DB error,
+    stale configured tag, or registry failure → ``None``.
+
+    The configured tag is validated against ``registry.get_version``
+    before being returned: if the tag no longer exists (retagged /
+    renamed) or the registry itself raises, the helper returns
+    ``None`` so the caller falls back to the base version instead of
+    hard-failing the spawn with a "version tag not found" error.
     """
-    # Daemon boot not finished — feature unavailable yet. Caller treats
-    # this the same as "no default configured".
     project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
     if project_id is None:
         return None
 
-    try:
+    # W1 FIX: mirror ``routers/settings.py:323-355`` — open the Session
+    # inside a worker thread so the synchronous DB read cannot block the
+    # event loop. ``_read`` is a plain sync nested function that opens
+    # its own Session and returns the parsed mapping (or ``{}`` on any
+    # read / parse failure).
+    def _read() -> dict[str, str | None]:
         with Session(project_repo.engine) as session:
             record = project_repo.get_metadata_record(
                 session,
                 project_id,
                 constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
             )
+        if record is None:
+            return {}
+        raw = getattr(record, "meta_value", None)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        normalized: dict[str, str | None] = {}
+        for k, v in parsed.items():
+            if isinstance(k, str) and (v is None or isinstance(v, str)):
+                normalized[k] = v
+        return normalized
+
+    try:
+        parsed_map = await asyncio.to_thread(_read)
     except Exception:
-        # Any DB error → caller falls back to base. Never raise.
         return None
 
-    if record is None:
+    configured_tag = parsed_map.get(agent_id)
+    if not configured_tag:
         return None
 
-    raw = getattr(record, "meta_value", None)
-    if not raw:
+    # W2 FIX: guard against a stale configured tag. If the user
+    # configured ``{"developer": "v99"}`` and ``v99`` has since been
+    # retagged or removed, ``registry.get_version`` returns ``None``
+    # and we drop the tag so the lifecycle service falls back to base
+    # instead of raising ``ValueError("Version tag not found")``.
+    if registry is None:
         return None
 
     try:
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError):
-        # Corrupt JSON — never raise.
+        resolved = registry.get_version(agent_id, configured_tag)
+    except Exception:
         return None
 
-    if not isinstance(parsed, dict):
+    if resolved is None:
         return None
 
-    # Normalize: only keep ``str → str | None`` entries. This mirrors
-    # the inline read pattern in ``routers/settings.py:323-353``.
-    normalized: dict[str, str | None] = {}
-    for k, v in parsed.items():
-        if isinstance(k, str) and (v is None or isinstance(v, str)):
-            normalized[k] = v
-
-    return normalized.get(agent_id)
+    return configured_tag
 
 
 def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str | None:
@@ -759,8 +786,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             # client-side resolution). The spawn_instance TOOL does not
             # expose version_tag (per UX decision); instead it always
             # uses the user-configured default, falling back to base.
-            version_tag = _resolve_default_version_tag(
-                manager._project_repository, agent_id
+            # W1: helper is async (DB read runs in a worker thread);
+            # W2: registry validates the configured tag so a stale
+            # default (e.g. ``"v99"`` retagged/renamed) falls back to
+            # base instead of hard-failing the spawn.
+            from ..registry import get_registry
+            registry = get_registry()
+            version_tag = await _resolve_default_version_tag(
+                manager._project_repository, agent_id, registry
             )
 
             new_instance_id, validated_model_override = manager.spawn_instance(
