@@ -347,8 +347,11 @@ export class ChatComponent implements OnInit, OnDestroy {
             // than always falling back to the base version.
             this.api.getDefaultAgentVersions().subscribe({
               next: (resp) => {
-                const defaults = resp.default_versions ?? {};
-                this.selectedVersionTag.set(defaults[savedAgent.id] ?? null);
+                // Guard: don't clobber if user already switched to a different agent
+                if (this.selectedAgent()?.id === savedAgent.id) {
+                  const defaults = resp.default_versions ?? {};
+                  this.selectedVersionTag.set(defaults[savedAgent.id] ?? null);
+                }
               },
               error: () => {
                 // Leave selectedVersionTag at its current value on error.
