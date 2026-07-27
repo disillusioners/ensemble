@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from langchain_core.tools import tool, BaseTool
 from pydantic import BaseModel, Field, model_validator
+from sqlmodel import Session
+
+if TYPE_CHECKING:
+    from daemon.repositories.project.repository import SQLModelProjectRepository
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +134,7 @@ from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, re
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
 from daemon.constants import DEFAULT_PAGE_LIMIT
+from daemon import constants
 from daemon.rag.config import is_rag_enabled
 from daemon.governor.contracts import SpawnCouncilorInput  # Phase 2: council tool schema (Phase 0 frozen)
 
@@ -244,6 +249,64 @@ def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> st
     except Exception:
         pass
     return None
+
+
+def _resolve_default_version_tag(
+    project_repo: "SQLModelProjectRepository",
+    agent_id: str,
+) -> str | None:
+    """Look up the per-project default version_tag for ``agent_id``.
+
+    Reads the ``"default_agent_versions"`` metadata map stored on the
+    ``SYSTEM_DEFAULT_PROJECT_ID``. Returns the configured tag, or
+    ``None`` if no default is configured for this agent (caller falls
+    back to base).
+
+    Always reads from the SYSTEM DEFAULT project — the default-version
+    feature is a single global scope (mirrors ``routers/settings.py``).
+    Never raises: corrupt JSON, missing record, missing key, or DB error → ``None``.
+    """
+    # Daemon boot not finished — feature unavailable yet. Caller treats
+    # this the same as "no default configured".
+    project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if project_id is None:
+        return None
+
+    try:
+        with Session(project_repo.engine) as session:
+            record = project_repo.get_metadata_record(
+                session,
+                project_id,
+                constants.DEFAULT_AGENT_VERSIONS_METADATA_KEY,
+            )
+    except Exception:
+        # Any DB error → caller falls back to base. Never raise.
+        return None
+
+    if record is None:
+        return None
+
+    raw = getattr(record, "meta_value", None)
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        # Corrupt JSON — never raise.
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    # Normalize: only keep ``str → str | None`` entries. This mirrors
+    # the inline read pattern in ``routers/settings.py:323-353``.
+    normalized: dict[str, str | None] = {}
+    for k, v in parsed.items():
+        if isinstance(k, str) and (v is None or isinstance(v, str)):
+            normalized[k] = v
+
+    return normalized.get(agent_id)
 
 
 def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str | None:
@@ -692,6 +755,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 project_id = _get_instance_project_id(manager, current_instance_id)
                 project_id = normalize_project_id(project_id)
 
+            # Resolve per-project default version (mirrors the frontend
+            # client-side resolution). The spawn_instance TOOL does not
+            # expose version_tag (per UX decision); instead it always
+            # uses the user-configured default, falling back to base.
+            version_tag = _resolve_default_version_tag(
+                manager._project_repository, agent_id
+            )
+
             new_instance_id, validated_model_override = manager.spawn_instance(
                 agent_id=agent_id,
                 instance_id=None,
@@ -699,6 +770,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 project_id=project_id,
                 instance_name=instance_name,
                 model=model,
+                version_tag=version_tag,
             )
             # Surface a silent-fallback notice (Fix 2 / security review):
             # if the caller supplied a model that's not in
