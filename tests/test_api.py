@@ -855,6 +855,7 @@ async def test_send_message_success(client, mock_manager):
         message="Hello, agent!",
         source="api",
         images=None,
+        queue_id=None,
     )
 
 
