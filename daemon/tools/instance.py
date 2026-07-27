@@ -955,6 +955,126 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             ),
         }
 
+    @register_tool_category("council")
+    @tool
+    async def convene_council_with_skill(
+        councilor_agent_id: str,
+        request: str,
+        councilor_skill: str,
+        models: list[str] | None = None,
+        max_councilors: int | None = None,
+        instance_name: str | None = None,
+    ) -> dict:
+        """Convene a council of agents and inject a skill into each councilor.
+
+        Skill-passthrough variant of :func:`convene_council`. The
+        ``councilor_skill`` is forwarded to the governor's request message so
+        each spawned councilor can be primed with the named skill before
+        tackling the request.
+
+        Non-blocking: returns immediately with an async hint. The governor's
+        completion report arrives as a new message to the caller.
+        """
+        if councilor_skill is None:
+            raise ValueError(
+                "councilor_skill is required for convene_council_with_skill"
+            )
+        councilor_skill = councilor_skill.strip()
+        if not councilor_skill:
+            raise ValueError(
+                "councilor_skill is required for convene_council_with_skill"
+            )
+        # Reject newlines to prevent governor prompt injection
+        if "\n" in councilor_skill or "\r" in councilor_skill:
+            raise ValueError("councilor_skill must not contain newlines")
+
+        from ..registry import get_registry
+
+        canonical = get_registry().resolve_to_id(councilor_agent_id)
+        if not canonical:
+            raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
+
+        # convene_council_with_skill requires "governor" in the caller's team_members.
+        membership_error = _check_team_membership(caller_agent_id, "governor")
+        if membership_error is not None:
+            raise ValueError(membership_error)
+
+        # ── Optional skill existence check (defensive hardening) ────────
+        # Surface a WARNING when the requested skill is missing from both the
+        # ``skills`` and ``skill_bank`` tables so misnamed skills are caught
+        # before spawning a full governor + councilor chain. The lookup
+        # proceeds either way — consistent with the existing ``load_skill``
+        # tool, which also no-ops on misses. All access is defensive: any
+        # missing repo / lookup exception degrades to "not found".
+        skill_repo = getattr(manager, "_skill_repo", None)
+        skill_bank_repo = getattr(manager, "_skill_bank_repo", None)
+        project_id: str | None = None
+        instance_repo = getattr(manager, "_instance_repository", None)
+        if current_instance_id and instance_repo is not None:
+            try:
+                inst_meta = instance_repo.get(current_instance_id)
+                project_id = getattr(inst_meta, "project_id", None)
+            except Exception:
+                project_id = None
+
+        skill_found = False
+        if skill_repo is not None:
+            try:
+                hit = await asyncio.to_thread(
+                    skill_repo.get_by_name, project_id, councilor_skill, 0
+                )
+                if hit is not None:
+                    skill_found = True
+            except Exception:
+                pass
+        if not skill_found and skill_bank_repo is not None:
+            try:
+                hit = await asyncio.to_thread(
+                    skill_bank_repo.get_by_name_any_agent, councilor_skill
+                )
+                if hit is not None:
+                    skill_found = True
+            except Exception:
+                pass
+        if not skill_found:
+            logger.warning(
+                f"WARNING: Skill '{councilor_skill}' not found in skills or "
+                f"skill_bank tables — councilors will run without skill injection"
+            )
+
+        # No W1 identity guard: any caller authorized by team_members may convene.
+        gov_instance_id, _ = manager.spawn_instance(
+            agent_id="governor",
+            parent_id=current_instance_id,
+            instance_name=instance_name,
+        )
+
+        message_text = (
+            f'Convene a council using councilor_agent_id="{canonical}".\n'
+            f"Councilor skill: {councilor_skill}\n"
+            f"Request: {request}\n"
+            f"Models: {', '.join(models) if models else 'all available'}\n"
+            f"Max councilors: "
+            f"{max_councilors if max_councilors is not None else 'governor decides'}"
+        )
+
+        await manager.enqueue_message(
+            instance_id=gov_instance_id,
+            message=message_text,
+            source=f"internal_agent:{current_instance_id}",
+        )
+
+        return {
+            "status": "convened",
+            "governor_instance_id": gov_instance_id,
+            "councilor_skill": councilor_skill,
+            "hint": (
+                "Council convened with skill injection. The governor will "
+                "process your request and deliver a result. Watch for the "
+                "completion report."
+            ),
+        }
+
     @register_tool_category("instance")
     @tool
     async def send_message(
@@ -1264,6 +1384,7 @@ Returns:
         spawn_councilor,          # Phase 2: council category — governor-only
         clear_councilor_errors,   # Phase 2: council category — governor-only
         convene_council,          # Council category — team-membership authorized
+        convene_council_with_skill,  # Council category — team-membership authorized (skill-injection variant)
         send_message,
         terminate_instance,
         list_instances,

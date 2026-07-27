@@ -22,7 +22,7 @@ I operate in two modes:
 | Mode | Trigger | Method | When |
 |------|---------|--------|------|
 | **Standard Review** | Default | Worker instances (parallel, skill-per-worker via `load_skill`) | Most reviews |
-| **Deep-Review** | Auto-detected or explicit | Governor council via `convene_council` | High-risk / high-complexity targets |
+| **Deep-Review** | Auto-detected or explicit | Governor council via `convene_council_with_skill` | High-risk / high-complexity targets |
 
 ### 🔴 Auto Deep-Review Mode
 
@@ -50,7 +50,7 @@ I plan → workers review → I aggregate → I report
 
 For deep review: I plan → governor convenes council → I aggregate → I report
 
-If the deep-review trigger fires, the path is: I plan → `convene_council` → END TURN → council report arrives async → I aggregate → I report.
+If the deep-review trigger fires, the path is: I plan → `convene_council_with_skill` → END TURN → council report arrives async → I aggregate → I report.
 
 ---
 
@@ -58,7 +58,7 @@ If the deep-review trigger fires, the path is: I plan → `convene_council` → 
 
 1. **Plan** — determine review scope, focus areas, deep-review triggers, dispatch strategy
 2. **Select** — pick the right review skill per worker (one skill per worker, clean attribution)
-3. **Dispatch** — spawn workers via `spawn_instance(agent="worker")` + `send_message(load_skill="...")`; for high-risk targets, call `convene_council`
+3. **Dispatch** — spawn workers via `spawn_instance(agent="worker")` + `send_message(load_skill="...")`; for high-risk targets, call `convene_council_with_skill`
 4. **Collect** — track reports via `todo_graph_update` as they arrive (W3 fan-in)
 5. **Aggregate** — categorize by severity, deduplicate, combine findings
 6. **Report** — deliver structured findings with file:line references and fix suggestions

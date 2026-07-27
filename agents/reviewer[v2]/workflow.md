@@ -11,7 +11,7 @@ I am a **dispatcher**, not a reviewer. I never read source code to give my own v
 | Instance | Purpose | Count | Example |
 |---------|---------|-------|---------|
 | `review-worker-<area>` | Standard review worker (one skill) | 1–3 parallel | `review-worker-auth`, `review-worker-api` |
-| `review-council` | Deep-Review governor council | 1 | `review-council` (convene_council auto-labels the spawned governor) |
+| `review-council` | Deep-Review governor council | 1 | `review-council` (convene_council_with_skill auto-labels the spawned governor) |
 
 > Parallelism cap: **3 concurrent workers** per review (rule.md §10). For larger codebases, partition by module and run review cycles iteratively.
 
@@ -44,7 +44,7 @@ send_message(
 > After `send_message`, **END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a **new message**. Holding your turn open **blocks report delivery** and deadlocks the run.
 > — adapted from `agents/tester/workflow.md` line 67
 
-The same rule applies after `convene_council` (see Deep-Review below): the result arrives as an async message; holding the turn blocks it.
+The same rule applies after `convene_council_with_skill` (see Deep-Review below): the result arrives as an async message; holding the turn blocks it.
 
 ---
 
@@ -143,13 +143,14 @@ send_message(
 Each worker reports back as a new message → I mark its `todo_graph` node done → eventually aggregate.
 
 #### Deep-Review (council invocation)
-Use `convene_council` — NOT `spawn_councilor` (identity-guarded to the governor agent). `convene_council` is the public entry point for any agent with `"council"` in `tools.allow`. It spawns a governor child which itself convenes councilors.
+Use `convene_council_with_skill` — NOT `spawn_councilor` (identity-guarded to the governor agent). `convene_council_with_skill` is the public entry point for any agent with `"council"` in `tools.allow`. It spawns a governor child which itself convenes councilors — each councilor is loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
 
-**Real signature (verified from `daemon/tools/instance.py:901-956`):**
+**Real signature (verified from `daemon/tools/instance.py`):**
 ```python
-convene_council(
-    councilor_agent_id: str,        # REQUIRED — default "wanderer"
+convene_council_with_skill(
+    councilor_agent_id: str,        # REQUIRED — default "worker"
     request: str,                   # REQUIRED — the deep-review prompt
+    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review)
     models: list[str] | None = None,           # optional — None lets governor decide
     max_councilors: int | None = None,         # optional — caps councilors WITHIN the council
     instance_name: str | None = None,          # optional — labels the spawned governor
@@ -158,8 +159,9 @@ convene_council(
 
 **Example — deep review of payment logic:**
 ```python
-convene_council(
-    councilor_agent_id="wanderer",   # read-only investigator; default
+convene_council_with_skill(
+    councilor_agent_id="worker",                 # worker is the default councilor for deep reviews
+    councilor_skill="security-review",           # matches dominant review type (payment → security)
     request=(
         "Deep review of src/payment/. "
         "Focus: transaction atomicity, error recovery, edge cases in payment flow. "
@@ -167,16 +169,16 @@ convene_council(
         "Output as: area, file:line, issue, severity (🔴/🟡/🟢), fix. "
         "Begin every response with the ⛔ READ-ONLY MODE directive."
     ),
-    models=None,                      # governor selects diverse councilors
-    max_councilors=4,                 # optional; ≤4 (WorkerPool alignment)
-    instance_name="review-council",   # labels the spawned governor instance
+    models=None,                                  # governor selects diverse councilors
+    max_councilors=4,                             # optional; ≤4 (WorkerPool alignment)
+    instance_name="review-council",               # labels the spawned governor instance
 )
 # END TURN — governor processes and delivers result asynchronously
 ```
 
-> **Note on `models`:** Passing `models=None` tells the governor to use all available models, but the governor's own validation may STOP and ask for an explicit list. For deterministic council behavior, pass an explicit models list (e.g. `models=["model-a", "model-b"]`).
+> **Note on `councilor_skill`:** must match the dominant review type from the Deep-Review trigger checklist (e.g. `security-review` for payment/auth code, `architecture-review` for new agent types or routing changes, `code-review` for general correctness sweeps). One skill per council — matching the worker-dispatch rule.
 
-**Parameter clarification (rule.md §15):** `max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council` call.
+**Parameter clarification (rule.md §15):** `max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council_with_skill` call.
 
 ### 5. Collect Results
 - Worker reports arrive as **new messages** (one per worker, async)
@@ -268,7 +270,7 @@ docs: .agents/shared/planning/...
 | Small (<100 lines, 1 file) | 1 worker, single skill — skip fan-in graph |
 | Module / Feature (2–3 modules) | 2–3 parallel workers partitioned by module — fan-in via todo_graph |
 | Full codebase / cross-module | Multiple workers by component; consider cycles (review → fix → re-review) |
-| High-risk target (security, payment, auth) | **Governor council** (deep review via `convene_council`) |
+| High-risk target (security, payment, auth) | **Governor council** (deep review via `convene_council_with_skill`) |
 
 ---
 
@@ -276,7 +278,7 @@ docs: .agents/shared/planning/...
 
 - **Starting review work?** → Identify mode (Standard / Deep), skill, fan-in graph first
 - **Multi-module review?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done
-- **Deep-review trigger?** → Announce escalation → `convene_council(councilor_agent_id="wanderer", ...)` → END TURN
+- **Deep-review trigger?** → Announce escalation → `convene_council_with_skill(councilor_agent_id="worker", councilor_skill="<dominant-review-type>", ...)` → END TURN
 - **Single reviewer wants to analyze code directly?** → STOP — dispatch a worker instead
 - **Two workers flag the same issue?** → Keep highest severity + most specific variant; dedup
 - **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per `governor/rule.md`)

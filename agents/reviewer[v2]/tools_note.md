@@ -37,29 +37,31 @@ See `workflow.md` → "Skill Selection Guide" for which `load_skill` value match
 
 ## Council Management
 
-`council` category — `convene_council` for Deep-Review.
+`council` category — `convene_council_with_skill` for Deep-Review.
 
-### `convene_council` — DEEP REVIEW
+### `convene_council_with_skill` — DEEP REVIEW
 
 Real signature (verified from `daemon/tools/instance.py:901-956`):
 
 ```python
-convene_council(
-    councilor_agent_id: str,           # REQUIRED — default "wanderer"
-    request: str,                      # REQUIRED — deep-review prompt (prepend ⛔ READ-ONLY directive if you rely on governor to enforce it; governor prepends automatically)
+convene_council_with_skill(
+    councilor_agent_id: str,        # REQUIRED — default "worker"
+    request: str,                   # REQUIRED — the deep-review prompt
+    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review)
     models: list[str] | None = None,             # optional — None lets governor pick diverse models
     max_councilors: int | None = None,           # optional — caps councilors WITHIN the council (≤4)
     instance_name: str | None = None,            # optional — labels the spawned governor instance
 )
 ```
 
-> `convene_council` is **non-blocking**. It returns immediately with `{"status": "convened", ...}`. The governor runs the council asynchronously and the synthesized result is delivered to me as a **new message** later.
+> `convene_council_with_skill` is **non-blocking**. It returns immediately with `{"status": "convened", ...}`. The governor runs the council asynchronously and the synthesized result is delivered to me as a **new message** later.
 
 ### Usage
 
 ```python
-convene_council(
-    councilor_agent_id="wanderer",
+convene_council_with_skill(
+    councilor_agent_id="worker",
+    councilor_skill="code-review",   # or whichever review type dominates
     request=(
         "Deep review of <target>. "
         "Focus: <concerns>. Provide thorough analysis of correctness, safety, architecture."
@@ -77,16 +79,17 @@ convene_council(
 
 | Parameter | Required | Notes |
 |-----------|----------|-------|
-| `councilor_agent_id` | YES | Default `"wanderer"`. Never set to `"reviewer"` (recursion). `wanderer` is the purpose-built read-only investigator. |
+| `councilor_agent_id` | YES | Default `"worker"`. Never set to `"reviewer"` (recursion). Use `worker` (the generic councilor) with the matched `councilor_skill`. |
+| `councilor_skill`   | YES | Matches the dominant review type (code-review, plan-review, architecture-review, security-review, pr-review). One skill per council — mirrors worker dispatch. |
 | `request`             | YES | The deep-review prompt. Governor prepends the ⛔ READ-ONLY directive automatically before dispatching to councilors. |
 | `models`              | NO  | `None` lets the governor pick diverse councilors. Pass a list to constrain. |
 | `max_councilors`      | NO  | Caps councilors spawned **within this single council** (≤4, WorkerPool alignment). It is NOT the number of councils. |
 | `instance_name`       | NO  | A label for the spawned governor instance. |
 
-### What `convene_council` Is Not
+### What `convene_council_with_skill` Is Not
 
 - **Not `spawn_councilor` directly.** `spawn_councilor` is identity-guarded to the `governor` agent. As a reviewer, I cannot call it.
-- **Not multiple councils per review.** Deep-Review = exactly **one** `convene_council` call. The governor handles councilor spawning within.
+- **Not multiple councils per review.** Deep-Review = exactly **one** `convene_council_with_skill` call. The governor handles councilor spawning within.
 - **Not blocking.** Do not poll / sleep / bash waiting for the result. End turn; report arrives async.
 
 ---
@@ -129,7 +132,7 @@ Pass queries via an explorer team member for synthesis; reserve direct calls for
 | Member | Role | When to Use |
 |--------|------|-------------|
 | `worker` | Skill-equipped reviewer (skill-per-worker) | Default — standard reviews, multi-area parallel dispatch |
-| `governor` | Council convenor (via `convene_council`) | Deep-Review of high-risk targets |
+| `governor` | Council convenor (via `convene_council_with_skill`) | Deep-Review of high-risk targets |
 | `explorer` | Knowledge-base retrieval | Project conventions, prior findings, RAG lookup |
 
 Worker reuse: a worker can be re-dispatched with a new `load_skill` if context is still relevant (follow-up review in the same area). Otherwise spawn fresh.
@@ -168,6 +171,6 @@ This agent does **NOT** use opencode sessions. No `external_opencode_*` tool cal
 
 All analysis is delegated to:
 - **Skill-equipped worker instances** (standard reviews) — primary path, `load_skill`-attributed
-- **Governor council via `convene_council`** (deep reviews)
+- **Governor council via `convene_council_with_skill`** (deep reviews)
 
 Opencode is not part of `meta.json` (`innate_skills` does not contain `"opencode"`, and `tools.allow` does not contain any `external_opencode_*` entry). Removing opencode from the review surface is a core requirement — it eliminates a heavy external dependency and gives clean skill-evolution attribution per worker dispatch.
