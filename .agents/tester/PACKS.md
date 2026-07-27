@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 203 packs
-- Unit: 162 | Integration: 10 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
+- Total: 204 packs
+- Unit: 163 | Integration: 10 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 
 ## Unit Test Packs
@@ -20,7 +20,8 @@
 | migration_worker_unit_test | tests/unit/test_migration_worker.py | MigrationWorker: 5-state machine, asyncio.Lock, config update, writes paused/resumed, SSE, cancel | 2 min | 2026-06-04 | ✅ PASS (40/40, Phase 3, 0 failures in isolation) |
 | migration_api_unit_test | tests/unit/test_migration_api.py | Migration API: 5 endpoints (availability/start/status/cancel/events), status codes, SSE streaming | 2 min | 2026-06-04 | ✅ PASS (29/29, Phase 3, 0 failures) |
 | migration_e2e_test | tests/e2e/test_migration_e2e.py | Real SQLite→PostgreSQL E2E migration against ensemble_test: full migration, availability, idempotency | 5 min | 2026-06-04 | ✅ PASS (3/3, Phase 3, real PG migration verified) |
-| sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
+| sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-07-27 | ✅ PASS (152 passed, 0 failures, feature/rename-source-credential-key regression check) |
+| encryption_key_fallback_unit_test | test/packs/encryption_key_fallback_unit_test.sh | Encryption key env var fallback: `SYSTEM_ENCRYPTION_KEY` canonical name with `SOURCE_CREDENTIAL_KEY` backward-compat + deprecation warning; both-set canonical wins; error when neither set | 2 min | 2026-07-27 | ✅ PASS (9/9, feature/rename-source-credential-key, commit 75c77ade) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance. **Auto-start tests (4cc91a4): 4 new tests — test_auto_start_vscode_calls_ensure_running_when_preference_is_vscode, test_auto_start_vscode_skips_ensure_running_when_preference_is_builtin, test_auto_start_vscode_swallows_ensure_running_failure (non-fatal), test_auto_start_vscode_passes_project_repository_to_get_editor_preference. Quick fixes e5c351ba + 5e6b9cc3: pre-existing test_send_message_success mock+assertion drift (queued field, queue_id kwarg).** | 2 min | 2026-07-27 | ✅ PASS (213 passed, 8 skipped in 12.3s, feature/vscode-autostart-editor-ui @ cb5819c9, 0 failures) |
 | spawn_instance_default_version_unit_test | tests/unit/tools/test_spawn_instance_default_version.py | spawn_instance default-version resolution: `_resolve_default_version_tag` async helper + `asyncio.to_thread` DB read. 4 scenarios (configured→version_tag, no-default→None, stale tag→None, DB error→None) + edge cases (corrupt JSON, key-miss, stale-import-safe `constants.SYSTEM_DEFAULT_PROJECT_ID`). Real in-memory SQLite via StaticPool. | 2 min | 2026-07-27 | ✅ PASS (12/12 in 1.22s, feature/spawn-instance-default-version @ f01b3621, 0 failures) |
