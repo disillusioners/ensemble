@@ -11,6 +11,23 @@ class MockInstanceService {
 
   readonly hasMoreInstances = signal(false);
 
+  // Search-related members (mirrors InstanceService search feature)
+  readonly searchQuery = signal<string>('');
+  readonly isSearching = computed(() => this.searchQuery().trim().length > 0);
+  currentProjectId: string | null = null;
+  private _currentOffset = 0;
+
+  setSearchQuery(query: string): void {
+    const trimmed = query.trim();
+    if (this.searchQuery() === trimmed) return;
+    this.searchQuery.set(trimmed);
+    this._currentOffset = 0;
+  }
+
+  getCurrentOffset(): number {
+    return this._currentOffset;
+  }
+
   toggleKb(): void {
     this.showKb.update(v => !v);
   }
@@ -44,6 +61,79 @@ class TestableInstanceListComponent {
 
   // Track refresh state
   readonly isRefreshing = signal(false);
+
+  // ── Search feature members ───────────────────────────────────────────────
+  // Raw text the user is typing. The debounced effect below mirrors it into
+  // instanceService.searchQuery after a 300ms idle window.
+  readonly searchInput = signal<string>('');
+
+  // Debounce timer — cleared in ngOnDestroy.
+  private _searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Build the (input) event the real component receives from Angular's
+  // event binding. Mirrors what onSearchInput unwraps via event.target.value.
+  private static buildInputEvent(value: string): Event {
+    return {
+      target: { value },
+    } as unknown as Event;
+  }
+
+  /**
+   * Bind to the search input's (input) event. Sets searchInput to the
+   * raw value (no trim). Mirrors the real component.
+   */
+  onSearchInput(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.searchInput.set(target.value);
+  }
+
+  /**
+   * Clear button handler — same as the user emptying the box, but explicit.
+   * No debounce; the effect below runs synchronously when searchInput changes.
+   */
+  onClearSearch(): void {
+    this.searchInput.set('');
+  }
+
+  /**
+   * Debounce effect logic: wait 300ms then push to the service and reload.
+   * On empty value, reset immediately (no debounce).
+   *
+   * This is exposed as a method so tests can drive the effect manually
+   * (the real component registers it inside its constructor effect()).
+   * Mirrors the constructor effect body in instance-list.component.ts.
+   */
+  runSearchEffect(): void {
+    const value = this.searchInput();
+    if (this._searchDebounceTimer) {
+      clearTimeout(this._searchDebounceTimer);
+      this._searchDebounceTimer = null;
+    }
+    if (value.trim().length === 0) {
+      // Instant reset path: clear search right now, no debounce.
+      if (this.instanceService.searchQuery().length > 0) {
+        this.instanceService.setSearchQuery('');
+        this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined);
+      }
+      return;
+    }
+    this._searchDebounceTimer = setTimeout(() => {
+      this.instanceService.setSearchQuery(value);
+      this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined);
+    }, 300);
+  }
+
+  // Exposed for ngOnDestroy test assertions.
+  clearSearchDebounceTimer(): void {
+    if (this._searchDebounceTimer) {
+      clearTimeout(this._searchDebounceTimer);
+      this._searchDebounceTimer = null;
+    }
+  }
+
+  hasPendingSearchDebounce(): boolean {
+    return this._searchDebounceTimer !== null;
+  }
 
   // Output EventEmitters (mocked as objects with emit methods)
   readonly terminateInstance = { emit: jest.fn() };
@@ -87,6 +177,11 @@ class TestableInstanceListComponent {
 
   ngOnDestroy(): void {
     this.instanceListContainer?.nativeElement?.removeEventListener('scroll', this.scrollHandler);
+    // Mirrors real component: clear any pending debounce timer.
+    if (this._searchDebounceTimer) {
+      clearTimeout(this._searchDebounceTimer);
+      this._searchDebounceTimer = null;
+    }
   }
 
   constructor(instanceService: MockInstanceService) {
@@ -785,6 +880,354 @@ describe('InstanceListComponent', () => {
         const routerLinkArray = ['/projects', projectContext, 'instances', instanceId];
 
         expect(routerLinkArray).toEqual(['/projects', 'all', 'instances', 'all-tab-inst']);
+      });
+    });
+  });
+
+  // ── Search feature: searchInput signal + onSearchInput/onClearSearch ─────
+  // Mirrors the implementation in instance-list.component.ts:
+  //   - searchInput signal (line 109)
+  //   - onSearchInput() (line 383): reads event.target.value, sets the signal
+  //   - onClearSearch() (line 392): sets searchInput to '' (effect resets)
+  //   - debounce effect (lines 188-203): 300ms wait then setSearchQuery + load
+  //   - instant reset on empty (no debounce)
+  //   - setSearchQuery('') resets offset (instance.service.ts line 77)
+  //   - template renders the search box (instance-list.html lines 35-56)
+  describe('search feature', () => {
+    describe('searchInput signal', () => {
+      it('should default to an empty string', () => {
+        expect(component.searchInput()).toBe('');
+      });
+
+      it('should reflect updates via .set()', () => {
+        component.searchInput.set('hello');
+        expect(component.searchInput()).toBe('hello');
+      });
+    });
+
+    describe('onSearchInput', () => {
+      it('should update searchInput from an input event value', () => {
+        const event = {
+          target: { value: 'worker-42' },
+        } as unknown as Event;
+
+        component.onSearchInput(event);
+
+        expect(component.searchInput()).toBe('worker-42');
+      });
+
+      it('should preserve raw value including whitespace (no trim)', () => {
+        // The real component intentionally does NOT trim — the effect does.
+        const event = {
+          target: { value: '  spaced  ' },
+        } as unknown as Event;
+
+        component.onSearchInput(event);
+
+        expect(component.searchInput()).toBe('  spaced  ');
+      });
+
+      it('should overwrite a previous searchInput value on subsequent input', () => {
+        component.searchInput.set('old');
+
+        const event = { target: { value: 'new' } } as unknown as Event;
+        component.onSearchInput(event);
+
+        expect(component.searchInput()).toBe('new');
+      });
+
+      it('should set empty string when the input is cleared by hand', () => {
+        component.searchInput.set('something');
+
+        const event = { target: { value: '' } } as unknown as Event;
+        component.onSearchInput(event);
+
+        expect(component.searchInput()).toBe('');
+      });
+    });
+
+    describe('onClearSearch', () => {
+      it('should reset searchInput to an empty string', () => {
+        component.searchInput.set('previously-typed');
+
+        component.onClearSearch();
+
+        expect(component.searchInput()).toBe('');
+      });
+
+      it('should be a no-op-safe reset when searchInput is already empty', () => {
+        expect(component.searchInput()).toBe('');
+
+        expect(() => component.onClearSearch()).not.toThrow();
+
+        expect(component.searchInput()).toBe('');
+      });
+    });
+
+    // ── Debounce effect (Jest fake timers) ───────────────────────────────
+    // These tests drive runSearchEffect() — the mirror of the constructor
+    // effect body in instance-list.component.ts. We use fake timers so the
+    // 300ms debounce is deterministic and never waits in real time.
+    describe('debounce effect (300ms)', () => {
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        // Always clear any pending timer + restore real timers so the next
+        // test block isn't poisoned by fake time.
+        component.clearSearchDebounceTimer();
+        jest.useRealTimers();
+      });
+
+      it('should NOT call setSearchQuery before 300ms elapse', () => {
+        component.searchInput.set('worker');
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+        const loadSpy = jest.spyOn(mockService, 'loadInstances');
+
+        component.runSearchEffect();
+
+        // Just under the debounce window — service must not be touched yet.
+        jest.advanceTimersByTime(299);
+
+        expect(setSearchSpy).not.toHaveBeenCalled();
+        expect(loadSpy).not.toHaveBeenCalled();
+      });
+
+      it('should call setSearchQuery + loadInstances AFTER 300ms', () => {
+        component.searchInput.set('worker');
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+        const loadSpy = jest.spyOn(mockService, 'loadInstances');
+
+        component.runSearchEffect();
+        jest.advanceTimersByTime(300);
+
+        expect(setSearchSpy).toHaveBeenCalledTimes(1);
+        expect(setSearchSpy).toHaveBeenCalledWith('worker');
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('should pass the RAW (untrimmed) value to setSearchQuery — trimming happens in the service', () => {
+        // Real component passes raw value; the service's setSearchQuery is
+        // responsible for trimming. Assert the contract boundary.
+        component.searchInput.set('  spaced  ');
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+
+        component.runSearchEffect();
+        jest.advanceTimersByTime(300);
+
+        expect(setSearchSpy).toHaveBeenCalledWith('  spaced  ');
+      });
+
+      it('should reset the pending timer when a new keystroke arrives (debounce coalescing)', () => {
+        component.searchInput.set('w');
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+
+        component.runSearchEffect();
+        jest.advanceTimersByTime(200); // not yet
+
+        component.searchInput.set('wo');
+        component.runSearchEffect(); // new keystroke restarts the window
+        jest.advanceTimersByTime(200); // would fire if first timer were live
+
+        expect(setSearchSpy).not.toHaveBeenCalled();
+
+        jest.advanceTimersByTime(100); // now the second timer's 300ms has elapsed
+        expect(setSearchSpy).toHaveBeenCalledTimes(1);
+        expect(setSearchSpy).toHaveBeenCalledWith('wo');
+      });
+    });
+
+    // ── Instant reset path (no debounce) ────────────────────────────────
+    // When searchInput goes empty (user pressed the X or cleared the box),
+    // the effect resets immediately — no 300ms wait.
+    describe('instant reset path (no debounce)', () => {
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        component.clearSearchDebounceTimer();
+        jest.useRealTimers();
+      });
+
+      it('should clear the search IMMEDIATELY when value becomes empty (no debounce wait)', () => {
+        // Simulate prior active search
+        mockService.searchQuery.set('worker');
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+        const loadSpy = jest.spyOn(mockService, 'loadInstances');
+
+        component.searchInput.set('');
+        component.runSearchEffect();
+
+        // advanceTimersByTime(0) — nothing should be queued to fire later;
+        // the reset path is synchronous.
+        jest.advanceTimersByTime(0);
+
+        expect(setSearchSpy).toHaveBeenCalledTimes(1);
+        expect(setSearchSpy).toHaveBeenCalledWith('');
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('should NOT trigger a reset if the search was already empty (avoid redundant reload)', () => {
+        // searchQuery is '' by default — emptying searchInput is a no-op.
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+        const loadSpy = jest.spyOn(mockService, 'loadInstances');
+
+        component.searchInput.set('');
+        component.runSearchEffect();
+        jest.advanceTimersByTime(0);
+
+        expect(setSearchSpy).not.toHaveBeenCalled();
+        expect(loadSpy).not.toHaveBeenCalled();
+      });
+
+      it('should clear any pending debounce timer when the reset path runs', () => {
+        // Start a debounced search...
+        component.searchInput.set('worker');
+        component.runSearchEffect();
+        expect(component.hasPendingSearchDebounce()).toBe(true);
+
+        // ...then the user hits the X — the pending timer must be cleared.
+        mockService.searchQuery.set('worker'); // pretend prior search committed
+        component.searchInput.set('');
+        component.runSearchEffect();
+
+        expect(component.hasPendingSearchDebounce()).toBe(false);
+      });
+    });
+
+    // ── setSearchQuery offset reset contract ────────────────────────────
+    // Mirrors instance.service.ts: setSearchQuery resets currentOffset = 0
+    // so the next non-append load starts at the beginning of the filtered set.
+    describe('setSearchQuery offset reset', () => {
+      it('should reset offset to 0 when a new query is set', () => {
+        // Simulate the service being mid-pagination by seeding the private
+        // offset directly (mirrors the real service's currentOffset field).
+        mockService['_currentOffset'] = 20;
+        expect(mockService.getCurrentOffset()).toBe(20);
+
+        mockService.setSearchQuery('worker');
+
+        expect(mockService.getCurrentOffset()).toBe(0);
+      });
+
+      it('should be a no-op (and preserve offset) when query is unchanged', () => {
+        mockService.searchQuery.set('worker');
+        mockService['_currentOffset'] = 20;
+
+        mockService.setSearchQuery('worker'); // same trimmed value
+
+        expect(mockService.getCurrentOffset()).toBe(20);
+      });
+
+      it('should trim the query before comparing/storing', () => {
+        mockService.setSearchQuery('  worker  ');
+
+        expect(mockService.searchQuery()).toBe('worker');
+      });
+
+      it('should treat empty string as a query change that resets offset', () => {
+        mockService.searchQuery.set('worker');
+        mockService['_currentOffset'] = 30;
+
+        mockService.setSearchQuery('');
+
+        expect(mockService.searchQuery()).toBe('');
+        expect(mockService.getCurrentOffset()).toBe(0);
+      });
+    });
+
+    // ── isSearching computed signal ─────────────────────────────────────
+    describe('isSearching computed signal', () => {
+      it('should be false when searchQuery is empty', () => {
+        mockService.searchQuery.set('');
+        expect(mockService.isSearching()).toBe(false);
+      });
+
+      it('should be false when searchQuery is whitespace-only (trimmed empty)', () => {
+        mockService.searchQuery.set('   ');
+        // isSearching reads .trim().length > 0
+        expect(mockService.isSearching()).toBe(false);
+      });
+
+      it('should be true when searchQuery has non-whitespace content', () => {
+        mockService.searchQuery.set('worker');
+        expect(mockService.isSearching()).toBe(true);
+      });
+    });
+
+    // ── ngOnDestroy clears the debounce timer ───────────────────────────
+    describe('ngOnDestroy clears pending search debounce', () => {
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should clear a pending debounce timer on destroy (no late setSearchQuery)', () => {
+        component.searchInput.set('worker');
+        const setSearchSpy = jest.spyOn(mockService, 'setSearchQuery');
+
+        component.runSearchEffect();
+        expect(component.hasPendingSearchDebounce()).toBe(true);
+
+        component.ngOnDestroy();
+
+        expect(component.hasPendingSearchDebounce()).toBe(false);
+
+        // Advance well past 300ms — nothing should fire post-destroy.
+        jest.advanceTimersByTime(1000);
+        expect(setSearchSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    // ── Template contract: search box markup ────────────────────────────
+    // We don't mount the real Angular template (the spec uses a hand-rolled
+    // mirror class), but we DO assert the static HTML contract: the search
+    // input + clear button exist and are wired to the right handlers. This
+    // catches accidental template regressions (e.g. someone removing the
+    // (input) binding) without needing TestBed.
+    describe('template contract (instance-list.html)', () => {
+      let templateHtml: string;
+
+      beforeAll(() => {
+        // Resolve relative to this spec file: ../../instance-list.html
+        const path = require('path');
+        const fs = require('fs');
+        const specDir = __dirname;
+        const htmlPath = path.join(specDir, 'instance-list.html');
+        templateHtml = fs.readFileSync(htmlPath, 'utf-8');
+      });
+
+      it('should render a search input in the header', () => {
+        expect(templateHtml).toMatch(/class="search-input"/);
+        expect(templateHtml).toMatch(/aria-label="Search instances"/);
+      });
+
+      it('should bind the input value to searchInput()', () => {
+        expect(templateHtml).toMatch(/\[value\]="searchInput\(\)"/);
+      });
+
+      it('should wire (input) events to onSearchInput($event)', () => {
+        expect(templateHtml).toMatch(/\(input\)="onSearchInput\(\$event\)"/);
+      });
+
+      it('should render the clear (X) button bound to onClearSearch()', () => {
+        expect(templateHtml).toMatch(/\(click\)="onClearSearch\(\)"/);
+        expect(templateHtml).toMatch(/aria-label="Clear search"/);
+      });
+
+      it('should conditionally show the clear button only when searchInput has text', () => {
+        // Mirrors: @if (searchInput().trim().length > 0) { ... clear btn ... }
+        expect(templateHtml).toMatch(/searchInput\(\)\.trim\(\)\.length > 0/);
+      });
+
+      it('should render the N-results-for-query subtitle when isSearching() is true', () => {
+        expect(templateHtml).toMatch(/instanceService\.isSearching\(\)/);
+        expect(templateHtml).toMatch(/instanceService\.searchQuery\(\)/);
       });
     });
   });
