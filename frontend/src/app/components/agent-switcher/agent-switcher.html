@@ -31,6 +31,20 @@
     </mat-icon>
   </button>
 
+  <!-- Version picker for the selected agent (only when >1 versions available).
+       Mirrors AgentSelectorComponent's selected-version-bar so users can
+       pick a different agent version before creating a new instance. -->
+  @if (selectedAgent() && shouldShowVersionPicker()) {
+    <div class="selected-version-bar" role="region" [attr.aria-label]="'Selected agent version'">
+      <span class="selected-version-label">Version for new chat:</span>
+      <app-version-picker
+        [availableVersions]="selectedAgent()?.available_versions ?? []"
+        [selectedTag]="selectedVersionTag()"
+        (tagChange)="onVersionTagChange($event)"
+      ></app-version-picker>
+    </div>
+  }
+
   <!-- Dropdown menu -->
   @if (isOpen()) {
     <div 
