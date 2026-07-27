@@ -78,6 +78,7 @@ async def mock_manager():
         instance_id="test-instance-id",
         status="queued",
         job_id="test-job-id",
+        queued=False,
     ))
     # Mock the RAM-injection primitives so the router's "existing content"
     # branch dereferences cleanly. Without these, ``existing.get("content")``
