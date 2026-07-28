@@ -1,9 +1,10 @@
 # Test Packs
 
 ## Summary
-- Total: 205 packs
-- Unit: 164 | Integration: 10 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5
+- Total: 212 packs
+- Unit: 166 | Integration: 16 | Mock: 7 | E2E: 13 | Postgres: 3 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
+- Context Injection Restructure: 2026-07-28 on `feature/context-injection-restructure` @ `2de4af3a` — 209 new feature tests ALL PASS, 694 core regression pass with 0 NEW failures (41 pre-existing matching baseline). See `RESULTS/2026-07-28-context-injection-restructure.md`
 
 ## Unit Test Packs
 
@@ -504,3 +505,17 @@ VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | authz_auto_derive_unit_test | test/packs/authz_auto_derive_unit_test.sh | Spawn/team-member authorization: `_check_team_membership` auto-derive (knowledge→explorer, non-matching category→deny, deny-by-default), ari no-spawn contract (empty team_members + no instance tool). 3 core claim scenarios covered. | 2 min | 2026-07-25 | ✅ PASS (72/72 in ~2s, feature/tool-authz-auto-derive @ b81e455d, 0 failures. +1 NEW test `test_non_agent_backed_category_implies_nothing`. Pack script NEW commit b81e455d) |
+
+## Context Injection Restructure Packs (2026-07-28)
+
+`feature/context-injection-restructure` @ `2de4af3a`. Restructures context delivery from frozen system-prompt appenders to ephemeral `[SYSTEM CONTEXT: ...]` HumanMessages injected into local `full_messages` inside `agent_node` (never entering checkpoint state). Two modes: `system_prompt` (default, legacy-compatible) and `human_messages` (opt-in via `context_injection_mode` in agent meta.json). Three B-fixes: B1 (loop-breaker re-append), B2 (manager indirection for skills), B3 (retry-safe skills). C1 fix: repair SystemMessage not dropped when context injection active.
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| context_messages_unit_test | test/packs/context_messages_unit_test.sh | ContextMessageBuilder unit tests: `assemble_context_messages()`, ContextInjectionMode class, mode resolution, deprecation warning for legacy `context_injection: true` boolean. **Quick fix `6e44157f` applied during testing.** | 2 min | 2026-07-28 | ✅ PASS (57/57 in ~3s, feature/context-injection-restructure @ 6e44157f, 0 failures) |
+| context_skills_unit_test | test/packs/context_skills_unit_test.sh | Skill/shared context injection unit tests: auto_load_skills (22 tests), shared_context_injection (19 tests), shared_context_prompt_injection (11 tests). B3 retry-safe skills, B2 manager indirection. | 2 min | 2026-07-28 | ✅ PASS (52/52 in ~3.1s, feature/context-injection-restructure @ 2de4af3a, 0 failures) |
+| context_graph_integration_test | test/packs/context_graph_integration_test.sh | **CRITICAL** Phase 3 graph wiring: ephemerality (context msgs NOT in checkpoint, ARE in local full_messages), C1 loop-breaker fix (repair SystemMessage not dropped when context injection active), injection order (SystemMsg → Context → History → User). | 5 min | 2026-07-28 | ✅ PASS (20/20 in 0.99s, feature/context-injection-restructure @ 2de4af3a, 0 failures) |
+| context_injection_integration_test | test/packs/context_injection_integration_test.sh | End-to-end `human_messages` mode integration: full wiring from agent_node → ContextMessageBuilder → LLM call. API-contract coverage for Phases 1-5. | 5 min | 2026-07-28 | ✅ PASS (14/14 in 0.95s, feature/context-injection-restructure @ 2de4af3a, 0 failures) |
+| legacy_agents_regression_test | test/packs/legacy_agents_regression_test.sh | Backward compatibility regression: `system_prompt` mode (default) byte-identical to pre-refactor. GET /messages unchanged for legacy agents. | 5 min | 2026-07-28 | ✅ PASS (21/21 in 0.78s, feature/context-injection-restructure @ 2de4af3a, 0 failures) |
+| api_messages_integration_test | test/packs/api_messages_integration_test.sh | GET /messages API contract (Phase 4): context messages appear with `is_synthetic: true` + `context_kind` field. Read-only verification (no DB writes during GET). | 5 min | 2026-07-28 | ✅ PASS (9/9 in 0.96s, feature/context-injection-restructure @ 2de4af3a, 0 failures) |
+| context_freshness_hierarchy_test | test/packs/context_freshness_hierarchy_test.sh | Phase 5 freshness (per-turn DB read guarantee) + hierarchy (context_key tree-root inheritance across parent→child) + performance smoke (context rebuild latency). | 5 min | 2026-07-28 | ✅ PASS (14/14 in 1.50s, feature/context-injection-restructure @ 2de4af3a, 0 failures) |
