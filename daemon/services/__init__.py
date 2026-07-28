@@ -18,6 +18,20 @@ from daemon.services.title_generation import TitleGenerationService
 from daemon.services.event_publisher import EventPublisherService
 from daemon.services.completion_registry import CompletionRegistry, CompletionResult, get_completion_registry
 
+# Context-injection message builders (Phase 1, restructure plan)
+from daemon.services.context_messages import (
+    assemble_context_messages,
+    build_project_context_message,
+    build_shared_context_message,
+    build_skills_message,
+    escape_for_context_block,
+    CONTEXT_KIND_PROJECT,
+    CONTEXT_KIND_SHARED_CONTEXT,
+    CONTEXT_KIND_SKILLS,
+    CONTEXT_PREFIX,
+    CONTEXT_SUFFIX,
+)
+
 __all__ = [
     # Worker pool services
     "JobLockManager",
@@ -41,4 +55,15 @@ __all__ = [
     "CompletionRegistry",
     "CompletionResult",
     "get_completion_registry",
+    # Context-injection message builders (Phase 1, restructure plan)
+    "assemble_context_messages",
+    "build_project_context_message",
+    "build_shared_context_message",
+    "build_skills_message",
+    "escape_for_context_block",
+    "CONTEXT_KIND_PROJECT",
+    "CONTEXT_KIND_SHARED_CONTEXT",
+    "CONTEXT_KIND_SKILLS",
+    "CONTEXT_PREFIX",
+    "CONTEXT_SUFFIX",
 ]
