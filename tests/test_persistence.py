@@ -425,6 +425,7 @@ class TestGetInstanceMessages:
         instance_meta.instance_metadata = {}
         instance_meta.parent_id = None
         instance_meta.project_id = None
+        instance_meta.created_at = "2026-07-28T00:00:00+00:00"
 
         instance_repo = MagicMock()
         instance_repo.get = MagicMock(return_value=instance_meta)
@@ -492,6 +493,7 @@ class TestGetInstanceMessages:
         assert apply_kwargs["agent_id"] == "developer"
         assert apply_kwargs["manager"] is manager
         assert apply_kwargs["instance_repository"] is instance_repo
+        assert apply_kwargs["disable_auto_load_tracking"] is True
 
         # Returned list now has the synthetic system message at index 0,
         # followed by the original human message.
@@ -503,11 +505,62 @@ class TestGetInstanceMessages:
         # base. This is the core improvement the test guards.
         assert messages[0]["content"] == full_prompt
         assert messages[0]["instance_id"] == "inst-123"
-        assert messages[0]["message_id"].startswith("synthetic-system-")
+        assert messages[0]["message_id"] == "synthetic-system-inst-123"
+        assert messages[0]["created_at"] == "2026-07-28T00:00:00+00:00"
 
         # The originally-persisted human message is preserved at index 1.
         assert messages[1]["role"] == "user"
         assert messages[1]["content"] == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_does_not_track_auto_load_skills(self):
+        """Reconstruction includes auto-load skills without metadata writes."""
+        from types import SimpleNamespace
+        from langchain_core.messages import HumanMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [HumanMessage(content="Hello world")]}
+        })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
+
+        agent_dir = Path(__file__).resolve().parent.parent / "agents" / "developer"
+        instance_meta = SimpleNamespace(
+            agent_id="developer",
+            agent_dir=str(agent_dir),
+            agent_tag=None,
+            instance_metadata={},
+            parent_id=None,
+            project_id="project-123",
+            created_at="2026-07-28T00:00:00+00:00",
+        )
+        instance_repo = MagicMock()
+        instance_repo.get.return_value = instance_meta
+
+        manager = SimpleNamespace(
+            _instance_repository=instance_repo,
+            prompt_cache=MagicMock(),
+            _project_repository=None,
+            shared_context_metadata_repo=MagicMock(),
+            _skill_repo=MagicMock(),
+            _skill_clone_service=None,
+            config=SimpleNamespace(llm=SimpleNamespace(allowed_models=[])),
+        )
+        manager._skill_repo.get_auto_load_skills.return_value = [
+            SimpleNamespace(id="skill-1", content="Always verify the result.")
+        ]
+
+        base_prompt = "You are a developer agent."
+        with patch(
+            "daemon.manager.load_and_cache_prompt",
+            return_value=(base_prompt, len(base_prompt)),
+        ), patch("daemon.registry.get_registry", side_effect=RuntimeError("no registry")):
+            messages = await get_instance_messages(
+                mock_checkpointer, "inst-123", manager=manager
+            )
+
+        assert "Always verify the result." in messages[0]["content"]
+        instance_repo.set_metadata.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_instance_messages_no_synthetic_without_manager(self):

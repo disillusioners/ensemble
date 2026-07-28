@@ -19,8 +19,6 @@ PostgreSQL Notes:
 import asyncio
 import logging
 import os
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -378,15 +376,23 @@ async def get_instance_messages(
             # worker thread so we don't block the event loop, matching the
             # pattern already used inside the helper for the SQLAlchemy
             # ``Repository.get`` call.
-            system_prompt = await asyncio.to_thread(
+            reconstruction = await asyncio.to_thread(
                 _reconstruct_full_system_prompt,
                 instance_id,
                 manager,
             )
+            if reconstruction is not None:
+                system_prompt, instance_created_at = reconstruction
+            else:
+                system_prompt, instance_created_at = None, None
             if system_prompt and system_prompt.strip():
-                synthetic_id = f"synthetic-system-{uuid.uuid4().hex[:16]}"
+                created_at = (
+                    instance_created_at.isoformat()
+                    if hasattr(instance_created_at, "isoformat")
+                    else str(instance_created_at or instance_id)
+                )
                 system_msg = {
-                    "message_id": synthetic_id,
+                    "message_id": f"synthetic-system-{instance_id}",
                     "type": "system",
                     "role": "system",
                     "content": system_prompt,
@@ -394,7 +400,7 @@ async def get_instance_messages(
                     "thinking_extracted": None,
                     "tool_calls": None,
                     "images": None,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": created_at,
                     "instance_id": instance_id,
                     "is_synthetic": True,
                 }
@@ -413,7 +419,7 @@ async def get_instance_messages(
 def _reconstruct_full_system_prompt(
     instance_id: str,
     manager: Any,
-) -> str | None:
+) -> tuple[str, Any] | None:
     """Reconstruct the FULL system prompt the LLM actually saw.
 
     Mirrors the spawn/restore path in
@@ -505,5 +511,6 @@ def _reconstruct_full_system_prompt(
         project_repository=getattr(manager, "_project_repository", None),
         manager=manager,
         agent_meta=agent_meta,
+        disable_auto_load_tracking=True,
     )
-    return system_prompt
+    return system_prompt, getattr(instance_meta, "created_at", None)

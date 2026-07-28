@@ -520,6 +520,7 @@ class ChildReportsService:
         # Get instance messages
         if self._checkpointer:
             messages = await get_instance_messages(self._checkpointer, instance_id)
+            messages = [m for m in messages if not m.get("is_synthetic")]
         else:
             messages = []
         
@@ -1003,6 +1004,7 @@ Provide a concise summary:"""
         """
         if self._checkpointer:
             messages = await get_instance_messages(self._checkpointer, instance_id)
+            messages = [m for m in messages if not m.get("is_synthetic")]
         else:
             messages = []
         
