@@ -209,6 +209,20 @@ def _import_assemble_context_messages():
     return assemble_context_messages
 
 
+def _flatten_context_result(t: tuple[list, list]) -> list:
+    """Flatten ``(persistent, ephemeral)`` tuple into a single ordered list.
+
+    Hybrid Context Injection (2026-07-29): the orchestrator now
+    returns a tuple. Freshness tests assert the LLM-visible context
+    (regardless of which half it lands in), so we flatten the tuple
+    into a single ordered list. Tests that want to assert the split
+    can call :func:`assemble_context_messages` directly and unpack
+    the tuple.
+    """
+    persistent, ephemeral = t
+    return list(persistent) + list(ephemeral)
+
+
 def _create_root_instance(instance_repo: Any, instance_id: str) -> None:
     """Create a root instance via the real repo so tree-root resolution works.
 
@@ -280,14 +294,14 @@ class TestKVFreshness:
 
         # ── First call: KV is empty → no project message, RAG returns
         # sentinel because the context dir does not exist. Result: [].
-        result1 = await assemble(
+        result1 = _flatten_context_result(await assemble(
             instance_id=context_key,
             user_query="any query",
             project_id=None,
             agent_meta=agent_meta,
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
-        )
+        ))
         all_content_1 = "\n".join(str(m.content) for m in result1)
         assert marker not in all_content_1, (
             f"Marker unexpectedly present in first call: {all_content_1[:200]!r}"
@@ -305,14 +319,14 @@ class TestKVFreshness:
         # ── Second call: same instance, same everything. The orchestrator
         # must read the KV afresh and emit a ``[SYSTEM CONTEXT: Related
         # Project]`` message carrying the marker.
-        result2 = await assemble(
+        result2 = _flatten_context_result(await assemble(
             instance_id=context_key,
             user_query="any query",
             project_id=None,
             agent_meta=agent_meta,
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
-        )
+        ))
         all_content_2 = "\n".join(str(m.content) for m in result2)
         assert marker in all_content_2, (
             f"Marker missing from second call — KV freshness broken. "
@@ -402,14 +416,14 @@ class TestFileFreshness:
         # ── First call: context dir is empty → RAG returns the
         # "There is no context yet." sentinel → build_shared_context_message
         # returns None (the sentinel is in the drop-list). Result: [].
-        result1 = await assemble(
+        result1 = _flatten_context_result(await assemble(
             instance_id=context_key,
             user_query=query,
             project_id=None,
             agent_meta=agent_meta,
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
-        )
+        ))
         all_content_1 = "\n".join(str(m.content) for m in result1)
         assert marker not in all_content_1, (
             f"Marker unexpectedly present in first call: {all_content_1[:200]!r}"
@@ -429,14 +443,14 @@ class TestFileFreshness:
         # _format_injection includes the full content (Match 1 always
         # included), and build_shared_context_message wraps the body
         # under ``[SYSTEM CONTEXT: Shared Context]``.
-        result2 = await assemble(
+        result2 = _flatten_context_result(await assemble(
             instance_id=context_key,
             user_query=query,
             project_id=None,
             agent_meta=agent_meta,
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
-        )
+        ))
         all_content_2 = "\n".join(str(m.content) for m in result2)
         assert marker in all_content_2, (
             f"Marker missing from second call — file freshness broken. "
@@ -556,14 +570,14 @@ class TestSkillFreshness:
 
         # ── First call: no skill exists → fake search returns
         # (None, []) → build_skills_message returns None → result is [].
-        result1 = await assemble(
+        result1 = _flatten_context_result(await assemble(
             instance_id=context_key,
             user_query="any query",
             project_id=project_id,
             agent_meta=agent_meta,
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
-        )
+        ))
         all_content_1 = "\n".join(str(m.content) for m in result1)
         assert marker not in all_content_1, (
             f"Marker unexpectedly present in first call: {all_content_1[:200]!r}"
@@ -586,14 +600,14 @@ class TestSkillFreshness:
         # ── Second call: fake re-reads the DB, finds the skill,
         # returns a body that includes the marker. The orchestrator
         # wraps it under ``[SYSTEM CONTEXT: Skills]``.
-        result2 = await assemble(
+        result2 = _flatten_context_result(await assemble(
             instance_id=context_key,
             user_query="any query",
             project_id=project_id,
             agent_meta=agent_meta,
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
-        )
+        ))
         all_content_2 = "\n".join(str(m.content) for m in result2)
         assert marker in all_content_2, (
             f"Marker missing from second call — skill freshness broken. "

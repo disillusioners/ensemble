@@ -173,6 +173,20 @@ def _import_assemble_context_messages():
     return assemble_context_messages
 
 
+def _flatten_context_result(t: tuple[list, list]) -> list:
+    """Flatten ``(persistent, ephemeral)`` tuple into a single ordered list.
+
+    Hybrid Context Injection (2026-07-29): the orchestrator now
+    returns a tuple. Hierarchy tests assert the LLM-visible context
+    (regardless of which half it lands in), so we flatten the tuple
+    into a single ordered list. Tests that want to assert the split
+    can call :func:`assemble_context_messages` directly and unpack
+    the tuple.
+    """
+    persistent, ephemeral = t
+    return list(persistent) + list(ephemeral)
+
+
 # ============================================================================
 # 1. Test context_key inheritance
 # ============================================================================
@@ -304,7 +318,7 @@ class TestContextResolutionUsesCorrectKey:
 
         assemble = _import_assemble_context_messages()
 
-        result = await assemble(
+        result = _flatten_context_result(await assemble(
             instance_id=child_id,
             user_query="root context file",
             project_id=None,
@@ -312,7 +326,7 @@ class TestContextResolutionUsesCorrectKey:
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
             parent_id=root_id,
-        )
+        ))
 
         all_content = "\n".join(str(m.content) for m in result)
         assert marker in all_content, (
@@ -370,7 +384,7 @@ class TestSharedContextMetadataIsolation:
 
         assemble = _import_assemble_context_messages()
 
-        result = await assemble(
+        result = _flatten_context_result(await assemble(
             instance_id=child_of_a,
             user_query="isolation test",
             project_id=None,
@@ -378,7 +392,7 @@ class TestSharedContextMetadataIsolation:
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
             parent_id=root_a,
-        )
+        ))
 
         all_content = "\n".join(str(m.content) for m in result)
         assert marker_a in all_content, (
@@ -533,7 +547,7 @@ class TestHumanMessagesModeForChild:
 
         assemble = _import_assemble_context_messages()
 
-        result = await assemble(
+        result = _flatten_context_result(await assemble(
             instance_id=child_id,
             user_query="human messages child test",
             project_id=None,
@@ -541,7 +555,7 @@ class TestHumanMessagesModeForChild:
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
             parent_id=root_id,
-        )
+        ))
 
         # The KV marker must appear in the assembled messages.
         all_content = "\n".join(str(m.content) for m in result)
@@ -596,7 +610,7 @@ class TestHumanMessagesModeForChild:
 
         assemble = _import_assemble_context_messages()
 
-        result = await assemble(
+        result = _flatten_context_result(await assemble(
             instance_id=child_id,
             user_query="context disabled",
             project_id=None,
@@ -604,7 +618,7 @@ class TestHumanMessagesModeForChild:
             manager=bundle.manager,
             instance_repository=bundle.instance_repo,
             parent_id=root_id,
-        )
+        ))
 
         # Legacy mode → [] regardless of the legacy ``context_injection`` boolean.
         assert result == [], (

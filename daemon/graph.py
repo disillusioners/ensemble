@@ -370,12 +370,29 @@ class ContextSlot:
         instance_id: str,
         user_query: str,
         project_id: str | None,
-    ) -> list[HumanMessage]:
-        """Assemble per-turn context messages for ``instance_id``.
+    ) -> tuple[list[HumanMessage], list[HumanMessage]]:
+        """Assemble per-turn context messages for ``instance_id`` (hybrid split).
+
+        Hybrid Context Injection (2026-07-29): returns the
+        ``(persistent_msgs, ephemeral_msgs)`` tuple from
+        :func:`assemble_context_messages`. ``agent_node`` consumes
+        ONLY the ephemeral half (skills) per turn — the persistent
+        half (project + shared context) was prepended to
+        ``graph_input`` by the messaging path on the first turn and
+        lives in ``state['messages']`` from then on.
+
+        The ``project_injected`` flag is read fresh from instance
+        metadata on every call so the once-per-instance contract is
+        enforced even after a checkpoint restore or a cross-process
+        handoff. On the first turn the flag is unset, so the
+        orchestrator builds the full triple (project + shared
+        context + skills); on every subsequent turn the flag is
+        set, the orchestrator skips the persistent builders and
+        emits only skills.
 
         Calls :func:`assemble_context_messages` with the slot's
         captured dependencies plus the per-call inputs (instance_id,
-        user_query, project_id). Returns ``[]`` when the agent's
+        user_query, project_id). Returns ``([], [])`` when the agent's
         injection mode is not ``human_messages`` (legacy
         ``"legacy"`` mode is untouched).
 
@@ -386,20 +403,13 @@ class ContextSlot:
         time — the manager, the agent metadata, the instance
         repository, and the parent id. Every ``assemble()`` call
         therefore resolves the current project, the current parent,
-        and the current skill-search result fresh, and delegates all
+        the current skill-search result, and the current
+        ``project_injected`` flag fresh, and delegates all
         data-source reads (project JSON, critical notes, recent
         history, shared-context KV, shared-context files, skills)
         to :func:`assemble_context_messages`, which performs them
-        live each time.
-
-        The returned list is a local object handed straight back to
-        ``agent_node``. It is **never** cached on the slot and is
-        **never** stored in graph state — the next turn gets a
-        freshly built list, so mid-session mutations to any
-        context source surface on the very next LLM call with no
-        invalidation hook required. This is a deliberate departure
-        from the pre-Phase-3 design, where context was frozen at
-        graph-compile time via a system-prompt closure variable.
+        live each time (for the skills half — the persistent half
+        is intentionally built once).
 
         Args:
             instance_id: The current instance id.
@@ -410,11 +420,13 @@ class ContextSlot:
                 from the instance metadata at call time.
 
         Returns:
-            List of zero or more tagged :class:`HumanMessage`
-            instances (``[SYSTEM CONTEXT: ...]``) in canonical
-            order: ``[project?, shared_context?, skills?]``.
-            Empty list when the agent is in ``legacy`` mode
-            or every feature flag is off.
+            ``(persistent_msgs, ephemeral_msgs)`` tuple. In
+            ``human_messages`` mode the persistent list is empty
+            after the first turn (the orchestrator is told via
+            ``project_already_injected=True`` to skip the
+            persistent builders). The ephemeral list carries zero
+            or one ``[SYSTEM CONTEXT: Skills]`` HumanMessage.
+            ``([], [])`` when the agent is in ``legacy`` mode.
         """
         # Lazy imports — see top-of-file note about the graph ↔
         # services cycle. ``_resolve_injection_mode`` and
@@ -432,7 +444,7 @@ class ContextSlot:
             # Legacy mode — context is baked into the system prompt
             # by the existing appenders. The slot is a no-op so the
             # pre-Phase-3 byte layout is preserved.
-            return []
+            return ([], [])
 
         # B2 fix: read pre-computed skill result from MANAGER (not
         # from ``self``). The messaging path stores the result of
@@ -449,6 +461,15 @@ class ContextSlot:
         if getter is not None:
             skill_result = getter(instance_id)
 
+        # Hybrid split — read ``project_injected`` fresh from
+        # instance metadata so a checkpoint restore / cross-process
+        # handoff is honoured. The messaging path sets the flag
+        # AFTER building persistent context (so the orchestrator on
+        # the first turn emits the full triple); from the next
+        # turn onward the flag is set and the orchestrator skips
+        # the persistent builders.
+        project_already_injected = self._is_project_already_injected(instance_id)
+
         return await assemble_context_messages(
             instance_id=instance_id,
             user_query=user_query,
@@ -458,7 +479,40 @@ class ContextSlot:
             instance_repository=self._instance_repository,
             parent_id=self._parent_id,
             skill_injection_result=skill_result,
+            project_already_injected=project_already_injected,
         )
+
+    def _is_project_already_injected(self, instance_id: str) -> bool:
+        """Return ``True`` when the once-per-instance ``project_injected`` flag is set.
+
+        Reads ``instance_metadata["project_injected"]`` via the captured
+        ``instance_repository``. ``False`` on any failure (missing
+        repo, missing instance, missing metadata key) so a transient
+        error cannot strand the slot in the "already injected" state
+        and silently drop the persistent context for an instance that
+        actually needs it.
+
+        Args:
+            instance_id: The current instance id.
+
+        Returns:
+            ``True`` when the flag is present and truthy, ``False``
+            otherwise.
+        """
+        if self._instance_repository is None:
+            return False
+        try:
+            inst = self._instance_repository.get(instance_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+                f"failed during project_injected check: {exc}"
+            )
+            return False
+        if inst is None:
+            return False
+        metadata = getattr(inst, "instance_metadata", None) or {}
+        return bool(metadata.get("project_injected"))
 
     def resolve_project_id(self, instance_id: str) -> str | None:
         """Resolve ``project_id`` for ``instance_id`` from instance metadata.
@@ -2273,24 +2327,33 @@ def create_agent_node(
         instance_short = instance_id.split('-')[0] if '-' in instance_id else instance_id
 
         # ── Context Injection Restructure — Phase 3 / Task 4+5 ──────────
-        # Assemble per-turn context messages via the ContextSlot. The
-        # assembled list is inserted AFTER the SystemMessage and BEFORE
-        # the state messages — this keeps the system prompt persona
-        # at the top while ensuring the LLM sees fresh context before
-        # any prior-conversation noise. Per ADR-2 the messages are
-        # LOCAL only — they never enter graph state or checkpoint.
+        # Hybrid Context Injection (2026-07-29): the slot returns a
+        # ``(persistent_msgs, ephemeral_msgs)`` tuple. The persistent
+        # half is built ONCE per instance on the first turn and
+        # prepended to ``graph_input`` by the messaging path so it
+        # lives in ``state['messages']`` (and the checkpoint) from
+        # that turn forward. This node only consumes the EPHEMERAL
+        # half — the persistent half is already at the start of
+        # ``state['messages']`` because the messaging path put it
+        # there. The result feeds straight into the local
+        # ``full_messages`` build below; ephemeral messages never
+        # enter ``state['messages']`` or the checkpoint, preserving
+        # the per-turn freshness contract for skills.
         #
-        # ``context_msgs`` is captured so the B1 re-append (after
-        # ``_maybe_repair_loop``) and the C3-analog compaction re-append
-        # can both rebuild the full_messages correctly when the loop
-        # breaker or reactive compaction rewrites ``full_messages`` from
-        # scratch.
-        context_msgs: list[HumanMessage] = []
+        # ``ephemeral_context_msgs`` is captured so the B1 re-append
+        # (after ``_maybe_repair_loop``) and the C3-analog compaction
+        # re-append can both rebuild ``full_messages`` correctly
+        # when the loop breaker or reactive compaction rewrites
+        # ``full_messages`` from scratch. Only ephemeral messages
+        # need re-appending — the persistent block is part of the
+        # state and survives any ``full_messages`` rebuild as long
+        # as the rebuild reads from ``list(messages)``.
+        ephemeral_context_msgs: list[HumanMessage] = []
         if context_slot is not None:
             user_query = _extract_last_user_text(messages)
             project_id = context_slot.resolve_project_id(instance_id)
             try:
-                context_msgs = await context_slot.assemble(
+                _persistent_msgs, ephemeral_context_msgs = await context_slot.assemble(
                     instance_id, user_query, project_id
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -2299,22 +2362,32 @@ def create_agent_node(
                 logger.warning(
                     f"[ContextSlot] assemble() failed for "
                     f"{instance_short}: {type(exc).__name__}: {exc} — "
-                    f"continuing without context messages"
+                    f"continuing without ephemeral context messages"
                 )
-                context_msgs = []
+                ephemeral_context_msgs = []
 
-            if context_msgs:
-                # Insert AFTER SystemMessage, BEFORE state messages.
-                # The state messages list is read-only (we own a copy
-                # via ``list(messages)`` above) so reassignment is safe.
+            if ephemeral_context_msgs:
+                # Insert AFTER SystemMessage, BEFORE state messages
+                # — same position the pre-restructure context block
+                # held. The persistent block lives at the very
+                # start of ``state['messages']`` (it was prepended
+                # to ``graph_input`` by the messaging path on the
+                # first turn), so the final layout seen by the LLM
+                # is:
+                #   ``[SystemMessage] + ephemeral + [persistent (in state)] + history``
+                # which matches the existing per-turn behaviour for
+                # the ephemeral half — only the persistent half's
+                # storage location changed (system-prompt-closure →
+                # state.messages).
                 full_messages = (
                     [SystemMessage(content=system_prompt)]
-                    + context_msgs
+                    + ephemeral_context_msgs
                     + list(messages)
                 )
                 logger.debug(
-                    f"[ContextSlot] Injected {len(context_msgs)} context "
-                    f"message(s) for {instance_short} before LLM call"
+                    f"[ContextSlot] Injected {len(ephemeral_context_msgs)} "
+                    f"ephemeral context message(s) for {instance_short} "
+                    f"before LLM call"
                 )
 
         # ── Phase 3 / C2: pull + clear ALL pending user-injections ─────────
@@ -2616,27 +2689,34 @@ def create_agent_node(
             full_messages = full_messages + injected_report_msgs
 
         # Context Injection Restructure — Phase 3 / B1 fix: re-append
-        # ``context_msgs`` after the loop-breaker repair rewrote
-        # ``full_messages`` from scratch (see
+        # ``ephemeral_context_msgs`` after the loop-breaker repair
+        # rewrote ``full_messages`` from scratch (see
         # ``_maybe_repair_loop`` which rebuilds
         # ``[SystemMessage(system_prompt)] + list(messages)`` and
         # drops every locally-injected message). Same object-identity
         # guard pattern as the report-msg block above: when the loop
-        # breaker did NOT fire, ``context_msgs[0] is m`` matches the
-        # original insertion and we skip the append (no double-
-        # injection). The position is preserved by stripping any
-        # SystemMessage from the rebuilt list before prepending the
-        # context_msgs + a fresh SystemMessage.
-        if context_msgs and not any(
-            context_msgs[0] is m for m in full_messages
+        # breaker did NOT fire, ``ephemeral_context_msgs[0] is m``
+        # matches the original insertion and we skip the append (no
+        # double-injection).
+        #
+        # Hybrid Context Injection (2026-07-29): the persistent block
+        # is now part of ``state['messages']`` (checkpointed on the
+        # first turn) — it survives the ``full_messages`` rebuild via
+        # ``list(messages)`` automatically. Only the ephemeral block
+        # (skills) needs re-appending. The position is preserved by
+        # stripping any SystemMessage from the rebuilt list before
+        # prepending the ephemeral_context_msgs + a fresh
+        # SystemMessage.
+        if ephemeral_context_msgs and not any(
+            ephemeral_context_msgs[0] is m for m in full_messages
         ):
             full_messages = _reassemble_with_context(
-                full_messages, context_msgs, system_prompt
+                full_messages, ephemeral_context_msgs, system_prompt
             )
             logger.debug(
-                f"[ContextSlot] B1 re-append: {len(context_msgs)} "
-                f"context message(s) re-injected after loop-breaker "
-                f"repair for {instance_short}"
+                f"[ContextSlot] B1 re-append: {len(ephemeral_context_msgs)} "
+                f"ephemeral context message(s) re-injected after "
+                f"loop-breaker repair for {instance_short}"
             )
 
         try:
@@ -2711,23 +2791,26 @@ def create_agent_node(
                 compact_messages.append(rmsg)
 
             # Context Injection Restructure — Phase 3 / Task 8: C3
-            # analog for context messages. ``context_msgs`` live only
-            # in the local closure (they never enter the checkpoint
-            # per ADR-2), so ``graph.aget_state`` returns a compacted
-            # list missing them. Without this re-append the compaction
-            # retry would lose the per-turn context block. Append AFTER
-            # the injected_msgs / report msgs so the ordering of the
+            # analog for context messages. Hybrid Context Injection
+            # (2026-07-29): only the EPHEMERAL half
+            # (``ephemeral_context_msgs`` — skills) lives in the
+            # local closure and is dropped by ``graph.aget_state``;
+            # the persistent half (project + shared context) was
+            # checkpointed on the first turn and is part of
+            # ``replacement_messages`` already, so it does not need
+            # re-appending. Append the ephemeral block AFTER the
+            # injected_msgs / report msgs so the ordering of the
             # first-attempt ``full_messages`` is preserved on the
             # compaction retry:
-            #   ``[SystemMessage] + context_msgs + state + injected + report``
-            if context_msgs:
+            #   ``[SystemMessage] + state (incl. persistent) + ephemeral + injected + report``
+            if ephemeral_context_msgs:
                 compact_messages = _reassemble_with_context(
-                    compact_messages, context_msgs, system_prompt
+                    compact_messages, ephemeral_context_msgs, system_prompt
                 )
                 logger.debug(
                     f'[LLM] Reactive compaction: re-appended '
-                    f'{len(context_msgs)} context message(s) for '
-                    f'{instance_short}'
+                    f'{len(ephemeral_context_msgs)} ephemeral context '
+                    f'message(s) for {instance_short}'
                 )
 
             # Use run_in_executor to avoid blocking the event loop after compaction

@@ -860,29 +860,38 @@ async def assemble_context_messages(
     parent_id: str | None = None,
     skill_injection_result: tuple[str | None, list[str]] | None = None,
     message_id: str | None = None,
-) -> list[HumanMessage]:
-    """Async orchestrator returning the per-turn context message list.
+    project_already_injected: bool = False,
+) -> tuple[list[HumanMessage], list[HumanMessage]]:
+    """Async orchestrator returning ``(persistent_msgs, ephemeral_msgs)``.
 
-    Produces ``[project_msg?, shared_context_msg?, skills_msg?]`` in
-    canonical order — the same order the LLM input list is built in
-    (plan-overview.md:39-46). Each element may be omitted when the
-    corresponding feature is disabled or the fetch returned no
-    content.
+    Hybrid Context Injection (2026-07-29): project context + shared
+    context (heuristic ``.md`` matches) are now **persistent** — built
+    once on the first user turn and prepended to ``graph_input`` so
+    LangGraph's ``add_messages`` reducer checkpoints them with the
+    user message. Subsequent turns read them straight from
+    ``state['messages']`` for free, preserving the LLM prefix-cache.
 
-    Opt-in behavior (per ADR-8):
+    Skills remain **ephemeral** — rebuilt every turn by
+    :class:`ContextSlot` inside ``agent_node`` and never checkpointed.
+    The split is returned as a tuple so callers can route each part
+    to its own delivery surface.
 
-    * Project messages are always built in human_messages mode (gated
-      only on ``context_injection_mode``). Shared-context (RAG-matched
-      .md files) messages are gated on the new
-      ``context_injection.heuristic_match_shared_md_files`` flag in
-      addition to the resolved injection mode.
-    * Skills message is still gated on
-      ``getattr(agent_meta, "skill_injection", False)`` to match the
-      existing skill-injection gate.
+    Partition rule (ADR-15 — Hybrid split):
 
-    If all three feature flags are off the function returns an
-    empty list — caller treats that as "no context to inject this
-    turn".
+    * Persistent: ``"project"`` + ``"shared_context"`` — injected via
+      ``graph_input`` once, then read from checkpoint.
+    * Ephemeral: ``"skills"`` — injected per-turn into the local
+      ``full_messages`` inside ``agent_node``.
+
+    When ``project_already_injected=True`` the orchestrator skips the
+    entire project + shared_context build section (no project_repo /
+    shared-context / RAG I/O) and only emits skills — preserving the
+    per-turn freshness contract for skills while avoiding wasted DB
+    work on every turn after the first.
+
+    The legacy (``"legacy"``) mode gate still returns ``([], [])`` —
+    the 3 CONTEXT appenders inside ``_apply_post_cache_appends`` own
+    context delivery in that mode.
 
     Skill injection takes two paths (B3 fix, risk register):
 
@@ -895,40 +904,21 @@ async def assemble_context_messages(
       skills just because the first attempt skipped the
       injection step.
 
-    Per-turn freshness guarantee (ADR-2):
+    Per-turn freshness guarantee (ADR-2) for the ephemeral part:
 
-    This function is called inside ``agent_node`` on every LLM
+    The skills builder is called inside ``agent_node`` on every LLM
     turn; it is **not** a one-shot snapshot captured at graph
-    compile time. Every invocation performs live reads of all
-    data sources — there are no stale caches on this path:
+    compile time. Every invocation performs a live BM25 / embedding
+    search via :class:`SkillInjectionService` (unless the caller
+    passed a pre-computed ``skill_injection_result``).
 
-    * **Project JSON** — fresh DB read via the project
-      repository.
-    * **Critical notes** — fresh DB read of the project's
-      RAG notes.
-    * **Recent history** — fresh DB read of the instance's
-      recent-message history used for the history block.
-    * **Shared context KV** — fresh DB read of the
-      ``_shared_context_metadata_repo`` table.
-    * **Shared context files** — live filesystem glob +
-      ``read_text``, sorted by mtime so the newest entries
-      surface first.
-    * **Skills** — fresh BM25 / embedding search via
-      :class:`SkillInjectionService` (unless the caller
-      passed a pre-computed ``skill_injection_result``).
-
-    Mid-session mutations are picked up automatically on the
-    **next** turn: a new KV entry, a newly created ``.md``
-    file under the shared context directory, or a new
-    published skill will appear in the next ``assemble()``
-    call without any explicit invalidation step.
-
-    The **single intentional exception** to this rule is the
-    base system prompt itself, which
-    :func:`load_and_cache_prompt` caches by file mtime —
-    correct because the agent persona does not change
-    mid-session, so re-reading it every turn would burn
-    tokens for no behavioural benefit.
+    The persistent part is intentionally rebuilt ONCE — its freshness
+    guarantee is replaced by the once-per-instance contract enforced
+    via the ``project_injected`` flag in instance metadata. Mid-
+    session mutations to project data, KV metadata, or shared-
+    context ``.md`` files are **not** reflected in the persistent
+    block after the first turn. This is the explicit trade-off for
+    prefix-cache stability documented in the hybrid plan.
 
     Args:
         instance_id: The current instance id.
@@ -960,12 +950,21 @@ async def assemble_context_messages(
             path can attach the search result to the correct
             message rather than the instance. ``None`` → use
             ``instance_id`` as a stable fallback.
+        project_already_injected: When ``True`` the project +
+            shared_context build is skipped (no DB / RAG work) and
+            only skills are emitted. Used by ``ContextSlot`` on
+            every turn after the first to honour the once-per-
+            instance ``project_injected`` flag. Default ``False``
+            for backward-compatible first-turn callers.
 
     Returns:
-        List of zero to three tagged :class:`HumanMessage`
-        instances in canonical order. Empty list when the resolved
-        injection mode is ``legacy`` (the 3 CONTEXT appenders own
-        the legacy system-prompt path in that case).
+        ``(persistent_msgs, ephemeral_msgs)`` tuple. ``persistent_msgs``
+        carries zero-to-two tagged :class:`HumanMessage` instances
+        (``[project?, shared_context?]``); ``ephemeral_msgs`` carries
+        zero-to-one ``[skills?]``. Both lists are empty when the
+        resolved injection mode is ``legacy`` (the 3 CONTEXT appenders
+        own the legacy system-prompt path in that case) or when
+        ``project_already_injected=True`` and skills are also off.
     """
     # Lazy imports to keep DB-touching imports out of unit-test
     # import paths where the test mocks the repos directly.
@@ -983,15 +982,41 @@ async def assemble_context_messages(
 
     # In legacy mode the 3 CONTEXT appenders inside
     # ``_apply_post_cache_appends`` own the context-delivery surface,
-    # so this orchestrator must stay out of the way and return ``[]``.
+    # so this orchestrator must stay out of the way and return
+    # ``([], [])``.
     if mode == ContextInjectionMode.LEGACY:
-        return []
+        return ([], [])
 
-    messages: list[HumanMessage] = []
+    # Hybrid split — when persistent context was already injected on
+    # a previous turn, skip the project + shared_context builders
+    # entirely (no DB / RAG I/O) and only emit ephemeral skills.
+    # This is the steady-state hot path: every turn after the first
+    # for a given instance pays only the skills-search cost.
+    if project_already_injected:
+        skills_enabled_only = bool(getattr(agent_meta, "skill_injection", False))
+        if not skills_enabled_only:
+            return ([], [])
+        if skill_injection_result is not None:
+            injection_text, _skill_ids = skill_injection_result
+        else:
+            injection_text, _skill_ids = await _run_skill_search(
+                user_query=user_query,
+                project_id=project_id,
+                instance_id=instance_id,
+                manager=manager,
+                message_id=message_id,
+            )
+        skills_msg = build_skills_message(injection_text)
+        if skills_msg is None:
+            return ([], [])
+        return ([], [skills_msg])
+
+    persistent_msgs: list[HumanMessage] = []
+    ephemeral_msgs: list[HumanMessage] = []
 
     context_key = _resolve_tree_root_id(instance_id, parent_id, instance_repository)
 
-    # ── 1. Project context message (includes KV metadata) ──
+    # ── 1. Project context message (includes KV metadata) — PERSISTENT ──
     project, critical_notes, history_entries = await asyncio.to_thread(
         _fetch_project_payload, project_id, manager
     )
@@ -1006,9 +1031,9 @@ async def assemble_context_messages(
         history_entries=history_entries,
     )
     if project_msg is not None:
-        messages.append(project_msg)
+        persistent_msgs.append(project_msg)
 
-    # ── 2. Shared context (RAG) message ──
+    # ── 2. Shared context (RAG) message — PERSISTENT ──
     # Gate the entire RAG path on ``context_injection.heuristic_match_shared_md_files``
     # so the filesystem read + message build only runs when the agent
     # explicitly opts in. Project + metadata messages above are
@@ -1039,9 +1064,9 @@ async def assemble_context_messages(
 
         shared_msg = build_shared_context_message(rag_text)
         if shared_msg is not None:
-            messages.append(shared_msg)
+            persistent_msgs.append(shared_msg)
 
-    # ── 3. Skills message ──
+    # ── 3. Skills message — EPHEMERAL ──
     # Skill injection remains opt-in via the legacy ``skill_injection``
     # boolean — independent of the resolved injection mode so an agent
     # in legacy mode can still opt-in to per-turn skills if it wants.
@@ -1060,9 +1085,9 @@ async def assemble_context_messages(
 
         skills_msg = build_skills_message(injection_text)
         if skills_msg is not None:
-            messages.append(skills_msg)
+            ephemeral_msgs.append(skills_msg)
 
-    return messages
+    return (persistent_msgs, ephemeral_msgs)
 
 
 __all__ = [

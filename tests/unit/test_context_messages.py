@@ -28,6 +28,24 @@ Test breakdown:
 from __future__ import annotations
 
 import asyncio
+
+
+def _flatten_context_result(
+    t: tuple[list, list],
+) -> list:
+    """Flatten ``(persistent, ephemeral)`` tuple into a single ordered list.
+
+    Hybrid Context Injection (2026-07-29): the orchestrator now
+    returns a tuple. Most pre-restructure assertions
+    (``len(result)``, ``result[0]``, ``for m in result``) expect
+    a flat list — this helper folds the tuple back into a flat
+    list so the existing assertion surface keeps working
+    unchanged. New tests that want to assert the split can call
+    :func:`assemble_context_messages` directly and unpack the
+    tuple.
+    """
+    persistent, ephemeral = t
+    return list(persistent) + list(ephemeral)
 import json
 import logging
 from typing import Any
@@ -650,7 +668,14 @@ class TestAssembleContextMessages:
         return asyncio.run(coro)
 
     def test_returns_empty_when_all_disabled(self) -> None:
-        """Legacy-mode agent with skills off → ``[]`` (append chain owns legacy path)."""
+        """Legacy-mode agent with skills off → ``([], [])`` (append chain owns legacy path).
+
+        Hybrid Context Injection (2026-07-29): the orchestrator now
+        returns ``(persistent_msgs, ephemeral_msgs)``. In legacy mode
+        BOTH halves are empty so the caller sees an empty-tuple
+        shape — same flat-empty semantics as the pre-restructure
+        list ``[]`` from the caller's perspective.
+        """
         manager, instance_repo, _ = self._make_manager()
         # ``context_injection_mode="legacy"`` short-circuits the
         # orchestrator so the 3 CONTEXT appenders inside
@@ -671,7 +696,7 @@ class TestAssembleContextMessages:
                 instance_repository=instance_repo,
             )
         )
-        assert result == []
+        assert result == ([], [])
 
     def test_returns_project_only_when_skills_disabled(self) -> None:
         """Skills flag off → only project (no skills message)."""
@@ -680,7 +705,7 @@ class TestAssembleContextMessages:
         manager, instance_repo, agent_meta = self._make_manager(project=project)
         agent_meta.skill_injection = False
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="hi",
@@ -689,7 +714,7 @@ class TestAssembleContextMessages:
                 manager=manager,
                 instance_repository=instance_repo,
             )
-        )
+        ))
         # Project + shared context (RAG is mocked to None so it skips).
         assert len(result) == 1
         assert result[0].additional_kwargs["context_kind"] == "project"
@@ -719,7 +744,7 @@ class TestAssembleContextMessages:
             "daemon.services.context_injection.get_shared_context",
             return_value=rag,
         ):
-            result = self._run(
+            result = _flatten_context_result(self._run(
                 assemble_context_messages(
                     instance_id="inst-1",
                     user_query="hi",
@@ -728,7 +753,7 @@ class TestAssembleContextMessages:
                     manager=manager,
                     instance_repository=instance_repo,
                 )
-            )
+            ))
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert kinds == ["project", "shared_context", "skills"]
 
@@ -749,7 +774,7 @@ class TestAssembleContextMessages:
             "daemon.services.context_injection.get_shared_context",
             return_value=no_context,
         ):
-            result = self._run(
+            result = _flatten_context_result(self._run(
                 assemble_context_messages(
                     instance_id="inst-1",
                     user_query="hi",
@@ -760,7 +785,7 @@ class TestAssembleContextMessages:
                     manager=manager,
                     instance_repository=instance_repo,
                 )
-            )
+            ))
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert "shared_context" not in kinds
         assert "project" in kinds
@@ -773,7 +798,7 @@ class TestAssembleContextMessages:
             project=project, skill_text=(None, []),
         )
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="hi",
@@ -782,7 +807,7 @@ class TestAssembleContextMessages:
                 manager=manager,
                 instance_repository=instance_repo,
             )
-        )
+        ))
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert "skills" not in kinds
 
@@ -801,7 +826,7 @@ class TestAssembleContextMessages:
             ["pre-1", "pre-2"],
         )
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="hi",
@@ -811,7 +836,7 @@ class TestAssembleContextMessages:
                 instance_repository=instance_repo,
                 skill_injection_result=pre_computed,
             )
-        )
+        ))
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert "skills" in kinds
         # The pre-computed path wins — the skill service is NOT called.
@@ -839,7 +864,7 @@ class TestAssembleContextMessages:
 
         agent_meta = MagicMock(context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), skill_injection=True)
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="user query text",
@@ -849,7 +874,7 @@ class TestAssembleContextMessages:
                 instance_repository=instance_repository,
                 skill_injection_result=None,  # forces the search path
             )
-        )
+        ))
         assert skill_service.inject_skills.await_count == 1
         assert skill_service.inject_skills.await_args is not None
         # First positional arg is the user query text.
@@ -876,7 +901,8 @@ class TestAssembleContextMessages:
                 instance_repository=instance_repo,
             )
         )
-        assert result == []
+        # Hybrid split: legacy mode returns the empty tuple.
+        assert result == ([], [])
         # Repo call counts: nothing touched. The repos are plain
         # ``MagicMock`` (the orchestrator wraps them in
         # ``asyncio.to_thread``), so use ``call_count``, not
@@ -924,7 +950,7 @@ class TestAssembleContextMessages:
         manager._project_repository.get_recent_history.side_effect = RuntimeError("db down")
         manager._shared_context_metadata_repo.get_all_as_dict.side_effect = RuntimeError("db down")
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="hi",
@@ -934,7 +960,7 @@ class TestAssembleContextMessages:
                 instance_repository=instance_repo,
                 skill_injection_result=("[System Inject] Relevant skills loaded:\n\nbody", ["s"]),
             )
-        )
+        ))
         # Project + KV are skipped (nothing came back), but skills
         # still render — no exception escapes.
         kinds = [m.additional_kwargs["context_kind"] for m in result]
@@ -1057,7 +1083,7 @@ class TestAssembleContextMessagesModeGate:
             "daemon.services.context_injection.get_shared_context",
             return_value=rag,
         ):
-            result = self._run(
+            result = _flatten_context_result(self._run(
                 assemble_context_messages(
                     instance_id="inst-1",
                     user_query="hi",
@@ -1066,7 +1092,7 @@ class TestAssembleContextMessagesModeGate:
                     manager=manager,
                     instance_repository=instance_repo,
                 )
-            )
+            ))
 
         # The bug returned []; the fix must produce messages.
         assert len(result) > 0
@@ -1095,7 +1121,7 @@ class TestAssembleContextMessagesModeGate:
         agent_meta = MagicMock(spec=["skill_injection"])
         agent_meta.skill_injection = False
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="hi",
@@ -1104,14 +1130,14 @@ class TestAssembleContextMessagesModeGate:
                 manager=manager,
                 instance_repository=instance_repo,
             )
-        )
+        ))
 
         assert len(result) > 0
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert "project" in kinds
 
     def test_legacy_mode_returns_empty_list(self) -> None:
-        """Agent in ``legacy`` mode gets ``[]`` — legacy append chain owns context."""
+        """Agent in ``legacy`` mode gets ``([], [])`` — legacy append chain owns context."""
         project = MagicMock()
         project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
         manager, instance_repo = self._make_minimal_manager(project=project)
@@ -1131,7 +1157,8 @@ class TestAssembleContextMessagesModeGate:
             )
         )
 
-        assert result == []
+        # Hybrid split: legacy mode returns the empty tuple.
+        assert result == ([], [])
         # In legacy mode NO repo or service should be touched —
         # the orchestrator returns before any DB call.
         assert manager._project_repository.get.call_count == 0
@@ -1161,7 +1188,7 @@ class TestAssembleContextMessagesModeGate:
             "daemon.services.context_injection.get_shared_context",
             return_value=rag,
         ):
-            result = self._run(
+            result = _flatten_context_result(self._run(
                 assemble_context_messages(
                     instance_id="inst-1",
                     user_query="hi",
@@ -1170,7 +1197,7 @@ class TestAssembleContextMessagesModeGate:
                     manager=manager,
                     instance_repository=instance_repo,
                 )
-            )
+            ))
 
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert kinds == ["project", "shared_context", "skills"]
@@ -1187,7 +1214,7 @@ class TestAssembleContextMessagesModeGate:
             skill_injection=False,
         )
 
-        result = self._run(
+        result = _flatten_context_result(self._run(
             assemble_context_messages(
                 instance_id="inst-1",
                 user_query="hi",
@@ -1196,7 +1223,7 @@ class TestAssembleContextMessagesModeGate:
                 manager=manager,
                 instance_repository=instance_repo,
             )
-        )
+        ))
 
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         assert "project" in kinds

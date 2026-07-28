@@ -619,7 +619,14 @@ async def _build_context_dicts_for_response(
     # biting during ``daemon.persistence`` import in test collection.
     from daemon.services.context_messages import assemble_context_messages
 
-    context_msgs = await assemble_context_messages(
+    # Hybrid Context Injection (2026-07-29): the orchestrator now
+    # returns ``(persistent_msgs, ephemeral_msgs)``. The read path
+    # (``GET /messages``) needs ALL context kinds surfaced as
+    # synthetic messages so the frontend can render the full context
+    # block — flatten the tuple and emit in canonical order
+    # (project → shared_context → skills) regardless of which half
+    # the runtime agent_node would consume.
+    persistent_msgs, ephemeral_msgs = await assemble_context_messages(
         instance_id=instance_id,
         user_query=user_query,
         project_id=project_id,
@@ -631,6 +638,7 @@ async def _build_context_dicts_for_response(
         # ``assemble_context_messages`` will run the search itself.
         skill_injection_result=None,
     )
+    context_msgs = list(persistent_msgs) + list(ephemeral_msgs)
     if not context_msgs:
         return []
 

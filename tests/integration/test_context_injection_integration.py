@@ -161,6 +161,21 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _flatten_context_result(t: tuple[list, list]) -> list:
+    """Flatten ``(persistent, ephemeral)`` tuple into a single ordered list.
+
+    Hybrid Context Injection (2026-07-29): the orchestrator now
+    returns a tuple. Most pre-restructure assertions expect a flat
+    list — this helper folds the tuple back into a flat list so the
+    existing assertion surface keeps working unchanged. New tests
+    that want to assert the split can call
+    :func:`assemble_context_messages` directly and unpack the
+    tuple.
+    """
+    persistent, ephemeral = t
+    return list(persistent) + list(ephemeral)
+
+
 # ─── 1. Context Messages Appear in Correct Order ────────────────────────────────
 
 
@@ -212,7 +227,7 @@ class TestContextMessagesCanonicalOrder:
             "daemon.services.context_injection.get_shared_context",
             return_value=rag_text,
         ):
-            result = _run(
+            result = _flatten_context_result(_run(
                 assemble_context_messages(
                     instance_id="inst-1",
                     user_query="hi",
@@ -221,7 +236,7 @@ class TestContextMessagesCanonicalOrder:
                     manager=manager,
                     instance_repository=instance_repo,
                 )
-            )
+            ))
 
         # Exactly three messages.
         assert len(result) == 3
@@ -276,7 +291,7 @@ class TestContextMessagesCanonicalOrder:
             "daemon.services.context_injection.get_shared_context",
             return_value="",  # forces shared context to short-circuit
         ):
-            result = _run(
+            result = _flatten_context_result(_run(
                 assemble_context_messages(
                     instance_id="inst-2",
                     user_query="hi",
@@ -285,7 +300,7 @@ class TestContextMessagesCanonicalOrder:
                     manager=manager,
                     instance_repository=instance_repo,
                 )
-            )
+            ))
 
         kinds = [m.additional_kwargs["context_kind"] for m in result]
         # Skills must be absent; project message is still emitted.
@@ -350,8 +365,13 @@ class TestContextMessagesEphemerality:
 
         context_slot = MagicMock(spec=ContextSlot)
         # ``assemble`` is async; AsyncMock gives the right awaitable.
+        # Hybrid Context Injection (2026-07-29): the slot returns a
+        # ``(persistent_msgs, ephemeral_msgs)`` tuple. The agent_node
+        # only consumes the ephemeral half — feeding the same
+        # context messages as ephemeral exercises the re-append /
+        # pass-through path.
         context_slot.assemble = AsyncMock(
-            return_value=[context_msg_project, context_msg_shared]
+            return_value=([], [context_msg_project, context_msg_shared])
         )
         context_slot.resolve_project_id = MagicMock(return_value="proj-1")
 
@@ -532,7 +552,7 @@ class TestSkillsSurviveRetry:
             "daemon.services.context_injection.get_shared_context",
             return_value="",
         ):
-            result = _run(
+            result = _flatten_context_result(_run(
                 assemble_context_messages(
                     instance_id="inst-b3",
                     user_query="hi",
@@ -542,7 +562,7 @@ class TestSkillsSurviveRetry:
                     instance_repository=instance_repo,
                     skill_injection_result=pre_computed,
                 )
-            )
+            ))
 
         # Skills message was built.
         kinds = [m.additional_kwargs["context_kind"] for m in result]

@@ -110,7 +110,12 @@ class TestContextSlotAssembleLegacyMode:
         legacy_agent_meta: SimpleNamespace,
         stub_manager: SimpleNamespace,
     ) -> None:
-        """Legacy mode must return [] and never call assemble_context_messages."""
+        """Legacy mode must return ``([], [])`` and never call assemble_context_messages.
+
+        Hybrid Context Injection (2026-07-29): the slot now returns a
+        tuple. In legacy mode both halves are empty — the caller's
+        flat-empty contract is preserved at the tuple-shape level.
+        """
         slot = ContextSlot(
             manager=stub_manager,
             agent_meta=legacy_agent_meta,
@@ -118,7 +123,7 @@ class TestContextSlotAssembleLegacyMode:
 
         with patch(
             "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=([], [])),
         ) as mock_assemble:
             result = await slot.assemble(
                 instance_id="inst-1",
@@ -126,7 +131,7 @@ class TestContextSlotAssembleLegacyMode:
                 project_id="proj-1",
             )
 
-        assert result == []
+        assert result == ([], [])
         # Must NOT have invoked the orchestrator at all — the slot
         # is a hard no-op in legacy mode.
         mock_assemble.assert_not_called()
@@ -153,7 +158,7 @@ class TestContextSlotAssembleHumanMessagesMode:
             parent_id=None,
         )
 
-        sentinel = [HumanMessage(content="[SYSTEM CONTEXT: project] test", id="ctx-1")]
+        sentinel = (None, [HumanMessage(content="[SYSTEM CONTEXT: project] test", id="ctx-1")])
         with patch(
             "daemon.services.context_messages.assemble_context_messages",
             new=AsyncMock(return_value=sentinel),
@@ -164,7 +169,7 @@ class TestContextSlotAssembleHumanMessagesMode:
                 project_id="proj-42",
             )
 
-        # Returned list comes straight from the orchestrator.
+        # Returned tuple comes straight from the orchestrator.
         assert result is sentinel
         # The orchestrator was awaited exactly once with the slot's
         # captured dependencies plus the per-call args.
@@ -179,6 +184,11 @@ class TestContextSlotAssembleHumanMessagesMode:
         assert kwargs["parent_id"] is None
         # Default skill_injection_result pulled from the manager getter.
         assert kwargs["skill_injection_result"] is None
+        # Hybrid split: the slot reads ``project_injected`` fresh on
+        # every call. With no instance repository it defaults to
+        # ``False`` so the orchestrator is asked to build the full
+        # triple.
+        assert kwargs["project_already_injected"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +470,7 @@ class TestContextSlotPassesStoredSkillResult:
 
         with patch(
             "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=([], [])),
         ) as mock_assemble:
             await slot.assemble(
                 instance_id="inst-cached",
@@ -492,7 +502,7 @@ class TestContextSlotPassesStoredSkillResult:
 
         with patch(
             "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=([], [])),
         ) as mock_assemble:
             await slot.assemble(
                 instance_id="inst-fresh",
@@ -518,7 +528,7 @@ class TestContextSlotPassesStoredSkillResult:
 
         with patch(
             "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=([], [])),
         ) as mock_assemble:
             await slot.assemble(
                 instance_id="inst-bare",
