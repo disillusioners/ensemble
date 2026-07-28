@@ -9,5 +9,6 @@
   "tools": {
     "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db"]
   },
-  "team_members": ["explorer", "worker"]
+  "team_members": ["explorer", "worker"],
+  "context_injection_mode": "human_messages"
 }

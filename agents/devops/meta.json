@@ -11,5 +11,6 @@
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db", "infra", "project", "dynamic-skill", "question"]
   },
-  "team_members": ["explorer"]
+  "team_members": ["explorer"],
+  "context_injection_mode": "human_messages"
 }

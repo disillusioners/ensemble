@@ -23,5 +23,6 @@
       "shared_context",
       "dynamic-skill"
     ]
-  }
+  },
+  "context_injection_mode": "human_messages"
 }

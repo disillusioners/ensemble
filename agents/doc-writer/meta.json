@@ -9,5 +9,6 @@
   "tools": {
     "allow": ["filesystem", "bash", "proc", "time", "help", "context", "shared_context"]
   },
-  "team_members": []
+  "team_members": [],
+  "context_injection_mode": "human_messages"
 }

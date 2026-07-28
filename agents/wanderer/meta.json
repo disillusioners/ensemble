@@ -9,5 +9,6 @@
   "team_members": ["coder"],
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance"]
-  }
+  },
+  "context_injection_mode": "human_messages"
 }
