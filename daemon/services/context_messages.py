@@ -883,6 +883,41 @@ async def assemble_context_messages(
       skills just because the first attempt skipped the
       injection step.
 
+    Per-turn freshness guarantee (ADR-2):
+
+    This function is called inside ``agent_node`` on every LLM
+    turn; it is **not** a one-shot snapshot captured at graph
+    compile time. Every invocation performs live reads of all
+    data sources — there are no stale caches on this path:
+
+    * **Project JSON** — fresh DB read via the project
+      repository.
+    * **Critical notes** — fresh DB read of the project's
+      RAG notes.
+    * **Recent history** — fresh DB read of the instance's
+      recent-message history used for the history block.
+    * **Shared context KV** — fresh DB read of the
+      ``_shared_context_metadata_repo`` table.
+    * **Shared context files** — live filesystem glob +
+      ``read_text``, sorted by mtime so the newest entries
+      surface first.
+    * **Skills** — fresh BM25 / embedding search via
+      :class:`SkillInjectionService` (unless the caller
+      passed a pre-computed ``skill_injection_result``).
+
+    Mid-session mutations are picked up automatically on the
+    **next** turn: a new KV entry, a newly created ``.md``
+    file under the shared context directory, or a new
+    published skill will appear in the next ``assemble()``
+    call without any explicit invalidation step.
+
+    The **single intentional exception** to this rule is the
+    base system prompt itself, which
+    :func:`load_and_cache_prompt` caches by file mtime —
+    correct because the agent persona does not change
+    mid-session, so re-reading it every turn would burn
+    tokens for no behavioural benefit.
+
     Args:
         instance_id: The current instance id.
         user_query: The user message text — used for both the RAG

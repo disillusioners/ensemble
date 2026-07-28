@@ -363,6 +363,28 @@ class ContextSlot:
         injection mode is not ``human_messages`` (legacy
         ``system_prompt`` mode is untouched).
 
+        Per-turn freshness guarantee (ADR-2):
+
+        The slot itself holds **no** mutable per-turn state. Only
+        stable, long-lived references are captured at construction
+        time — the manager, the agent metadata, the instance
+        repository, and the parent id. Every ``assemble()`` call
+        therefore resolves the current project, the current parent,
+        and the current skill-search result fresh, and delegates all
+        data-source reads (project JSON, critical notes, recent
+        history, shared-context KV, shared-context files, skills)
+        to :func:`assemble_context_messages`, which performs them
+        live each time.
+
+        The returned list is a local object handed straight back to
+        ``agent_node``. It is **never** cached on the slot and is
+        **never** stored in graph state — the next turn gets a
+        freshly built list, so mid-session mutations to any
+        context source surface on the very next LLM call with no
+        invalidation hook required. This is a deliberate departure
+        from the pre-Phase-3 design, where context was frozen at
+        graph-compile time via a system-prompt closure variable.
+
         Args:
             instance_id: The current instance id.
             user_query: The latest user message text — used as the
