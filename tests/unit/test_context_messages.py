@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -646,10 +647,16 @@ class TestAssembleContextMessages:
         return asyncio.run(coro)
 
     def test_returns_empty_when_all_disabled(self) -> None:
-        """No flags → no work, empty list."""
-        manager, instance_repo, agent_meta = self._make_manager()
-        agent_meta.context_injection = False
-        agent_meta.skill_injection = False
+        """Legacy-mode agent with skills off → ``[]`` (append chain owns legacy path)."""
+        manager, instance_repo, _ = self._make_manager()
+        # ``context_injection_mode="legacy"`` short-circuits the
+        # orchestrator so the 3 CONTEXT appenders inside
+        # ``_apply_post_cache_appends`` own context delivery instead.
+        agent_meta = MagicMock(
+            context_injection=False,
+            skill_injection=False,
+            context_injection_mode="legacy",
+        )
 
         result = self._run(
             assemble_context_messages(
@@ -848,9 +855,13 @@ class TestAssembleContextMessages:
         assert "skills" in kinds
 
     def test_context_injection_disabled_skips_rag_call(self) -> None:
-        """``context_injection=False`` skips both project + RAG lookups."""
+        """Legacy-mode agent skips both project + RAG lookups."""
         manager, instance_repo, _ = self._make_manager()
-        agent_meta = MagicMock(context_injection=False, skill_injection=False)
+        agent_meta = MagicMock(
+            context_injection=False,
+            skill_injection=False,
+            context_injection_mode="legacy",
+        )
 
         result = self._run(
             assemble_context_messages(
@@ -927,6 +938,304 @@ class TestAssembleContextMessages:
         assert "skills" in kinds
         # No project message because every repo call failed.
         assert "project" not in kinds
+
+
+# ─── Mode-based gate (regression for the 2026-07-28 bug) ────────────────────
+
+
+class TestAssembleContextMessagesModeGate:
+    """Regression tests for the mode-based gate in ``assemble_context_messages``.
+
+    The bug fixed in this patch: the legacy ``context_injection``
+    boolean was the gate, so most agents (which never set
+    ``context_injection: true`` in meta.json) silently received
+    ``[]`` from the orchestrator after the
+    ``context_injection_mode`` default flipped to
+    ``human_messages`` on 2026-07-28. The fix gates on the resolved
+    ``_resolve_injection_mode(agent_meta)`` value:
+
+    * ``legacy`` → orchestrator returns ``[]`` (the 3 CONTEXT
+      appenders inside ``_apply_post_cache_appends`` own that path).
+    * ``human_messages`` → orchestrator builds project + shared
+      context messages every turn.
+    """
+
+    @staticmethod
+    def _make_agent_meta(
+        context_injection_mode: str | None = None,
+        skill_injection: bool = False,
+    ) -> Any:
+        """Build a duck-typed ``AgentMetadata`` with explicit mode field.
+
+        ``MagicMock`` instances make ``getattr`` return a fresh
+        ``MagicMock`` for unknown attributes — which is NOT in
+        :data:`VALID_INJECTION_MODES` and so resolves to the
+        default ``human_messages`` — but the bug spec wants an
+        explicit assertion that an agent meta object *without*
+        ``context_injection_mode`` set still lands in
+        ``human_messages`` mode. Using a plain object here keeps
+        the resolution path deterministic for the assertion.
+        """
+        meta = MagicMock(spec=["skill_injection", "context_injection_mode"])
+        meta.skill_injection = skill_injection
+        meta.context_injection_mode = context_injection_mode
+        return meta
+
+    @staticmethod
+    def _make_minimal_manager(
+        *,
+        project: Any = None,
+        skill_text: tuple[str | None, list[str]] | None = None,
+    ) -> tuple[Any, Any]:
+        """Build a manager + repo pair with a stub project + skills service."""
+        project_repo = MagicMock()
+        project_repo.get.return_value = project
+        project_repo.list_critical_notes.return_value = []
+        project_repo.get_recent_history.return_value = []
+
+        kv_repo = MagicMock()
+        kv_repo.get_all_as_dict.return_value = {}
+
+        skill_service = MagicMock()
+        if skill_text is None:
+            skill_service.inject_skills = AsyncMock(return_value=(None, []))
+        else:
+            skill_service.inject_skills = AsyncMock(return_value=skill_text)
+
+        manager = MagicMock()
+        manager._project_repository = project_repo
+        manager._shared_context_metadata_repo = kv_repo
+        manager._skill_injection_service = skill_service
+
+        instance_repository = MagicMock()
+        instance_repository.get_tree_root_id.return_value = "root-id"
+
+        return manager, instance_repository
+
+    @staticmethod
+    def _run(coro: Any) -> Any:
+        """Drive an awaitable to completion under a fresh event loop.
+
+        Mirrors the helper in ``TestAssembleContextMessages`` —
+        :func:`asyncio.run` avoids the Python 3.12+
+        ``DeprecationWarning`` from
+        :func:`asyncio.get_event_loop`.
+        """
+        return asyncio.run(coro)
+
+    def test_human_messages_mode_without_context_injection_flag_returns_messages(
+        self,
+    ) -> None:
+        """Regression for the 2026-07-28 bug.
+
+        Agent has ``context_injection_mode="human_messages"`` and
+        ``context_injection=False`` (the default for most agents —
+        they never set the legacy boolean). The orchestrator must
+        still build the project + shared-context messages.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {
+            "project_id": "p1", "name": "X", "critical_notes": []
+        }
+        manager, instance_repo = self._make_minimal_manager(project=project)
+        agent_meta = self._make_agent_meta(
+            context_injection_mode="human_messages",
+            skill_injection=False,
+        )
+
+        rag = (
+            "# Shared Context\ncontext_key: abc\n\n"
+            "## file.md (95% match)\ncontent\n"
+        )
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=rag,
+        ):
+            result = self._run(
+                assemble_context_messages(
+                    instance_id="inst-1",
+                    user_query="hi",
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=instance_repo,
+                )
+            )
+
+        # The bug returned []; the fix must produce messages.
+        assert len(result) > 0
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "project" in kinds
+        assert "shared_context" in kinds
+        # Skills gate (skill_injection=False) still respected.
+        assert "skills" not in kinds
+
+    def test_human_messages_default_resolves_without_explicit_field(
+        self,
+    ) -> None:
+        """Agent meta missing ``context_injection_mode`` defaults to ``human_messages``.
+
+        ``_resolve_injection_mode`` is fail-open — an agent that
+        does not set the field at all still receives context
+        messages via the orchestrator.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        manager, instance_repo = self._make_minimal_manager(project=project)
+        # Use a plain object (not MagicMock) so the missing
+        # ``context_injection_mode`` triggers the actual default
+        # branch in ``_resolve_injection_mode`` rather than a
+        # spurious ``MagicMock`` match against ``VALID_INJECTION_MODES``.
+        agent_meta = MagicMock(spec=["skill_injection"])
+        agent_meta.skill_injection = False
+
+        result = self._run(
+            assemble_context_messages(
+                instance_id="inst-1",
+                user_query="hi",
+                project_id="proj-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+
+        assert len(result) > 0
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "project" in kinds
+
+    def test_legacy_mode_returns_empty_list(self) -> None:
+        """Agent in ``legacy`` mode gets ``[]`` — legacy append chain owns context."""
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        manager, instance_repo = self._make_minimal_manager(project=project)
+        agent_meta = self._make_agent_meta(
+            context_injection_mode="legacy",
+            skill_injection=True,
+        )
+
+        result = self._run(
+            assemble_context_messages(
+                instance_id="inst-1",
+                user_query="hi",
+                project_id="proj-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+
+        assert result == []
+        # In legacy mode NO repo or service should be touched —
+        # the orchestrator returns before any DB call.
+        assert manager._project_repository.get.call_count == 0
+        assert manager._shared_context_metadata_repo.get_all_as_dict.call_count == 0
+        assert manager._skill_injection_service.inject_skills.await_count == 0
+
+    def test_human_messages_mode_with_skills_enabled_returns_all_three(
+        self,
+    ) -> None:
+        """``human_messages`` + ``skill_injection=True`` → project + RAG + skills."""
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        skill = ("[System Inject] Relevant skills loaded:\n\nbody", ["s1"])
+        manager, instance_repo = self._make_minimal_manager(
+            project=project, skill_text=skill,
+        )
+        agent_meta = self._make_agent_meta(
+            context_injection_mode="human_messages",
+            skill_injection=True,
+        )
+
+        rag = (
+            "# Shared Context\ncontext_key: abc\n\n"
+            "## file.md (95% match)\ncontent\n"
+        )
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=rag,
+        ):
+            result = self._run(
+                assemble_context_messages(
+                    instance_id="inst-1",
+                    user_query="hi",
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=instance_repo,
+                )
+            )
+
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert kinds == ["project", "shared_context", "skills"]
+
+    def test_human_messages_mode_with_skills_disabled_returns_project_only(
+        self,
+    ) -> None:
+        """``human_messages`` + ``skill_injection=False`` → project + RAG, no skills."""
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        manager, instance_repo = self._make_minimal_manager(project=project)
+        agent_meta = self._make_agent_meta(
+            context_injection_mode="human_messages",
+            skill_injection=False,
+        )
+
+        result = self._run(
+            assemble_context_messages(
+                instance_id="inst-1",
+                user_query="hi",
+                project_id="proj-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "project" in kinds
+        assert "skills" not in kinds
+        # No skill search should have run.
+        assert manager._skill_injection_service.inject_skills.await_count == 0
+
+
+# ─── _fetch_project_payload debug log ────────────────────────────────────────
+
+
+class TestFetchProjectPayloadDebugLog:
+    """Tests for the ``project_id=None`` debug log in ``_fetch_project_payload``."""
+
+    def test_returns_empty_tuple_when_project_id_none(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``project_id=None`` returns ``(None, [], [])`` and emits a debug log.
+
+        Confirms both the contract (no project / no notes / no
+        history tuple) and the diagnostic log the team added so a
+        silent skip is observable in ``LOG_LEVEL=DEBUG`` runs.
+        """
+        from daemon.services.context_messages import _fetch_project_payload
+
+        manager = MagicMock()
+        manager._project_repository = MagicMock()
+
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.services.context_messages"
+        ):
+            project, notes, history = _fetch_project_payload(None, manager)
+
+        assert project is None
+        assert notes == []
+        assert history == []
+        # No DB call when project_id is None.
+        assert manager._project_repository.get.call_count == 0
+        # Debug log emitted with the agreed wording.
+        assert any(
+            "Skipping project context" in record.message
+            and "project_id is None" in record.message
+            and record.levelno == logging.DEBUG
+            for record in caplog.records
+        )
 
 
 # ─── Module exports ──────────────────────────────────────────────────────────
