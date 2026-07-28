@@ -166,8 +166,15 @@ class TestReviewerV2MetaJson:
 
     def test_context_injection_enabled(self) -> None:
         meta = _load_meta()
-        assert meta.get("context_injection") is True, (
-            f"context_injection must be true. Got: {meta.get('context_injection')!r}"
+        # ``context_injection`` is now an object; the enabled flag is
+        # ``heuristic_match_shared_md_files`` (see ADR for context_injection
+        # object form).
+        assert meta.get("context_injection") == {
+            "heuristic_match_shared_md_files": True,
+        }, (
+            f"context_injection must be the new object form with "
+            "heuristic_match_shared_md_files=true. "
+            f"Got: {meta.get('context_injection')!r}"
         )
 
     def test_team_members_includes_worker_governor_explorer(self) -> None:

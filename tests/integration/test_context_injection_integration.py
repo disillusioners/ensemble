@@ -72,6 +72,9 @@ from daemon.services.instance_lifecycle import (
 # ─── Shared fixtures / helpers ─────────────────────────────────────────────────
 
 
+from daemon.registry import ContextInjectionConfig
+
+
 def _human_messages_agent_meta() -> SimpleNamespace:
     """AgentMeta stub in ``human_messages`` mode with both feature flags on.
 
@@ -80,7 +83,7 @@ def _human_messages_agent_meta() -> SimpleNamespace:
     """
     return SimpleNamespace(
         context_injection_mode=ContextInjectionMode.HUMAN_MESSAGES,
-        context_injection=True,
+        context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
         skill_injection=True,
         allowed_models=None,
     )
@@ -97,7 +100,7 @@ def _legacy_agent_meta() -> SimpleNamespace:
     """
     return SimpleNamespace(
         context_injection_mode=ContextInjectionMode.LEGACY,
-        context_injection=True,
+        context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
         skill_injection=True,
         allowed_models=None,
     )

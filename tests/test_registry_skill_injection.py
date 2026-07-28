@@ -80,9 +80,18 @@ class TestAgentMetadataDefaults:
         """``skill_injection`` is a declared field (defends against removal)."""
         assert "skill_injection" in AgentMetadata.model_fields
 
-    def test_context_injection_default_false(self, tmp_path: Path):
+    def test_context_injection_default_config(self, tmp_path: Path):
+        """Bare ``AgentMetadata`` exposes the default ``ContextInjectionConfig``.
+
+        The new model replaces the legacy boolean with an object. The
+        default config has ``heuristic_match_shared_md_files=False`` so
+        a fresh agent gets no RAG-driven shared-context messages.
+        """
+        from daemon.registry import ContextInjectionConfig
+
         meta = AgentMetadata(id="bare", name="Bare", path=tmp_path / "bare")
-        assert meta.context_injection is False
+        assert isinstance(meta.context_injection, ContextInjectionConfig)
+        assert meta.context_injection.heuristic_match_shared_md_files is False
 
     def test_context_injection_field_declared(self):
         assert "context_injection" in AgentMetadata.model_fields
@@ -201,16 +210,22 @@ class TestAgentRegistryDiscoverSkillInjection:
         assert second.skill_injection is True
 
     def test_context_injection_from_meta_json(self, tmp_path: Path):
+        """discover() reads the new ``ContextInjectionConfig`` object from meta.json."""
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
-        _create_agent_meta(agents_dir, "context-agent", context_injection=True)
+        _create_agent_meta(
+            agents_dir,
+            "context-agent",
+            context_injection={"heuristic_match_shared_md_files": True},
+        )
         registry = AgentRegistry(agents_dir)
         registry.discover()
         agent = registry.get("context-agent")
         assert agent is not None
-        assert agent.context_injection is True
+        assert agent.context_injection.heuristic_match_shared_md_files is True
 
     def test_context_injection_absent_from_meta_json(self, tmp_path: Path):
+        """When the field is missing from meta.json, default to ``False``."""
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
         _create_agent_meta(agents_dir, "no-context-agent")
@@ -218,4 +233,49 @@ class TestAgentRegistryDiscoverSkillInjection:
         registry.discover()
         agent = registry.get("no-context-agent")
         assert agent is not None
-        assert agent.context_injection is False
+        assert agent.context_injection.heuristic_match_shared_md_files is False
+
+    def test_context_injection_legacy_boolean_true_normalized(self, tmp_path: Path):
+        """Backward compat: legacy boolean ``true`` → heuristic enabled."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(agents_dir, "legacy-bool-true", context_injection=True)
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        agent = registry.get("legacy-bool-true")
+        assert agent is not None
+        assert agent.context_injection.heuristic_match_shared_md_files is True
+
+    def test_context_injection_legacy_boolean_false_normalized(self, tmp_path: Path):
+        """Backward compat: legacy boolean ``false`` → heuristic disabled."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(agents_dir, "legacy-bool-false", context_injection=False)
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        agent = registry.get("legacy-bool-false")
+        assert agent is not None
+        assert agent.context_injection.heuristic_match_shared_md_files is False
+
+    def test_context_injection_unknown_keys_dropped(self, tmp_path: Path):
+        """Unknown keys in the new object are silently dropped (extra='ignore')."""
+        from daemon.registry import ContextInjectionConfig
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(
+            agents_dir,
+            "extra-keys-agent",
+            context_injection={
+                "heuristic_match_shared_md_files": True,
+                "future_unknown_key": "should be dropped",
+            },
+        )
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        agent = registry.get("extra-keys-agent")
+        assert agent is not None
+        assert isinstance(agent.context_injection, ContextInjectionConfig)
+        assert agent.context_injection.heuristic_match_shared_md_files is True
+        # ``future_unknown_key`` must NOT appear as an attribute.
+        assert not hasattr(agent.context_injection, "future_unknown_key")

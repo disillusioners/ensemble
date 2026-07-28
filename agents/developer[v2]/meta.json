@@ -10,5 +10,7 @@
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db"]
   },
   "team_members": ["coder"],
-  "context_injection": true
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  }
 }

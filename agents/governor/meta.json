@@ -6,7 +6,9 @@
   "color": "accent-purple",
   "version": "0.1.0",
   "innate_skills": ["todo", "chart"],
-  "context_injection": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
   "inject_allowed_models": true,
   "tools": {
     "allow": [

@@ -160,6 +160,9 @@ def _create_child_instance(
     )
 
 
+from daemon.registry import ContextInjectionConfig
+
+
 def _import_assemble_context_messages():
     """Lazy import of the orchestrator under test.
 
@@ -295,7 +298,7 @@ class TestContextResolutionUsesCorrectKey:
         )
 
         agent_meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             skill_injection=False,
         )
 
@@ -361,7 +364,7 @@ class TestSharedContextMetadataIsolation:
         bundle.shared_repo.set_many(root_b, {"root_b_key": marker_b})
 
         agent_meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             skill_injection=False,
         )
 
@@ -521,9 +524,9 @@ class TestHumanMessagesModeForChild:
         marker = "HUMAN_MESSAGES_CHILD_KV_MARKER"
         bundle.shared_repo.set_many(root_id, {"hm_child_key": marker})
 
-        # Agent meta: human_messages mode, context_injection=True.
+        # Agent meta: human_messages mode, context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True).
         agent_meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             skill_injection=False,
             context_injection_mode="human_messages",
         )

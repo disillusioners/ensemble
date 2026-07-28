@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from daemon.registry import ContextInjectionConfig
 from daemon.services.instance_lifecycle import _apply_post_cache_appends
 
 
@@ -28,7 +29,7 @@ def test_post_cache_appender_injects_context_when_enabled():
         prompt, _ = _apply_post_cache_appends(
             **_args(
                 SimpleNamespace(
-                    context_injection=True, context_injection_mode="legacy"
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
                 )
             )
         )
@@ -57,7 +58,7 @@ def test_post_cache_appender_handles_empty_context():
         prompt, _ = _apply_post_cache_appends(
             **_args(
                 SimpleNamespace(
-                    context_injection=True, context_injection_mode="legacy"
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
                 )
             )
         )
@@ -73,7 +74,7 @@ def test_post_cache_appender_includes_security_fence():
         prompt, _ = _apply_post_cache_appends(
             **_args(
                 SimpleNamespace(
-                    context_injection=True, context_injection_mode="legacy"
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
                 )
             )
         )
@@ -91,7 +92,7 @@ def test_post_cache_appender_escapes_context_fence_content():
         prompt, _ = _apply_post_cache_appends(
             **_args(
                 SimpleNamespace(
-                    context_injection=True, context_injection_mode="legacy"
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
                 )
             )
         )
@@ -103,7 +104,7 @@ def test_post_cache_appender_escapes_context_fence_content():
 def test_post_cache_appender_does_not_fetch_critical_notes():
     args = _args(
         SimpleNamespace(
-            context_injection=True, context_injection_mode="legacy"
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
         )
     )
     with patch(
@@ -123,7 +124,7 @@ def test_post_cache_appender_swallows_exception():
         prompt, _ = _apply_post_cache_appends(
             **_args(
                 SimpleNamespace(
-                    context_injection=True, context_injection_mode="legacy"
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
                 )
             )
         )
@@ -134,7 +135,7 @@ def test_post_cache_appender_swallows_exception():
 def test_post_cache_appender_resolves_child_context_key():
     args = _args(
         SimpleNamespace(
-            context_injection=True, context_injection_mode="legacy"
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), context_injection_mode="legacy"
         )
     )
     args["parent_id"] = "parent-id"

@@ -334,3 +334,29 @@ class TestNoLegacyFlagNoWarning:
         )
         assert "modern_b" not in deprecation_records[0].getMessage()
         assert "vanilla_c" not in deprecation_records[0].getMessage()
+
+    def test_context_injection_object_form_no_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The new object form must not trigger the legacy boolean deprecation warning."""
+        _make_agents_dir(
+            tmp_path,
+            {
+                "object_form_agent": {
+                    "id": "object_form_agent",
+                    "name": "Object Form Agent",
+                    "description": "Agent using the new context_injection object form.",
+                    "context_injection": {"heuristic_match_shared_md_files": True},
+                },
+            },
+        )
+
+        _discover_with_caplog(tmp_path, caplog)
+
+        assert not _has_deprecation_warning(caplog), (
+            "Did NOT expect the legacy 'context_injection: true' deprecation warning "
+            "when the agent uses the new object form "
+            "'context_injection: {\"heuristic_match_shared_md_files\": true}'. "
+            f"Captured records: "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )

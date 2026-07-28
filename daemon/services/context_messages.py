@@ -871,12 +871,11 @@ async def assemble_context_messages(
 
     Opt-in behavior (per ADR-8):
 
-    * Project + shared-context messages are gated on the resolved
-      injection mode (``_resolve_injection_mode``) — in
-      ``human_messages`` mode (the default) they are always built;
-      in ``legacy`` mode the function short-circuits to ``[]`` and
-      the 3 CONTEXT appenders inside ``_apply_post_cache_appends``
-      handle the legacy system-prompt path.
+    * Project messages are always built in human_messages mode (gated
+      only on ``context_injection_mode``). Shared-context (RAG-matched
+      .md files) messages are gated on the new
+      ``context_injection.heuristic_match_shared_md_files`` flag in
+      addition to the resolved injection mode.
     * Skills message is still gated on
       ``getattr(agent_meta, "skill_injection", False)`` to match the
       existing skill-injection gate.
@@ -1010,27 +1009,37 @@ async def assemble_context_messages(
         messages.append(project_msg)
 
     # ── 2. Shared context (RAG) message ──
-    # The RAG call is sync (filesystem + slug token overlap) —
-    # wrap in ``asyncio.to_thread`` per ADR-12 so the agent-
-    # node async loop doesn't block on disk I/O.
-    try:
-        rag_text = await asyncio.to_thread(
-            get_shared_context,
-            context_key,
-            user_query,
-            "internal",
-            project_id=project_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            f"[ContextMessages] get_shared_context failed for "
-            f"{context_key}: {exc}"
-        )
-        rag_text = None
+    # Gate the entire RAG path on ``context_injection.heuristic_match_shared_md_files``
+    # so the filesystem read + message build only runs when the agent
+    # explicitly opts in. Project + metadata messages above are
+    # always built (mode-gated only by ``context_injection_mode``).
+    ci = getattr(agent_meta, "context_injection", None)
+    heuristic_enabled = bool(
+        ci and getattr(ci, "heuristic_match_shared_md_files", False)
+    )
+    rag_text: str | None = None
+    if heuristic_enabled:
+        # The RAG call is sync (filesystem + slug token overlap) —
+        # wrap in ``asyncio.to_thread`` per ADR-12 so the agent-
+        # node async loop doesn't block on disk I/O.
+        try:
+            rag_text = await asyncio.to_thread(
+                get_shared_context,
+                context_key,
+                user_query,
+                "internal",
+                project_id=project_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[ContextMessages] get_shared_context failed for "
+                f"{context_key}: {exc}"
+            )
+            rag_text = None
 
-    shared_msg = build_shared_context_message(rag_text)
-    if shared_msg is not None:
-        messages.append(shared_msg)
+        shared_msg = build_shared_context_message(rag_text)
+        if shared_msg is not None:
+            messages.append(shared_msg)
 
     # ── 3. Skills message ──
     # Skill injection remains opt-in via the legacy ``skill_injection``

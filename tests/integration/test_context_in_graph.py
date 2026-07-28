@@ -47,6 +47,7 @@ from daemon.graph import (
     _extract_last_user_text,
 )
 from daemon.manager import InstanceManager
+from daemon.registry import ContextInjectionConfig
 from daemon.services.instance_messaging import _build_graph_input
 
 
@@ -75,7 +76,7 @@ def human_messages_agent_meta() -> SimpleNamespace:
     """AgentMeta stub in ``human_messages`` mode (the new default)."""
     return SimpleNamespace(
         context_injection_mode="human_messages",
-        context_injection=True,
+        context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
         skill_injection=True,
     )
 

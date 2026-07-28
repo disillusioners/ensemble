@@ -36,6 +36,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import HumanMessage
 
+from daemon.registry import ContextInjectionConfig
 from daemon.services.context_messages import (
     CONTEXT_KIND_PROJECT,
     CONTEXT_KIND_SHARED_CONTEXT,
@@ -603,7 +604,9 @@ class TestAssembleContextMessages:
         lazily inside :func:`assemble_context_messages`.
         """
         agent_meta = MagicMock()
-        agent_meta.context_injection = True
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
         agent_meta.skill_injection = True
 
         project_repo = MagicMock()
@@ -752,7 +755,7 @@ class TestAssembleContextMessages:
                     user_query="hi",
                     project_id="proj-1",
                     agent_meta=MagicMock(
-                        context_injection=True, skill_injection=False
+                        context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), skill_injection=False
                     ),
                     manager=manager,
                     instance_repository=instance_repo,
@@ -775,7 +778,7 @@ class TestAssembleContextMessages:
                 instance_id="inst-1",
                 user_query="hi",
                 project_id="proj-1",
-                agent_meta=MagicMock(context_injection=True, skill_injection=True),
+                agent_meta=MagicMock(context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), skill_injection=True),
                 manager=manager,
                 instance_repository=instance_repo,
             )
@@ -834,7 +837,7 @@ class TestAssembleContextMessages:
         instance_repository = MagicMock()
         instance_repository.get_tree_root_id.return_value = None
 
-        agent_meta = MagicMock(context_injection=True, skill_injection=True)
+        agent_meta = MagicMock(context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), skill_injection=True)
 
         result = self._run(
             assemble_context_messages(
@@ -904,7 +907,7 @@ class TestAssembleContextMessages:
                 instance_id="inst-1",
                 user_query="hi",
                 project_id="proj-1",
-                agent_meta=MagicMock(context_injection=True, skill_injection=False),
+                agent_meta=MagicMock(context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), skill_injection=False),
                 manager=manager,
                 instance_repository=instance_repo,
                 parent_id="parent-x",
@@ -926,7 +929,7 @@ class TestAssembleContextMessages:
                 instance_id="inst-1",
                 user_query="hi",
                 project_id="proj-1",
-                agent_meta=MagicMock(context_injection=True, skill_injection=True),
+                agent_meta=MagicMock(context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True), skill_injection=True),
                 manager=manager,
                 instance_repository=instance_repo,
                 skill_injection_result=("[System Inject] Relevant skills loaded:\n\nbody", ["s"]),
@@ -979,6 +982,9 @@ class TestAssembleContextMessagesModeGate:
         meta = MagicMock(spec=["skill_injection", "context_injection_mode"])
         meta.skill_injection = skill_injection
         meta.context_injection_mode = context_injection_mode
+        meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
         return meta
 
     @staticmethod

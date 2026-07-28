@@ -99,6 +99,36 @@ class ToolFilter(BaseModel):
     )
 
 
+class ContextInjectionConfig(BaseModel):
+    """Structured per-agent context-injection configuration.
+
+    Replaces the legacy boolean ``context_injection: true|false`` meta.json
+    flag with an object so additional knobs can be added in the future
+    without breaking backward compatibility.
+
+    Backward compat: legacy ``"context_injection": true|false|missing``
+    values are normalized by the ``AgentMetadata`` field validator (see
+    ``_normalize_context_injection`` below) so existing meta.json files
+    keep loading without error.
+
+    Attributes:
+        heuristic_match_shared_md_files: When ``True``, the heuristic
+            ``.md`` file matching from the filesystem runs and produces
+            ``[SYSTEM CONTEXT: Shared Context]`` messages. When ``False``
+            (the default), this feature is skipped. Defaults to ``False``
+            so agents without an explicit opt-in do not pay the RAG cost.
+    """
+    heuristic_match_shared_md_files: bool = Field(
+        default=False,
+        description=(
+            "When true, the heuristic .md file matching from the "
+            "filesystem runs and produces [SYSTEM CONTEXT: Shared "
+            "Context] messages. Default false."
+        ),
+    )
+    model_config = ConfigDict(extra="ignore")
+
+
 class AgentMetadata(BaseModel):
     """Complete agent metadata."""
 
@@ -132,9 +162,15 @@ class AgentMetadata(BaseModel):
         default=False,
         description="Whether this agent should have dynamic skills injected into conversations.",
     )
-    context_injection: bool = Field(
-        default=False,
-        description="When true, inject shared project context into this agent's system prompt at spawn time.",
+    context_injection: ContextInjectionConfig = Field(
+        default_factory=ContextInjectionConfig,
+        description=(
+            "Per-agent context-injection configuration. Replaces the "
+            "legacy boolean 'context_injection' flag. Set to an object "
+            "like '{\"heuristic_match_shared_md_files\": true}' to "
+            "opt in to heuristic .md file matching. Default "
+            "heuristic_match_shared_md_files=False."
+        ),
     )
     # ADR-8: per-agent context-injection mode flag. Two values only —
     # "human_messages" (default — context as [SYSTEM CONTEXT: ...]
@@ -195,6 +231,36 @@ class AgentMetadata(BaseModel):
         if isinstance(v, Path):
             return v
         return Path(v)
+
+    @field_validator("context_injection", mode="before")
+    @classmethod
+    def _normalize_context_injection(cls, v: Any) -> Any:
+        """Coerce legacy boolean / dict / None into the structured config.
+
+        Backward compatibility for existing ``meta.json`` files:
+
+        * ``True`` → ``{"heuristic_match_shared_md_files": True}``
+        * ``False`` / missing / ``None`` → ``{}`` (default config;
+          ``heuristic_match_shared_md_files=False``)
+        * ``dict`` → passed through to ``ContextInjectionConfig`` for
+          Pydantic validation (extra keys silently dropped).
+        * already a ``ContextInjectionConfig`` instance → returned as-is
+          so Pydantic can revalidate the fields cleanly.
+        * Unknown type → fail-open to defaults with a warning.
+        """
+        if isinstance(v, ContextInjectionConfig):
+            return v
+        if v is True:
+            return {"heuristic_match_shared_md_files": True}
+        if v is False or v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        logger.warning(
+            f"Unknown context_injection value type {type(v).__name__}; "
+            "treating as default config."
+        )
+        return {}
 
 
 class AgentRegistry:
@@ -277,7 +343,8 @@ class AgentRegistry:
             # mode (the newer ``context_injection_mode`` field does — see
             # ADR-8). Emit a one-shot warning so agents still relying on the
             # legacy flag can migrate to ``context_injection_mode``.
-            if meta.get("context_injection") and agent_id not in _deprecation_warned:
+            _ci_raw = meta.get("context_injection")
+            if _ci_raw is True and agent_id not in _deprecation_warned:
                 _deprecation_warned.add(agent_id)
                 logger.warning(
                     "Agent '%s' uses deprecated 'context_injection: true' flag. "

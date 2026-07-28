@@ -193,6 +193,9 @@ def MagicMock_get_returning_none():  # noqa: N802 (factory helper)
     return repo
 
 
+from daemon.registry import ContextInjectionConfig
+
+
 def _import_assemble_context_messages():
     """Lazy import of the orchestrator under test.
 
@@ -264,7 +267,7 @@ class TestKVFreshness:
 
         # Agent meta: context injection on, skills off (isolate KV path).
         agent_meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             skill_injection=False,
         )
 
@@ -383,7 +386,7 @@ class TestFileFreshness:
         context_dir.mkdir(parents=True, exist_ok=True)
 
         agent_meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             skill_injection=False,
         )
 

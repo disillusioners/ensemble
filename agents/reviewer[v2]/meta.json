@@ -8,7 +8,9 @@
   "innate_skills": ["todo", "chart", "dynamic-skill"],
   "skill_injection": true,
   "no_force_explore": true,
-  "context_injection": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
   "tools": {
     "allow": ["instance", "council", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
   },

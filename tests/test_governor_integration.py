@@ -238,7 +238,7 @@ class TestGovernorAgentMetadata:
             "C6 REGRESSION: inject_allowed_models silently dropped — "
             "need BOTH the field declaration AND the loader line"
         )
-        assert gov.context_injection is True, (
+        assert gov.context_injection.heuristic_match_shared_md_files is True, (
             "C6 REGRESSION: context_injection silently dropped"
         )
 
@@ -252,8 +252,12 @@ class TestGovernorAgentMetadata:
         assert data["inject_allowed_models"] is True, (
             "inject_allowed_models must be true in governor meta.json"
         )
-        assert data["context_injection"] is True, (
-            "context_injection must be true in governor meta.json"
+        assert isinstance(data["context_injection"], dict), (
+            "context_injection must be the new object form in governor meta.json"
+        )
+        assert data["context_injection"]["heuristic_match_shared_md_files"] is True, (
+            "context_injection.heuristic_match_shared_md_files must be true "
+            "in governor meta.json"
         )
         assert "council" in data["tools"]["allow"], (
             "governor must allow the 'council' tool category"

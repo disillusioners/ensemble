@@ -37,6 +37,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from daemon.registry import ContextInjectionConfig
 from daemon.services.context_messages import ContextInjectionMode
 from daemon.services.instance_lifecycle import (
     _apply_post_cache_appends,
@@ -166,10 +167,13 @@ class TestSevenAppenderChainInLegacyMode:
             return_value="# Pre-loaded Context\nSome facts here.",
         ):
             out, _ = _apply_post_cache_appends(
-                **_args(
-                    SimpleNamespace(context_injection=True, inject_allowed_models=False),
-                    mode="legacy",
-                )
+**_args(
+                SimpleNamespace(
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
+                    inject_allowed_models=False,
+                ),
+                mode="legacy",
+            )
             )
         assert "# Injected Project Context" in out
         assert "<injected_project_context>" in out
@@ -279,7 +283,9 @@ class TestContextAppendersDoNotEarlyReturnInLegacyMode:
                 system_prompt="BASE",
                 instance_id="inst-1",
                 instance_repository=_make_instance_repo(),
-                agent_meta=SimpleNamespace(context_injection=True),
+                agent_meta=SimpleNamespace(
+                    context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
+                ),
                 mode="legacy",
             )
         assert result != "BASE"
@@ -424,7 +430,10 @@ class TestBackwardCompatibilityOfApplyPostCacheAppends:
         mode produced — 7 appenders run, no defense instruction,
         full XML fence layout.
         """
-        meta = SimpleNamespace(context_injection=True, inject_allowed_models=True)
+        meta = SimpleNamespace(
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
+            inject_allowed_models=True,
+        )
 
         args = _args(meta, mode="legacy")
         args["project_repository"] = None  # → language = "Auto"
@@ -489,7 +498,7 @@ class TestBackwardCompatibilityOfApplyPostCacheAppends:
         back to human_messages behind the caller's back).
         """
         meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             inject_allowed_models=True,
             context_injection_mode="legacy",
         )
@@ -576,7 +585,7 @@ class TestLegacyModeByteIdenticalToOriginalSystemPromptPipeline:
         cosmetic at the byte level.
         """
         meta = SimpleNamespace(
-            context_injection=True,
+            context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
             inject_allowed_models=True,
             context_injection_mode="legacy",
         )
