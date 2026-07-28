@@ -264,6 +264,20 @@ class AgentRegistry:
                 )
             agent_id = meta.get("id", base_agent_id)
 
+            # Deprecation warning: ``context_injection: true`` is the legacy
+            # boolean opt-in. It no longer controls the per-agent injection
+            # mode (the newer ``context_injection_mode`` field does — see
+            # ADR-8). Emit a one-shot warning so agents still relying on the
+            # legacy flag can migrate to ``context_injection_mode``.
+            if meta.get("context_injection"):
+                logger.warning(
+                    "Agent '%s' uses deprecated 'context_injection: true' flag. "
+                    "This flag no longer controls context injection mode. "
+                    "To use the new human_messages mode, set 'context_injection_mode': 'human_messages' in meta.json. "
+                    "The 'context_injection' flag will be removed in a future version.",
+                    agent_id,
+                )
+
             # Build AgentMetadata with defaults for missing fields
             tools_config = meta.get("tools")
             tools_filter = None
