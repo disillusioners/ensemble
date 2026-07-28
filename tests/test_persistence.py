@@ -391,3 +391,188 @@ class TestGetInstanceMessages:
         assert len(messages) == 1
         assert "message_id" in messages[0]
         assert messages[0]["message_id"] is not None
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_injects_synthetic_system_when_manager_provided(self):
+        """System prompt is not persisted in the checkpoint but is needed by the
+        frontend "View system message" toggle. When ``manager`` is passed,
+        ``get_instance_messages`` should reconstruct the FULL prompt (cached
+        base + post-cache appends) and prepend a synthetic ``role="system"``
+        entry at index 0 of the returned list. The synthetic content must
+        match the post-cache-augmented prompt the LLM actually saw, not
+        just the cached base prompt.
+        """
+        from langchain_core.messages import HumanMessage
+
+        # Mock checkpointer: only a human message is persisted (no system).
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [HumanMessage(content="Hello world")]
+            }
+        })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
+
+        # Mock instance row: agent exists, agent_dir points to a real agent.
+        agent_dir = Path(__file__).resolve().parent.parent / "agents" / "developer"
+        if not agent_dir.exists():
+            pytest.skip("developer agent directory not present in this checkout")
+
+        instance_meta = MagicMock()
+        instance_meta.agent_id = "developer"
+        instance_meta.agent_dir = str(agent_dir)
+        instance_meta.agent_tag = None
+        instance_meta.instance_metadata = {}
+        instance_meta.parent_id = None
+        instance_meta.project_id = None
+
+        instance_repo = MagicMock()
+        instance_repo.get = MagicMock(return_value=instance_meta)
+
+        prompt_cache = MagicMock()
+        # First call (cache.get) is a miss → force ``load_and_cache_prompt`` to
+        # actually run. The second call (cache.set) is fine to no-op.
+        prompt_cache.get = MagicMock(return_value=None)
+
+        # Patch load_and_cache_prompt at the import site used by
+        # get_instance_messages (``daemon.manager``) so the lazy import inside
+        # the helper returns our stub. The "base" prompt is what the prompt
+        # cache would have returned.
+        base_prompt = (
+            "You are a developer agent.\n\n"
+            "## Rule\nFollow the rules.\n\n## Workflow\nDo work."
+        )
+        # The "full" prompt is what the LLM actually saw — base + all
+        # post-cache appends (context key, shared context metadata, current
+        # time, allowed models, user language, auto-loaded skills, etc.).
+        full_prompt = (
+            base_prompt
+            + "\n\n---\n\n# Context Key\nctx_key_for_inst-123"
+            + "\n\n---\n\n# Shared Context Metadata\n<shared_context></shared_context>"
+            + "\n\n---\n\n# Current Time\n2026-07-28T00:00:00Z"
+            + "\n\n---\n\n# User Language\nen"
+            + "\n\n---\n\n# Auto-Loaded Skills\n<auto_load></auto_load>"
+        )
+
+        with patch(
+            "daemon.manager.load_and_cache_prompt",
+            return_value=(base_prompt, len(base_prompt)),
+        ) as mock_load, patch(
+            # Patch at the source module — the helper imports via
+            # ``from daemon.services.instance_lifecycle import _apply_post_cache_appends``,
+            # so the attribute is read at call time from the source module.
+            "daemon.services.instance_lifecycle._apply_post_cache_appends",
+            return_value=(full_prompt, "en"),
+        ) as mock_apply:
+            manager = MagicMock()
+            manager._instance_repository = instance_repo
+            manager.prompt_cache = prompt_cache
+            # The post-cache appender touches these on the manager — provide
+            # MagicMocks so ``getattr`` resolves them.
+            manager._project_repository = MagicMock()
+            manager.shared_context_metadata_repo = MagicMock()
+
+            messages = await get_instance_messages(
+                mock_checkpointer, "inst-123", manager=manager
+            )
+
+        # load_and_cache_prompt must have been called to rebuild the base prompt.
+        mock_load.assert_called_once()
+        # All args are passed as kwargs.
+        call_kwargs = mock_load.call_args.kwargs
+        assert call_kwargs["agent_id"] == "developer"
+        assert Path(call_kwargs["agent_dir"]) == agent_dir
+
+        # The post-cache append chain must have been called exactly once,
+        # mirroring the spawn/restore call sites in instance_lifecycle.py.
+        mock_apply.assert_called_once()
+        apply_kwargs = mock_apply.call_args.kwargs
+        assert apply_kwargs["system_prompt"] == base_prompt
+        assert apply_kwargs["instance_id"] == "inst-123"
+        assert apply_kwargs["agent_id"] == "developer"
+        assert apply_kwargs["manager"] is manager
+        assert apply_kwargs["instance_repository"] is instance_repo
+
+        # Returned list now has the synthetic system message at index 0,
+        # followed by the original human message.
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert messages[0]["type"] == "system"
+        assert messages[0]["is_synthetic"] is True
+        # The injected content must be the FULL prompt (post-cache), not the
+        # base. This is the core improvement the test guards.
+        assert messages[0]["content"] == full_prompt
+        assert messages[0]["instance_id"] == "inst-123"
+        assert messages[0]["message_id"].startswith("synthetic-system-")
+
+        # The originally-persisted human message is preserved at index 1.
+        assert messages[1]["role"] == "user"
+        assert messages[1]["content"] == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_no_synthetic_without_manager(self):
+        """Backward compatibility: when ``manager`` is None (or omitted),
+        no synthetic system message is injected — only persisted messages
+        are returned.
+        """
+        from langchain_core.messages import HumanMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [HumanMessage(content="Hello world")]
+            }
+        })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
+
+        messages = await get_instance_messages(mock_checkpointer, "inst-123")
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_injection_swallows_errors(self):
+        """When the manager is provided but reconstruction fails (e.g. the
+        ``load_and_cache_prompt`` patch raises), the function must still
+        return the original list of persisted messages — never raise.
+        """
+        from langchain_core.messages import HumanMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [HumanMessage(content="Hello world")]
+            }
+        })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
+
+        instance_meta = MagicMock()
+        instance_meta.agent_id = "developer"
+        instance_meta.agent_dir = "/nonexistent/path/that/cannot/be/loaded"
+        instance_meta.agent_tag = None
+        instance_meta.instance_metadata = {}
+
+        instance_repo = MagicMock()
+        instance_repo.get = MagicMock(return_value=instance_meta)
+
+        prompt_cache = MagicMock()
+        prompt_cache.get = MagicMock(return_value=None)
+
+        manager = MagicMock()
+        manager._instance_repository = instance_repo
+        manager.prompt_cache = prompt_cache
+
+        # Patch load_and_cache_prompt to raise — simulating a corrupt agent
+        # directory or missing registry. The function must swallow the error.
+        with patch(
+            "daemon.manager.load_and_cache_prompt",
+            side_effect=RuntimeError("boom: prompt build failed"),
+        ):
+            messages = await get_instance_messages(
+                mock_checkpointer, "inst-123", manager=manager
+            )
+
+        # Original list is preserved unchanged.
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "Hello world"

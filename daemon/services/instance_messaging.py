@@ -2785,7 +2785,13 @@ class InstanceMessagingService:
         await self._manager.get_instance(instance_id)  # raises KeyError if not found
         
         if self._checkpointer:
-            return await get_instance_messages(self._checkpointer, instance_id)
+            # Pass the manager so get_instance_messages can inject the
+            # synthetic system prompt (which is NOT persisted to the
+            # checkpoint but is needed by the frontend's
+            # "View system message" toggle).
+            return await get_instance_messages(
+                self._checkpointer, instance_id, manager=self._manager
+            )
         return []
 
     async def get_queue_stats(self, instance_id: str) -> dict:

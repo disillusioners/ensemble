@@ -16,8 +16,11 @@ PostgreSQL Notes:
   SQLite path is unaffected when PostgreSQL extras are not installed.
 """
 
+import asyncio
 import logging
 import os
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -252,7 +255,8 @@ async def get_checkpointer(config: EnsembleConfig) -> CheckpointerAdapter:
 
 async def get_instance_messages(
     checkpointer: Any,
-    instance_id: str
+    instance_id: str,
+    manager: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Get message history from LangGraph checkpoints.
 
@@ -267,9 +271,19 @@ async def get_instance_messages(
                       ``alist(config, limit=...)`` (both ``AsyncSqliteSaver``
                       and ``AsyncPostgresSaver`` do).
         instance_id: Instance identifier to retrieve messages for.
+        manager: Optional ``InstanceManager`` reference. When provided, the
+                 function attempts to reconstruct the agent's system prompt
+                 (which is **not** persisted to the LangGraph checkpoint) and
+                 inject it as a synthetic ``role="system"`` message at the
+                 start of the returned list. This is needed by the frontend
+                 "View system message" toggle. Any failure is swallowed and
+                 the function returns the original list — the synthetic
+                 message is best-effort, never load-bearing.
 
     Returns:
         List of message dictionaries with role, content, thinking, tool_calls.
+        When ``manager`` is provided and the system prompt can be
+        reconstructed, a synthetic ``role="system"`` message is prepended.
     """
     from typing import cast
     from langgraph.checkpoint.memory import CheckpointTuple
@@ -348,4 +362,148 @@ async def get_instance_messages(
 
         result.append(serialized)
 
+    # ── Synthetic system message injection ──────────────────────────────────
+    # The agent's system prompt is NOT persisted to the LangGraph checkpoint
+    # (it is constructed locally in the agent_node for each LLM call, then
+    # discarded). This means the frontend "View system message" toggle sees
+    # no system message. Reconstruct it from the manager + prompt cache and
+    # prepend it as a synthetic role="system" entry. Best-effort: any
+    # failure (missing instance meta, no manager, no cache, etc.) leaves the
+    # original list unchanged.
+    if manager is not None:
+        try:
+            # The full prompt path (load_and_cache_prompt + DB read +
+            # _apply_post_cache_appends) does sync filesystem + DB I/O and
+            # may walk the registry. Offload the whole reconstruction to a
+            # worker thread so we don't block the event loop, matching the
+            # pattern already used inside the helper for the SQLAlchemy
+            # ``Repository.get`` call.
+            system_prompt = await asyncio.to_thread(
+                _reconstruct_full_system_prompt,
+                instance_id,
+                manager,
+            )
+            if system_prompt and system_prompt.strip():
+                synthetic_id = f"synthetic-system-{uuid.uuid4().hex[:16]}"
+                system_msg = {
+                    "message_id": synthetic_id,
+                    "type": "system",
+                    "role": "system",
+                    "content": system_prompt,
+                    "thinking": None,
+                    "thinking_extracted": None,
+                    "tool_calls": None,
+                    "images": None,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "instance_id": instance_id,
+                    "is_synthetic": True,
+                }
+                result.insert(0, system_msg)
+        except Exception as exc:
+            # Best-effort injection — never fail the call because of a
+            # missing system prompt.
+            logger.debug(
+                f"get_instance_messages: skipping synthetic system prompt "
+                f"for {instance_id[:8] if instance_id else '?'}: {exc}"
+            )
+
     return result
+
+
+def _reconstruct_full_system_prompt(
+    instance_id: str,
+    manager: Any,
+) -> str | None:
+    """Reconstruct the FULL system prompt the LLM actually saw.
+
+    Mirrors the spawn/restore path in
+    :func:`daemon.services.instance_lifecycle.spawn_instance` /
+    :func:`_restore_instance`:
+
+        base_prompt = load_and_cache_prompt(...)
+        full_prompt = _apply_post_cache_appends(base_prompt, ...)
+
+    Args:
+        instance_id: The instance whose checkpoint we are reading.
+        manager: The ``InstanceManager`` facade. Used to access the
+            instance/project/shared-context repositories, the prompt cache,
+            and (best-effort) the agent registry.
+
+    Returns:
+        The fully composed system prompt (base + post-cache appends), or
+        ``None`` if any required dependency is missing. Caller treats
+        ``None`` as "skip injection" — never raises.
+    """
+    instance_repo = getattr(manager, "_instance_repository", None)
+    prompt_cache = getattr(manager, "prompt_cache", None)
+    if instance_repo is None or prompt_cache is None:
+        return None
+
+    # Repository.get() is sync SQLAlchemy.
+    instance_meta = instance_repo.get(instance_id)
+    if instance_meta is None:
+        return None
+
+    agent_id = getattr(instance_meta, "agent_id", None)
+    agent_dir_raw = getattr(instance_meta, "agent_dir", None)
+    if not agent_id or not agent_dir_raw:
+        return None
+
+    agent_dir = Path(agent_dir_raw)
+    mcp_tool_names = None
+    inst_meta = getattr(instance_meta, "instance_metadata", None)
+    if isinstance(inst_meta, dict):
+        mcp_tool_names = inst_meta.get("mcp_tool_names")
+    version_tag = getattr(instance_meta, "agent_tag", None)
+
+    # Lazy import here — same pattern used by the spawn/restore call sites
+    # in instance_lifecycle.py so test patches at ``daemon.manager.*``
+    # take effect.
+    from daemon.manager import load_and_cache_prompt
+
+    system_prompt, _ = load_and_cache_prompt(
+        agent_id=agent_id,
+        agent_dir=agent_dir,
+        cache=prompt_cache,
+        mcp_tool_names=mcp_tool_names,
+        version_tag=version_tag,
+    )
+    if not system_prompt or not system_prompt.strip():
+        return None
+
+    # Best-effort agent_meta lookup so context_injection and allowed_models
+    # appenders (which are gated on agent_meta flags) can run too. The
+    # resolve mirrors the restore path: try the versioned agent first, then
+    # fall back to the base, then to None. Any registry failure is
+    # swallowed — the prompt will still get the other appends.
+    agent_meta: Any = None
+    try:
+        from daemon.registry import get_registry
+        registry = get_registry()
+        if version_tag is not None:
+            agent_meta = registry.get_version(agent_id, version_tag)
+        if agent_meta is None:
+            agent_meta = registry.get_resolved(agent_id)
+    except Exception:
+        agent_meta = None
+
+    # Apply the post-cache append chain — same call sites as the spawn
+    # path at daemon/services/instance_lifecycle.py:1250-1261 and the
+    # restore path at lines 2623-2634. We mirror those signature exactly.
+    from daemon.services.instance_lifecycle import _apply_post_cache_appends
+
+    system_prompt, _user_language = _apply_post_cache_appends(
+        system_prompt=system_prompt,
+        instance_id=instance_id,
+        instance_repository=instance_repo,
+        shared_context_metadata_repo=getattr(
+            manager, "shared_context_metadata_repo", None
+        ),
+        parent_id=getattr(instance_meta, "parent_id", None),
+        agent_id=agent_id,
+        project_id=getattr(instance_meta, "project_id", None),
+        project_repository=getattr(manager, "_project_repository", None),
+        manager=manager,
+        agent_meta=agent_meta,
+    )
+    return system_prompt
