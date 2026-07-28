@@ -163,7 +163,7 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
                     "output": tool_outputs.get(tc_id),
                 })
     
-    return {
+    serialized = {
         "message_id": str(message_id) if message_id else getattr(msg, 'id', None) or str(uuid.uuid4()),
         "type": msg.type,
         "role": role,
@@ -174,6 +174,18 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
         "images": images,
         "created_at": _extract_timestamp(msg),
     }
+
+    # Phase 4: surface ``context_kind`` so the frontend can style
+    # synthetic context messages (project / shared_context / skills)
+    # differently from regular user messages. Only added when present
+    # in ``additional_kwargs`` — keeps the dict shape backward
+    # compatible for messages that were never tagged as context.
+    additional_kwargs = getattr(msg, 'additional_kwargs', None) or {}
+    context_kind = additional_kwargs.get("context_kind")
+    if context_kind:
+        serialized["context_kind"] = context_kind
+
+    return serialized
 
 
 # Sequence counter for checkpoint events

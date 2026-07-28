@@ -278,10 +278,25 @@ async def get_instance_messages(
                  the function returns the original list — the synthetic
                  message is best-effort, never load-bearing.
 
+                 When the resolved injection mode is ``"human_messages"``
+                 (Phase 4 add), the function additionally calls
+                 :func:`daemon.services.context_messages.assemble_context_messages`
+                 to rebuild the per-turn context messages on-demand and
+                 inserts them between the synthetic system message and the
+                 most recent user message. Each rebuilt context message is
+                 stamped with ``is_synthetic=True`` and a ``context_kind``
+                 field so the frontend can identify them.
+
     Returns:
         List of message dictionaries with role, content, thinking, tool_calls.
         When ``manager`` is provided and the system prompt can be
         reconstructed, a synthetic ``role="system"`` message is prepended.
+        When the agent opts into ``human_messages`` mode, zero or more
+        synthetic context messages are inserted immediately before the
+        most recent user message. The response shape is additive —
+        existing API consumers continue to see the same messages they
+        saw before; only ``is_synthetic`` + ``context_kind`` fields are
+        added on the new entries.
     """
     from typing import cast
     from langgraph.checkpoint.memory import CheckpointTuple
@@ -360,6 +375,32 @@ async def get_instance_messages(
 
         result.append(serialized)
 
+    # ── Phase 4: resolve instance/agent metadata + injection mode once ─────────
+    # ``get_instance_messages`` may need to do TWO things with this
+    # metadata:
+    #
+    #   1. Reconstruct the full system prompt for the synthetic system
+    #      message (legacy behavior).
+    #   2. Rebuild per-turn context messages when the agent opts into
+    #      ``human_messages`` mode (Phase 4 add).
+    #
+    # Both lookups touch the same repos + the agent registry, so we
+    # resolve them once here and thread the result into both helpers
+    # rather than re-doing the work in each. When ``manager`` is None
+    # or the instance meta is missing, ``ctx`` is ``None`` and both
+    # downstream paths skip (backward-compatible — the legacy code
+    # returned the persisted list unchanged).
+    ctx = None
+    if manager is not None:
+        try:
+            ctx = _resolve_instance_message_context(instance_id, manager)
+        except Exception as exc:
+            logger.debug(
+                f"get_instance_messages: context metadata resolution "
+                f"failed for {instance_id[:8] if instance_id else '?'}: {exc}"
+            )
+            ctx = None
+
     # ── Synthetic system message injection ──────────────────────────────────
     # The agent's system prompt is NOT persisted to the LangGraph checkpoint
     # (it is constructed locally in the agent_node for each LLM call, then
@@ -380,6 +421,7 @@ async def get_instance_messages(
                 _reconstruct_full_system_prompt,
                 instance_id,
                 manager,
+                ctx,
             )
             if reconstruction is not None:
                 system_prompt, instance_created_at = reconstruction
@@ -413,12 +455,229 @@ async def get_instance_messages(
                 f"for {instance_id[:8] if instance_id else '?'}: {exc}"
             )
 
+    # ── Phase 4: per-turn context messages for ``human_messages`` mode ──────
+    # When the agent opts into ``human_messages`` mode, the 3 CONTEXT
+    # appenders early-return inside ``_apply_post_cache_appends`` so the
+    # persisted checkpoint has NO context messages. The LLM still receives
+    # them every turn (built locally by ``agent_node`` via
+    # ``assemble_context_messages``), but they are not in the checkpoint
+    # and therefore not visible in this API response. Rebuild them here
+    # on-demand using the same helper so the frontend "View system
+    # message" toggle can show what the LLM actually saw.
+    #
+    # Strictly read-only: no DB writes, no skill tracking. Errors are
+    # swallowed so a flaky context build never breaks the GET endpoint.
+    if ctx is not None and ctx["mode"] == "human_messages":
+        try:
+            context_dicts = await _build_context_dicts_for_response(
+                instance_id=instance_id,
+                ctx=ctx,
+                manager=manager,
+                messages=messages,
+            )
+            if context_dicts:
+                # Insert AFTER the synthetic system message (if any) but
+                # BEFORE the most recent user message. ``human_messages``
+                # mode rebuilds context for the *current* turn, so only
+                # the last user turn is preceded by context — historical
+                # turns remain bare in the API response, matching what
+                # the LLM actually received on those earlier turns.
+                insert_at = _locate_context_insertion_index(result)
+                result[insert_at:insert_at] = context_dicts
+        except Exception as exc:
+            # Best-effort — never fail GET /messages because context
+            # rebuild broke.
+            logger.debug(
+                f"get_instance_messages: skipping context rebuild for "
+                f"{instance_id[:8] if instance_id else '?'}: {exc}"
+            )
+
     return result
+
+
+def _resolve_instance_message_context(
+    instance_id: str,
+    manager: Any,
+) -> dict[str, Any] | None:
+    """Resolve the metadata ``get_instance_messages`` needs to inject.
+
+    Returns a dict with three keys:
+
+    * ``instance_meta`` — the ``Instance`` row from the manager's
+      ``_instance_repository``. ``None`` if the instance is gone or
+      the repo is missing.
+    * ``agent_meta`` — best-effort resolved ``AgentMetadata`` for
+      the agent (versioned first, then base). ``None`` when the
+      registry is unreachable.
+    * ``mode`` — the result of ``_resolve_injection_mode(agent_meta)``,
+      i.e. ``"system_prompt"`` or ``"human_messages"``. Defaults to
+      ``"system_prompt"`` when ``agent_meta`` is ``None``, matching
+      the legacy contract.
+
+    ``None`` is returned when no instance repository is attached or
+    the instance row cannot be loaded — callers treat that as
+    "skip both synthetic system message and context rebuild".
+
+    The function is sync because all the lookups it performs are
+    sync (SQLAlchemy ``Repository.get`` and the in-process agent
+    registry). Callers that need async-safety wrap the call in
+    :func:`asyncio.to_thread` (see ``get_instance_messages``).
+    """
+    instance_repo = getattr(manager, "_instance_repository", None)
+    if instance_repo is None:
+        return None
+
+    # Repository.get() is sync SQLAlchemy.
+    instance_meta = instance_repo.get(instance_id)
+    if instance_meta is None:
+        return None
+
+    agent_id = getattr(instance_meta, "agent_id", None)
+    version_tag = getattr(instance_meta, "agent_tag", None)
+
+    # Best-effort agent_meta lookup so context_injection and allowed_models
+    # appenders (which are gated on agent_meta flags) can run too. The
+    # resolve mirrors the restore path: try the versioned agent first, then
+    # fall back to the base, then to None. Any registry failure is
+    # swallowed — the prompt will still get the other appends.
+    agent_meta: Any = None
+    try:
+        from daemon.registry import get_registry
+        registry = get_registry()
+        if version_tag is not None:
+            agent_meta = registry.get_version(agent_id, version_tag)
+        if agent_meta is None:
+            agent_meta = registry.get_resolved(agent_id)
+    except Exception:
+        agent_meta = None
+
+    # Lazy import here — same pattern used by the spawn/restore call sites
+    # in instance_lifecycle.py so test patches at ``daemon.manager.*``
+    # take effect.
+    from daemon.services.instance_lifecycle import _resolve_injection_mode
+    mode = _resolve_injection_mode(agent_meta)
+
+    return {
+        "instance_meta": instance_meta,
+        "agent_meta": agent_meta,
+        "mode": mode,
+    }
+
+
+async def _build_context_dicts_for_response(
+    *,
+    instance_id: str,
+    ctx: dict[str, Any],
+    manager: Any,
+    messages: list[Any],
+) -> list[dict[str, Any]]:
+    """Build the synthetic context-message dicts for the API response.
+
+    Calls :func:`daemon.services.context_messages.assemble_context_messages`
+    using the pre-resolved metadata from :func:`_resolve_instance_message_context`
+    and the *latest user message* from the persisted checkpoint as the
+    ``user_query``. The resulting ``HumanMessage`` instances are then
+    run through :func:`daemon.utils.serialize_message` (which emits
+    ``context_kind`` per Phase 4 CHANGE 1) and stamped with
+    ``is_synthetic=True`` and a stable ``synthetic-context-<kind>-<idx>``
+    ``message_id`` so the frontend can identify them.
+
+    Args:
+        instance_id: The instance whose context to rebuild.
+        ctx: Pre-resolved metadata from ``_resolve_instance_message_context``.
+        manager: The :class:`InstanceManager` facade (passed through to
+            ``assemble_context_messages`` for repo / skill-search access).
+        messages: The persisted checkpoint messages list. Used to find
+            the latest user message text.
+
+    Returns:
+        Serialized context-message dicts in the same canonical order as
+        ``assemble_context_messages`` emits them. Empty list when there
+        is no user message yet (nothing to query against) or when the
+        helper returned no messages (no context to show).
+    """
+    # Need a user query to drive the RAG + skill-search pipelines.
+    # ``assemble_context_messages`` requires non-empty input; we mirror
+    # the agent_node contract by using the latest persisted user message.
+    user_query = ""
+    for msg in reversed(messages):
+        if getattr(msg, "type", None) == "human":
+            content = getattr(msg, "content", "") or ""
+            user_query = content if isinstance(content, str) else str(content)
+            break
+    if not user_query:
+        # No user turn yet — nothing to contextualize against.
+        return []
+
+    instance_meta = ctx["instance_meta"]
+    project_id = getattr(instance_meta, "project_id", None)
+    parent_id = getattr(instance_meta, "parent_id", None)
+    agent_meta = ctx["agent_meta"]
+    instance_repo = getattr(manager, "_instance_repository", None)
+
+    # Lazy import — keeps the import-time graph ↔ services cycle from
+    # biting during ``daemon.persistence`` import in test collection.
+    from daemon.services.context_messages import assemble_context_messages
+
+    context_msgs = await assemble_context_messages(
+        instance_id=instance_id,
+        user_query=user_query,
+        project_id=project_id,
+        agent_meta=agent_meta,
+        manager=manager,
+        instance_repository=instance_repo,
+        parent_id=parent_id,
+        # Pre-computed skill result is unavailable on the read path;
+        # ``assemble_context_messages`` will run the search itself.
+        skill_injection_result=None,
+    )
+    if not context_msgs:
+        return []
+
+    # Lazy import — matches the existing helper above.
+    from daemon.utils import serialize_message
+
+    out: list[dict[str, Any]] = []
+    for idx, msg in enumerate(context_msgs):
+        d = serialize_message(msg)
+        # Phase 4: mark every context message synthetic so
+        # ``child_reports.py`` (lines 523, 1007) and any other
+        # ``is_synthetic`` filters continue to exclude them, and the
+        # frontend can apply the synthetic styling. Stable ID encodes
+        # the kind so the same kind re-rebuilt on the next request
+        # keeps its identity if the frontend wants to key on it.
+        context_kind = d.get("context_kind") or "context"
+        d["message_id"] = f"synthetic-context-{context_kind}-{instance_id}-{idx}"
+        d["instance_id"] = instance_id
+        d["is_synthetic"] = True
+        out.append(d)
+    return out
+
+
+def _locate_context_insertion_index(result: list[dict[str, Any]]) -> int:
+    """Find the index to insert synthetic context messages at.
+
+    The contract: insert AFTER the synthetic system message (if any) but
+    BEFORE the most recent user message. When there is no user message
+    yet, append at the end of the list (after the synthetic system
+    message). The synthetic system message is at index 0 only when it
+    was injected — we detect it by the ``message_id`` convention.
+    """
+    has_synthetic_system = bool(result) and result[0].get("message_id", "").startswith(
+        "synthetic-system-"
+    )
+    scan_from = 1 if has_synthetic_system else 0
+    for i in range(len(result) - 1, scan_from - 1, -1):
+        if result[i].get("role") == "user":
+            return i
+    # No user message found after the synthetic system message → append.
+    return len(result)
 
 
 def _reconstruct_full_system_prompt(
     instance_id: str,
     manager: Any,
+    ctx: dict[str, Any] | None = None,
 ) -> tuple[str, Any] | None:
     """Reconstruct the FULL system prompt the LLM actually saw.
 
@@ -434,25 +693,65 @@ def _reconstruct_full_system_prompt(
         manager: The ``InstanceManager`` facade. Used to access the
             instance/project/shared-context repositories, the prompt cache,
             and (best-effort) the agent registry.
+        ctx: Optional pre-resolved metadata from
+            :func:`_resolve_instance_message_context` so we don't
+            re-do the instance_repo lookup, the agent registry lookup,
+            and the injection-mode resolution when ``get_instance_messages``
+            already did them. ``None`` → resolve them locally
+            (preserves the pre-Phase-4 call signature used by callers
+            outside ``get_instance_messages``).
 
     Returns:
         The fully composed system prompt (base + post-cache appends), or
         ``None`` if any required dependency is missing. Caller treats
         ``None`` as "skip injection" — never raises.
     """
-    instance_repo = getattr(manager, "_instance_repository", None)
-    prompt_cache = getattr(manager, "prompt_cache", None)
-    if instance_repo is None or prompt_cache is None:
-        return None
+    # Phase 4: when ``ctx`` is provided by ``get_instance_messages``, reuse
+    # the already-resolved metadata. Otherwise fall back to the legacy
+    # local lookups so existing direct callers keep working.
+    if ctx is not None:
+        instance_meta = ctx["instance_meta"]
+        agent_meta = ctx["agent_meta"]
+        resolved_mode = ctx["mode"]
+        if instance_meta is None:
+            return None
+    else:
+        instance_repo = getattr(manager, "_instance_repository", None)
+        prompt_cache = getattr(manager, "prompt_cache", None)
+        if instance_repo is None or prompt_cache is None:
+            return None
 
-    # Repository.get() is sync SQLAlchemy.
-    instance_meta = instance_repo.get(instance_id)
-    if instance_meta is None:
-        return None
+        # Repository.get() is sync SQLAlchemy.
+        instance_meta = instance_repo.get(instance_id)
+        if instance_meta is None:
+            return None
+
+        agent_meta: Any = None
+        try:
+            from daemon.registry import get_registry
+            registry = get_registry()
+            version_tag = getattr(instance_meta, "agent_tag", None)
+            if version_tag is not None:
+                agent_meta = registry.get_version(
+                    getattr(instance_meta, "agent_id", None), version_tag
+                )
+            if agent_meta is None:
+                agent_meta = registry.get_resolved(
+                    getattr(instance_meta, "agent_id", None)
+                )
+        except Exception:
+            agent_meta = None
+
+        from daemon.services.instance_lifecycle import _resolve_injection_mode
+        resolved_mode = _resolve_injection_mode(agent_meta)
 
     agent_id = getattr(instance_meta, "agent_id", None)
     agent_dir_raw = getattr(instance_meta, "agent_dir", None)
     if not agent_id or not agent_dir_raw:
+        return None
+
+    prompt_cache = getattr(manager, "prompt_cache", None)
+    if prompt_cache is None:
         return None
 
     agent_dir = Path(agent_dir_raw)
@@ -477,37 +776,12 @@ def _reconstruct_full_system_prompt(
     if not system_prompt or not system_prompt.strip():
         return None
 
-    # Best-effort agent_meta lookup so context_injection and allowed_models
-    # appenders (which are gated on agent_meta flags) can run too. The
-    # resolve mirrors the restore path: try the versioned agent first, then
-    # fall back to the base, then to None. Any registry failure is
-    # swallowed — the prompt will still get the other appends.
-    agent_meta: Any = None
-    try:
-        from daemon.registry import get_registry
-        registry = get_registry()
-        if version_tag is not None:
-            agent_meta = registry.get_version(agent_id, version_tag)
-        if agent_meta is None:
-            agent_meta = registry.get_resolved(agent_id)
-    except Exception:
-        agent_meta = None
-
     # Apply the post-cache append chain — same call sites as the spawn
     # path at daemon/services/instance_lifecycle.py:1250-1261 and the
     # restore path at lines 2623-2634. We mirror those signature exactly.
-    from daemon.services.instance_lifecycle import (
-        _apply_post_cache_appends,
-        _resolve_injection_mode,
-    )
+    from daemon.services.instance_lifecycle import _apply_post_cache_appends
 
-    # Phase 2 (ADR-8): pass the resolved mode from agent_meta so
-    # human_messages agents see the system prompt without the 3
-    # CONTEXT knots but WITH the prompt-injection defense instruction.
-    # ``agent_meta`` is best-effort above and may be ``None`` here;
-    # ``_resolve_injection_mode`` defaults to ``"system_prompt"`` in
-    # that case so legacy call behavior is preserved byte-identical.
-    resolved_mode = _resolve_injection_mode(agent_meta)
+    instance_repo = getattr(manager, "_instance_repository", None)
 
     system_prompt, _user_language = _apply_post_cache_appends(
         system_prompt=system_prompt,

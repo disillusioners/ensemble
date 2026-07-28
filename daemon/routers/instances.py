@@ -990,9 +990,55 @@ async def get_messages(
     instance_id: str,
     request: Request,
 ) -> list[dict]:
-    """Get message history for an instance."""
+    """Get message history for an instance.
+
+    Response shape
+    --------------
+
+    Returns a ``list[dict]`` of serialized messages in chronological
+    order. The list is composed of three segments:
+
+    1. **Synthetic system message** (optional, ``is_synthetic=True``)
+
+       When the manager can reconstruct the agent's full system prompt,
+       a single ``role="system"`` entry is prepended so the frontend
+       "View system message" toggle has something to display. Its
+       ``message_id`` is ``"synthetic-system-<instance_id>"``.
+
+    2. **Synthetic context messages** (optional, ``is_synthetic=True``)
+
+       When the agent opts into ``context_injection_mode:
+       "human_messages"``, zero or more per-turn context messages are
+       inserted immediately BEFORE the most recent user message. Each
+       entry carries:
+
+       * ``is_synthetic=True``
+       * ``context_kind`` — one of ``"project"``, ``"shared_context"``,
+         ``"skills"`` (or another kind added in the future).
+       * A stable ``message_id`` of the form
+         ``"synthetic-context-<kind>-<instance_id>-<idx>"``.
+
+       These messages are rebuilt ON-DEMAND from
+       :func:`daemon.services.context_messages.assemble_context_messages`
+       — they are not persisted in the LangGraph checkpoint and are
+       never written back. The endpoint therefore stays strictly
+       read-only.
+
+    3. **Persisted checkpoint messages** (always)
+
+       Real Human / AI / System messages read from the LangGraph
+       checkpoint, in their original order. Tool messages are skipped
+       (they ride along inside the ``tool_calls`` field of their
+       originating AIMessage).
+
+    Existing API consumers see the same messages they always have.
+    The synthetic entries are additive — both the synthetic system
+    message and the synthetic context messages carry
+    ``is_synthetic=True`` and the context messages also carry
+    ``context_kind`` so the frontend can style them differently.
+    """
     manager = _get_manager(request)
-    
+
     # Check instance exists
     try:
         await manager.get_instance(instance_id)

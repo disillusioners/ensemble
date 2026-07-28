@@ -629,3 +629,246 @@ class TestGetInstanceMessages:
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "Hello world"
+
+
+class TestGetInstanceMessagesHumanMessagesContext:
+    """Tests for the Phase 4 human_messages context rebuild path.
+
+    When the agent's ``context_injection_mode`` resolves to
+    ``"human_messages"``, ``get_instance_messages`` must:
+
+    1. Call ``assemble_context_messages`` on-demand to rebuild the
+       per-turn context messages (which are NOT in the checkpoint).
+    2. Serialize each context message and stamp it with
+       ``is_synthetic=True`` and the ``context_kind`` enum value.
+    3. Insert them between the synthetic system message (when present)
+       and the most recent user message.
+    4. NEVER write to the database (read endpoint, ADR-2).
+
+    When the mode is ``"system_prompt"`` (legacy), the context rebuild
+    must be a strict no-op so the existing byte layout is preserved.
+    """
+
+    @pytest.mark.asyncio
+    async def test_human_messages_mode_injects_synthetic_context_before_last_user(self):
+        """human_messages mode rebuilds context messages and inserts them
+        between the synthetic system message and the most recent user
+        message. Each entry is stamped ``is_synthetic=True`` and carries
+        a ``context_kind``.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        # Two-turn conversation in the checkpoint — context is rebuilt
+        # for the LAST user turn only (per Phase 4 plan: "before the
+        # most recent user message only").
+        persisted = [
+            HumanMessage(content="first user turn"),
+            AIMessage(content="first assistant reply"),
+            HumanMessage(content="second user turn"),
+        ]
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": persisted}
+        })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
+
+        # Manager stubs — instance_meta + agent_meta + mode all go
+        # through ``_resolve_instance_message_context``, which the test
+        # patches to return human_messages mode without touching the
+        # registry.
+        instance_meta = MagicMock()
+        instance_meta.agent_id = "developer"
+        instance_meta.agent_tag = None
+        instance_meta.instance_metadata = {}
+        instance_meta.parent_id = None
+        instance_meta.project_id = "project-1"
+        instance_meta.created_at = "2026-07-28T00:00:00+00:00"
+
+        instance_repo = MagicMock()
+        instance_repo.get = MagicMock(return_value=instance_meta)
+
+        agent_meta = MagicMock()
+        agent_meta.context_injection_mode = "human_messages"
+
+        ctx = {
+            "instance_meta": instance_meta,
+            "agent_meta": agent_meta,
+            "mode": "human_messages",
+        }
+
+        # Stub the two helpers ``get_instance_messages`` calls: the
+        # metadata resolver and the context-message builder. The system-
+        # prompt reconstructor is also stubbed so we don't have to
+        # patch through ``load_and_cache_prompt``.
+        with patch(
+            "daemon.persistence._resolve_instance_message_context",
+            return_value=ctx,
+        ) as mock_resolve, patch(
+            "daemon.persistence._build_context_dicts_for_response",
+            new=AsyncMock(return_value=[
+                {
+                    "message_id": "synthetic-context-project-inst-123-0",
+                    "type": "human",
+                    "role": "user",
+                    "content": "[SYSTEM CONTEXT: Related Project]\n\nproject body",
+                    "thinking": None,
+                    "thinking_extracted": None,
+                    "tool_calls": None,
+                    "images": None,
+                    "created_at": "2026-07-28T00:00:00+00:00",
+                    "instance_id": "inst-123",
+                    "is_synthetic": True,
+                    "context_kind": "project",
+                },
+                {
+                    "message_id": "synthetic-context-skills-inst-123-1",
+                    "type": "human",
+                    "role": "user",
+                    "content": "[SYSTEM CONTEXT: Skills]\n\nskill body",
+                    "thinking": None,
+                    "thinking_extracted": None,
+                    "tool_calls": None,
+                    "images": None,
+                    "created_at": "2026-07-28T00:00:00+00:00",
+                    "instance_id": "inst-123",
+                    "is_synthetic": True,
+                    "context_kind": "skills",
+                },
+            ]),
+        ) as mock_build, patch(
+            # ``_reconstruct_full_system_prompt`` returns ``None`` so the
+            # test focuses purely on the context-rebuild path without
+            # also synthesizing a system message.
+            "daemon.persistence._reconstruct_full_system_prompt",
+            return_value=None,
+        ):
+            manager = MagicMock()
+            manager._instance_repository = instance_repo
+
+            messages = await get_instance_messages(
+                mock_checkpointer, "inst-123", manager=manager
+            )
+
+        # Metadata resolver + context builder were both invoked.
+        mock_resolve.assert_called_once_with("inst-123", manager)
+        mock_build.assert_awaited_once()
+
+        # Result layout:
+        #   [0] first persisted user  (no context before — historical turn)
+        #   [1] first persisted assistant
+        #   [2] synthetic context (project)
+        #   [3] synthetic context (skills)
+        #   [4] second persisted user (current turn — context prepended)
+        assert len(messages) == 5
+        assert messages[0]["content"] == "first user turn"
+        assert messages[1]["content"] == "first assistant reply"
+        assert messages[2]["is_synthetic"] is True
+        assert messages[2]["context_kind"] == "project"
+        assert messages[2]["message_id"] == "synthetic-context-project-inst-123-0"
+        assert messages[3]["is_synthetic"] is True
+        assert messages[3]["context_kind"] == "skills"
+        assert messages[4]["role"] == "user"
+        assert messages[4]["content"] == "second user turn"
+        # Real persisted messages must NOT be marked synthetic.
+        assert "is_synthetic" not in messages[0]
+        assert "is_synthetic" not in messages[1]
+        assert "is_synthetic" not in messages[4]
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_mode_does_not_call_assemble_context_messages(self):
+        """system_prompt mode is the legacy default. Context is baked
+        into the system prompt by ``_apply_post_cache_appends``; the
+        GET /messages response must NOT rebuild it via
+        ``assemble_context_messages`` — that would double-token-cost
+        and risk confusing the LLM by sending the same data twice.
+        """
+        from langchain_core.messages import HumanMessage
+
+        persisted = [HumanMessage(content="Hello world")]
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": persisted}
+        })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
+
+        instance_meta = MagicMock()
+        instance_meta.agent_id = "developer"
+        instance_meta.agent_tag = None
+        instance_meta.instance_metadata = {}
+        instance_meta.parent_id = None
+        instance_meta.project_id = None
+        instance_meta.created_at = "2026-07-28T00:00:00+00:00"
+        instance_repo = MagicMock()
+        instance_repo.get = MagicMock(return_value=instance_meta)
+
+        ctx = {
+            "instance_meta": instance_meta,
+            "agent_meta": None,
+            "mode": "system_prompt",  # legacy default
+        }
+
+        # Track whether the context builder is invoked — must NOT be.
+        with patch(
+            "daemon.persistence._resolve_instance_message_context",
+            return_value=ctx,
+        ), patch(
+            "daemon.persistence._build_context_dicts_for_response",
+            new=AsyncMock(return_value=["should-not-appear"]),
+        ) as mock_build, patch(
+            "daemon.persistence._reconstruct_full_system_prompt",
+            return_value=None,
+        ):
+            manager = MagicMock()
+            manager._instance_repository = instance_repo
+
+            messages = await get_instance_messages(
+                mock_checkpointer, "inst-123", manager=manager
+            )
+
+        # The context builder was NEVER awaited in legacy mode.
+        mock_build.assert_not_awaited()
+
+        # Only the persisted message is returned — no synthetic entries.
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "Hello world"
+        # No ``context_kind`` leaks into legacy responses.
+        assert all("context_kind" not in m for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_serialize_message_emits_context_kind_only_for_context(self):
+        """``serialize_message`` must add the ``context_kind`` field ONLY
+        when ``additional_kwargs["context_kind"]`` is present. Messages
+        without it (regular user/assistant turns) keep the legacy dict
+        shape unchanged.
+        """
+        from daemon.utils import serialize_message
+        from langchain_core.messages import HumanMessage
+
+        # Tagged context message — must surface ``context_kind``.
+        ctx_msg = HumanMessage(
+            content="[SYSTEM CONTEXT: Skills]\n\nbody",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": "skills",
+            },
+        )
+        serialized = serialize_message(ctx_msg)
+        assert serialized["context_kind"] == "skills"
+        assert serialized["role"] == "user"
+
+        # Regular message — must NOT add the field.
+        plain_msg = HumanMessage(content="just a normal turn")
+        serialized_plain = serialize_message(plain_msg)
+        assert "context_kind" not in serialized_plain
+        assert serialized_plain["role"] == "user"
+        assert serialized_plain["content"] == "just a normal turn"
+
+        # Edge case: ``additional_kwargs`` present but no ``context_kind``
+        # — must NOT add the field.
+        noisy_msg = HumanMessage(
+            content="with metadata",
+            additional_kwargs={"some_other_flag": True},
+        )
+        serialized_noisy = serialize_message(noisy_msg)
+        assert "context_kind" not in serialized_noisy
