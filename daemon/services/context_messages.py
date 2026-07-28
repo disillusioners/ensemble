@@ -756,6 +756,10 @@ def _fetch_project_payload(
         the project id was missing.
     """
     if not project_id:
+        logger.debug(
+            "[ContextMessages] Skipping project context — "
+            "project_id is None"
+        )
         return (None, [], [])
 
     project_repo = getattr(manager, "_project_repository", None)
@@ -867,14 +871,15 @@ async def assemble_context_messages(
 
     Opt-in behavior (per ADR-8):
 
-    * Project message is gated on
-      ``getattr(agent_meta, "context_injection", False)`` to match
-      the existing system-prompt appender gate.
-    * Skills message is gated on
-      ``getattr(agent_meta, "skill_injection", False)`` to match
-      the existing skill-injection gate.
-    * Shared Context message is gated on the same project flag (it
-      is part of the same context-injection surface).
+    * Project + shared-context messages are gated on the resolved
+      injection mode (``_resolve_injection_mode``) — in
+      ``human_messages`` mode (the default) they are always built;
+      in ``legacy`` mode the function short-circuits to ``[]`` and
+      the 3 CONTEXT appenders inside ``_apply_post_cache_appends``
+      handle the legacy system-prompt path.
+    * Skills message is still gated on
+      ``getattr(agent_meta, "skill_injection", False)`` to match the
+      existing skill-injection gate.
 
     If all three feature flags are off the function returns an
     empty list — caller treats that as "no context to inject this
@@ -959,65 +964,79 @@ async def assemble_context_messages(
 
     Returns:
         List of zero to three tagged :class:`HumanMessage`
-        instances in canonical order. Empty list when every
-        feature is disabled.
+        instances in canonical order. Empty list when the resolved
+        injection mode is ``legacy`` (the 3 CONTEXT appenders own
+        the legacy system-prompt path in that case).
     """
-    context_enabled = bool(getattr(agent_meta, "context_injection", False))
-    skills_enabled = bool(getattr(agent_meta, "skill_injection", False))
-
-    if not context_enabled and not skills_enabled:
-        return []
-
     # Lazy imports to keep DB-touching imports out of unit-test
     # import paths where the test mocks the repos directly.
     from .context_injection import get_shared_context
+    from .instance_lifecycle import _resolve_injection_mode
+
+    # Gate the whole builder on the resolved injection mode rather
+    # than the legacy ``context_injection`` boolean flag. As of
+    # 2026-07-28 the default ``context_injection_mode`` was flipped
+    # to ``human_messages`` so most agents (which never had
+    # ``context_injection: true`` set in meta.json) need
+    # ``assemble_context_messages`` to actually run and emit
+    # ``[SYSTEM CONTEXT: ...]`` HumanMessages every turn.
+    mode = _resolve_injection_mode(agent_meta)
+
+    # In legacy mode the 3 CONTEXT appenders inside
+    # ``_apply_post_cache_appends`` own the context-delivery surface,
+    # so this orchestrator must stay out of the way and return ``[]``.
+    if mode == ContextInjectionMode.LEGACY:
+        return []
 
     messages: list[HumanMessage] = []
 
     context_key = _resolve_tree_root_id(instance_id, parent_id, instance_repository)
 
     # ── 1. Project context message (includes KV metadata) ──
-    if context_enabled:
-        project, critical_notes, history_entries = await asyncio.to_thread(
-            _fetch_project_payload, project_id, manager
-        )
-        kv_metadata = await asyncio.to_thread(
-            _fetch_kv_metadata, context_key, manager
-        )
+    project, critical_notes, history_entries = await asyncio.to_thread(
+        _fetch_project_payload, project_id, manager
+    )
+    kv_metadata = await asyncio.to_thread(
+        _fetch_kv_metadata, context_key, manager
+    )
 
-        project_msg = build_project_context_message(
-            project=project,
-            critical_notes=critical_notes,
-            kv_metadata=kv_metadata,
-            history_entries=history_entries,
+    project_msg = build_project_context_message(
+        project=project,
+        critical_notes=critical_notes,
+        kv_metadata=kv_metadata,
+        history_entries=history_entries,
+    )
+    if project_msg is not None:
+        messages.append(project_msg)
+
+    # ── 2. Shared context (RAG) message ──
+    # The RAG call is sync (filesystem + slug token overlap) —
+    # wrap in ``asyncio.to_thread`` per ADR-12 so the agent-
+    # node async loop doesn't block on disk I/O.
+    try:
+        rag_text = await asyncio.to_thread(
+            get_shared_context,
+            context_key,
+            user_query,
+            "internal",
+            project_id=project_id,
         )
-        if project_msg is not None:
-            messages.append(project_msg)
+    except Exception as exc:
+        logger.warning(
+            f"[ContextMessages] get_shared_context failed for "
+            f"{context_key}: {exc}"
+        )
+        rag_text = None
 
-        # ── 2. Shared context (RAG) message ──
-        # The RAG call is sync (filesystem + slug token overlap) —
-        # wrap in ``asyncio.to_thread`` per ADR-12 so the agent-
-        # node async loop doesn't block on disk I/O.
-        try:
-            rag_text = await asyncio.to_thread(
-                get_shared_context,
-                context_key,
-                user_query,
-                "internal",
-                project_id=project_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"[ContextMessages] get_shared_context failed for "
-                f"{context_key}: {exc}"
-            )
-            rag_text = None
-
-        shared_msg = build_shared_context_message(rag_text)
-        if shared_msg is not None:
-            messages.append(shared_msg)
+    shared_msg = build_shared_context_message(rag_text)
+    if shared_msg is not None:
+        messages.append(shared_msg)
 
     # ── 3. Skills message ──
+    # Skill injection remains opt-in via the legacy ``skill_injection``
+    # boolean — independent of the resolved injection mode so an agent
+    # in legacy mode can still opt-in to per-turn skills if it wants.
+    skills_enabled = bool(getattr(agent_meta, "skill_injection", False))
     if skills_enabled:
         if skill_injection_result is not None:
             injection_text, _skill_ids = skill_injection_result

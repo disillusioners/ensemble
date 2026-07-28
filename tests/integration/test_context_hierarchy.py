@@ -559,7 +559,18 @@ class TestHumanMessagesModeForChild:
         tmp_path,
         monkeypatch,
     ) -> None:
-        """human_messages mode with context_injection=False returns []."""
+        """Legacy mode (regardless of ``context_injection`` boolean) returns ``[]``.
+
+        After the 2026-07-28 mode-gate fix, ``assemble_context_messages``
+        short-circuits on ``context_injection_mode="legacy"`` — the 3
+        CONTEXT appenders inside ``_apply_post_cache_appends`` own
+        the legacy system-prompt path. The legacy
+        ``context_injection: false`` boolean alone no longer gates
+        the orchestrator: in ``human_messages`` mode (the default),
+        agents with ``context_injection: false`` still receive
+        context messages (see
+        ``TestAssembleContextMessagesModeGate::test_human_messages_mode_without_context_injection_flag_returns_messages``).
+        """
         engine = _build_engine()
         bundle = _build_manager_stub(engine)
 
@@ -570,13 +581,14 @@ class TestHumanMessagesModeForChild:
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
-        # KV written under root's context_key, but context_injection=False.
+        # KV written under root's context_key; in legacy mode the
+        # orchestrator must skip it entirely.
         bundle.shared_repo.set_many(root_id, {"some_key": "some_value"})
 
         agent_meta = SimpleNamespace(
             context_injection=False,
             skill_injection=False,
-            context_injection_mode="human_messages",
+            context_injection_mode="legacy",
         )
 
         assemble = _import_assemble_context_messages()
@@ -591,8 +603,8 @@ class TestHumanMessagesModeForChild:
             parent_id=root_id,
         )
 
-        # No messages when context_injection is False.
+        # Legacy mode → [] regardless of the legacy ``context_injection`` boolean.
         assert result == [], (
-            f"Expected [] when context_injection=False, got "
+            f"Expected [] in legacy mode, got "
             f"{[m.additional_kwargs.get('context_kind') for m in result]}"
         )

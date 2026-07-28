@@ -630,9 +630,18 @@ class TestGetInstanceMessages:
 
         # Patch load_and_cache_prompt to raise — simulating a corrupt agent
         # directory or missing registry. The function must swallow the error.
+        # Also opt out of the per-turn ``assemble_context_messages`` rebuild
+        # so this test stays focused on prompt-load error swallowing and
+        # doesn't accidentally depend on what the (fixed) orchestrator now
+        # emits in ``human_messages`` mode. The helper is lazily imported
+        # inside ``_build_context_dicts_for_response`` so we patch it at
+        # its source module.
         with patch(
             "daemon.manager.load_and_cache_prompt",
             side_effect=RuntimeError("boom: prompt build failed"),
+        ), patch(
+            "daemon.services.context_messages.assemble_context_messages",
+            new=AsyncMock(return_value=[]),
         ):
             messages = await get_instance_messages(
                 mock_checkpointer, "inst-123", manager=manager
