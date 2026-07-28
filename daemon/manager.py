@@ -2066,26 +2066,37 @@ class InstanceManager:
         """Return the cached skill-search result for ``instance_id``.
 
         Returns the ``(injection_text, injected_skill_ids)`` tuple
-        cached by :meth:`set_context_skill_result`, or ``None`` if
-        no entry has been stored. Callers must distinguish three
-        B3-relevant cases:
+        cached by :meth:`set_context_skill_result`, or ``None`` when
+        no entry has been stored.
+
+        ``None`` is ambiguous in this implementation:
+
+        * the key was never set (search never ran), **or**
+        * the key was explicitly set to ``None`` (search ran but
+          yielded no injectable skills).
+
+        Both cases are returned as ``None`` because the underlying
+        ``dict.get()`` cannot distinguish them — and the B3 fix in
+        ``assemble_context_messages`` treats them identically
+        (re-run the search), so callers do not need to disambiguate.
+        If a future caller genuinely needs the distinction, they
+        should check ``instance_id in self._context_skill_results``
+        directly and only fall back to ``.get()`` for the value.
+
+        Callers that DO need to react differently to the two
+        "result present" shapes (B3):
 
         * ``(text, ids)`` with non-empty ``ids`` → reuse directly.
         * ``(None, [])`` or ``(None, [...])`` with empty content →
-          search ran and yielded no injection; do NOT re-run.
-        * ``None`` return (key absent) → search never ran on the
-          first attempt; caller should re-run the search.
-
-        The "absent key" vs "cached None" cases can be distinguished
-        via the ``in`` check on ``manager._context_skill_results`` if
-        needed; the orchestrator in ``assemble_context_messages``
-        uses the simpler contract above.
+          search already ran and yielded no injection; do NOT
+          re-run.
 
         Args:
             instance_id: Target instance.
 
         Returns:
-            The cached tuple, or ``None`` when no entry exists.
+            The cached tuple, or ``None`` when the key is absent
+            or explicitly stored as ``None``.
         """
         return self._context_skill_results.get(instance_id)
 

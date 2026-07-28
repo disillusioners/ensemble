@@ -30,6 +30,12 @@ SKIP_DIRS: frozenset[str] = frozenset({
 # do NOT match and are treated as plain agent ids.
 _TAG_PATTERN = re.compile(r'^([^\[\]]+)\[([A-Za-z0-9_-]+)\]$')
 
+# Module-level dedup set for the "context_injection: true" deprecation
+# warning. ``discover()`` is called on every daemon poll / reload, so an
+# unconditional warning would fire repeatedly for the same legacy agent.
+# Keyed by agent_id — once we've warned for an agent we never warn again.
+_deprecation_warned: set[str] = set()
+
 
 def _parse_agent_dir_name(dir_name: str) -> tuple[str, str | None]:
     """Parse a directory name, extracting optional [tag] suffix.
@@ -269,7 +275,8 @@ class AgentRegistry:
             # mode (the newer ``context_injection_mode`` field does — see
             # ADR-8). Emit a one-shot warning so agents still relying on the
             # legacy flag can migrate to ``context_injection_mode``.
-            if meta.get("context_injection"):
+            if meta.get("context_injection") and agent_id not in _deprecation_warned:
+                _deprecation_warned.add(agent_id)
                 logger.warning(
                     "Agent '%s' uses deprecated 'context_injection: true' flag. "
                     "This flag no longer controls context injection mode. "

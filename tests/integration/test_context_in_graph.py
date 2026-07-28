@@ -8,8 +8,6 @@ Context Injection Restructure Phase 3:
   messages and gates on ``context_injection_mode``.
 * :func:`daemon.graph._extract_last_user_text` — extracts the last
   user text from the LangGraph ``messages`` list.
-* :func:`daemon.graph._resolve_project_id` — resolves the project
-  id from instance metadata.
 * :func:`daemon.services.instance_messaging._build_graph_input` —
   builds the ``graph_input`` dict, honoring the
   ``context_injection_mode`` gate in ``human_messages`` mode.
@@ -47,7 +45,6 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from daemon.graph import (
     ContextSlot,
     _extract_last_user_text,
-    _resolve_project_id,
 )
 from daemon.manager import InstanceManager
 from daemon.services.instance_messaging import _build_graph_input
@@ -390,51 +387,30 @@ class TestExtractLastUserText:
 
 
 # ---------------------------------------------------------------------------
-# 7. _resolve_project_id
+# 7. _reassemble_with_context
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# 7. _resolve_project_id
-# ---------------------------------------------------------------------------
+class TestReassembleWithContext:
+    """Regression test for C1: both persona and repair SystemMessages survive."""
 
+    def test_preserves_persona_and_repair_system_messages(self):
+        from daemon.graph import _reassemble_with_context
+        from langchain_core.messages import SystemMessage, HumanMessage
 
-class TestResolveProjectId:
-    """Project id resolution from instance metadata."""
+        persona = SystemMessage(content="You are a helpful agent.")
+        repair = SystemMessage(content="[System Repair] Stop repeating yourself.")
+        user_msg = HumanMessage(content="hello")
+        context = [HumanMessage(content="[SYSTEM CONTEXT: Project] info")]
 
-    def test_returns_project_id_from_metadata(self) -> None:
-        """Repository returns an instance whose metadata has project_id."""
-        instance = SimpleNamespace(instance_metadata={"project_id": "proj-abc"})
-        repo = SimpleNamespace(get=lambda instance_id: instance)
+        messages = [persona, user_msg, repair]
+        result = _reassemble_with_context(messages, context, persona.content)
 
-        assert _resolve_project_id("inst-1", repo) == "proj-abc"
-
-    def test_returns_none_when_metadata_lacks_project_id(self) -> None:
-        """Metadata without ``project_id`` returns None."""
-        instance = SimpleNamespace(instance_metadata={"other_key": "value"})
-        repo = SimpleNamespace(get=lambda instance_id: instance)
-
-        assert _resolve_project_id("inst-2", repo) is None
-
-    def test_returns_none_when_instance_not_found(self) -> None:
-        """Repository returning None (instance not found) returns None."""
-        repo = SimpleNamespace(get=lambda instance_id: None)
-
-        assert _resolve_project_id("inst-3", repo) is None
-
-    def test_returns_none_when_repository_is_none(self) -> None:
-        """No repository at all must return None — never raise."""
-        assert _resolve_project_id("inst-4", None) is None
-
-    def test_returns_none_when_repository_raises(self) -> None:
-        """A transient repo error is swallowed and returns None."""
-        def _raise(_instance_id: str) -> None:
-            raise RuntimeError("db transient error")
-
-        repo = SimpleNamespace(get=_raise)
-
-        # Best-effort — never raises.
-        assert _resolve_project_id("inst-5", repo) is None
+        system_msgs = [m for m in result if isinstance(m, SystemMessage)]
+        assert len(system_msgs) == 2
+        assert system_msgs[0].content == persona.content
+        assert any(m.content == repair.content for m in system_msgs)
+        assert isinstance(result[1], HumanMessage)
 
 
 # ---------------------------------------------------------------------------

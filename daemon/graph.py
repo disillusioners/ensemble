@@ -123,6 +123,22 @@ from .config import LoopBreakerConfig
 # now the ``set`` side lives on ``InstanceManager`` because no agent-node
 # code path needs to write.
 
+
+def _reassemble_with_context(
+    messages: list,
+    context_msgs: list,
+    system_prompt: str,
+) -> list:
+    """Re-insert context messages after persona SystemMessage, preserving non-persona system messages."""
+    if not context_msgs:
+        return messages
+    non_persona_system = [
+        m for m in messages
+        if not (isinstance(m, SystemMessage) and m.content == system_prompt)
+    ]
+    return [SystemMessage(content=system_prompt)] + context_msgs + non_persona_system
+
+
 class InjectionSlot:
     """Lightweight, mock-friendly handle around InstanceManager injection queue.
 
@@ -534,49 +550,6 @@ def _extract_last_user_text(messages: list[BaseMessage]) -> str:
         continue
 
     return ""
-
-
-def _resolve_project_id(
-    instance_id: str,
-    instance_repository: Any,
-) -> str | None:
-    """Resolve ``project_id`` from instance metadata.
-
-    Context Injection Restructure — Phase 3 / Task 4 helper.
-    Reads ``instance_metadata["project_id"]`` via the instance
-    repository. ``None`` when the instance has no project attached
-    or the lookup fails.
-
-    Reads are best-effort — a transient repo error is logged at
-    debug and returns ``None`` so the context-rebuild path never
-    crashes the agent_node. Per-turn freshness matters here: the
-    project_id can be set late on an instance (e.g. by a leader
-    that ran keyword matching against a stored project) so a
-    closure-captured value would silently miss late bindings.
-
-    Args:
-        instance_id: The current instance id.
-        instance_repository: The instance repository (duck-typed;
-            exposes ``get(instance_id)`` returning an object with
-            an ``instance_metadata`` dict).
-
-    Returns:
-        The project id, or ``None``.
-    """
-    if instance_repository is None:
-        return None
-    try:
-        inst = instance_repository.get(instance_id)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug(
-            f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
-            f"failed during project_id resolution: {exc}"
-        )
-        return None
-    if inst is None:
-        return None
-    metadata = getattr(inst, "instance_metadata", None) or {}
-    return metadata.get("project_id")
 
 
 class ToolThrottleSlot:
@@ -2657,11 +2630,8 @@ def create_agent_node(
         if context_msgs and not any(
             context_msgs[0] is m for m in full_messages
         ):
-            non_system = [m for m in full_messages if not isinstance(m, SystemMessage)]
-            full_messages = (
-                [SystemMessage(content=system_prompt)]
-                + context_msgs
-                + non_system
+            full_messages = _reassemble_with_context(
+                full_messages, context_msgs, system_prompt
             )
             logger.debug(
                 f"[ContextSlot] B1 re-append: {len(context_msgs)} "
@@ -2751,11 +2721,8 @@ def create_agent_node(
             # compaction retry:
             #   ``[SystemMessage] + context_msgs + state + injected + report``
             if context_msgs:
-                non_system = [m for m in compact_messages if not isinstance(m, SystemMessage)]
-                compact_messages = (
-                    [SystemMessage(content=system_prompt)]
-                    + context_msgs
-                    + non_system
+                compact_messages = _reassemble_with_context(
+                    compact_messages, context_msgs, system_prompt
                 )
                 logger.debug(
                     f'[LLM] Reactive compaction: re-appended '

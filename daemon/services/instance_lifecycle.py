@@ -27,7 +27,7 @@ from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .context_injection import get_shared_context
-from .context_messages import ContextInjectionMode, _VALID_INJECTION_MODES
+from .context_messages import ContextInjectionMode, VALID_INJECTION_MODES
 from .dependency_bus import get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
@@ -180,6 +180,30 @@ _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a
 # info log would spam the daemon log. Keyed by instance_id — entries
 # live for the daemon's lifetime and are bounded by the number of
 # instances ever spawned in this process.
+#
+# The sets grow unbounded over a long-running daemon (one entry per
+# instance per spawn). To prevent a memory leak in daemons that spawn
+# many instances, each set is cleared when it exceeds the cap below.
+# We accept re-emitting one duplicate log per cap window — a small
+# operational cost in exchange for bounded memory.
+_LOG_DEDUP_MAX_ENTRIES = 5000
+
+
+def _log_dedup_check(record: dict[str, bool], key: str) -> bool:
+    """Return True once per key, bounded by a clear-at-cap eviction.
+
+    The first call for ``key`` returns True and records the key. After
+    the cap is hit the record is cleared, so a duplicate log may emit
+    once per cap window — accepted for bounded memory.
+    """
+    if len(record) >= _LOG_DEDUP_MAX_ENTRIES:
+        record.clear()
+    if record.get(key):
+        return False
+    record[key] = True
+    return True
+
+
 _shared_context_metadata_skipped_logged: dict[str, bool] = {}
 _context_injection_skipped_logged: dict[str, bool] = {}
 _auto_load_skills_skipped_logged: dict[str, bool] = {}
@@ -353,13 +377,12 @@ def append_shared_context_metadata(
     # info log uses a module-level flag so a single agent spawning
     # does not flood the log on every LLM call (the appender runs
     # on every system-prompt rebuild — see GET /messages).
-    if mode == "human_messages":
-        if not _shared_context_metadata_skipped_logged.get(instance_id):
+    if mode == ContextInjectionMode.HUMAN_MESSAGES:
+        if _log_dedup_check(_shared_context_metadata_skipped_logged, instance_id):
             logger.info(
                 f"append_shared_context_metadata: skipping in "
                 f"human_messages mode (instance={instance_id[:8]}...)"
             )
-            _shared_context_metadata_skipped_logged[instance_id] = True
         return system_prompt
     try:
         # Resolve context_key (same logic as append_context_key)
@@ -666,14 +689,13 @@ def append_auto_load_skills(
     # known GET /messages → appender → set_metadata write-side-effect
     # bug is structurally impossible in human_messages mode. Per-
     # turn skill search runs via the orchestrator (Phase 3).
-    if mode == "human_messages":
+    if mode == ContextInjectionMode.HUMAN_MESSAGES:
         key = instance_id or agent_id
-        if key and not _auto_load_skills_skipped_logged.get(key):
+        if key and _log_dedup_check(_auto_load_skills_skipped_logged, key):
             logger.info(
                 f"append_auto_load_skills: skipping in human_messages "
                 f"mode (agent={agent_id}, instance={key[:8]}...)"
             )
-            _auto_load_skills_skipped_logged[key] = True
         return system_prompt
 
     # No project → no auto_load section.
@@ -863,13 +885,12 @@ def append_context_injection(
     # is rebuilt per-turn by the context orchestrator. Logging is
     # deduped via a module-level dict so the per-poll GET /messages
     # reconstruction does not flood the log.
-    if mode == "human_messages":
-        if not _context_injection_skipped_logged.get(instance_id):
+    if mode == ContextInjectionMode.HUMAN_MESSAGES:
+        if _log_dedup_check(_context_injection_skipped_logged, instance_id):
             logger.info(
                 f"append_context_injection: skipping in "
                 f"human_messages mode (instance={instance_id[:8]}...)"
             )
-            _context_injection_skipped_logged[instance_id] = True
         return system_prompt
 
     try:
@@ -1022,7 +1043,7 @@ def _resolve_injection_mode(agent_meta: Any) -> str:
     ``human_messages`` mode. Only the explicit
     ``context_injection_mode`` field controls the new mode.
 
-    Validation is driven by ``_VALID_INJECTION_MODES`` (re-exported
+    Validation is driven by ``VALID_INJECTION_MODES`` (re-exported
     from :mod:`daemon.services.context_messages`) so adding a new
     mode to ``ContextInjectionMode`` automatically widens this
     validator — no second hardcoded list to keep in sync.
@@ -1047,13 +1068,13 @@ def _resolve_injection_mode(agent_meta: Any) -> str:
             and missing attribute both coerce to default).
 
     Returns:
-        One of the values in ``_VALID_INJECTION_MODES``. Never
+        One of the values in ``VALID_INJECTION_MODES``. Never
         raises — coercion is the failure mode.
     """
     if agent_meta is None:
         return ContextInjectionMode.SYSTEM_PROMPT
     mode = getattr(agent_meta, "context_injection_mode", None)
-    if mode in _VALID_INJECTION_MODES:
+    if mode in VALID_INJECTION_MODES:
         return mode
     return ContextInjectionMode.SYSTEM_PROMPT
 
@@ -1164,7 +1185,7 @@ def _apply_post_cache_appends(
     # for the per-turn [SYSTEM CONTEXT: ...] HumanMessages. Add the
     # PERSONA-level defense instruction so the LLM treats those
     # messages as observational reference material, not instructions.
-    if mode == "human_messages":
+    if mode == ContextInjectionMode.HUMAN_MESSAGES:
         system_prompt = append_context_injection_defense(system_prompt)
     return (
         append_auto_load_skills(

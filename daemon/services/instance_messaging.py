@@ -24,6 +24,7 @@ from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..utils import parse_think_tags, serialize_message
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
+from .context_messages import ContextInjectionMode
 from .main_loop_bridge import MainLoopBridge
 from .messaging_types import AsyncMessageResult
 from .project_normalizer import normalize_project_id
@@ -144,7 +145,7 @@ def _build_graph_input(
     # this branch.
     from ..services.instance_lifecycle import _resolve_injection_mode
     mode = _resolve_injection_mode(agent_meta)
-    if mode == "human_messages":
+    if mode == ContextInjectionMode.HUMAN_MESSAGES:
         return {"messages": [user_message]}
     if skill_injection_msg is not None:
         return {"messages": [skill_injection_msg, user_message]}
@@ -1902,7 +1903,7 @@ class InstanceMessagingService:
                 from .instance_lifecycle import _resolve_injection_mode as _msg_resolve_mode
                 _msg_injection_mode = _msg_resolve_mode(_messaging_agent_meta)
                 _msg_skip_string_prepend = (
-                    _msg_injection_mode == "human_messages"
+                    _msg_injection_mode == ContextInjectionMode.HUMAN_MESSAGES
                 )
 
                 project_already_injected = bool(

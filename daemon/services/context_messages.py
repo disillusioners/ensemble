@@ -117,7 +117,7 @@ class ContextInjectionMode:
     # validation. Built from the enum constants so a future addition
     # to :class:`ContextInjectionMode` automatically widens the
     # validator without a separate hardcoded list.
-_VALID_INJECTION_MODES = (
+VALID_INJECTION_MODES = (
     ContextInjectionMode.SYSTEM_PROMPT,
     ContextInjectionMode.HUMAN_MESSAGES,
 )
@@ -796,6 +796,7 @@ async def _run_skill_search(
     project_id: str | None,
     instance_id: str,
     manager: Any,
+    message_id: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """Run ``SkillInjectionService.inject_skills`` with graceful fallback.
 
@@ -811,6 +812,10 @@ async def _run_skill_search(
         instance_id: Receiving instance id (used for A/B routing).
         manager: :class:`InstanceManager` exposing
             ``self._skill_injection_service``.
+        message_id: Identifier of the user message the search
+            attaches to. ``None`` → fall back to ``instance_id`` so
+            legacy call sites keep working and search-result
+            caching remains scoped to the instance.
 
     Returns:
         Tuple ``(injection_text, skill_ids)`` matching the
@@ -820,12 +825,13 @@ async def _run_skill_search(
     if service is None:
         return (None, [])
 
+    effective_message_id = message_id if message_id is not None else instance_id
     try:
         result = await service.inject_skills(
             user_query,
             project_id=project_id,
             instance_id=instance_id,
-            message_id=instance_id,  # B3 fix: callers may override via the pre-computed path
+            message_id=effective_message_id,
         )
         if not isinstance(result, tuple) or len(result) != 2:
             logger.warning(
@@ -848,6 +854,7 @@ async def assemble_context_messages(
     instance_repository: Any,
     parent_id: str | None = None,
     skill_injection_result: tuple[str | None, list[str]] | None = None,
+    message_id: str | None = None,
 ) -> list[HumanMessage]:
     """Async orchestrator returning the per-turn context message list.
 
@@ -942,6 +949,12 @@ async def assemble_context_messages(
             ``(injection_text, skill_ids)`` tuple from the
             messaging path. ``None`` → run the search inside
             this orchestrator.
+        message_id: Identifier of the user message the skill
+            search attaches to. Forwarded to
+            :func:`_run_skill_search` so callers in the messaging
+            path can attach the search result to the correct
+            message rather than the instance. ``None`` → use
+            ``instance_id`` as a stable fallback.
 
     Returns:
         List of zero to three tagged :class:`HumanMessage`
@@ -1013,6 +1026,7 @@ async def assemble_context_messages(
                 project_id=project_id,
                 instance_id=instance_id,
                 manager=manager,
+                message_id=message_id,
             )
 
         skills_msg = build_skills_message(injection_text)
