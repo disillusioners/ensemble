@@ -355,3 +355,135 @@ class TestErrorHandling:
         )
 
         assert result == base_prompt
+
+
+# ─── Phase 2 (ADR-8): human_messages mode dormancy ─────────────────────────────
+
+
+class TestHumanMessagesMode:
+    """ADR-8 dormancy gate — ``mode="human_messages"`` early-returns.
+
+    Per Phase 2 of the Context Injection Restructure plan, when an
+    agent opts into the ``human_messages`` context-injection mode the
+    CONTEXT appenders (including ``append_shared_context_metadata``)
+    must short-circuit so the metadata KV is rebuilt per-turn inside
+    :func:`daemon.services.context_messages.assemble_context_messages`
+    and merged into the ``[SYSTEM CONTEXT: Related Project]``
+    HumanMessage.
+
+    In ``human_messages`` mode:
+
+    * the system prompt carries persona content only,
+    * the metadata KV does NOT appear in the system prompt,
+    * NO DB lookup is performed (no JSON, no fence, no log spam
+      per call — one info-level log per instance on first skip).
+    """
+
+    def test_human_messages_mode_returns_unchanged_when_metadata_exists(
+        self, base_prompt
+    ):
+        """``mode="human_messages"`` + metadata present → prompt unchanged.
+
+        The DB is seeded with KV so a regression that forgot the
+        gate would inject the metadata block and fail this test.
+        """
+        repo = _make_repo({"project_scope": "LARGE", "priority": 1})
+
+        result = append_shared_context_metadata(
+            system_prompt=base_prompt,
+            instance_id="inst-human-1",
+            instance_repository=MagicMock(),
+            shared_context_metadata_repo=repo,
+            mode="human_messages",
+        )
+
+        # Byte-identical — no metadata section, no fence, no JSON.
+        assert result == base_prompt
+        assert "# Shared Context" not in result
+        assert "<shared_context_metadata>" not in result
+
+    def test_human_messages_mode_skips_db_lookup(self, base_prompt):
+        """The KV repo MUST NOT be queried in ``human_messages`` mode.
+
+        Per-turn KV lookups run inside the context orchestrator
+        (:func:`assemble_context_messages`), so the appender's DB
+        query is duplicate work in the new mode. We spy on the repo
+        to prove the call never happens.
+        """
+        spy_repo = MagicMock()
+        spy_repo.get_all_as_dict.return_value = {"k": "v"}
+
+        append_shared_context_metadata(
+            system_prompt=base_prompt,
+            instance_id="inst-human-2",
+            instance_repository=MagicMock(),
+            shared_context_metadata_repo=spy_repo,
+            mode="human_messages",
+        )
+
+        spy_repo.get_all_as_dict.assert_not_called()
+
+    def test_human_messages_mode_skips_tree_lookup_for_child(self, base_prompt):
+        """Child instances in ``human_messages`` mode do not resolve
+        the tree root either — the gate sits BEFORE the tree walk
+        so neither the tree repo nor the KV repo is touched.
+        """
+        repo = _make_repo({"k": "v"})
+        instance_repo = _make_instance_repo(root_id="grandparent-1")
+
+        append_shared_context_metadata(
+            system_prompt=base_prompt,
+            instance_id="child-human",
+            instance_repository=instance_repo,
+            shared_context_metadata_repo=repo,
+            parent_id="parent-human",
+            mode="human_messages",
+        )
+
+        # Neither lookup fired.
+        instance_repo.get_tree_root_id.assert_not_called()
+        repo.get_all_as_dict.assert_not_called()
+
+    def test_system_prompt_mode_default_behavior_preserved(self, base_prompt):
+        """When ``mode`` is omitted the function defaults to
+        ``"system_prompt"`` and injects as before.
+
+        Pins the byte-identical-output constraint from the Phase 2
+        plan — existing callers must see no behavior change.
+        """
+        repo = _make_repo({"k": "v"})
+
+        # No ``mode`` kwarg → defaults to "system_prompt".
+        result = append_shared_context_metadata(
+            system_prompt=base_prompt,
+            instance_id="inst-legacy",
+            instance_repository=MagicMock(),
+            shared_context_metadata_repo=repo,
+        )
+
+        # Legacy behavior: section appended.
+        assert result != base_prompt
+        assert "# Shared Context" in result
+        assert "## Metadata KV" in result
+
+    def test_unknown_mode_coerced_to_system_prompt(self, base_prompt):
+        """An unknown mode string falls back to ``"system_prompt"``.
+
+        Per ADR-8 the function silently coerces unknown values so a
+        typo in meta.json cannot break instance execution. This pins
+        the fail-open contract.
+        """
+        repo = _make_repo({"k": "v"})
+
+        # Mode that isn't "system_prompt" or "human_messages".
+        result = append_shared_context_metadata(
+            system_prompt=base_prompt,
+            instance_id="inst-unknown",
+            instance_repository=MagicMock(),
+            shared_context_metadata_repo=repo,
+            mode="both",  # intentionally invalid
+        )
+
+        # Coerced to system_prompt → metadata injected.
+        assert "# Shared Context" in result
+        assert "## Metadata KV" in result

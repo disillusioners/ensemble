@@ -727,3 +727,224 @@ class TestNonAutoLoadExcluded:
         )
         assert "Auto-Loaded Skills" not in out
         assert out == "BASE"
+
+
+# ============================================================================
+# Phase 2 (ADR-8): human_messages mode dormancy
+# ============================================================================
+
+
+class TestHumanMessagesMode:
+    """ADR-8 dormancy gate — ``mode="human_messages"`` short-circuits
+    BEFORE any DB I/O.
+
+    Per Phase 2 of the Context Injection Restructure plan, when an
+    agent opts into the ``human_messages`` context-injection mode the
+    3 CONTEXT appenders (including ``append_auto_load_skills``) must
+    early-return so context is rebuilt per-turn by
+    :func:`daemon.services.context_messages.assemble_context_messages`
+    instead of being baked into the system prompt.
+
+    This gate ALSO fixes the known bug where the appender's
+    ``set_metadata`` write turned the GET /messages endpoint into a
+    write endpoint (every poll re-wrote ``last_injected_skill_ids``).
+    In ``human_messages`` mode the entire function returns the
+    prompt unchanged before the clone service, the skill query,
+    OR the metadata write runs.
+    """
+
+    def test_human_messages_mode_skips_clone_and_query(
+        self,
+        manager: _StubManager,
+        skill_repo: SkillRepository,
+    ) -> None:
+        """Even with a populated skill table, ``human_messages`` mode
+        returns the prompt unchanged.
+
+        The DB is seeded so a regression that forgets the early-
+        return gate would still inject the skill and fail this test.
+        """
+        _seed_skill(
+            skill_repo,
+            project_id="proj-1",
+            name="alpha",
+            content="# Alpha\nDo the thing.",
+        )
+        base = "# Base prompt\nCore instructions."
+
+        out = append_auto_load_skills(
+            base,
+            agent_id="tester",
+            project_id="proj-1",
+            manager=manager,
+            mode="human_messages",
+        )
+
+        # Byte-identical — no section appended, no header text.
+        assert out == base
+        assert "## Auto-Loaded Skills (Evolvable)" not in out
+        assert "alpha" not in out
+        assert "Do the thing." not in out
+
+    def test_human_messages_mode_skips_clone_service(
+        self,
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """The clone-on-miss step MUST NOT fire in ``human_messages`` mode.
+
+        A regression that moves the gate after the clone service
+        would silently clone skill_bank templates into the project
+        on every prompt rebuild — bloat + unexpected DB writes. The
+        short-circuit gate sits BEFORE the clone call so neither the
+        clone nor the query runs.
+        """
+        _seed_bank_template(
+            skill_bank_repo,
+            name="human-mode-skill",
+            auto_load=True,
+        )
+        clone_service = SkillCloneService(
+            skill_repo=skill_repo,
+            skill_bank_repo=skill_bank_repo,
+            embedding_service=None,
+        )
+        manager = _StubManager(
+            skill_repo=skill_repo,
+            skill_clone_service=clone_service,
+        )
+
+        append_auto_load_skills(
+            "BASE",
+            agent_id="tester",
+            project_id="proj-human",
+            manager=manager,
+            mode="human_messages",
+        )
+
+        # Clone did NOT run — the bank template is still missing
+        # from the project scope.
+        assert skill_repo.get_auto_load_skills("proj-human") == []
+
+    def test_human_messages_mode_skips_metadata_write(
+        self,
+        skill_repo: SkillRepository,
+        skill_bank_repo: SkillBankRepository,
+    ) -> None:
+        """The ``last_injected_skill_ids`` write MUST NOT fire.
+
+        This is the regression test for the known DB-write-on-poll
+        bug: previously ``append_auto_load_skills`` wrote metadata
+        on every call, including GET /messages prompt reconstruction.
+        In ``human_messages`` mode the gate sits BEFORE the write so
+        the read endpoint stays a read endpoint.
+
+        We spy on ``instance_repository.set_metadata`` to prove the
+        write is never attempted.
+        """
+        _seed_skill(
+            skill_repo,
+            project_id="proj-1",
+            name="tracked-skill",
+        )
+        manager = _StubManager(skill_repo=skill_repo)
+
+        spy_instance_repo = MagicMock()
+        spy_instance_repo.get.return_value = MagicMock(instance_metadata={})
+
+        out = append_auto_load_skills(
+            "BASE",
+            agent_id="tester",
+            project_id="proj-1",
+            manager=manager,
+            instance_id="inst-spy",
+            instance_repository=spy_instance_repo,
+            mode="human_messages",
+        )
+
+        # Prompt unchanged.
+        assert out == "BASE"
+        # The metadata write was NEVER attempted — neither the get()
+        # nor the set_metadata() calls were made.
+        spy_instance_repo.set_metadata.assert_not_called()
+        spy_instance_repo.get.assert_not_called()
+
+    def test_human_messages_mode_default_param_is_system_prompt(
+        self,
+        manager: _StubManager,
+        skill_repo: SkillRepository,
+    ) -> None:
+        """The ``mode`` parameter defaults to ``"system_prompt"`` so
+        legacy callers (tests, third-party code) see no behavior
+        change. Existing call sites that omit ``mode`` must continue
+        to inject the auto_load section.
+
+        This pins the byte-identical-output constraint from the
+        Phase 2 plan: a regression that flipped the default would
+        silently break every legacy agent.
+        """
+        _seed_skill(
+            skill_repo,
+            project_id="proj-1",
+            name="alpha",
+            content="# Alpha\nDo the thing.",
+        )
+
+        # No ``mode`` kwarg — defaults to "system_prompt".
+        out = append_auto_load_skills(
+            "BASE",
+            agent_id="tester",
+            project_id="proj-1",
+            manager=manager,
+        )
+
+        # Legacy behavior: section appended.
+        assert "## Auto-Loaded Skills (Evolvable)" in out
+        assert "Do the thing." in out
+
+    def test_human_messages_mode_logs_skip_once_per_instance(
+        self,
+        manager: _StubManager,
+        skill_repo: SkillRepository,
+        caplog,
+    ) -> None:
+        """A one-time INFO log marks the skip so operators can
+        confirm an agent opted into the new mode. Per-instance
+        dedup prevents the log from flooding when the prompt is
+        rebuilt repeatedly (e.g. on every GET /messages poll).
+        """
+        import logging
+
+        _seed_skill(
+            skill_repo,
+            project_id="proj-1",
+            name="alpha",
+        )
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.instance_lifecycle"
+        ):
+            # Call twice with the same instance_id.
+            append_auto_load_skills(
+                "BASE",
+                agent_id="tester",
+                project_id="proj-1",
+                manager=manager,
+                instance_id="inst-dedup",
+                mode="human_messages",
+            )
+            append_auto_load_skills(
+                "BASE",
+                agent_id="tester",
+                project_id="proj-1",
+                manager=manager,
+                instance_id="inst-dedup",
+                mode="human_messages",
+            )
+
+        skip_logs = [
+            r for r in caplog.records
+            if "human_messages" in r.message and "skipping" in r.message
+        ]
+        # Exactly one log entry for the deduped instance_id.
+        assert len(skip_logs) == 1

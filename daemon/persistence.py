@@ -496,7 +496,18 @@ def _reconstruct_full_system_prompt(
     # Apply the post-cache append chain — same call sites as the spawn
     # path at daemon/services/instance_lifecycle.py:1250-1261 and the
     # restore path at lines 2623-2634. We mirror those signature exactly.
-    from daemon.services.instance_lifecycle import _apply_post_cache_appends
+    from daemon.services.instance_lifecycle import (
+        _apply_post_cache_appends,
+        _resolve_injection_mode,
+    )
+
+    # Phase 2 (ADR-8): pass the resolved mode from agent_meta so
+    # human_messages agents see the system prompt without the 3
+    # CONTEXT knots but WITH the prompt-injection defense instruction.
+    # ``agent_meta`` is best-effort above and may be ``None`` here;
+    # ``_resolve_injection_mode`` defaults to ``"system_prompt"`` in
+    # that case so legacy call behavior is preserved byte-identical.
+    resolved_mode = _resolve_injection_mode(agent_meta)
 
     system_prompt, _user_language = _apply_post_cache_appends(
         system_prompt=system_prompt,
@@ -512,5 +523,6 @@ def _reconstruct_full_system_prompt(
         manager=manager,
         agent_meta=agent_meta,
         disable_auto_load_tracking=True,
+        mode=resolved_mode,
     )
     return system_prompt, getattr(instance_meta, "created_at", None)

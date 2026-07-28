@@ -130,6 +130,25 @@ class AgentMetadata(BaseModel):
         default=False,
         description="When true, inject shared project context into this agent's system prompt at spawn time.",
     )
+    # ADR-8: per-agent context-injection mode flag. Two values only —
+    # "system_prompt" (default, legacy) or "human_messages" (new —
+    # context as [SYSTEM CONTEXT: ...] HumanMessages). The legacy
+    # ``context_injection: true`` flag does NOT auto-flip to
+    # ``human_messages`` (per reviewer note #1); agents must
+    # explicitly set ``context_injection_mode: "human_messages"`` in
+    # meta.json to opt in. Validation lives in
+    # :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
+    # — unknown values are silently coerced to ``"system_prompt"``
+    # rather than rejected, so a typo in meta.json cannot break
+    # instance execution.
+    context_injection_mode: str = Field(
+        default="system_prompt",
+        description=(
+            "Context injection mode — one of 'system_prompt' (default, "
+            "legacy) or 'human_messages' (context as [SYSTEM CONTEXT: ...] "
+            "HumanMessages). See ADR-8."
+        ),
+    )
     inject_allowed_models: bool = Field(
         default=False,
         description="When true, inject the allowed-models list into this agent's system prompt at spawn time.",
@@ -272,6 +291,9 @@ class AgentRegistry:
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
                     context_injection=meta.get("context_injection", False),
+                    context_injection_mode=meta.get(
+                        "context_injection_mode", "system_prompt"
+                    ),
                     inject_allowed_models=meta.get("inject_allowed_models", False),
                     version_tag=version_tag,
                 )
