@@ -758,6 +758,26 @@ class InstanceManager:
         # wires those paths up.
         self._loop_breaker_state: dict[str, dict] = {}
 
+        # Context Injection Restructure — Phase 3 (B2 fix): per-instance
+        # cache of the LAST ``(injection_text, injected_skill_ids)`` tuple
+        # produced by :meth:`SkillInjectionService.inject_skills`. The
+        # messaging path writes this on first attempt; the ``agent_node``
+        # ``ContextSlot.assemble()`` reads it so a retry of the same user
+        # message reuses the same matched skills (otherwise the retry
+        # would either re-run the search or, after the refactor, lose
+        # skills entirely — see plan risk register B3).
+        #
+        # Mirrors the ``_pending_injections`` indirection pattern so the
+        # messaging path (which holds the compiled graph but no slot
+        # reference) can hand the result to the ``agent_node``-side slot
+        # through the manager. Stored as ``None`` for "search ran but
+        # yielded no injection" so the retry short-circuits without
+        # re-running the search; absent key means "first attempt never
+        # ran the search" (retry should re-run).
+        self._context_skill_results: dict[
+            str, tuple[str | None, list[str]] | None
+        ] = {}
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -1997,6 +2017,79 @@ class InstanceManager:
         return list(queue)
 
     # ------------------------------------------------------------------
+    # Context Injection Restructure — Phase 3 (B2 fix)
+    # ------------------------------------------------------------------
+    # ``_context_skill_results`` is the per-instance cache of the
+    # LAST skill-search result, written by the messaging path on the
+    # first attempt of a message and read by ``ContextSlot.assemble()``
+    # inside ``agent_node`` so retries can reuse the same matched
+    # skills without re-running the search (or losing them entirely,
+    # which would be the B3 bug). The indirection through the manager
+    # mirrors :meth:`set_injection` / :meth:`get_injection` so the
+    # messaging path (which holds only the compiled graph) can hand
+    # the result to the slot without a direct reference.
+    #
+    # Cleanup mirrors :meth:`clear_injection` — every per-instance
+    # cleanup site (``_cleanup_instance_state``, the TTL sweep, the
+    # cancel-graph-task done-branch) also drops the entry here.
+
+    def set_context_skill_result(
+        self,
+        instance_id: str,
+        result: tuple[str | None, list[str]] | None,
+    ) -> None:
+        """Cache the latest skill-search result for ``instance_id``.
+
+        Stores the ``(injection_text, injected_skill_ids)`` tuple
+        returned by
+        :meth:`SkillInjectionService.inject_skills` (or ``None`` for
+        "search ran but yielded no injection") so a retry of the
+        same user message can reuse the same matched skills
+        instead of re-running the search. The cache is per-message,
+        overwritten on every new first-attempt injection — there is
+        no list of historical results, just the latest one (B3 fix).
+
+        Args:
+            instance_id: Target instance.
+            result: The tuple returned by the skill injector, or
+                ``None`` for "search ran but yielded nothing". The
+                caller is responsible for having awaited the search
+                before calling this — the method does not run any
+                new search itself.
+        """
+        self._context_skill_results[instance_id] = result
+
+    def get_context_skill_result(
+        self,
+        instance_id: str,
+    ) -> tuple[str | None, list[str]] | None:
+        """Return the cached skill-search result for ``instance_id``.
+
+        Returns the ``(injection_text, injected_skill_ids)`` tuple
+        cached by :meth:`set_context_skill_result`, or ``None`` if
+        no entry has been stored. Callers must distinguish three
+        B3-relevant cases:
+
+        * ``(text, ids)`` with non-empty ``ids`` → reuse directly.
+        * ``(None, [])`` or ``(None, [...])`` with empty content →
+          search ran and yielded no injection; do NOT re-run.
+        * ``None`` return (key absent) → search never ran on the
+          first attempt; caller should re-run the search.
+
+        The "absent key" vs "cached None" cases can be distinguished
+        via the ``in`` check on ``manager._context_skill_results`` if
+        needed; the orchestrator in ``assemble_context_messages``
+        uses the simpler contract above.
+
+        Args:
+            instance_id: Target instance.
+
+        Returns:
+            The cached tuple, or ``None`` when no entry exists.
+        """
+        return self._context_skill_results.get(instance_id)
+
+    # ------------------------------------------------------------------
     # Question pause-requested flag (Phase 1 / question tool)
     # ------------------------------------------------------------------
     # The ``question`` tool sets this flag before returning. The
@@ -2209,6 +2302,20 @@ class InstanceManager:
         # centralizing in ``_cleanup_instance_state`` is the single source
         # of truth for the 4 lifecycle callers that route through here.
         self._loop_breaker_state.pop(instance_id, None)
+        # Context Injection Restructure — Phase 3 (B2 fix): drop the
+        # per-instance cached skill-search result. Without this the
+        # dict leaks one entry per terminated instance, and a future
+        # instance that reused this id could inherit a stale result.
+        # ``getattr`` keeps the cleanup defensive against test stubs
+        # that build a minimal ``InstanceManager`` without going
+        # through the full ``__init__`` (a handful of unit tests in
+        # ``test_question_graph`` etc. call this path with a hand-
+        # rolled manager).
+        _ctx_skill_results = getattr(
+            self, "_context_skill_results", None
+        )
+        if _ctx_skill_results is not None:
+            _ctx_skill_results.pop(instance_id, None)
         self.release_context_usage_cache(instance_id)
         # Question-tool cleanup (F5): drop any pending QuestionPack and the
         # pause-requested flag so the dicts cannot grow unbounded across many
@@ -2307,6 +2414,18 @@ class InstanceManager:
 
         for iid in stale:
             self._pending_injections.pop(iid, None)
+            # Context Injection Restructure — Phase 3 (B2 fix): piggy-
+            # back on the existing TTL sweep so a stranded skill result
+            # for the same stale instance is cleared in lockstep. The
+            # value carries no timestamp of its own, so we rely on the
+            # parent ``_pending_injections`` entry's age as the proxy.
+            # ``getattr`` keeps the cleanup defensive against test
+            # stubs that skip the full ``__init__``.
+            _ctx_skill_results = getattr(
+                self, "_context_skill_results", None
+            )
+            if _ctx_skill_results is not None:
+                _ctx_skill_results.pop(iid, None)
 
         if stale:
             logger.info(
@@ -4600,6 +4719,16 @@ class InstanceManager:
             # alongside the dead-task cleanup. Same pattern as
             # ``_gii_throttle`` above (cancel_graph_task done-branch).
             self._loop_breaker_state.pop(instance_id, None)
+            # Context Injection Restructure — Phase 3 (B2 fix): drop the
+            # cached skill-search result alongside the dead-task cleanup
+            # so the dead-task branch mirrors ``_cleanup_instance_state``.
+            # ``getattr`` keeps the cleanup defensive against test
+            # stubs that skip the full ``__init__``.
+            _ctx_skill_results = getattr(
+                self, "_context_skill_results", None
+            )
+            if _ctx_skill_results is not None:
+                _ctx_skill_results.pop(instance_id, None)
             return gate_cancelled
 
         if task is not None:

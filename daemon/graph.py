@@ -23,6 +23,17 @@ import uuid
 import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
+# Context Injection Restructure — Phase 3 imports are LAZY (inside
+# :class:`ContextSlot.assemble`) to avoid the ``graph.py`` ↔
+# ``services.instance_lifecycle`` cycle: ``instance_lifecycle.py``
+# imports ``ContextCompactor`` which imports ``clean_llm_config``
+# from this module. Hoisting the helper imports to module top
+# would break the test-collection path (see test runs in
+# ``.agents/shared/planning/context-injection-restructure/phase3-plan.md``
+# Step 4). Imports stay inside the call site, mirroring the
+# existing ``from .services.language_utils import is_auto_language``
+# pattern below.
+
 logger = logging.getLogger(__name__)
 
 
@@ -267,6 +278,283 @@ class ReportInjectionSlot:
         if not drained and pending_set is not None:
             pending_set.discard(instance_id)
         return drained
+
+
+class ContextSlot:
+    """Per-instance handle for assembling per-turn context messages.
+
+    Context Injection Restructure — Phase 3 / Task 1. Encapsulates
+    the dependencies :func:`assemble_context_messages` needs (the
+    :class:`InstanceManager`, the per-instance
+    :class:`AgentMetadata`) and exposes a single
+    :meth:`assemble` call the ``agent_node`` invokes at the start of
+    every turn. Mirrors :class:`InjectionSlot`'s manager-indirection
+    pattern: the messaging path (which holds the compiled graph but
+    no slot reference) writes the skill-search result onto the
+    manager via :meth:`InstanceManager.set_context_skill_result`,
+    and :meth:`ContextSlot.assemble` reads it via
+    :meth:`InstanceManager.get_context_skill_result` so a retry of
+    the same user message can reuse the cached result without
+    re-running the search (B3 fix) — and without a direct
+    cross-layer reference.
+
+    The slot itself holds no mutable per-turn state. It only caches
+    the manager reference and the agent metadata at construction
+    time; every :meth:`assemble` call resolves the current project /
+    parent / skill result fresh.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object
+            exposing ``get_context_skill_result``,
+            ``_project_repository``,
+            ``_shared_context_metadata_repo``,
+            ``_skill_injection_service``, and
+            ``_instance_repository``). Duck-typed via ``getattr`` so
+            tests can pass a stub without wiring the full manager.
+        agent_meta: The :class:`AgentMetadata` providing the
+            ``context_injection_mode`` and feature-flag fields
+            (``context_injection``, ``skill_injection``). ``None``
+            is treated as the default ``system_prompt`` mode by
+            :func:`daemon.services.instance_lifecycle._resolve_injection_mode`.
+        instance_repository: The instance repository (duck-typed)
+            used by :func:`assemble_context_messages` to resolve
+            the tree-root id via ``get_tree_root_id``. ``None``
+            disables RAG lookups (caller-side safety).
+        parent_id: The parent instance id, or ``None`` when this is
+            a tree-root instance. Captured at construction so
+            :meth:`assemble` does not need to be passed it on every
+            call. Mirrors the ``parent_id`` field of the
+            :class:`Instance` ORM model — see
+            :mod:`daemon.services.instance_lifecycle` for the
+            canonical ``parent_id`` resolution path.
+
+    Note:
+        ``context_slot.assemble()`` returns ``[]`` (no-op) when the
+        resolved mode is anything other than
+        ``ContextInjectionMode.HUMAN_MESSAGES``. This is the
+        single gate that keeps the legacy ``system_prompt`` mode
+        byte-identical to its pre-Phase-3 behavior — no context
+        messages are emitted, no skill search is run by the slot.
+    """
+
+    def __init__(
+        self,
+        manager: Any,
+        agent_meta: Any,
+        instance_repository: Any | None = None,
+        parent_id: str | None = None,
+    ) -> None:
+        self._manager = manager
+        self._agent_meta = agent_meta
+        self._instance_repository = instance_repository
+        self._parent_id = parent_id
+
+    async def assemble(
+        self,
+        instance_id: str,
+        user_query: str,
+        project_id: str | None,
+    ) -> list[HumanMessage]:
+        """Assemble per-turn context messages for ``instance_id``.
+
+        Calls :func:`assemble_context_messages` with the slot's
+        captured dependencies plus the per-call inputs (instance_id,
+        user_query, project_id). Returns ``[]`` when the agent's
+        injection mode is not ``human_messages`` (legacy
+        ``system_prompt`` mode is untouched).
+
+        Args:
+            instance_id: The current instance id.
+            user_query: The latest user message text — used as the
+                RAG query and the skill-search query.
+            project_id: The active project id, or ``None`` when no
+                project is attached. Resolved by ``agent_node``
+                from the instance metadata at call time.
+
+        Returns:
+            List of zero or more tagged :class:`HumanMessage`
+            instances (``[SYSTEM CONTEXT: ...]``) in canonical
+            order: ``[project?, shared_context?, skills?]``.
+            Empty list when the agent is in ``system_prompt`` mode
+            or every feature flag is off.
+        """
+        # Lazy imports — see top-of-file note about the graph ↔
+        # services cycle. ``_resolve_injection_mode`` and
+        # ``assemble_context_messages`` both live in the services
+        # tree that depends back on ``graph`` via ``compaction``
+        # (``clean_llm_config``). Hoisting would re-trigger the
+        # circular import the test collection just hit; keeping the
+        # imports local avoids the cycle entirely. The cost is one
+        # import per LLM call — negligible against the cost of the
+        # RAG / skill-search work that follows.
+        from .services.context_messages import assemble_context_messages
+        from .services.instance_lifecycle import _resolve_injection_mode
+        mode = _resolve_injection_mode(self._agent_meta)
+        if mode != "human_messages":
+            # Legacy mode — context is baked into the system prompt
+            # by the existing appenders. The slot is a no-op so the
+            # pre-Phase-3 byte layout is preserved.
+            return []
+
+        # B2 fix: read pre-computed skill result from MANAGER (not
+        # from ``self``). The messaging path stores the result of
+        # ``SkillInjectionService.inject_skills`` on the manager so
+        # ``agent_node`` (which lives on the other side of the
+        # compiled-graph boundary) can pick it up without a direct
+        # cross-reference. ``None`` means "no entry stored" — the
+        # first attempt didn't run the search (e.g. retry of an
+        # earlier message that failed before reaching the
+        # injection block) and ``assemble_context_messages`` will
+        # run the search itself per B3.
+        skill_result: tuple[str | None, list[str]] | None = None
+        getter = getattr(self._manager, "get_context_skill_result", None)
+        if getter is not None:
+            skill_result = getter(instance_id)
+
+        return await assemble_context_messages(
+            instance_id=instance_id,
+            user_query=user_query,
+            project_id=project_id,
+            agent_meta=self._agent_meta,
+            manager=self._manager,
+            instance_repository=self._instance_repository,
+            parent_id=self._parent_id,
+            skill_injection_result=skill_result,
+        )
+
+    def resolve_project_id(self, instance_id: str) -> str | None:
+        """Resolve ``project_id`` for ``instance_id`` from instance metadata.
+
+        Convenience accessor used by ``agent_node`` at the start of
+        every turn so the project id resolution lives next to the
+        rest of the context-rebuild plumbing. Reads
+        ``instance_metadata["project_id"]`` via the captured
+        ``instance_repository``; ``None`` when no project is attached
+        or the lookup fails.
+
+        Per-turn freshness matters: ``project_id`` can be set late on
+        an instance (e.g. by a leader that ran keyword matching
+        against a stored project) so a closure-captured value would
+        silently miss late bindings. Best-effort — never raises.
+
+        Args:
+            instance_id: The current instance id.
+
+        Returns:
+            The project id, or ``None``.
+        """
+        if self._instance_repository is None:
+            return None
+        try:
+            inst = self._instance_repository.get(instance_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+                f"failed during project_id resolution: {exc}"
+            )
+            return None
+        if inst is None:
+            return None
+        metadata = getattr(inst, "instance_metadata", None) or {}
+        return metadata.get("project_id")
+
+
+def _extract_last_user_text(messages: list[BaseMessage]) -> str:
+    """Extract the last user-text snippet from ``messages``.
+
+    Context Injection Restructure — Phase 3 / Task 5. The last
+    :class:`HumanMessage` in ``state['messages']`` is the user's
+    current request; we extract its text for the RAG query and the
+    skill-search query. Multipart content blocks (lists of
+    ``{"type": "text", ...}`` dicts) are flattened to a single
+    string with text blocks joined by ``"\\n"``. Image / audio
+    blocks are skipped — the context matchers are text-only.
+
+    Args:
+        messages: The LangGraph state ``messages`` list (already
+            augmented with the user turn by the reducer).
+
+    Returns:
+        The user text, or an empty string when ``messages`` is
+        empty or the last message has no text content. Never
+        raises — a malformed payload returns ``""`` so a single
+        bad message cannot break the context-rebuild path.
+    """
+    if not messages:
+        return ""
+
+    # Scan in reverse for the last HumanMessage — tool messages,
+    # AI messages, and remove markers between turns mean
+    # ``messages[-1]`` is not always a user message.
+    for msg in reversed(messages):
+        if not isinstance(msg, HumanMessage):
+            continue
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Multimodal / multipart content — flatten text blocks.
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = block.get("type")
+                    if block_type in ("text", None):
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+                elif isinstance(block, str):
+                    parts.append(block)
+            if parts:
+                return "\n".join(parts)
+        # Found a HumanMessage but no usable text — fall through
+        # to the next HumanMessage (rare but possible: a turn
+        # that is images-only).
+        continue
+
+    return ""
+
+
+def _resolve_project_id(
+    instance_id: str,
+    instance_repository: Any,
+) -> str | None:
+    """Resolve ``project_id`` from instance metadata.
+
+    Context Injection Restructure — Phase 3 / Task 4 helper.
+    Reads ``instance_metadata["project_id"]`` via the instance
+    repository. ``None`` when the instance has no project attached
+    or the lookup fails.
+
+    Reads are best-effort — a transient repo error is logged at
+    debug and returns ``None`` so the context-rebuild path never
+    crashes the agent_node. Per-turn freshness matters here: the
+    project_id can be set late on an instance (e.g. by a leader
+    that ran keyword matching against a stored project) so a
+    closure-captured value would silently miss late bindings.
+
+    Args:
+        instance_id: The current instance id.
+        instance_repository: The instance repository (duck-typed;
+            exposes ``get(instance_id)`` returning an object with
+            an ``instance_metadata`` dict).
+
+    Returns:
+        The project id, or ``None``.
+    """
+    if instance_repository is None:
+        return None
+    try:
+        inst = instance_repository.get(instance_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(
+            f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+            f"failed during project_id resolution: {exc}"
+        )
+        return None
+    if inst is None:
+        return None
+    metadata = getattr(inst, "instance_metadata", None) or {}
+    return metadata.get("project_id")
 
 
 class ToolThrottleSlot:
@@ -1908,6 +2196,7 @@ def create_agent_node(
     loop_breaker_slot: LoopBreakerSlot | None = None,
     loop_repairer: LoopRepairer | None = None,
     loop_breaker_config: "LoopBreakerConfig | None" = None,
+    context_slot: "ContextSlot | None" = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -1987,6 +2276,51 @@ def create_agent_node(
         timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
         instance_id = (config or {}).get('configurable', {}).get('thread_id', 'unknown')
         instance_short = instance_id.split('-')[0] if '-' in instance_id else instance_id
+
+        # ── Context Injection Restructure — Phase 3 / Task 4+5 ──────────
+        # Assemble per-turn context messages via the ContextSlot. The
+        # assembled list is inserted AFTER the SystemMessage and BEFORE
+        # the state messages — this keeps the system prompt persona
+        # at the top while ensuring the LLM sees fresh context before
+        # any prior-conversation noise. Per ADR-2 the messages are
+        # LOCAL only — they never enter graph state or checkpoint.
+        #
+        # ``context_msgs`` is captured so the B1 re-append (after
+        # ``_maybe_repair_loop``) and the C3-analog compaction re-append
+        # can both rebuild the full_messages correctly when the loop
+        # breaker or reactive compaction rewrites ``full_messages`` from
+        # scratch.
+        context_msgs: list[HumanMessage] = []
+        if context_slot is not None:
+            user_query = _extract_last_user_text(messages)
+            project_id = context_slot.resolve_project_id(instance_id)
+            try:
+                context_msgs = await context_slot.assemble(
+                    instance_id, user_query, project_id
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                # Context assembly must never crash the agent_node.
+                # Log and continue with the legacy full_messages layout.
+                logger.warning(
+                    f"[ContextSlot] assemble() failed for "
+                    f"{instance_short}: {type(exc).__name__}: {exc} — "
+                    f"continuing without context messages"
+                )
+                context_msgs = []
+
+            if context_msgs:
+                # Insert AFTER SystemMessage, BEFORE state messages.
+                # The state messages list is read-only (we own a copy
+                # via ``list(messages)`` above) so reassignment is safe.
+                full_messages = (
+                    [SystemMessage(content=system_prompt)]
+                    + context_msgs
+                    + list(messages)
+                )
+                logger.debug(
+                    f"[ContextSlot] Injected {len(context_msgs)} context "
+                    f"message(s) for {instance_short} before LLM call"
+                )
 
         # ── Phase 3 / C2: pull + clear ALL pending user-injections ─────────
         # Pull happens BEFORE the LLM call so the injected HumanMessages are
@@ -2286,6 +2620,33 @@ def create_agent_node(
         ):
             full_messages = full_messages + injected_report_msgs
 
+        # Context Injection Restructure — Phase 3 / B1 fix: re-append
+        # ``context_msgs`` after the loop-breaker repair rewrote
+        # ``full_messages`` from scratch (see
+        # ``_maybe_repair_loop`` which rebuilds
+        # ``[SystemMessage(system_prompt)] + list(messages)`` and
+        # drops every locally-injected message). Same object-identity
+        # guard pattern as the report-msg block above: when the loop
+        # breaker did NOT fire, ``context_msgs[0] is m`` matches the
+        # original insertion and we skip the append (no double-
+        # injection). The position is preserved by stripping any
+        # SystemMessage from the rebuilt list before prepending the
+        # context_msgs + a fresh SystemMessage.
+        if context_msgs and not any(
+            context_msgs[0] is m for m in full_messages
+        ):
+            non_system = [m for m in full_messages if not isinstance(m, SystemMessage)]
+            full_messages = (
+                [SystemMessage(content=system_prompt)]
+                + context_msgs
+                + non_system
+            )
+            logger.debug(
+                f"[ContextSlot] B1 re-append: {len(context_msgs)} "
+                f"context message(s) re-injected after loop-breaker "
+                f"repair for {instance_short}"
+            )
+
         try:
             # Use run_in_executor to avoid blocking the event loop.
             # This allows SSE streaming to continue while LLM processes.
@@ -2356,6 +2717,29 @@ def create_agent_node(
             # lose the just-drained child reports.
             for rmsg in injected_report_msgs:
                 compact_messages.append(rmsg)
+
+            # Context Injection Restructure — Phase 3 / Task 8: C3
+            # analog for context messages. ``context_msgs`` live only
+            # in the local closure (they never enter the checkpoint
+            # per ADR-2), so ``graph.aget_state`` returns a compacted
+            # list missing them. Without this re-append the compaction
+            # retry would lose the per-turn context block. Append AFTER
+            # the injected_msgs / report msgs so the ordering of the
+            # first-attempt ``full_messages`` is preserved on the
+            # compaction retry:
+            #   ``[SystemMessage] + context_msgs + state + injected + report``
+            if context_msgs:
+                non_system = [m for m in compact_messages if not isinstance(m, SystemMessage)]
+                compact_messages = (
+                    [SystemMessage(content=system_prompt)]
+                    + context_msgs
+                    + non_system
+                )
+                logger.debug(
+                    f'[LLM] Reactive compaction: re-appended '
+                    f'{len(context_msgs)} context message(s) for '
+                    f'{instance_short}'
+                )
 
             # Use run_in_executor to avoid blocking the event loop after compaction
             # Continue with the same LLM that was being used (may be vision or standard)
@@ -2699,6 +3083,7 @@ def build_instance_graph(
     loop_breaker_slot: LoopBreakerSlot | None = None,
     loop_repairer: LoopRepairer | None = None,
     loop_breaker_config: "LoopBreakerConfig | None" = None,
+    context_slot: "ContextSlot | None" = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -2753,6 +3138,13 @@ def build_instance_graph(
             task). ``None`` is backward-compatible (no question-pause
             behavior; the unconditional ``tools → agent`` edge is used
             instead).
+        context_slot: Optional :class:`ContextSlot` (Phase 3) that
+            lets the ``agent_node`` assemble per-turn
+            ``[SYSTEM CONTEXT: ...]`` HumanMessages and inject them
+            into the LOCAL ``full_messages`` between the system
+            prompt and the state messages. ``None`` disables context
+            assembly (backward-compatible default — legacy agents
+            keep their system-prompt-baked context).
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
@@ -2806,6 +3198,7 @@ def build_instance_graph(
         loop_breaker_slot=loop_breaker_slot,
         loop_repairer=loop_repairer,
         loop_breaker_config=loop_breaker_config,
+        context_slot=context_slot,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)

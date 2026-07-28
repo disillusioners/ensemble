@@ -84,6 +84,7 @@ def _build_graph_input(
     content: str | list,
     message_id: str,
     skill_injection_msg: HumanMessage | None,
+    agent_meta: Any | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, optionally prepending a skill injection message.
 
@@ -94,11 +95,18 @@ def _build_graph_input(
     first-attempt branches — a divergence there would silently double-
     inject (or skip-inject) on retries.
 
-    The skill message is prepended (not appended) so the LangGraph
-    ``add_messages`` reducer sees it BEFORE the user message in the
-    final ordering — the agent's first read is the skill context, then
-    the user message. This mirrors the prompt layout the rest of the
-    codebase uses for system-context-then-user-input.
+    Context Injection Restructure — Phase 3 / Task 12: the
+    ``agent_meta`` arg drives the ``context_injection_mode`` gate. In
+    ``human_messages`` mode the skill content is consumed by
+    :func:`daemon.services.context_messages.assemble_context_messages`
+    inside ``agent_node`` (via the per-instance cached result on
+    the manager — see ``InstanceManager.set_context_skill_result``)
+    so prepending a separate ``HumanMessage`` here would
+    double-inject the same skill block. The function returns ONLY
+    ``[user_message]`` in that mode. In ``system_prompt`` mode the
+    legacy behavior is preserved — the skill message is prepended so
+    the LangGraph ``add_messages`` reducer sees the skill context
+    BEFORE the user message in the final ordering.
 
     Args:
         content: The user message content (string or multimodal
@@ -108,12 +116,36 @@ def _build_graph_input(
         skill_injection_msg: Optional ``HumanMessage`` carrying
             the skill-injection block. ``None`` (the default
             outside the first-attempt path) means no prepend.
+            IGNORED in ``human_messages`` mode (the skill content
+            is rebuilt inside ``agent_node`` instead).
+        agent_meta: Optional :class:`AgentMetadata` (or duck-typed
+            equivalent) used to resolve the
+            ``context_injection_mode``. ``None`` (or missing
+            ``context_injection_mode``) is coerced to
+            ``system_prompt`` by
+            :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
+            — the legacy path is the safe default for any caller that
+            doesn't yet pass the metadata.
 
     Returns:
         ``{"messages": [...]}`` dict ready for
-        ``graph.astream(graph_input, ...)``.
+        ``graph.astream(graph_input, ...)``. In ``human_messages``
+        mode the list contains ONLY the ``user_message``; in
+        ``system_prompt`` mode it contains ``[skill_injection_msg?,
+        user_message]`` matching the pre-Phase-3 layout.
     """
     user_message = HumanMessage(content=content, id=message_id)
+    # Phase 3 / Task 12 — human_messages mode bypasses the graph-input
+    # skill prepend. The skill block is rebuilt inside ``agent_node``
+    # by ``ContextSlot.assemble()`` reading the cached result from
+    # ``InstanceManager.get_context_skill_result``. Importing here
+    # (instead of at module top) keeps the module-load cost of the
+    # message-delivery path unchanged for callers that never reach
+    # this branch.
+    from ..services.instance_lifecycle import _resolve_injection_mode
+    mode = _resolve_injection_mode(agent_meta)
+    if mode == "human_messages":
+        return {"messages": [user_message]}
     if skill_injection_msg is not None:
         return {"messages": [skill_injection_msg, user_message]}
     return {"messages": [user_message]}
@@ -1803,6 +1835,38 @@ class InstanceMessagingService:
             )
         )
 
+        # Context Injection Restructure — Phase 3 / Task 12: resolve the
+        # agent metadata ONCE at the top of the messaging path so the
+        # ``_build_graph_input()`` helper (called from both retry
+        # branches AND the first-attempt branch below) can read the
+        # ``context_injection_mode`` and short-circuit the skill-message
+        # prepend in ``human_messages`` mode. The skill content is
+        # instead delivered via the manager-stored result + the
+        # ``ContextSlot.assemble()`` path inside ``agent_node``.
+        #
+        # Cheap lookup — the registry is in-memory; only the registry
+        # cache miss case hits disk. ``None`` is coerced to
+        # ``system_prompt`` by ``_resolve_injection_mode`` so a missing
+        # agent_meta can never accidentally opt an unknown agent into
+        # ``human_messages`` mode (the safe default is the legacy path).
+        _messaging_agent_meta: Any | None = None
+        try:
+            _instance_row_for_meta = await asyncio.to_thread(
+                self._manager._instance_repository.get, instance_id
+            )
+            if _instance_row_for_meta is not None:
+                from ..registry import get_registry
+                _registry = get_registry()
+                _messaging_agent_meta = _registry.get_resolved(
+                    _instance_row_for_meta.agent_id
+                )
+        except Exception as _meta_exc:  # pragma: no cover - defensive
+            logger.debug(
+                f"[Messaging] Failed to resolve agent_meta for "
+                f"{instance_id[:8]}...: {_meta_exc}"
+            )
+            _messaging_agent_meta = None
+
         # Project context injection for first message only
         if not is_retry:
             if is_completion_report:
@@ -1827,6 +1891,20 @@ class InstanceMessagingService:
                 )
 
                 # ── Project context injection (existing logic) ─────────────────
+                # Context Injection Restructure — Phase 3 / Task 9: skip
+                # the legacy string prepending in ``human_messages`` mode.
+                # The project + KV + notes + history content is rebuilt
+                # per-turn inside ``agent_node`` by
+                # :func:`daemon.services.context_messages.assemble_context_messages`
+                # → :func:`build_project_context_message`. The legacy
+                # ``format_project_context()`` is kept (still called by
+                # system-prompt-mode paths) per ADR-9.
+                from .instance_lifecycle import _resolve_injection_mode as _msg_resolve_mode
+                _msg_injection_mode = _msg_resolve_mode(_messaging_agent_meta)
+                _msg_skip_string_prepend = (
+                    _msg_injection_mode == "human_messages"
+                )
+
                 project_already_injected = bool(
                     instance_metadata and instance_metadata.get("project_injected")
                 )
@@ -1853,49 +1931,74 @@ class InstanceMessagingService:
                                 self._fetch_critical_notes_safe,
                                 matched_project.project_id,
                             )
-                            project_context = format_project_context(matched_project, store=self._manager.project_store, critical_notes=critical_notes)
-                            message = project_context + message
+                            # Phase 3 / Task 9: in human_messages mode, do
+                            # NOT prepend the project context to the user
+                            # message body. The content is rebuilt per-turn
+                            # inside ``agent_node`` instead. System-prompt
+                            # mode keeps the legacy prepending for byte-
+                            # identical output (zero regression).
+                            if not _msg_skip_string_prepend:
+                                project_context = format_project_context(
+                                    matched_project,
+                                    store=self._manager.project_store,
+                                    critical_notes=critical_notes,
+                                )
+                                message = project_context + message
                             injection_succeeded = True
                             logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
                     else:
                         # No project_id yet → extract keywords and try to match
                         from ..manager import extract_project_keywords
                         keywords = extract_project_keywords(message)
-                        
+
                         if keywords:
                             # Wrap the sync ``match_by_keywords`` DB read in
                             # ``asyncio.to_thread``.
                             matched_project = await asyncio.to_thread(
                                 self._project_repository.match_by_keywords, keywords
                             )
-                            
+
                             if matched_project:
                                 # Log the match
                                 logger.info(
                                     f"Project context injection: matched '{matched_project.name}' "
                                     f"from keywords: {keywords[:5]}..."
                                 )
-                                
+
                                 # Fetch critical notes from repository.
                                 # ``_fetch_critical_notes_safe`` is sync — wrap.
                                 critical_notes = await asyncio.to_thread(
                                     self._fetch_critical_notes_safe,
                                     matched_project.project_id,
                                 )
-                                
-                                # Prepend project context to message
-                                from ..manager import format_project_context
-                                project_context = format_project_context(matched_project, store=self._manager.project_store, critical_notes=critical_notes)
-                                message = project_context + message
+
+                                # Prepend project context to message —
+                                # Phase 3 / Task 9: skipped in
+                                # human_messages mode.
+                                if not _msg_skip_string_prepend:
+                                    from ..manager import format_project_context
+                                    project_context = format_project_context(
+                                        matched_project,
+                                        store=self._manager.project_store,
+                                        critical_notes=critical_notes,
+                                    )
+                                    message = project_context + message
                                 injection_succeeded = True
-                                
+
                                 # Update instance metadata with project_id.
                                 # Sync DB write — wrap in ``asyncio.to_thread``.
+                                # Phase 3: still stamp the project_id on the
+                                # instance metadata in human_messages mode so
+                                # ContextSlot.resolve_project_id() can pick
+                                # it up per-turn. The project_id is the same
+                                # gate the legacy prepend used — preserving
+                                # it here keeps the matching behavior
+                                # consistent across modes.
                                 await asyncio.to_thread(
                                     self._manager._instance_repository.set_metadata,
                                     instance_id, "project_id", matched_project.project_id,
                                 )
-                                
+
                                 logger.debug(f"Injected project context for instance {instance_id[:8]}...")
                     
                     # Mark as injected to prevent re-injection on subsequent messages.
@@ -1956,46 +2059,57 @@ class InstanceMessagingService:
                         if instance_meta is not None
                         else None
                     )
-                    # Local import keeps the message-delivery path's
-                    # module-load cost unchanged for callers that never
-                    # reach this branch (retries, completion reports).
-                    from .instance_lifecycle import (
-                        format_shared_context_for_message_body,
-                    )
-                    # ``format_shared_context_for_message_body`` is sync
-                    # — it touches the SQLite repo. Wrap in
-                    # ``asyncio.to_thread`` so SQLite StaticPool /
-                    # WAL-write contention cannot block the event loop
-                    # (same dead-lock-avoidance pattern used elsewhere
-                    # in this method).
-                    sc_block = await asyncio.to_thread(
-                        format_shared_context_for_message_body,
-                        instance_id,
-                        self._manager._instance_repository,
-                        self._manager.shared_context_metadata_repo,
-                        sc_parent_id,
-                    )
-                    if sc_block:
-                        message = sc_block + message
-                        logger.debug(
-                            f"Shared context metadata injected into message body "
-                            f"for instance {instance_id[:8]}..."
+                    # Context Injection Restructure — Phase 3 / Task 10:
+                    # in ``human_messages`` mode the KV block is part of
+                    # the ``[SYSTEM CONTEXT: Related Project]`` message
+                    # rebuilt per-turn inside ``agent_node`` by
+                    # :func:`daemon.services.context_messages._format_kv_metadata_section`.
+                    # Prepending here would double-inject. The legacy
+                    # ``system_prompt`` mode keeps the original behavior
+                    # — system-prompt appenders don't carry the KV, so
+                    # the message-body prepending is the only source.
+                    if not _msg_skip_string_prepend:
+                        # Local import keeps the message-delivery path's
+                        # module-load cost unchanged for callers that
+                        # never reach this branch (retries, completion
+                        # reports, human_messages agents).
+                        from .instance_lifecycle import (
+                            format_shared_context_for_message_body,
                         )
-                        # Flip the flag ONLY when injection actually
-                        # changed the message. This mirrors
-                        # ``project_injected`` (only flips when
-                        # ``injection_succeeded``) so a subsequent
-                        # message can pick up late-arriving metadata.
-                        await asyncio.to_thread(
-                            self._manager._instance_repository.set_metadata,
-                            instance_id, "shared_context_injected", True,
+                        # ``format_shared_context_for_message_body`` is
+                        # sync — it touches the SQLite repo. Wrap in
+                        # ``asyncio.to_thread`` so SQLite StaticPool /
+                        # WAL-write contention cannot block the event
+                        # loop (same dead-lock-avoidance pattern used
+                        # elsewhere in this method).
+                        sc_block = await asyncio.to_thread(
+                            format_shared_context_for_message_body,
+                            instance_id,
+                            self._manager._instance_repository,
+                            self._manager.shared_context_metadata_repo,
+                            sc_parent_id,
                         )
-                    else:
-                        # No block (no KV for this context, or 32k cap,
-                        # or exception). Skip without flipping the flag
-                        # — the next message will retry the lookup. This
-                        # case is logged inside the formatter itself.
-                        logger.debug(
+                        if sc_block:
+                            message = sc_block + message
+                            logger.debug(
+                                f"Shared context metadata injected into message body "
+                                f"for instance {instance_id[:8]}..."
+                            )
+                            # Flip the flag ONLY when injection actually
+                            # changed the message. This mirrors
+                            # ``project_injected`` (only flips when
+                            # ``injection_succeeded``) so a subsequent
+                            # message can pick up late-arriving metadata.
+                            await asyncio.to_thread(
+                                self._manager._instance_repository.set_metadata,
+                                instance_id, "shared_context_injected", True,
+                            )
+                        else:
+                            # No block (no KV for this context, or 32k cap,
+                            # or exception). Skip without flipping the flag
+                            # — the next message will retry the lookup. This
+                            # case is logged inside the formatter itself.
+                            logger.debug(
                             f"Shared context metadata injection skipped "
                             f"(empty/empty KV or graceful-degradation path) "
                             f"for instance {instance_id[:8]}..."
@@ -2102,6 +2216,48 @@ class InstanceMessagingService:
                                         message_id,
                                         injected_skill_ids,
                                     )
+                                    # Context Injection Restructure —
+                                    # Phase 3 / B2 fix: store the
+                                    # skill-search result on the manager
+                                    # so ``ContextSlot.assemble()``
+                                    # (running inside ``agent_node``)
+                                    # can reuse it on retry without
+                                    # re-running the search (B3 fix).
+                                    # Stored even when the agent is in
+                                    # ``system_prompt`` mode — it's a
+                                    # no-op for that mode (ContextSlot
+                                    # early-returns), so the cost is one
+                                    # extra dict entry per message.
+                                    setter = getattr(
+                                        self._manager,
+                                        "set_context_skill_result",
+                                        None,
+                                    )
+                                    if setter is not None:
+                                        setter(
+                                            instance_id,
+                                            (injection_text, injected_skill_ids),
+                                        )
+                                else:
+                                    # Search ran but yielded nothing.
+                                    # Still store the empty result so a
+                                    # retry of the same message does NOT
+                                    # re-run the search (per B3). ``None``
+                                    # here means "no injection text", not
+                                    # "not searched" — the latter is the
+                                    # absent-key case, which
+                                    # ``assemble_context_messages`` treats
+                                    # as "search again".
+                                    setter = getattr(
+                                        self._manager,
+                                        "set_context_skill_result",
+                                        None,
+                                    )
+                                    if setter is not None:
+                                        setter(
+                                            instance_id,
+                                            (None, list(injected_skill_ids)),
+                                        )
                                     # Persist injected skill IDs to instance
                                     # metadata so SkillMetricsService can
                                     # read them at task-completion time.
@@ -2225,6 +2381,28 @@ class InstanceMessagingService:
                                 content=_meta_injection_text,
                                 id=str(uuid.uuid4()),
                             )
+                        # Context Injection Restructure — Phase 3 / Task 13:
+                        # store the <meta>-tag skill result on the manager
+                        # so ``ContextSlot.assemble()`` can rebuild the
+                        # block with the unified ``[SYSTEM CONTEXT: Skills]``
+                        # prefix in ``human_messages`` mode. Same pattern
+                        # as the auto-search block above. Also store on
+                        # the empty-text path so a retry of the same
+                        # message does NOT re-run the explicit-skill
+                        # resolver — mirrors the B3 short-circuit.
+                        _meta_setter = getattr(
+                            self._manager,
+                            "set_context_skill_result",
+                            None,
+                        )
+                        if _meta_setter is not None:
+                            _meta_setter(
+                                instance_id,
+                                (
+                                    _meta_injection_text,
+                                    list(_meta_skill_ids),
+                                ),
+                            )
                         # Phase 4 metrics attribution. Same API the
                         # first-attempt block uses.
                         injection_service.track_injection(
@@ -2340,8 +2518,12 @@ class InstanceMessagingService:
                 # checkpoint messages, so the agent sees full history + new message.
                 content = _build_message_content(message, images)
                 if content and not silent:
+                    # Phase 3 / Task 12 — pass ``_messaging_agent_meta``
+                    # so ``_build_graph_input`` can short-circuit the
+                    # skill-message prepend in ``human_messages`` mode.
                     graph_input = _build_graph_input(
-                        content, message_id, _skill_injection_msg
+                        content, message_id, _skill_injection_msg,
+                        _messaging_agent_meta,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -2350,13 +2532,15 @@ class InstanceMessagingService:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
                 content = _build_message_content(message, images)
                 graph_input = _build_graph_input(
-                    content, message_id, _skill_injection_msg
+                    content, message_id, _skill_injection_msg,
+                    _messaging_agent_meta,
                 )
         else:
             # First attempt - add message to conversation
             content = _build_message_content(message, images)
             graph_input = _build_graph_input(
-                content, message_id, _skill_injection_msg
+                content, message_id, _skill_injection_msg,
+                _messaging_agent_meta,
             )
         
         # Build user message for pre-emit - use multimodal content if images present

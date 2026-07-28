@@ -1592,7 +1592,7 @@ class InstanceLifecycleService:
         # ``question_pause_node`` can set the deferred-pause marker
         # (C2 fix — ``pause_instance_cascade`` runs from the post-graph
         # completion path, not from inside the graph task).
-        from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
+        from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer, ContextSlot
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -1611,6 +1611,21 @@ class InstanceLifecycleService:
             loop_repairer=LoopRepairer(),
             loop_breaker_config=self._config.loop_breaker,
             manager=self._manager,
+            # Context Injection Restructure — Phase 3 / Task 3 part 2:
+            # thread the ContextSlot handle so ``agent_node`` can call
+            # ``ContextSlot.assemble()`` per turn. The slot captures
+            # the agent_meta (for mode resolution + feature flags),
+            # the instance_repository (for tree-root lookup via
+            # ``get_tree_root_id``), and parent_id (for child instances
+            # — ``None`` for tree-root instances). In
+            # ``system_prompt`` mode the slot is a no-op (returns
+            # ``[]``) so legacy agents keep their pre-Phase-3 behavior.
+            context_slot=ContextSlot(
+                self._manager,
+                metadata,
+                self._manager._instance_repository,
+                parent_id,
+            ),
         )
 
         # Save metadata to DB using instance repository
@@ -2995,7 +3010,25 @@ class InstanceLifecycleService:
         # Phase 1 / question-tool: thread ``manager`` for the same
         # reasons as the spawn path — conditional post-tools edge and
         # ``question_pause_node`` both need the manager reference.
-        from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer
+        from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer, ContextSlot
+        # Resolve ``parent_id`` from the restored instance metadata
+        # so the ContextSlot can pass it through to
+        # ``assemble_context_messages`` for tree-root resolution. Root
+        # instances have ``parent_id is None`` (or empty string);
+        # children have the parent's id. ``getattr`` with a ``None``
+        # default keeps the restore path tolerant of older rows that
+        # pre-date the ``parent_id`` column.
+        _restore_parent_id: str | None = None
+        try:
+            _restore_meta_row = (
+                self._manager._instance_repository.get(instance_id)
+            )
+            if _restore_meta_row is not None:
+                _restore_parent_id = getattr(
+                    _restore_meta_row, "parent_id", None
+                ) or None
+        except Exception:  # pragma: no cover - defensive
+            _restore_parent_id = None
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -3014,6 +3047,18 @@ class InstanceLifecycleService:
             loop_repairer=LoopRepairer(),
             loop_breaker_config=self._config.loop_breaker,
             manager=self._manager,
+            # Context Injection Restructure — Phase 3 / Task 3 part 2:
+            # thread the ContextSlot on the restore path too. Same
+            # pattern as the spawn path — the slot captures agent_meta
+            # (loaded at the top of the restore function), the
+            # instance_repository (for tree-root lookup), and
+            # parent_id (resolved from the restored instance row).
+            context_slot=ContextSlot(
+                self._manager,
+                agent_meta,
+                self._manager._instance_repository,
+                _restore_parent_id,
+            ),
         )
 
         # Store in instances dict
