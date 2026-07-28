@@ -75,6 +75,21 @@ def _has_deprecation_warning(caplog: pytest.LogCaptureFixture) -> bool:
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_deprecation_set():
+    """Clear the module-level dedup set so every test starts fresh.
+
+    ``daemon.registry._deprecation_warned`` persists across tests (module-level
+    set). Without resetting, a test reusing an agent_id that an earlier test
+    already warned for would see NO warning — a false negative.
+    """
+    from daemon.registry import _deprecation_warned
+
+    _deprecation_warned.clear()
+    yield
+    _deprecation_warned.clear()
+
+
 # =============================================================================
 # 1. Legacy flag present → warning emitted
 # =============================================================================
