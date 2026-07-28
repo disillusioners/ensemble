@@ -235,28 +235,6 @@ class TestAgentRegistryDiscoverSkillInjection:
         assert agent is not None
         assert agent.context_injection.heuristic_match_shared_md_files is False
 
-    def test_context_injection_legacy_boolean_true_normalized(self, tmp_path: Path):
-        """Backward compat: legacy boolean ``true`` → heuristic enabled."""
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _create_agent_meta(agents_dir, "legacy-bool-true", context_injection=True)
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-        agent = registry.get("legacy-bool-true")
-        assert agent is not None
-        assert agent.context_injection.heuristic_match_shared_md_files is True
-
-    def test_context_injection_legacy_boolean_false_normalized(self, tmp_path: Path):
-        """Backward compat: legacy boolean ``false`` → heuristic disabled."""
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _create_agent_meta(agents_dir, "legacy-bool-false", context_injection=False)
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-        agent = registry.get("legacy-bool-false")
-        assert agent is not None
-        assert agent.context_injection.heuristic_match_shared_md_files is False
-
     def test_context_injection_unknown_keys_dropped(self, tmp_path: Path):
         """Unknown keys in the new object are silently dropped (extra='ignore')."""
         from daemon.registry import ContextInjectionConfig

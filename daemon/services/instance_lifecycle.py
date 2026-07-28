@@ -881,8 +881,8 @@ def append_context_injection(
         ``"human_messages"``.
     """
     # Gate on the new object key ``heuristic_match_shared_md_files``.
-    # Backward compat: after Pydantic normalization, ``context_injection``
-    # is always a ``ContextInjectionConfig`` instance, so a duck-typed
+    # Pydantic guarantees ``context_injection`` is a
+    # ``ContextInjectionConfig`` instance (or None), so a duck-typed
     # attribute lookup is sufficient. ``False`` (the default) skips.
     ci = getattr(agent_meta, "context_injection", None)
     if not (ci and getattr(ci, "heuristic_match_shared_md_files", False)):

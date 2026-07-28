@@ -30,12 +30,6 @@ SKIP_DIRS: frozenset[str] = frozenset({
 # do NOT match and are treated as plain agent ids.
 _TAG_PATTERN = re.compile(r'^([^\[\]]+)\[([A-Za-z0-9_-]+)\]$')
 
-# Module-level dedup set for the "context_injection: true" deprecation
-# warning. ``discover()`` is called on every daemon poll / reload, so an
-# unconditional warning would fire repeatedly for the same legacy agent.
-# Keyed by agent_id — once we've warned for an agent we never warn again.
-_deprecation_warned: set[str] = set()
-
 
 def _parse_agent_dir_name(dir_name: str) -> tuple[str, str | None]:
     """Parse a directory name, extracting optional [tag] suffix.
@@ -102,15 +96,6 @@ class ToolFilter(BaseModel):
 class ContextInjectionConfig(BaseModel):
     """Structured per-agent context-injection configuration.
 
-    Replaces the legacy boolean ``context_injection: true|false`` meta.json
-    flag with an object so additional knobs can be added in the future
-    without breaking backward compatibility.
-
-    Backward compat: legacy ``"context_injection": true|false|missing``
-    values are normalized by the ``AgentMetadata`` field validator (see
-    ``_normalize_context_injection`` below) so existing meta.json files
-    keep loading without error.
-
     Attributes:
         heuristic_match_shared_md_files: When ``True``, the heuristic
             ``.md`` file matching from the filesystem runs and produces
@@ -165,8 +150,7 @@ class AgentMetadata(BaseModel):
     context_injection: ContextInjectionConfig = Field(
         default_factory=ContextInjectionConfig,
         description=(
-            "Per-agent context-injection configuration. Replaces the "
-            "legacy boolean 'context_injection' flag. Set to an object "
+            "Per-agent context-injection configuration. Set to an object "
             "like '{\"heuristic_match_shared_md_files\": true}' to "
             "opt in to heuristic .md file matching. Default "
             "heuristic_match_shared_md_files=False."
@@ -176,11 +160,10 @@ class AgentMetadata(BaseModel):
     # "human_messages" (default — context as [SYSTEM CONTEXT: ...]
     # HumanMessages) or "legacy" (opt-in — original system-prompt
     # injection behavior, used to reproduce the pre-restructure byte
-    # layout). The legacy ``context_injection: true`` flag does NOT
-    # influence this mode; agents that previously relied on it now
-    # default to ``human_messages`` unless they explicitly set
-    # ``context_injection_mode: "legacy"`` in meta.json. Validation
-    # lives in
+    # layout). Agents that previously relied on the legacy boolean
+    # ``context_injection: true`` flag now default to ``human_messages``
+    # unless they explicitly set ``context_injection_mode: "legacy"`` in
+    # meta.json. Validation lives in
     # :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
     # — unknown values are silently coerced to the default
     # (``"human_messages"``) rather than rejected, so a typo in
@@ -231,36 +214,6 @@ class AgentMetadata(BaseModel):
         if isinstance(v, Path):
             return v
         return Path(v)
-
-    @field_validator("context_injection", mode="before")
-    @classmethod
-    def _normalize_context_injection(cls, v: Any) -> Any:
-        """Coerce legacy boolean / dict / None into the structured config.
-
-        Backward compatibility for existing ``meta.json`` files:
-
-        * ``True`` → ``{"heuristic_match_shared_md_files": True}``
-        * ``False`` / missing / ``None`` → ``{}`` (default config;
-          ``heuristic_match_shared_md_files=False``)
-        * ``dict`` → passed through to ``ContextInjectionConfig`` for
-          Pydantic validation (extra keys silently dropped).
-        * already a ``ContextInjectionConfig`` instance → returned as-is
-          so Pydantic can revalidate the fields cleanly.
-        * Unknown type → fail-open to defaults with a warning.
-        """
-        if isinstance(v, ContextInjectionConfig):
-            return v
-        if v is True:
-            return {"heuristic_match_shared_md_files": True}
-        if v is False or v is None:
-            return {}
-        if isinstance(v, dict):
-            return v
-        logger.warning(
-            f"Unknown context_injection value type {type(v).__name__}; "
-            "treating as default config."
-        )
-        return {}
 
 
 class AgentRegistry:
@@ -338,23 +291,6 @@ class AgentRegistry:
                 )
             agent_id = meta.get("id", base_agent_id)
 
-            # Deprecation warning: ``context_injection: true`` is the legacy
-            # boolean opt-in. It no longer controls the per-agent injection
-            # mode (the newer ``context_injection_mode`` field does — see
-            # ADR-8). Emit a one-shot warning so agents still relying on the
-            # legacy flag can migrate to ``context_injection_mode``.
-            _ci_raw = meta.get("context_injection")
-            if _ci_raw is True and agent_id not in _deprecation_warned:
-                _deprecation_warned.add(agent_id)
-                logger.warning(
-                    "Agent '%s' uses deprecated 'context_injection: true' flag. "
-                    "This flag no longer controls context injection mode. "
-                    "The agent now defaults to 'context_injection_mode: \"human_messages\"'. "
-                    "To preserve the legacy system-prompt injection behavior, set 'context_injection_mode': 'legacy' in meta.json. "
-                    "The 'context_injection' flag will be removed in a future version.",
-                    agent_id,
-                )
-
             # Build AgentMetadata with defaults for missing fields
             tools_config = meta.get("tools")
             tools_filter = None
@@ -363,6 +299,15 @@ class AgentRegistry:
                     tools_filter = ToolFilter.model_validate(tools_config)
                 except Exception as e:
                     logger.warning(f"Failed to parse tools config for {agent_path.name}: {e}")
+
+            # ``context_injection`` must be a dict/ContextInjectionConfig;
+            # legacy booleans are no longer accepted and will raise a
+            # Pydantic validation error. Missing/None falls back to the
+            # ``default_factory`` on the field.
+            ci_raw = meta.get("context_injection")
+            context_injection_arg = (
+                ci_raw if ci_raw is not None else ContextInjectionConfig()
+            )
 
             try:
                 agent_meta = AgentMetadata(
@@ -381,7 +326,7 @@ class AgentRegistry:
                     llm_model=meta.get("llm_model"),
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
-                    context_injection=meta.get("context_injection", False),
+                    context_injection=context_injection_arg,
                     context_injection_mode=meta.get(
                         "context_injection_mode", "human_messages"
                     ),

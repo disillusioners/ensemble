@@ -10,7 +10,6 @@ cd "$PROJECT_DIR"
 # Layer 1 (command-level): 120s via `timeout` wrapper below
 timeout 110s .venv/bin/pytest \
   tests/unit/test_context_messages.py \
-  tests/unit/test_context_injection_deprecation.py \
   -v --override-ini="addopts=" --tb=short -q 2>&1
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
