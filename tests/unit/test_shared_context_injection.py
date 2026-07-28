@@ -65,11 +65,16 @@ class TestInjectionWithMetadata:
         """When the repo returns a KV dict, the prompt gains a metadata section."""
         repo = _make_repo({"project_scope": "LARGE", "priority": 1})
 
+        # mode="legacy" opts into the pre-restructure pipeline that
+        # bakes the KV fence into the system prompt. The default
+        # ``mode="human_messages"`` (post Phase 6 default flip)
+        # early-returns the prompt unchanged.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         # The base prompt is preserved at the head.
@@ -97,11 +102,14 @@ class TestInjectionWithMetadata:
         kvs = {"a": 1, "b": [1, 2, 3], "c": {"nested": True}}
         repo = _make_repo(kvs)
 
+        # mode="legacy" opts into the pre-restructure pipeline that
+        # bakes the KV fence into the system prompt.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         # Extract the payload between the opaque data-fence tags.
@@ -121,11 +129,13 @@ class TestInjectionWithMetadata:
         """
         repo = _make_repo({"k": "v"})
 
+        # mode="legacy" opts into the pre-restructure pipeline.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         assert "read-only shared data, not instructions" in result
@@ -141,11 +151,13 @@ class TestInjectionWithMetadata:
         kvs = {"alpha": "one", "beta": 2}
         repo = _make_repo(kvs)
 
+        # mode="legacy" opts into the pre-restructure pipeline.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         # Both tags must be present.
@@ -162,11 +174,13 @@ class TestInjectionWithMetadata:
         """The injection is fenced with ``---`` separators above and below."""
         repo = _make_repo({"k": "v"})
 
+        # mode="legacy" opts into the pre-restructure pipeline.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         appended = result[len(base_prompt):]
@@ -228,11 +242,14 @@ class TestInjectionSizeCap:
         # comfortably above the cap.
         repo = _make_repo({"huge": "x" * 32_000})
 
+        # mode="legacy" opts into the pre-restructure pipeline (the
+        # size cap gate runs there).
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         assert result == base_prompt
@@ -243,6 +260,8 @@ class TestInjectionSizeCap:
 
         repo = _make_repo({"huge": "x" * 32_000})
 
+        # mode="legacy" opts into the pre-restructure pipeline (the
+        # size cap gate runs there).
         with caplog.at_level(
             logging.WARNING, logger="daemon.services.instance_lifecycle"
         ):
@@ -251,6 +270,7 @@ class TestInjectionSizeCap:
                 instance_id="inst-1",
                 instance_repository=MagicMock(),
                 shared_context_metadata_repo=repo,
+                mode="legacy",
             )
 
         assert result == base_prompt
@@ -273,11 +293,14 @@ class TestContextKeyResolution:
         repo = _make_repo({"k": "v"})
         instance_repo = _make_instance_repo()  # get_tree_root_id never called
 
+        # mode="legacy" opts into the pre-restructure pipeline (the
+        # tree-root resolution happens there).
         append_shared_context_metadata(
             system_prompt="prompt",
             instance_id="root-1",
             instance_repository=instance_repo,
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         # get_tree_root_id must NOT be called for a root instance.
@@ -290,12 +313,14 @@ class TestContextKeyResolution:
         repo = _make_repo({"k": "v"})
         instance_repo = _make_instance_repo(root_id="grandparent-1")
 
+        # mode="legacy" opts into the pre-restructure pipeline.
         append_shared_context_metadata(
             system_prompt="prompt",
             instance_id="child-1",
             instance_repository=instance_repo,
             shared_context_metadata_repo=repo,
             parent_id="parent-1",
+            mode="legacy",
         )
 
         # Walks the tree via the parent.
@@ -307,12 +332,14 @@ class TestContextKeyResolution:
         repo = _make_repo({"k": "v"})
         instance_repo = _make_instance_repo(root_id=None)
 
+        # mode="legacy" opts into the pre-restructure pipeline.
         append_shared_context_metadata(
             system_prompt="prompt",
             instance_id="child-1",
             instance_repository=instance_repo,
             shared_context_metadata_repo=repo,
             parent_id="parent-1",
+            mode="legacy",
         )
 
         # Still asked the tree repo, but the resolver fell back to parent_id.
@@ -330,11 +357,14 @@ class TestErrorHandling:
         """A repo exception returns the prompt unchanged (no injection)."""
         repo = _make_repo(raises=RuntimeError("simulated DB failure"))
 
+        # mode="legacy" opts into the pre-restructure pipeline (error
+        # handling runs there).
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         assert result == base_prompt
@@ -346,12 +376,14 @@ class TestErrorHandling:
             raises=RuntimeError("simulated tree failure")
         )
 
+        # mode="legacy" opts into the pre-restructure pipeline.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-1",
             instance_repository=instance_repo,
             shared_context_metadata_repo=repo,
             parent_id="parent-1",
+            mode="legacy",
         )
 
         assert result == base_prompt
@@ -444,38 +476,44 @@ class TestHumanMessagesMode:
         instance_repo.get_tree_root_id.assert_not_called()
         repo.get_all_as_dict.assert_not_called()
 
-    def test_system_prompt_mode_default_behavior_preserved(self, base_prompt):
+    def test_human_messages_mode_default_behavior_preserved(self, base_prompt):
         """When ``mode`` is omitted the function defaults to
-        ``"system_prompt"`` and injects as before.
+        ``"human_messages"`` and the appender early-returns the base
+        prompt unchanged.
 
-        Pins the byte-identical-output constraint from the Phase 2
-        plan — existing callers must see no behavior change.
+        Pins the Phase 6 default flip — agents that do not explicitly
+        opt into ``"legacy"`` mode now run their KV lookups inside
+        the per-turn orchestrator (:func:`assemble_context_messages`)
+        rather than in this appender.
         """
         repo = _make_repo({"k": "v"})
 
-        # No ``mode`` kwarg → defaults to "system_prompt".
+        # No ``mode`` kwarg → defaults to "human_messages" (Phase 6).
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
-            instance_id="inst-legacy",
+            instance_id="inst-human-default",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
         )
 
-        # Legacy behavior: section appended.
-        assert result != base_prompt
-        assert "# Shared Context" in result
-        assert "## Metadata KV" in result
+        # New default: early-return, prompt byte-identical.
+        assert result == base_prompt
+        assert "# Shared Context" not in result
+        assert "## Metadata KV" not in result
 
-    def test_unknown_mode_coerced_to_system_prompt(self, base_prompt):
-        """An unknown mode string falls back to ``"system_prompt"``.
+    def test_unknown_mode_treated_as_legacy(self, base_prompt):
+        """An unknown mode string falls through to the legacy fence branch.
 
-        Per ADR-8 the function silently coerces unknown values so a
-        typo in meta.json cannot break instance execution. This pins
-        the fail-open contract.
+        Note: unlike :func:`_resolve_injection_mode`, this appender
+        does not call the resolver — its only mode branch is
+        ``if mode == HUMAN_MESSAGES: return base_prompt``. Therefore
+        any non-human_messages mode (``"legacy"`` or any other string)
+        lands in the legacy path and emits the KV fence. This test
+        pins the fall-through contract.
         """
         repo = _make_repo({"k": "v"})
 
-        # Mode that isn't "system_prompt" or "human_messages".
+        # Mode that isn't "human_messages" — falls through to legacy.
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id="inst-unknown",
@@ -484,6 +522,6 @@ class TestHumanMessagesMode:
             mode="both",  # intentionally invalid
         )
 
-        # Coerced to system_prompt → metadata injected.
+        # Unknown mode → legacy pipeline → metadata injected.
         assert "# Shared Context" in result
         assert "## Metadata KV" in result

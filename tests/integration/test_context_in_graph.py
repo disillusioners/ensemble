@@ -56,10 +56,15 @@ from daemon.services.instance_messaging import _build_graph_input
 
 
 @pytest.fixture
-def system_prompt_agent_meta() -> SimpleNamespace:
-    """AgentMeta stub in legacy ``system_prompt`` mode (default)."""
+def legacy_agent_meta() -> SimpleNamespace:
+    """AgentMeta stub in opt-in ``legacy`` mode.
+
+    Previously named ``system_prompt_agent_meta`` when ``system_prompt``
+    was the default. After the Phase 6 default flip, ``legacy`` mode is
+    only reachable by explicitly setting ``context_injection_mode``.
+    """
     return SimpleNamespace(
-        context_injection_mode="system_prompt",
+        context_injection_mode="legacy",
         context_injection=False,
         skill_injection=False,
     )
@@ -67,7 +72,7 @@ def system_prompt_agent_meta() -> SimpleNamespace:
 
 @pytest.fixture
 def human_messages_agent_meta() -> SimpleNamespace:
-    """AgentMeta stub in opt-in ``human_messages`` mode."""
+    """AgentMeta stub in ``human_messages`` mode (the new default)."""
     return SimpleNamespace(
         context_injection_mode="human_messages",
         context_injection=True,
@@ -94,19 +99,20 @@ def stub_manager() -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 
-class TestContextSlotAssembleSystemPromptMode:
-    """System-prompt mode is legacy — the slot must be a no-op."""
+class TestContextSlotAssembleLegacyMode:
+    """Legacy mode is opt-in via ``context_injection_mode: "legacy"`` — the
+    slot must be a no-op (context lives in the system prompt)."""
 
     @pytest.mark.asyncio
-    async def test_returns_empty_list_in_system_prompt_mode(
+    async def test_returns_empty_list_in_legacy_mode(
         self,
-        system_prompt_agent_meta: SimpleNamespace,
+        legacy_agent_meta: SimpleNamespace,
         stub_manager: SimpleNamespace,
     ) -> None:
         """Legacy mode must return [] and never call assemble_context_messages."""
         slot = ContextSlot(
             manager=stub_manager,
-            agent_meta=system_prompt_agent_meta,
+            agent_meta=legacy_agent_meta,
         )
 
         with patch(
@@ -263,19 +269,19 @@ class TestBuildGraphInputModeGating:
         assert messages[0].content == "hello"
         assert messages[0].id == "msg-hm"
 
-    def test_system_prompt_mode_prepends_skill_message(
+    def test_legacy_mode_prepends_skill_message(
         self,
-        system_prompt_agent_meta: SimpleNamespace,
+        legacy_agent_meta: SimpleNamespace,
     ) -> None:
-        """Legacy system_prompt mode preserves the pre-Phase-3 layout:
+        """Legacy mode preserves the pre-Phase-3 layout:
         the skill message is prepended BEFORE the user message."""
         skill_msg = HumanMessage(content="<skill>instructions</skill>", id="skill-1")
 
         result = _build_graph_input(
             content="hello",
-            message_id="msg-sp",
+            message_id="msg-legacy",
             skill_injection_msg=skill_msg,
-            agent_meta=system_prompt_agent_meta,
+            agent_meta=legacy_agent_meta,
         )
 
         messages = result["messages"]
@@ -285,27 +291,34 @@ class TestBuildGraphInputModeGating:
         assert messages[0].content == "<skill>instructions</skill>"
         assert messages[0].id == "skill-1"
         assert messages[1].content == "hello"
-        assert messages[1].id == "msg-sp"
+        assert messages[1].id == "msg-legacy"
 
-    def test_system_prompt_mode_without_skill_returns_single_message(
+    def test_legacy_mode_without_skill_returns_single_message(
         self,
-        system_prompt_agent_meta: SimpleNamespace,
+        legacy_agent_meta: SimpleNamespace,
     ) -> None:
         """Legacy mode without a skill message emits only the user message."""
         result = _build_graph_input(
             content="hello",
-            message_id="msg-sp-empty",
+            message_id="msg-legacy-empty",
             skill_injection_msg=None,
-            agent_meta=system_prompt_agent_meta,
+            agent_meta=legacy_agent_meta,
         )
 
         messages = result["messages"]
         assert len(messages) == 1
         assert messages[0].content == "hello"
-        assert messages[0].id == "msg-sp-empty"
+        assert messages[0].id == "msg-legacy-empty"
 
-    def test_default_agent_meta_treated_as_system_prompt(self) -> None:
-        """No agent_meta (None) must default to legacy behavior."""
+    def test_default_agent_meta_treated_as_human_messages(self) -> None:
+        """No agent_meta (None) must default to human_messages mode (the new default).
+
+        Previously this test asserted the default was ``system_prompt`` mode;
+        after the Phase 6 default flip the bare ``agent_meta=None`` case
+        lands in ``human_messages`` mode and emits only the user message
+        (no skill prepend, because context is rebuilt inside ``agent_node``
+        via ``ContextSlot.assemble()``).
+        """
         skill_msg = HumanMessage(content="<skill>legacy</skill>", id="skill-default")
 
         result = _build_graph_input(
@@ -316,9 +329,11 @@ class TestBuildGraphInputModeGating:
         )
 
         messages = result["messages"]
-        assert len(messages) == 2
-        assert messages[0] is skill_msg
-        assert messages[1].content == "hello"
+        # human_messages mode (the new default) emits only the user message —
+        # the skill block is rebuilt inside agent_node, not prepended here.
+        assert len(messages) == 1
+        assert messages[0] is not skill_msg
+        assert messages[0].content == "hello"
 
 
 # ---------------------------------------------------------------------------

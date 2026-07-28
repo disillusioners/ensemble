@@ -125,6 +125,7 @@ def test_auto_load_skills_tracked_in_metadata(
         manager=manager,
         instance_id="instance-1",
         instance_repository=instance_repository,
+        mode="legacy",
     )
 
     assert "## Auto-Loaded Skills (Evolvable)" in out
@@ -157,6 +158,7 @@ def test_auto_load_dedup_merge(
         manager=manager,
         instance_id="instance-1",
         instance_repository=instance_repository,
+        mode="legacy",
     )
 
     instance_repository.set_metadata.assert_called_once_with(
@@ -185,6 +187,7 @@ def test_auto_load_no_instance_id_skips_tracking(
         manager=manager,
         instance_id=None,
         instance_repository=instance_repository,
+        mode="legacy",
     )
 
     assert "## Auto-Loaded Skills (Evolvable)" in out
@@ -220,6 +223,7 @@ def test_auto_load_skips_explicitly_replaced_ids(
         manager=manager,
         instance_id="instance-1",
         instance_repository=instance_repository,
+        mode="legacy",
     )
 
     assert "# Skill A" in out
@@ -253,6 +257,7 @@ def test_auto_load_preserves_explicit_skills(
         manager=manager,
         instance_id="instance-1",
         instance_repository=instance_repository,
+        mode="legacy",
     )
 
     instance_repository.set_metadata.assert_called_once_with(

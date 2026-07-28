@@ -322,7 +322,7 @@ def append_shared_context_metadata(
     instance_repository: "SQLModelInstanceRepository",
     shared_context_metadata_repo: "SharedContextMetadataRepository",
     parent_id: Optional[str] = None,
-    mode: str = "system_prompt",
+    mode: str = "human_messages",
 ) -> str:
     """Inject shared context metadata KV into the system prompt.
 
@@ -341,16 +341,16 @@ def append_shared_context_metadata(
     system-prompt and message-body injections share a single source
     of truth for prompt-injection defenses.
 
-    Phase 2 (ADR-8) — ``mode="human_messages"`` early-returns the
-    prompt unchanged. In human_messages mode the metadata KV is
-    rebuilt per-turn inside :func:`daemon.services.context_messages.assemble_context_messages`
+    Phase 2 (ADR-8) — ``mode="human_messages"`` (the default) early-
+    returns the prompt unchanged. In human_messages mode the
+    metadata KV is rebuilt per-turn inside
+    :func:`daemon.services.context_messages.assemble_context_messages`
     and merged into the ``[SYSTEM CONTEXT: Related Project]``
     HumanMessage; baking it into the system prompt here would
     duplicate the data. A one-time info log marks the skip so
-    operators can confirm an agent opted into the new mode. The
-    legacy ``context_injection: true`` flag does NOT auto-flip the
-    mode — agents must set ``context_injection_mode:
-    "human_messages"`` in meta.json explicitly.
+    operators can confirm an agent opted into the new mode. To
+    restore the legacy system-prompt injection behavior, set
+    ``context_injection_mode: "legacy"`` in meta.json.
 
     Args:
         system_prompt: The base system prompt to append to.
@@ -361,10 +361,11 @@ def append_shared_context_metadata(
             ``context_key → {meta_key: meta_value}`` rows.
         parent_id: Optional parent instance ID. When provided the root
             is resolved via the parent (mirrors ``append_context_key``).
-        mode: Context injection mode — ``"system_prompt"`` (default,
-            legacy) injects here; ``"human_messages"`` skips and
-            relies on the per-turn orchestrator instead. Unknown
-            values are treated as ``"system_prompt"``.
+        mode: Context injection mode — ``"human_messages"`` (default)
+            skips here and relies on the per-turn orchestrator;
+            ``"legacy"`` injects as the original system-prompt block.
+            Unknown values are coerced to the default by
+            :func:`_resolve_injection_mode`.
 
     Returns:
         The system prompt with the ``## Shared Context`` section
@@ -630,7 +631,7 @@ def append_auto_load_skills(
     manager: Any,
     instance_id: str | None = None,
     instance_repository: Any = None,
-    mode: str = "system_prompt",
+    mode: str = "human_messages",
 ) -> str:
     """Append auto-load skills to a system prompt (post-cache).
 
@@ -646,10 +647,10 @@ def append_auto_load_skills(
     Before querying, triggers clone-on-miss to ensure the project has
     auto_load skills cloned from the skill_bank templates.
 
-    Phase 2 (ADR-8) — ``mode="human_messages"`` early-returns the
-    prompt unchanged WITHOUT touching the DB. The legacy appender
-    wrote ``last_injected_skill_ids`` metadata on every call — when
-    this function was wired into the GET /messages system-prompt
+    Phase 2 (ADR-8) — ``mode="human_messages"`` (the default) early-
+    returns the prompt unchanged WITHOUT touching the DB. The legacy
+    appender wrote ``last_injected_skill_ids`` metadata on every call
+    — when this function was wired into the GET /messages system-prompt
     reconstruction path the read endpoint became a write endpoint
     (a known bug). Skipping in human_messages mode eliminates the
     unnecessary write; per-turn skill injection is handled by
@@ -675,10 +676,9 @@ def append_auto_load_skills(
             for the metadata write. Same semantics as
             ``instance_id`` — both must be provided for tracking
             to fire. Default ``None`` = skip tracking.
-        mode: Context injection mode — ``"system_prompt"`` (default)
-            runs the existing clone + query + append + track pipeline;
-            ``"human_messages"`` short-circuits before any I/O.
-            Unknown values are treated as ``"system_prompt"``.
+        mode: Context injection mode — ``"human_messages"`` (default)
+            short-circuits before any I/O; ``"legacy"`` runs the
+            existing clone + query + append + track pipeline.
 
     Returns:
         The system prompt with auto_load skills section appended,
@@ -843,13 +843,14 @@ def append_context_injection(
     parent_id: str | None = None,
     project_id: str | None = None,
     project_repository: Any = None,
-    mode: str = "system_prompt",
+    mode: str = "human_messages",
 ) -> str:
     """Append shared project context when enabled in agent metadata.
 
-    Phase 2 (ADR-8) — ``mode="human_messages"`` early-returns the
-    prompt unchanged. In human_messages mode the RAG-matched context
-    is rebuilt per-turn inside :func:`daemon.services.context_messages.assemble_context_messages`
+    Phase 2 (ADR-8) — ``mode="human_messages"`` (the default) early-
+    returns the prompt unchanged. In human_messages mode the RAG-matched
+    context is rebuilt per-turn inside
+    :func:`daemon.services.context_messages.assemble_context_messages`
     and emitted as a ``[SYSTEM CONTEXT: Shared Context]`` HumanMessage;
     baking it into the system prompt here would duplicate the data.
     A one-time info log marks the skip per instance so operators can
@@ -867,10 +868,11 @@ def append_context_injection(
         project_repository: Optional project repository (unused by
             the current RAG helper but kept in the signature for
             symmetry with the other appenders).
-        mode: Context injection mode — ``"system_prompt"`` (default)
-            injects here; ``"human_messages"`` skips and relies on
-            the per-turn orchestrator instead. Unknown values are
-            treated as ``"system_prompt"``.
+        mode: Context injection mode — ``"human_messages"`` (default)
+            skips and relies on the per-turn orchestrator instead;
+            ``"legacy"`` injects here as the original system-prompt
+            block. Unknown values are coerced to the default by
+            :func:`_resolve_injection_mode`.
 
     Returns:
         The system prompt with the injected project-context block
@@ -1038,10 +1040,20 @@ def append_context_injection_defense(system_prompt: str) -> str:
 def _resolve_injection_mode(agent_meta: Any) -> str:
     """Resolve the context injection mode from agent metadata.
 
-    Per ADR-8 and reviewer note #1, the legacy
-    ``context_injection: true`` flag does NOT auto-flip to
-    ``human_messages`` mode. Only the explicit
-    ``context_injection_mode`` field controls the new mode.
+    Per ADR-8, the resolution order is:
+
+    1. If ``agent_meta`` is ``None`` → return the default.
+    2. If ``agent_meta.context_injection_mode`` is set and is one of
+       :data:`VALID_INJECTION_MODES` → return it (explicit opt-in).
+    3. Otherwise → return the default.
+
+    The legacy ``context_injection: true`` boolean flag does **not**
+    influence the resolution — agents that previously relied on it
+    now get the default mode unless they explicitly set
+    ``context_injection_mode: "legacy"`` in meta.json. Agents that
+    were never using ``context_injection`` at all also get the new
+    default, which is consistent with the original Phase 6 rollout
+    where every test agent runs in human_messages mode.
 
     Validation is driven by ``VALID_INJECTION_MODES`` (re-exported
     from :mod:`daemon.services.context_messages`) so adding a new
@@ -1050,17 +1062,19 @@ def _resolve_injection_mode(agent_meta: Any) -> str:
 
     Validation rules:
 
-    * ``"system_prompt"`` (the default) — legacy behavior; the 3
-      CONTEXT appenders run inside ``_apply_post_cache_appends``
-      and bake context into the system prompt.
-    * ``"human_messages"`` — opt-in; the 3 CONTEXT appenders
-      early-return; context is rebuilt per-turn inside
-      ``agent_node`` as ``[SYSTEM CONTEXT: ...]`` HumanMessages.
+    * ``"human_messages"`` (the default) — the 3 CONTEXT appenders
+      in ``_apply_post_cache_appends`` early-return; context is
+      rebuilt per-turn inside ``agent_node`` as
+      ``[SYSTEM CONTEXT: ...]`` HumanMessages.
+    * ``"legacy"`` (opt-in) — original system-prompt-injection
+      behavior; the 3 CONTEXT appenders run and bake context into
+      the system prompt. Used to reproduce the pre-restructure byte
+      layout.
     * Any other value (typo, missing field, ``None``) — coerced to
-      ``"system_prompt"`` so a misconfigured agent cannot break
-      instance execution. The coercion is silent at INFO level;
-      use meta.json validation (or a future stricter validator)
-      if you need a hard failure.
+      the default (``"human_messages"``) so a misconfigured agent
+      cannot break instance execution. The coercion is silent at
+      INFO level; use meta.json validation (or a future stricter
+      validator) if you need a hard failure.
 
     Args:
         agent_meta: Agent metadata exposing the
@@ -1072,11 +1086,11 @@ def _resolve_injection_mode(agent_meta: Any) -> str:
         raises — coercion is the failure mode.
     """
     if agent_meta is None:
-        return ContextInjectionMode.SYSTEM_PROMPT
+        return ContextInjectionMode.HUMAN_MESSAGES
     mode = getattr(agent_meta, "context_injection_mode", None)
     if mode in VALID_INJECTION_MODES:
         return mode
-    return ContextInjectionMode.SYSTEM_PROMPT
+    return ContextInjectionMode.HUMAN_MESSAGES
 
 
 def _apply_post_cache_appends(
@@ -1105,19 +1119,18 @@ def _apply_post_cache_appends(
 
     Phase 2 (ADR-8) — ``mode`` gates the 3 CONTEXT appenders
     (``append_shared_context_metadata``, ``append_context_injection``,
-    ``append_auto_load_skills``). When ``mode == "human_messages"`` the
-    CONTEXT appenders early-return and the
+    ``append_auto_load_skills``). When ``mode == "human_messages"``
+    (the default) the CONTEXT appenders early-return and the
     ``append_context_injection_defense`` PERSONA instruction is added
-    instead. When ``mode == "system_prompt"`` (or ``mode`` is
-    ``None``) the chain output is byte-identical to the legacy
-    behavior — the defense instruction is not added in legacy mode.
+    instead. When ``mode == "legacy"`` the chain output is
+    byte-identical to the pre-restructure behavior — the defense
+    instruction is not added in legacy mode.
 
     If ``mode`` is ``None`` and ``agent_meta`` is provided, the mode
     is resolved via :func:`_resolve_injection_mode`. Passing
-    ``mode="system_prompt"`` explicitly skips the lookup (useful
-    for tests and for the reconstruction path in
-    ``daemon.persistence`` that may not have ``agent_meta`` in
-    scope).
+    ``mode="legacy"`` explicitly skips the lookup (useful for tests
+    and for the reconstruction path in ``daemon.persistence`` that
+    may not have ``agent_meta`` in scope).
 
     Args:
         system_prompt: The cached system prompt to append to.
@@ -1130,7 +1143,7 @@ def _apply_post_cache_appends(
         project_repository: Repository used to resolve language preference.
         manager: Instance manager passed to the skill appender.
         agent_meta: Agent metadata for feature-flag gating. ``None``
-            falls back to ``mode="system_prompt"`` legacy behavior.
+            falls back to ``mode="human_messages"`` (the new default).
         auto_load_instance_id: Optional override for the auto_load
             tracking write.
         auto_load_instance_repository: Optional override for the
@@ -1139,8 +1152,8 @@ def _apply_post_cache_appends(
             ``last_injected_skill_ids`` metadata write entirely.
         mode: Explicit context injection mode. When ``None``, the
             mode is resolved from ``agent_meta`` via
-            :func:`_resolve_injection_mode` (legacy default
-            ``"system_prompt"`` if the field is missing/unknown).
+            :func:`_resolve_injection_mode` (default
+            ``"human_messages"`` if the field is missing/unknown).
 
     Returns:
         A tuple containing the system prompt with all post-cache sections
@@ -1639,7 +1652,7 @@ class InstanceLifecycleService:
             # the instance_repository (for tree-root lookup via
             # ``get_tree_root_id``), and parent_id (for child instances
             # — ``None`` for tree-root instances). In
-            # ``system_prompt`` mode the slot is a no-op (returns
+            # ``legacy`` mode the slot is a no-op (returns
             # ``[]``) so legacy agents keep their pre-Phase-3 behavior.
             context_slot=ContextSlot(
                 self._manager,

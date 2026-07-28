@@ -510,9 +510,9 @@ def _resolve_instance_message_context(
       the agent (versioned first, then base). ``None`` when the
       registry is unreachable.
     * ``mode`` — the result of ``_resolve_injection_mode(agent_meta)``,
-      i.e. ``"system_prompt"`` or ``"human_messages"``. Defaults to
-      ``"system_prompt"`` when ``agent_meta`` is ``None``, matching
-      the legacy contract.
+      i.e. ``"human_messages"`` (default) or ``"legacy"``. Defaults to
+      ``"human_messages"`` when ``agent_meta`` is ``None``, matching
+      the new default contract.
 
     ``None`` is returned when no instance repository is attached or
     the instance row cannot be loaded — callers treat that as

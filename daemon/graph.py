@@ -330,7 +330,7 @@ class ContextSlot:
         agent_meta: The :class:`AgentMetadata` providing the
             ``context_injection_mode`` and feature-flag fields
             (``context_injection``, ``skill_injection``). ``None``
-            is treated as the default ``system_prompt`` mode by
+            is treated as the default ``human_messages`` mode by
             :func:`daemon.services.instance_lifecycle._resolve_injection_mode`.
         instance_repository: The instance repository (duck-typed)
             used by :func:`assemble_context_messages` to resolve
@@ -348,8 +348,8 @@ class ContextSlot:
         ``context_slot.assemble()`` returns ``[]`` (no-op) when the
         resolved mode is anything other than
         ``ContextInjectionMode.HUMAN_MESSAGES``. This is the
-        single gate that keeps the legacy ``system_prompt`` mode
-        byte-identical to its pre-Phase-3 behavior — no context
+        single gate that keeps the ``"legacy"`` mode
+        byte-identical to its pre-restructure behavior — no context
         messages are emitted, no skill search is run by the slot.
     """
 
@@ -377,7 +377,7 @@ class ContextSlot:
         captured dependencies plus the per-call inputs (instance_id,
         user_query, project_id). Returns ``[]`` when the agent's
         injection mode is not ``human_messages`` (legacy
-        ``system_prompt`` mode is untouched).
+        ``"legacy"`` mode is untouched).
 
         Per-turn freshness guarantee (ADR-2):
 
@@ -413,7 +413,7 @@ class ContextSlot:
             List of zero or more tagged :class:`HumanMessage`
             instances (``[SYSTEM CONTEXT: ...]``) in canonical
             order: ``[project?, shared_context?, skills?]``.
-            Empty list when the agent is in ``system_prompt`` mode
+            Empty list when the agent is in ``legacy`` mode
             or every feature flag is off.
         """
         # Lazy imports — see top-of-file note about the graph ↔

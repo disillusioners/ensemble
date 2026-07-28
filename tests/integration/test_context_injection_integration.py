@@ -86,14 +86,17 @@ def _human_messages_agent_meta() -> SimpleNamespace:
     )
 
 
-def _system_prompt_agent_meta() -> SimpleNamespace:
-    """AgentMeta stub in legacy ``system_prompt`` mode (default).
+def _legacy_agent_meta() -> SimpleNamespace:
+    """AgentMeta stub in opt-in ``legacy`` mode.
 
     ``context_injection`` is True so the legacy mode actually emits
-    context — that's the mode we want to verify is unchanged.
+    context — that's the mode we want to verify is byte-identical to
+    the pre-restructure ``system_prompt`` pipeline. Renamed from
+    ``_system_prompt_agent_meta`` to match the canonical
+    ``ContextInjectionMode.LEGACY`` constant.
     """
     return SimpleNamespace(
-        context_injection_mode=ContextInjectionMode.SYSTEM_PROMPT,
+        context_injection_mode=ContextInjectionMode.LEGACY,
         context_injection=True,
         skill_injection=True,
         allowed_models=None,
@@ -846,7 +849,7 @@ class TestGetMessagesSystemPromptMode:
         with patch(
             "daemon.registry.get_registry",
             return_value=MagicMock(
-                get_resolved=MagicMock(return_value=_system_prompt_agent_meta()),
+                get_resolved=MagicMock(return_value=_legacy_agent_meta()),
                 get_version=MagicMock(return_value=None),
             ),
         ):
@@ -933,10 +936,10 @@ class TestPromptInjectionDefense:
         assert "## System Context Messages" in hm_result
         assert "Messages prefixed with [SYSTEM CONTEXT:" in hm_result
 
-        # ── system_prompt mode (legacy): defense is NOT appended ────────
-        sp_result, _ = _apply_post_cache_appends(
+        # ── legacy mode (renamed from system_prompt): defense is NOT appended ─
+        legacy_result, _ = _apply_post_cache_appends(
             system_prompt=persona,
-            instance_id="inst-sp",
+            instance_id="inst-legacy",
             instance_repository=MagicMock(),
             shared_context_metadata_repo=None,
             parent_id=None,
@@ -944,12 +947,12 @@ class TestPromptInjectionDefense:
             project_id=None,
             project_repository=MagicMock(),
             manager=MagicMock(),
-            agent_meta=_system_prompt_agent_meta(),
-            mode=ContextInjectionMode.SYSTEM_PROMPT,
+            agent_meta=_legacy_agent_meta(),
+            mode=ContextInjectionMode.LEGACY,
         )
-        assert "## System Context Messages" not in sp_result
+        assert "## System Context Messages" not in legacy_result
         # The persona itself is still there.
-        assert "base persona" in sp_result
+        assert "base persona" in legacy_result
 
     def test_defense_helper_idempotent_on_falsy_input(self) -> None:
         """An empty prompt still gets the defense — the helper is additive.

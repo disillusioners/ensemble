@@ -10,6 +10,5 @@
   "tools": {
     "allow": ["rag", "filesystem", "help", "time", "mcp", "context", "shared_context"]
   },
-  "team_members": [],
-  "context_injection_mode": "human_messages"
+  "team_members": []
 }

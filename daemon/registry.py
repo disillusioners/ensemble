@@ -137,22 +137,24 @@ class AgentMetadata(BaseModel):
         description="When true, inject shared project context into this agent's system prompt at spawn time.",
     )
     # ADR-8: per-agent context-injection mode flag. Two values only —
-    # "system_prompt" (default, legacy) or "human_messages" (new —
-    # context as [SYSTEM CONTEXT: ...] HumanMessages). The legacy
-    # ``context_injection: true`` flag does NOT auto-flip to
-    # ``human_messages`` (per reviewer note #1); agents must
-    # explicitly set ``context_injection_mode: "human_messages"`` in
-    # meta.json to opt in. Validation lives in
+    # "human_messages" (default — context as [SYSTEM CONTEXT: ...]
+    # HumanMessages) or "legacy" (opt-in — original system-prompt
+    # injection behavior, used to reproduce the pre-restructure byte
+    # layout). The legacy ``context_injection: true`` flag does NOT
+    # influence this mode; agents that previously relied on it now
+    # default to ``human_messages`` unless they explicitly set
+    # ``context_injection_mode: "legacy"`` in meta.json. Validation
+    # lives in
     # :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
-    # — unknown values are silently coerced to ``"system_prompt"``
-    # rather than rejected, so a typo in meta.json cannot break
-    # instance execution.
+    # — unknown values are silently coerced to the default
+    # (``"human_messages"``) rather than rejected, so a typo in
+    # meta.json cannot break instance execution.
     context_injection_mode: str = Field(
-        default="system_prompt",
+        default="human_messages",
         description=(
-            "Context injection mode — one of 'system_prompt' (default, "
-            "legacy) or 'human_messages' (context as [SYSTEM CONTEXT: ...] "
-            "HumanMessages). See ADR-8."
+            "Context injection mode — one of 'human_messages' (default, "
+            "context as [SYSTEM CONTEXT: ...] HumanMessages) or 'legacy' "
+            "(original system-prompt injection). See ADR-8."
         ),
     )
     inject_allowed_models: bool = Field(
@@ -280,7 +282,8 @@ class AgentRegistry:
                 logger.warning(
                     "Agent '%s' uses deprecated 'context_injection: true' flag. "
                     "This flag no longer controls context injection mode. "
-                    "To use the new human_messages mode, set 'context_injection_mode': 'human_messages' in meta.json. "
+                    "The agent now defaults to 'context_injection_mode: \"human_messages\"'. "
+                    "To preserve the legacy system-prompt injection behavior, set 'context_injection_mode': 'legacy' in meta.json. "
                     "The 'context_injection' flag will be removed in a future version.",
                     agent_id,
                 )
@@ -313,7 +316,7 @@ class AgentRegistry:
                     skill_injection=meta.get("skill_injection", False),
                     context_injection=meta.get("context_injection", False),
                     context_injection_mode=meta.get(
-                        "context_injection_mode", "system_prompt"
+                        "context_injection_mode", "human_messages"
                     ),
                     inject_allowed_models=meta.get("inject_allowed_models", False),
                     version_tag=version_tag,

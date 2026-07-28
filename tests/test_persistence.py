@@ -554,7 +554,20 @@ class TestGetInstanceMessages:
         with patch(
             "daemon.manager.load_and_cache_prompt",
             return_value=(base_prompt, len(base_prompt)),
-        ), patch("daemon.registry.get_registry", side_effect=RuntimeError("no registry")):
+        ), patch(
+            "daemon.registry.get_registry",
+            return_value=MagicMock(
+                # Opt into ``legacy`` mode (Phase 6 default flip means
+                # ``None`` now resolves to ``human_messages``, which skips
+                # the legacy auto_load appender — but this test exercises
+                # the legacy auto_load pipeline and expects the skill to
+                # appear in the reconstructed system prompt).
+                get_resolved=MagicMock(
+                    return_value=SimpleNamespace(context_injection_mode="legacy")
+                ),
+                get_version=MagicMock(return_value=None),
+            ),
+        ):
             messages = await get_instance_messages(
                 mock_checkpointer, "inst-123", manager=manager
             )
@@ -645,7 +658,7 @@ class TestGetInstanceMessagesHumanMessagesContext:
        and the most recent user message.
     4. NEVER write to the database (read endpoint, ADR-2).
 
-    When the mode is ``"system_prompt"`` (legacy), the context rebuild
+    When the mode is ``"legacy"`` (legacy), the context rebuild
     must be a strict no-op so the existing byte layout is preserved.
     """
 
@@ -804,7 +817,7 @@ class TestGetInstanceMessagesHumanMessagesContext:
         ctx = {
             "instance_meta": instance_meta,
             "agent_meta": None,
-            "mode": "system_prompt",  # legacy default
+            "mode": "legacy",  # legacy default
         }
 
         # Track whether the context builder is invoked — must NOT be.

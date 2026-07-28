@@ -110,11 +110,15 @@ class TestInjectionFenceDefense:
         # 2 & 3. Both fence tags are present and the value lives inside them.
         # instance_id must equal the stored context_key so the root-instance
         # branch (parent_id=None) queries the same partition we wrote to.
+        # mode="legacy" opts into the pre-restructure pipeline (the fence
+        # only renders in legacy mode; human_messages mode rebuilds
+        # context as ephemeral HumanMessages).
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id=context_key,
             instance_repository=MagicMock(),  # root instance → never queried
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         assert "<shared_context_metadata>" in result
@@ -168,11 +172,15 @@ class TestInjectionFenceDefense:
         snapshot = repo.get_all_as_dict(context_key)
         assert snapshot == {"escape_attempt": malicious_value}
 
+        # mode="legacy" opts into the pre-restructure pipeline (the
+        # fence only renders in legacy mode; human_messages mode
+        # rebuilds context as ephemeral HumanMessages).
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id=context_key,
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         # The injection fence's closing tag appears exactly once —
@@ -224,11 +232,15 @@ class TestInjectionFenceDefense:
         snapshot = repo.get_all_as_dict(context_key)
         assert snapshot == {"dash_value": tricky_value}
 
+        # mode="legacy" opts into the pre-restructure pipeline (the
+        # fence only renders in legacy mode; human_messages mode
+        # rebuilds context as ephemeral HumanMessages).
         result = append_shared_context_metadata(
             system_prompt=base_prompt,
             instance_id=context_key,
             instance_repository=MagicMock(),
             shared_context_metadata_repo=repo,
+            mode="legacy",
         )
 
         # The structural fences still bracket the block.
@@ -492,10 +504,14 @@ class TestContextInjectionDefense:
         assert "<injected_project_context>" not in out
         assert "Auto-Loaded Skills" not in out
 
-    def test_defense_instruction_absent_in_system_prompt_mode(self, base_prompt):
-        """End-to-end: ``mode="system_prompt"`` (or no mode) does
+    def test_defense_instruction_absent_in_legacy_mode(self, base_prompt):
+        """End-to-end: ``mode="legacy"`` (or no mode resolving to legacy) does
         NOT add the defense instruction so legacy output remains
         byte-identical.
+
+        Renamed from ``test_defense_instruction_absent_in_system_prompt_mode``
+        after the ``system_prompt`` mode was renamed to ``legacy`` in
+        Phase 6 of the Context Injection Restructure.
         """
         from types import SimpleNamespace
 
@@ -512,7 +528,7 @@ class TestContextInjectionDefense:
 
         out, _user_lang = _apply_post_cache_appends(
             system_prompt="BASE",
-            instance_id="inst-system",
+            instance_id="inst-legacy",
             instance_repository=instance_repo,
             shared_context_metadata_repo=kv_repo,
             parent_id=None,
@@ -525,8 +541,9 @@ class TestContextInjectionDefense:
             agent_meta=SimpleNamespace(
                 context_injection=False,
                 inject_allowed_models=False,
+                context_injection_mode="legacy",
             ),
-            mode="system_prompt",
+            mode="legacy",
         )
 
         # Defense instruction NOT present in legacy mode.

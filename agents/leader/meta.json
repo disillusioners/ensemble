@@ -11,6 +11,5 @@
   "tools": {
     "allow": ["instance", "self", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_context", "question"]
   },
-  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer"],
-  "context_injection_mode": "human_messages"
+  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer"]
 }

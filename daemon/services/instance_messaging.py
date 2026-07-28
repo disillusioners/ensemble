@@ -98,14 +98,15 @@ def _build_graph_input(
 
     Context Injection Restructure — Phase 3 / Task 12: the
     ``agent_meta`` arg drives the ``context_injection_mode`` gate. In
-    ``human_messages`` mode the skill content is consumed by
+    ``human_messages`` mode (the default) the skill content is
+    consumed by
     :func:`daemon.services.context_messages.assemble_context_messages`
     inside ``agent_node`` (via the per-instance cached result on
     the manager — see ``InstanceManager.set_context_skill_result``)
     so prepending a separate ``HumanMessage`` here would
     double-inject the same skill block. The function returns ONLY
-    ``[user_message]`` in that mode. In ``system_prompt`` mode the
-    legacy behavior is preserved — the skill message is prepended so
+    ``[user_message]`` in that mode. In ``legacy`` mode the original
+    behavior is preserved — the skill message is prepended so
     the LangGraph ``add_messages`` reducer sees the skill context
     BEFORE the user message in the final ordering.
 
@@ -123,17 +124,18 @@ def _build_graph_input(
             equivalent) used to resolve the
             ``context_injection_mode``. ``None`` (or missing
             ``context_injection_mode``) is coerced to
-            ``system_prompt`` by
+            ``human_messages`` by
             :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
-            — the legacy path is the safe default for any caller that
-            doesn't yet pass the metadata.
+            — the new default for any caller that doesn't yet pass
+            the metadata.
 
     Returns:
         ``{"messages": [...]}`` dict ready for
         ``graph.astream(graph_input, ...)``. In ``human_messages``
-        mode the list contains ONLY the ``user_message``; in
-        ``system_prompt`` mode it contains ``[skill_injection_msg?,
-        user_message]`` matching the pre-Phase-3 layout.
+        mode (the default) the list contains ONLY the
+        ``user_message``; in ``legacy`` mode it contains
+        ``[skill_injection_msg?, user_message]`` matching the
+        pre-restructure layout.
     """
     user_message = HumanMessage(content=content, id=message_id)
     # Phase 3 / Task 12 — human_messages mode bypasses the graph-input
@@ -1847,9 +1849,8 @@ class InstanceMessagingService:
         #
         # Cheap lookup — the registry is in-memory; only the registry
         # cache miss case hits disk. ``None`` is coerced to
-        # ``system_prompt`` by ``_resolve_injection_mode`` so a missing
-        # agent_meta can never accidentally opt an unknown agent into
-        # ``human_messages`` mode (the safe default is the legacy path).
+        # ``human_messages`` by ``_resolve_injection_mode`` so a missing
+        # agent_meta gets the new default behavior (not legacy).
         _messaging_agent_meta: Any | None = None
         try:
             _instance_row_for_meta = await asyncio.to_thread(
@@ -2066,7 +2067,7 @@ class InstanceMessagingService:
                     # rebuilt per-turn inside ``agent_node`` by
                     # :func:`daemon.services.context_messages._format_kv_metadata_section`.
                     # Prepending here would double-inject. The legacy
-                    # ``system_prompt`` mode keeps the original behavior
+                    # ``legacy`` mode keeps the original behavior
                     # — system-prompt appenders don't carry the KV, so
                     # the message-body prepending is the only source.
                     if not _msg_skip_string_prepend:
@@ -2225,7 +2226,7 @@ class InstanceMessagingService:
                                     # can reuse it on retry without
                                     # re-running the search (B3 fix).
                                     # Stored even when the agent is in
-                                    # ``system_prompt`` mode — it's a
+                                    # ``legacy`` mode — it's a
                                     # no-op for that mode (ContextSlot
                                     # early-returns), so the cost is one
                                     # extra dict entry per message.

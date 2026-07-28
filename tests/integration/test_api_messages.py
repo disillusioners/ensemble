@@ -17,9 +17,9 @@ Spec — :file:`.agents/shared/planning/context-injection-restructure/phase4-pla
 * ``is_synthetic`` and ``context_kind`` are present on every synthetic
   context entry so the frontend can style them and the existing
   ``child_reports.py`` filter (lines 523 and 1007) keeps excluding them.
-* Legacy ``system_prompt`` mode is byte-for-byte unchanged — no context
-  entries, no ``context_kind`` field, ``assemble_context_messages`` is
-  not even called.
+* Legacy ``legacy`` mode (renamed from ``system_prompt``) is byte-for-byte
+  unchanged — no context entries, no ``context_kind`` field,
+  ``assemble_context_messages`` is not even called.
 
 Compared to the unit-level ``TestGetInstanceMessagesHumanMessagesContext``
 in :file:`tests/test_persistence.py`, these tests exercise the integration
@@ -478,13 +478,14 @@ class TestGetMessagesMakesNoDBWrites:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 3: system_prompt mode is byte-for-byte unchanged
+# Test 3: legacy mode (renamed from system_prompt) is byte-for-byte unchanged
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestSystemPromptModeBackwardCompatibility:
-    """Legacy ``context_injection_mode=system_prompt`` (the default for
-    all pre-Phase-4 agents) MUST keep the existing byte layout:
+class TestLegacyModeBackwardCompatibility:
+    """Legacy ``context_injection_mode=legacy`` (opt-in via meta.json)
+    MUST keep the existing byte layout that ``system_prompt`` mode
+    produced before the rename:
 
     * No ``context_kind`` field anywhere in the response.
     * No synthetic context messages.
@@ -496,7 +497,7 @@ class TestSystemPromptModeBackwardCompatibility:
     """
 
     @pytest.mark.asyncio
-    async def test_system_prompt_mode_response_is_unchanged(self):
+    async def test_legacy_mode_response_is_unchanged(self):
         from daemon.persistence import get_instance_messages
 
         persisted = [HumanMessage(content="hello legacy turn", id="msg-leg")]
@@ -508,7 +509,7 @@ class TestSystemPromptModeBackwardCompatibility:
         ctx = {
             "instance_meta": instance_meta,
             "agent_meta": None,  # legacy: agent_meta unknown
-            "mode": "system_prompt",  # legacy default
+            "mode": "legacy",  # opt-in legacy mode (was "system_prompt")
         }
 
         with patch(
@@ -531,7 +532,7 @@ class TestSystemPromptModeBackwardCompatibility:
 
         # No context entries in the response.
         assert not any(m.get("is_synthetic") and m.get("context_kind") for m in messages), (
-            f"system_prompt mode leaked a context message: {messages!r}"
+            f"legacy mode leaked a context message: {messages!r}"
         )
         # No ``context_kind`` field anywhere.
         assert all("context_kind" not in m for m in messages), (
@@ -543,7 +544,7 @@ class TestSystemPromptModeBackwardCompatibility:
         assert messages[0]["content"] == "hello legacy turn"
 
     @pytest.mark.asyncio
-    async def test_system_prompt_mode_no_db_writes(self):
+    async def test_legacy_mode_no_db_writes(self):
         """Legacy mode is also read-only — the absence of writes must hold
         even when system prompt reconstruction succeeds."""
         from daemon.persistence import get_instance_messages
@@ -557,7 +558,7 @@ class TestSystemPromptModeBackwardCompatibility:
         ctx = {
             "instance_meta": instance_meta,
             "agent_meta": None,
-            "mode": "system_prompt",
+            "mode": "legacy",
         }
 
         with patch(

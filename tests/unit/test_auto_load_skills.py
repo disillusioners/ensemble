@@ -167,11 +167,13 @@ class TestNoProjectId:
         object) so callers can compare for the no-op case.
         """
         base = "# Base prompt\nCore instructions."
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             base,
             agent_id="tester",
             project_id=None,
             manager=manager,
+            mode="legacy",
         )
         assert out == base
 
@@ -180,11 +182,13 @@ class TestNoProjectId:
     ) -> None:
         """Empty string ``project_id`` is treated like ``None``."""
         base = "# Base prompt\nCore instructions."
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             base,
             agent_id="tester",
             project_id="",
             manager=manager,
+            mode="legacy",
         )
         assert out == base
 
@@ -206,11 +210,13 @@ class TestSkillRepoMissing:
             skill_clone_service=clone_service,
         )
         base = "# Base prompt\nCore instructions."
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             base,
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         assert out == base
 
@@ -228,11 +234,13 @@ class TestNoSkillsFound:
         ``get_auto_load_skills`` query returns ``[]`` → prompt is
         returned unchanged.
         """
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "# Base prompt\nCore instructions.",
             agent_id="tester",
             project_id="proj-empty",
             manager=manager,
+            mode="legacy",
         )
         assert "Auto-Loaded Skills" not in out
 
@@ -259,11 +267,13 @@ class TestSkillsAppended:
         )
         base = "# Base prompt\nCore instructions."
 
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             base,
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
 
         assert out.startswith(base)
@@ -286,11 +296,13 @@ class TestSkillsAppended:
             project_id="proj-1",
             name="alpha-skill",
         )
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         # Section header immediately follows a `---` divider.
         assert "\n---\n\n## Auto-Loaded Skills (Evolvable)" in out
@@ -323,11 +335,13 @@ class TestCloneBeforeQuery:
         # Pre-condition: no row in skills table for proj-fresh.
         assert manager._skill_repo.get_auto_load_skills("proj-fresh") == []
 
+        # mode="legacy" opts into the pre-restructure pipeline
         append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-fresh",
             manager=manager,
+            mode="legacy",
         )
 
         # Post-condition: the bank template is now in project scope.
@@ -349,17 +363,20 @@ class TestCloneBeforeQuery:
             name="dup-skill",
             auto_load=True,
         )
+        # mode="legacy" opts into the pre-restructure pipeline
         append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         rows = skill_repo.get_auto_load_skills("proj-1")
         assert len(rows) == 1
@@ -408,11 +425,13 @@ class TestCloneFailsSoftFail:
             skill_clone_service=clone_service,
         )
 
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
 
         # The pre-existing skill still made it into the section.
@@ -444,11 +463,13 @@ class TestQueryFailsSoftFail:
         manager._skill_repo = boom_repo
 
         base = "BASE PROMPT"
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             base,
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         assert out == base
         # The query was attempted exactly once.
@@ -483,11 +504,13 @@ class TestMultipleSkills:
             content="# Beta\nsecond skill.",
         )
 
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
 
         assert "# Alpha" in out
@@ -551,11 +574,13 @@ class TestEmptyContentSkipped:
             content="",  # truly empty
         )
 
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
 
         assert "## Auto-Loaded Skills (Evolvable)" in out
@@ -594,11 +619,13 @@ class TestProjectIsolation:
         )
 
         # Query for project-A only.
+        # mode="legacy" opts into the pre-restructure pipeline
         out_a = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-A",
             manager=manager,
+            mode="legacy",
         )
         assert "Alpha A" in out_a
         assert "A-only." in out_a
@@ -606,11 +633,13 @@ class TestProjectIsolation:
         assert "B-only." not in out_a
 
         # Query for project-B only.
+        # mode="legacy" opts into the pre-restructure pipeline
         out_b = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-B",
             manager=manager,
+            mode="legacy",
         )
         assert "Beta B" in out_b
         assert "B-only." in out_b
@@ -646,11 +675,13 @@ class TestCloneServiceNone:
             skill_repo=skill_repo,
             skill_clone_service=None,
         )
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         assert "## Auto-Loaded Skills (Evolvable)" in out
         # The seeded skill's default content lands in the section.
@@ -687,11 +718,13 @@ class TestInactiveExcluded:
             is_active=True,
         )
 
+        # mode="legacy" opts into the pre-restructure pipeline
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
             project_id="proj-1",
             manager=manager,
+            mode="legacy",
         )
         assert "Active" in out
         assert "Inactive" not in out
@@ -869,19 +902,23 @@ class TestHumanMessagesMode:
         spy_instance_repo.set_metadata.assert_not_called()
         spy_instance_repo.get.assert_not_called()
 
-    def test_human_messages_mode_default_param_is_system_prompt(
+    def test_human_messages_mode_default_param_is_human_messages(
         self,
         manager: _StubManager,
         skill_repo: SkillRepository,
     ) -> None:
-        """The ``mode`` parameter defaults to ``"system_prompt"`` so
-        legacy callers (tests, third-party code) see no behavior
-        change. Existing call sites that omit ``mode`` must continue
-        to inject the auto_load section.
+        """The ``mode`` parameter defaults to ``"human_messages"``
+        (Phase 6 default flip from the Context Injection Restructure).
 
-        This pins the byte-identical-output constraint from the
-        Phase 2 plan: a regression that flipped the default would
-        silently break every legacy agent.
+        Callers that omit ``mode`` must see the dormancy behavior —
+        the prompt is returned unchanged, with no DB query, no clone
+        call, and no metadata write. To get the legacy append behavior
+        the caller MUST opt in explicitly with ``mode="legacy"``.
+
+        This pins the Phase 6 default — a regression that flipped
+        the default back to ``"legacy"`` would silently re-bake the
+        auto_load section into every system prompt for every agent,
+        defeating the ADR-8 dormancy gate.
         """
         _seed_skill(
             skill_repo,
@@ -890,7 +927,7 @@ class TestHumanMessagesMode:
             content="# Alpha\nDo the thing.",
         )
 
-        # No ``mode`` kwarg — defaults to "system_prompt".
+        # No ``mode`` kwarg — defaults to "human_messages".
         out = append_auto_load_skills(
             "BASE",
             agent_id="tester",
@@ -898,9 +935,10 @@ class TestHumanMessagesMode:
             manager=manager,
         )
 
-        # Legacy behavior: section appended.
-        assert "## Auto-Loaded Skills (Evolvable)" in out
-        assert "Do the thing." in out
+        # Default-flip behavior: prompt unchanged, section NOT appended.
+        assert out == "BASE"
+        assert "## Auto-Loaded Skills (Evolvable)" not in out
+        assert "Do the thing." not in out
 
     def test_human_messages_mode_logs_skip_once_per_instance(
         self,

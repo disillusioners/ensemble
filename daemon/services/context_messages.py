@@ -75,14 +75,15 @@ CONTEXT_KIND_SKILLS = "skills"
 # meta.json JSON serialization and the ``AgentMetadata.context_injection_mode``
 # field without an explicit encoder. Two values only:
 #
-# * ``SYSTEM_PROMPT`` (default) — legacy behavior. The 3 CONTEXT
-#   appenders (``append_shared_context_metadata``,
+# * ``LEGACY`` (opt-in) — legacy system-prompt-injection behavior. The
+#   3 CONTEXT appenders (``append_shared_context_metadata``,
 #   ``append_context_injection``, ``append_auto_load_skills``) run
 #   inside ``_apply_post_cache_appends`` and bake context into the
-#   system prompt.
-# * ``HUMAN_MESSAGES`` — opt-in mode. The 3 CONTEXT appenders
-#   early-return so the system prompt carries persona content only;
-#   context is rebuilt per-turn inside ``agent_node`` as
+#   system prompt. Use only when an agent must reproduce the
+#   pre-restructure byte layout.
+# * ``HUMAN_MESSAGES`` (default) — the 3 CONTEXT appenders early-return
+#   so the system prompt carries persona content only; context is
+#   rebuilt per-turn inside ``agent_node`` as
 #   ``[SYSTEM CONTEXT: ...]`` HumanMessages by
 #   :func:`assemble_context_messages`. The system prompt gains a
 #   prompt-injection defense instruction so the LLM treats context
@@ -91,10 +92,10 @@ CONTEXT_KIND_SKILLS = "skills"
 # ``BOTH`` mode is intentionally omitted (per reviewer W1) — it
 # would double token cost and risks confusing the LLM by sending
 # the same data twice (once in the system prompt, once as a
-# HumanMessage). Legacy ``context_injection: true`` does NOT
-# auto-flip to ``HUMAN_MESSAGES`` (per reviewer note #1) — agents
-# must explicitly set ``context_injection_mode: "human_messages"``
-# in meta.json to opt in.
+# HumanMessage). Legacy ``context_injection: true`` no longer
+# controls the mode — agents that previously relied on it now
+# default to ``HUMAN_MESSAGES`` unless they explicitly set
+# ``context_injection_mode: "legacy"`` in meta.json.
 class ContextInjectionMode:
     """Mode flag controlling where context is injected.
 
@@ -104,11 +105,11 @@ class ContextInjectionMode:
     ``AgentMetadata.context_injection_mode`` field without an
     explicit decoder. Callers should use these constants when
     setting the mode on ``AgentMetadata`` and the literal strings
-    ``"system_prompt"`` / ``"human_messages"`` when reading from
+    ``"legacy"`` / ``"human_messages"`` when reading from
     meta.json / the ``_resolve_injection_mode`` helper.
     """
 
-    SYSTEM_PROMPT = "system_prompt"
+    LEGACY = "legacy"
     HUMAN_MESSAGES = "human_messages"
 
 
@@ -118,7 +119,7 @@ class ContextInjectionMode:
     # to :class:`ContextInjectionMode` automatically widens the
     # validator without a separate hardcoded list.
 VALID_INJECTION_MODES = (
-    ContextInjectionMode.SYSTEM_PROMPT,
+    ContextInjectionMode.LEGACY,
     ContextInjectionMode.HUMAN_MESSAGES,
 )
 

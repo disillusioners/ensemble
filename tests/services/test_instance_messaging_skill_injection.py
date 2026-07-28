@@ -296,7 +296,12 @@ class TestBuildGraphInputHelper:
         codebase uses).
         """
         skill_msg = HumanMessage(content="[System Inject] skill", id="skill-id-1")
-        result = _build_graph_input("hello", "msg-1", skill_msg)
+        result = _build_graph_input(
+            "hello",
+            "msg-1",
+            skill_msg,
+            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
+        )
 
         assert len(result["messages"]) == 2
         assert result["messages"][0] is skill_msg
@@ -309,7 +314,12 @@ class TestBuildGraphInputHelper:
         that and the id round-trips through ``uuid.UUID()``.
         """
         skill_msg = HumanMessage(content="[System Inject] skill", id=str(uuid.uuid4()))
-        result = _build_graph_input("hello", "msg-1", skill_msg)
+        result = _build_graph_input(
+            "hello",
+            "msg-1",
+            skill_msg,
+            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
+        )
 
         extracted_id = result["messages"][0].id
         # Round-trip — any non-UUID garbage raises ``ValueError``.
@@ -324,7 +334,12 @@ class TestBuildGraphInputHelper:
         """
         skill_id = str(uuid.uuid4())
         skill_msg = HumanMessage(content="[System Inject]", id=skill_id)
-        result = _build_graph_input("hello", "msg-1", skill_msg)
+        result = _build_graph_input(
+            "hello",
+            "msg-1",
+            skill_msg,
+            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
+        )
 
         msgs = result["messages"]
         skill_actual_id = msgs[0].id
@@ -340,7 +355,12 @@ class TestBuildGraphInputHelper:
         bits and break the contract.
         """
         skill_msg = HumanMessage(content="skill", id=str(uuid.uuid4()))
-        result = _build_graph_input("hello", "msg-1", skill_msg)
+        result = _build_graph_input(
+            "hello",
+            "msg-1",
+            skill_msg,
+            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
+        )
 
         parsed = uuid.UUID(result["messages"][0].id)
         assert parsed.version == 4
@@ -560,7 +580,11 @@ class TestSkillInjectionGates:
         captured_input, manager = await _invoke_hook(
             is_retry=False,
             message_source="telegram:user-42",
-            agent_meta=SimpleNamespace(agent_id="leader", skill_injection=True),
+            agent_meta=SimpleNamespace(
+                agent_id="leader",
+                skill_injection=True,
+                context_injection_mode="legacy",
+            ),
             injection_service=injection_service,
         )
 

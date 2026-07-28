@@ -1013,7 +1013,12 @@ class TestBuildGraphInput:
         # in the message list so the agent reads skill context
         # before user input.
         skill_msg = HumanMessage(content="skill text", id="skill-msg")
-        result = _build_graph_input("hello", "msg-1", skill_msg)
+        result = _build_graph_input(
+            "hello",
+            "msg-1",
+            skill_msg,
+            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
+        )
 
         assert "messages" in result
         assert len(result["messages"]) == 2

@@ -213,6 +213,16 @@ class TestMessageBodySharedContextInjection:
         ``## Metadata KV`` block (and the ``<shared_context_metadata>``
         data fence) visibly prepended, NOT just sitting in the
         system prompt.
+
+        Opts into ``legacy`` mode via the registry mock's
+        ``context_injection_mode`` so the message-body prepend
+        branch runs. In ``human_messages`` mode (the new default)
+        the KV is rebuilt per-turn inside ``agent_node`` by
+        :func:`daemon.services.context_messages.assemble_context_messages`
+        — prepending here would double-inject. The legacy path
+        keeps the message-body block as the only source of these
+        metadata KV entries (the system-prompt appenders do not
+        carry them in legacy mode).
         """
         captured: dict = {}
         graph = _make_capturing_graph(captured)
@@ -222,9 +232,15 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
-            # ``get_resolved`` returns None → skill injection branch
-            # is skipped (matches the "no skill_injection" path).
-            registry.get_resolved = MagicMock(return_value=None)
+            # ``get_resolved`` returns an AgentMeta stub in ``legacy``
+            # mode — opts into the pre-restructure pipeline where the
+            # message-body prepend is the only source of the KV
+            # block. In ``human_messages`` mode (the new default) the
+            # prepend branch is skipped and KV is rebuilt per-turn
+            # inside ``agent_node``.
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="legacy")
+            )
             mock_get_registry.return_value = registry
 
             svc = _make_service(manager)
@@ -265,7 +281,12 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
-            registry.get_resolved = MagicMock(return_value=None)
+            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+            # now resolves to ``human_messages``, which skips the message-body
+            # prepend — the legacy path keeps it as the only source of KV).
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="legacy")
+            )
             mock_get_registry.return_value = registry
 
             svc = _make_service(manager)
@@ -353,7 +374,12 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
-            registry.get_resolved = MagicMock(return_value=None)
+            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+            # now resolves to ``human_messages``, which skips the message-body
+            # prepend — the legacy path keeps it as the only source of KV).
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="legacy")
+            )
             mock_get_registry.return_value = registry
 
             svc = _make_service(manager)
@@ -447,7 +473,12 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
-            registry.get_resolved = MagicMock(return_value=None)
+            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+            # now resolves to ``human_messages``, which skips the message-body
+            # prepend — the legacy path keeps it as the only source of KV).
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="legacy")
+            )
             mock_get_registry.return_value = registry
 
             svc1 = _make_service(manager1)
@@ -484,7 +515,12 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
-            registry.get_resolved = MagicMock(return_value=None)
+            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+            # now resolves to ``human_messages``, which skips the message-body
+            # prepend — the legacy path keeps it as the only source of KV).
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="legacy")
+            )
             mock_get_registry.return_value = registry
 
             svc2 = _make_service(manager2)
@@ -793,7 +829,12 @@ class TestMessageBodySharedContextInjection:
             ):
                 with patch("daemon.registry.get_registry") as mock_get_registry:
                     registry = MagicMock()
-                    registry.get_resolved = MagicMock(return_value=None)
+                    # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+                    # now resolves to ``human_messages``, which skips the message-body
+                    # prepend — the legacy path keeps it as the only source of KV).
+                    registry.get_resolved = MagicMock(
+                        return_value=SimpleNamespace(context_injection_mode="legacy")
+                    )
                     mock_get_registry.return_value = registry
 
                     svc = _make_service(manager)
@@ -941,7 +982,12 @@ class TestMessageBodySharedContextInjection:
             ):
                 with patch("daemon.registry.get_registry") as mock_get_registry:
                     registry = MagicMock()
-                    registry.get_resolved = MagicMock(return_value=None)
+                    # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+                    # now resolves to ``human_messages``, which skips the message-body
+                    # prepend — the legacy path keeps it as the only source of KV).
+                    registry.get_resolved = MagicMock(
+                        return_value=SimpleNamespace(context_injection_mode="legacy")
+                    )
                     mock_get_registry.return_value = registry
 
                     svc = _make_service(manager)
@@ -1001,7 +1047,12 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
-            registry.get_resolved = MagicMock(return_value=None)
+            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
+            # now resolves to ``human_messages``, which skips the message-body
+            # prepend — the legacy path keeps it as the only source of KV).
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="legacy")
+            )
             mock_get_registry.return_value = registry
 
             svc = _make_service(manager)
