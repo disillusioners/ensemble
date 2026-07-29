@@ -1000,6 +1000,20 @@ class VSCodeServerManager:
                 last_exit_code = process.returncode
                 restart_succeeded = False
                 for attempt in range(1, VSCODE_RESTART_MAX_ATTEMPTS + 1):
+                    # Re-check the user-stop flag between attempts: the
+                    # user may call ``stop()`` during an inter-attempt
+                    # backoff, in which case the manager is tearing down
+                    # and we must NOT keep restarting. Mirrors the outer
+                    # ``user_stopped`` guard at the top of the loop.
+                    if self.state.user_stopped:
+                        logger.info(
+                            "code-server auto-restart aborted: "
+                            "user_stopped set during backoff "
+                            "(after %d/%d attempts)",
+                            attempt - 1,
+                            VSCODE_RESTART_MAX_ATTEMPTS,
+                        )
+                        return
                     logger.warning(
                         "code-server auto-restart attempt %d/%d "
                         "in %.1fs",

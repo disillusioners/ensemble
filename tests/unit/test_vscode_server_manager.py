@@ -2368,3 +2368,103 @@ class TestVSCodeServerManager:
         # Cleanup: cancel the new watchdog/health tasks via stop().
         if new_proc_alive:
             await manager.cleanup()
+
+    # ── Issue 2: Robust log_tail decoding + user_stopped mid-restart ────
+
+    async def test_watchdog_crash_log_tail_handles_non_utf8_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-UTF8 bytes in ``log_buffer`` MUST NOT raise on crash.
+
+        ``_build_crash_log_tail`` decodes the buffer with
+        ``errors="replace"`` so a stray binary byte (e.g. a stack trace
+        from a child native lib) becomes ``U+FFFD`` rather than crashing
+        the watchdog with ``UnicodeDecodeError``. This pins that contract.
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=1)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        # Mix valid UTF-8 with an invalid byte sequence (lone 0xFF is not
+        # valid UTF-8 anywhere). The replacement char MUST appear in
+        # ``last_error``; the loop MUST NOT raise.
+        manager.state.log_buffer.extend(
+            b"valid line before\n" + b"\xff\xfe\xfd bad bytes\n"
+        )
+        fast_watchdog_pacing(monkeypatch, max_attempts=1)
+
+        async def fake_start_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated spawn failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_fails)
+
+        # The replacement-char branch must NOT raise UnicodeDecodeError.
+        await manager._watchdog_loop()
+
+        assert manager.state.status == "crashed"
+        assert manager.state.last_error is not None
+        # Valid prefix survives intact.
+        assert "valid line before" in manager.state.last_error
+        # Invalid bytes were substituted with the U+FFFD replacement char
+        # instead of crashing the decode.
+        assert "\ufffd" in manager.state.last_error
+
+    async def test_watchdog_user_stopped_during_restart_backoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting ``user_stopped=True`` DURING the restart backoff MUST
+        abort the retry loop without further ``start()`` calls and MUST
+        NOT mark the manager ``crashed``.
+
+        The existing ``test_watchdog_does_not_restart_when_user_stopped``
+        pins the guard when ``user_stopped`` is set BEFORE the watchdog
+        observes the crash. This complementary test sets it AFTER the
+        first failed restart attempt (during the inter-attempt backoff)
+        so the guard is checked in the retry loop, not just on entry.
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=1)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=5)
+
+        start_call_count = 0
+
+        async def fake_start_fail_then_user_stop() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            # First attempt fails as expected; before the second attempt
+            # runs, simulate the user calling stop() (which flips
+            # user_stopped=True).
+            if start_call_count == 1:
+                manager.state.user_stopped = True
+                raise VSCodeServerStartError("first attempt fails")
+            # Subsequent attempts must NEVER execute.
+            raise AssertionError(
+                "start() must not be called once user_stopped=True"
+            )
+
+        monkeypatch.setattr(manager, "start", fake_start_fail_then_user_stop)
+
+        await manager._watchdog_loop()
+
+        # Exactly one start() call: the first attempt. The user_stopped
+        # flag flipped mid-backoff caused the retry loop to short-circuit
+        # before the next attempt.
+        assert start_call_count == 1, (
+            f"watchdog must stop retrying once user_stopped is set; "
+            f"got {start_call_count} start() calls"
+        )
+        # Status is NOT flipped to "crashed" — the user initiated stop,
+        # so the manager should remain in its pre-watchdog state. The
+        # watchdog returns without touching status in this branch.
+        assert manager.state.status != "crashed", (
+            f"watchdog must NOT set status='crashed' when the user "
+            f"stopped mid-restart; got {manager.state.status}"
+        )
