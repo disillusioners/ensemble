@@ -322,8 +322,13 @@ def create_vscode_proxy_app(
                 group.create_task(upstream_to_browser(websocket, upstream))
         # (Fix 2) Add RuntimeError so the outer handler swallows the
         # ASGI-after-close crash even if Fixes 1/3 miss an edge case.
-        except* (WebSocketDisconnect, ConnectionError, asyncio.CancelledError, RuntimeError):
-            pass
+        except* (WebSocketDisconnect, ConnectionError, asyncio.CancelledError, RuntimeError) as eg:
+            # RuntimeError is expected when sending after the browser WS closes.
+            # Log at debug for observability — non-send RuntimeErrors are rare but
+            # would be invisible without this.
+            for exc in eg.exceptions:
+                if isinstance(exc, RuntimeError):
+                    logger.debug(f"WebSocket proxy RuntimeError swallowed: {exc}")
         finally:
             if upstream is not None:
                 await upstream.close()
