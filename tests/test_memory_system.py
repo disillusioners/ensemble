@@ -108,6 +108,7 @@ class TestAccessMemoryTool:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -146,6 +147,7 @@ class TestAccessMemoryTool:
             with patch("daemon.registry.get_registry") as mock_get_registry:
                 mock_registry = MagicMock()
                 mock_registry.get_resolved.return_value = mock_meta
+                mock_registry.get_version.return_value = None
                 mock_get_registry.return_value = mock_registry
 
                 tool = create_access_memory_tool("test-agent")
@@ -175,6 +177,7 @@ class TestAccessMemoryTool:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -199,6 +202,7 @@ class TestAccessMemoryTool:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -227,6 +231,7 @@ class TestAccessMemoryTool:
         with patch("daemon.registry.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -267,6 +272,7 @@ class TestSymlinkHandling:
             with patch("daemon.registry.get_registry") as mock_get_registry:
                 mock_registry = MagicMock()
                 mock_registry.get_resolved.return_value = mock_meta
+                mock_registry.get_version.return_value = None
                 mock_get_registry.return_value = mock_registry
 
                 tool = create_access_memory_tool("test-agent")
