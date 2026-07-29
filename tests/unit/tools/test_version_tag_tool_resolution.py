@@ -1252,7 +1252,9 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
                   side_effect=_noop_filter),
         ]
 
-        # Build the real convene_council tool with version_tag='v2'.
+        # Build and invoke the real convene_council tool with version_tag='v2'.
+        # Keep the registry patch active through invocation because both the
+        # authorization helper and the closure resolve agents at run time.
         for p in heavy_patches:
             p.start()
         try:
@@ -1263,21 +1265,21 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
                     agent_id="governor",
                     version_tag="v2",
                 )
-            convene = next(
-                t for t in tools
-                if getattr(t, "name", None) == "convene_council"
-            )
+                convene = next(
+                    t for t in tools
+                    if getattr(t, "name", None) == "convene_council"
+                )
+
+                # Invoke with minimal valid arguments per the closure signature
+                # (councilor_agent_id + request are required; models /
+                # max_councilors / instance_name are optional).
+                result = await convene.coroutine(
+                    councilor_agent_id="developer",
+                    request="Refactor X",
+                )
         finally:
             for p in reversed(heavy_patches):
                 p.stop()
-
-        # Invoke with minimal valid arguments per the closure signature
-        # (councilor_agent_id + request are required; models /
-        # max_councilors / instance_name are optional).
-        result = await convene.coroutine(
-            councilor_agent_id="developer",
-            request="Refactor X",
-        )
 
         # The v2 team-membership gate MUST have PASSED — i.e. the
         # closure did NOT raise a ValueError carrying a team-members
