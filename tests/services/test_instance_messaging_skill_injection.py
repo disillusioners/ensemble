@@ -241,6 +241,11 @@ async def _invoke_hook(
 
     with patch("daemon.registry.get_registry") as mock_get_registry:
         registry = MagicMock()
+        # ``get_version`` returns ``None`` so the production code's
+        # ``get_version() or get_resolved()`` fallback (S2/C1 fixes)
+        # exercises the base-agent path these tests model — the
+        # configured ``get_resolved`` return value wins.
+        registry.get_version = MagicMock(return_value=None)
         registry.get_resolved = MagicMock(return_value=agent_meta)
         mock_get_registry.return_value = registry
 

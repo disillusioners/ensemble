@@ -240,6 +240,10 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            # ``get_version`` returns ``None`` so the production code's
+            # ``get_version() or get_resolved()`` fallback (S2/C1 fixes)
+            # exercises the base-agent path these tests model.
+            registry.get_version = MagicMock(return_value=None)
             # ``get_resolved`` returns an AgentMeta stub in ``legacy``
             # mode — opts into the pre-restructure pipeline where the
             # message-body prepend is the only source of the KV
@@ -289,6 +293,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
             # now resolves to ``human_messages``, which skips the message-body
             # prepend — the legacy path keeps it as the only source of KV).
@@ -336,6 +341,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -382,6 +388,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
             # now resolves to ``human_messages``, which skips the message-body
             # prepend — the legacy path keeps it as the only source of KV).
@@ -431,6 +438,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -481,6 +489,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
             # now resolves to ``human_messages``, which skips the message-body
             # prepend — the legacy path keeps it as the only source of KV).
@@ -523,6 +532,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
             # now resolves to ``human_messages``, which skips the message-body
             # prepend — the legacy path keeps it as the only source of KV).
@@ -570,6 +580,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -613,6 +624,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -661,6 +673,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -707,6 +720,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -756,6 +770,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -837,6 +852,7 @@ class TestMessageBodySharedContextInjection:
             ):
                 with patch("daemon.registry.get_registry") as mock_get_registry:
                     registry = MagicMock()
+                    registry.get_version = MagicMock(return_value=None)
                     # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
                     # now resolves to ``human_messages``, which skips the message-body
                     # prepend — the legacy path keeps it as the only source of KV).
@@ -901,6 +917,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(return_value=None)
             mock_get_registry.return_value = registry
 
@@ -990,6 +1007,7 @@ class TestMessageBodySharedContextInjection:
             ):
                 with patch("daemon.registry.get_registry") as mock_get_registry:
                     registry = MagicMock()
+                    registry.get_version = MagicMock(return_value=None)
                     # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
                     # now resolves to ``human_messages``, which skips the message-body
                     # prepend — the legacy path keeps it as the only source of KV).
@@ -1055,6 +1073,7 @@ class TestMessageBodySharedContextInjection:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
             # now resolves to ``human_messages``, which skips the message-body
             # prepend — the legacy path keeps it as the only source of KV).
@@ -1141,6 +1160,7 @@ class TestPersistentContextSseEmission:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             # Opt into ``human_messages`` mode so the persistent block
             # is built via ``assemble_context_messages`` rather than
             # landed in the legacy system-prompt appenders.
@@ -1275,6 +1295,7 @@ class TestPersistentContextSseEmission:
 
         with patch("daemon.registry.get_registry") as mock_get_registry:
             registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
             registry.get_resolved = MagicMock(
                 return_value=SimpleNamespace(context_injection_mode="human_messages")
             )
