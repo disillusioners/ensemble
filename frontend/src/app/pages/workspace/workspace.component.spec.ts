@@ -2021,6 +2021,69 @@ describe('WorkspaceComponent', () => {
       expect(hideEmitSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('Ctrl+S is inert in vscode mode (no save, no preventDefault)', () => {
+      // Set up VS Code mode. renderWithEditorMode drains the boot
+      // requests but does NOT select a file or mark it dirty — that is
+      // intentional: even with no file selected, the daemon handler
+      // would normally still preventDefault. We want to assert that
+      // the VS Code-mode guard fires first and bails out cleanly.
+      renderWithEditorMode('vscode');
+
+      const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+      const ctrlS = new KeyboardEvent('keydown', {
+        bubbles: true,
+        key: 's',
+        ctrlKey: true,
+      });
+      const preventDefaultSpy = jest.spyOn(ctrlS, 'preventDefault');
+
+      component.onSaveKeydown(ctrlS);
+
+      expect(saveFileSpy).not.toHaveBeenCalled();
+      // The handler must NOT swallow the keydown — we want the
+      // browser/code-server default save to proceed.
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it('Cmd+S is inert in vscode mode (macOS parity)', () => {
+      renderWithEditorMode('vscode');
+
+      const saveFileSpy = jest.spyOn(workspaceService, 'saveFile');
+      const cmdS = new KeyboardEvent('keydown', {
+        bubbles: true,
+        key: 's',
+        metaKey: true,
+      });
+      const preventDefaultSpy = jest.spyOn(cmdS, 'preventDefault');
+
+      component.onSaveKeydown(cmdS);
+
+      expect(saveFileSpy).not.toHaveBeenCalled();
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it('Escape dismisses the workspace via onHide in vscode mode', () => {
+      renderWithEditorMode('vscode');
+      const onHideSpy = jest.spyOn(component, 'onHide');
+      const hideEmitSpy = jest.spyOn(component.hide, 'emit');
+
+      component.onEscapeKey();
+
+      expect(onHideSpy).toHaveBeenCalledTimes(1);
+      expect(hideEmitSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('Escape does NOT dismiss the workspace in builtin mode', () => {
+      renderWithEditorMode('builtin');
+      const onHideSpy = jest.spyOn(component, 'onHide');
+      const hideEmitSpy = jest.spyOn(component.hide, 'emit');
+
+      component.onEscapeKey();
+
+      expect(onHideSpy).not.toHaveBeenCalled();
+      expect(hideEmitSpy).not.toHaveBeenCalled();
+    });
+
     it('editorMode="builtin" does NOT render the VsCodeViewerComponent', () => {
       setupWithEditorMode('builtin');
       fixture.detectChanges();

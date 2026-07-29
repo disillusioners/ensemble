@@ -638,9 +638,26 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     if (!(event.ctrlKey || event.metaKey) || event.key !== 's') {
       return;
     }
+    // In VS Code mode, let the keydown reach code-server so its own
+    // save handler runs. Do NOT call preventDefault() — we want the
+    // event to flow through normally.
+    if (this.editorMode() !== 'builtin') return;
     event.preventDefault();
     if (this.canSave()) {
       this.saveFile();
+    }
+  }
+
+  /**
+   * Escape — dismiss the VS Code overlay so the user can return to the
+   * project list. Active only in VS Code mode; in builtin mode the
+   * Escape key is left alone so it does not interfere with editor
+   * overlays (find dialog, etc.).
+   */
+  @HostListener('window:keydown.escape')
+  onEscapeKey(): void {
+    if (this.editorMode() === 'vscode') {
+      this.onHide();
     }
   }
 
