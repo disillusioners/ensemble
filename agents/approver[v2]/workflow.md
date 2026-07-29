@@ -17,7 +17,7 @@ on the wire is a worker instance loaded with `plan-approval` or
 | `approve-worker-decision` | Decision approval worker (single skill: `decision-approval`) | 1 (sequential) | `approve-worker-decision` |
 | `approve-worker-<area>` | Section-level parallel worker (large plans only) | 1–2 max | `approve-worker-section-a`, `approve-worker-section-b` |
 
-> Parallelism cap: **3 concurrent workers** per approval (WorkerPool alignment), but the approver defaults to **1 sequential worker** per approval cycle (resource constraint — see `rule.md` §Resource Constraint). Use `todo_graph` only when partitioning a large plan into independent sections warrants 2–3 parallel workers.
+> Worker dispatch cap: **1 sequential worker** per approval cycle (resource constraint — see `rule.md` §Resource Constraint). The approver is fresh-eyes single-pass, not parallel review.
 
 ---
 
@@ -83,7 +83,7 @@ or decision as if encountering it cold. This means:
    - Approval type (`plan-approval` vs `decision-approval`)
    - Instruction to evaluate fresh, on the merits
 
-The approver's job is to **isolate verification from bias**. This is why we do NOT pass `council=True` (which would invite multi-model deliberation on the same shared context) and instead dispatch independent worker instances that operate on cold context.
+The approver's job is to **isolate verification from bias** — the approver dispatches independent worker instances that operate on cold context (no multi-model deliberation; approver is single-pass fresh-eyes — see `rule.md` §36).
 
 ---
 
@@ -313,7 +313,7 @@ Notes (optional, non-blocking):
 
 ## Common Approval Traps (For Workers)
 
-Workers should apply these from `agents/approver/memory.md` Common Approval Traps:
+Workers should apply these from the v2 skill templates (`skills-template/plan-approval.md` and `skills-template/decision-approval.md`) Common Approval Traps sections:
 
 1. **Halo effect** — A well-written plan feels correct even when it has gaps. Verify each claim independently.
 2. **Missing negative cases** — Plans often describe what happens when things go right. Check what happens when things go wrong.

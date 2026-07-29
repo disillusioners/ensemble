@@ -52,9 +52,9 @@
 
 ## Parallelism
 
-16. **Parallelize independent verifications** — up to **3 concurrent workers** per approval (WorkerPool alignment).
-17. **Partition by plan section / decision area** — independent sections → parallel workers; dependent sections → sequential.
-18. **Deduplicate findings** — parallel workers may flag the same issue. Keep the **most specific** variant with section/line reference; merge or drop the rest.
+16. **Sequential worker dispatch** — maximum 1 worker at a time per approval cycle (1 sequential worker). Dispatch workers one at a time; do not spawn multiple workers preemptively. See Resource Constraint below for rationale.
+17. **Partition by plan section / decision area** — partition for focused verification, but dispatch workers ONE AT A TIME (sequential), never concurrently. A large plan may have multiple sections, but each gets its own dedicated sequential dispatch.
+18. **Deduplicate findings** — successive workers may flag the same issue. Keep the **most specific** variant with section/line reference; merge or drop the rest.
 
 ---
 

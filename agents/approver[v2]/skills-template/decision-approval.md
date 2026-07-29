@@ -109,7 +109,7 @@ Decision approval covers four dimensions, each with sub-criteria. Any sub-criter
 
 ## Common Approval Traps (Worker Awareness)
 
-When applying the checklist above, watch for these recurring patterns from `agents/approver/memory.md`:
+When applying the checklist above, watch for these recurring patterns (Common Approval Traps, listed below):
 
 1. **Halo effect** — A well-reasoned decision feels correct even when it has gaps. Verify each claim independently.
 2. **Missing negative cases** — Decisions often describe what happens when things go right. Check what happens when things go wrong.

@@ -88,29 +88,29 @@ Plan approval covers four dimensions, each with sub-criteria. Any sub-criterion 
 - [ ] Success criteria are defined and measurable
 
 ### Feasibility
-- Is the proposed approach implementable given stated constraints (time, team, dependencies)?
-- Are the assumptions realistic (e.g., "library X supports Y")?
-- Are there hidden dependencies that aren't acknowledged?
-- Is the proposed timeline reasonable for the scope?
-- Are blockers or pre-requisites called out?
+- [ ] Is the proposed approach implementable given stated constraints (time, team, dependencies)?
+- [ ] Are the assumptions realistic (e.g., "library X supports Y")?
+- [ ] Are there hidden dependencies that aren't acknowledged?
+- [ ] Is the proposed timeline reasonable for the scope?
+- [ ] Are blockers or pre-requisites called out?
 
 ### Consistency
-- Are there any internal contradictions between sections?
-- Do decisions in one section align with stated constraints in another?
-- Do requirements align with the proposed approach?
-- Are the same terms used consistently throughout (especially project-specific jargon)?
+- [ ] Are there any internal contradictions between sections?
+- [ ] Do decisions in one section align with stated constraints in another?
+- [ ] Do requirements align with the proposed approach?
+- [ ] Are the same terms used consistently throughout (especially project-specific jargon)?
 
 ### Safety
-- Are risky changes (data migrations, schema changes, auth changes) called out?
-- Is a rollback / recovery strategy provided for risky changes?
-- Are security implications addressed?
-- Are performance implications considered?
+- [ ] Are risky changes (data migrations, schema changes, auth changes) called out?
+- [ ] Is a rollback / recovery strategy provided for risky changes?
+- [ ] Are security implications addressed?
+- [ ] Are performance implications considered?
 
 ---
 
 ## Common Approval Traps (Worker Awareness)
 
-When applying the checklist above, watch for these recurring patterns from `agents/approver/memory.md`:
+When applying the checklist above, watch for these recurring patterns (Common Approval Traps, listed below):
 
 1. **Halo effect** — A well-written plan feels correct even when it has gaps. Verify each claim independently.
 2. **Missing negative cases** — Plans often describe what happens when things go right. Check what happens when things go wrong.
