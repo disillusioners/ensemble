@@ -456,41 +456,76 @@ async def get_instance_messages(
             )
 
     # ── Phase 4: per-turn context messages for ``human_messages`` mode ──────
-    # When the agent opts into ``human_messages`` mode, the 3 CONTEXT
-    # appenders early-return inside ``_apply_post_cache_appends`` so the
-    # persisted checkpoint has NO context messages. The LLM still receives
-    # them every turn (built locally by ``agent_node`` via
-    # ``assemble_context_messages``), but they are not in the checkpoint
-    # and therefore not visible in this API response. Rebuild them here
-    # on-demand using the same helper so the frontend "View system
-    # message" toggle can show what the LLM actually saw.
+    # Two paths emit context messages in ``human_messages`` mode:
+    #
+    # * Path A (write — ``_build_graph_input`` in
+    #   ``daemon/services/instance_messaging.py:203-211``) INTENTIONALLY
+    #   pre-pends ``persistent_context_msgs`` (project + shared context
+    #   + skills) to ``graph_input`` so LangGraph's ``add_messages``
+    #   reducer checkpoints them as REAL messages alongside the user
+    #   turn. This is the desired design — preserves the LLM prefix-
+    #   cache and makes the skill block visible in message history for
+    #   debugging.
+    #
+    # * Path B (read — this function) previously assumed the
+    #   checkpoint had NO context messages and rebuilt them on every
+    #   GET /messages call as ``is_synthetic=True`` entries. With Path A
+    #   active, that assumption is wrong: rebuilding here produces
+    #   DUPLICATE ``[SYSTEM CONTEXT]`` entries in the API response (one
+    #   real checkpointed msg + one synthetic rebuild).
+    #
+    # The guard below skips the synthetic rebuild whenever the
+    # checkpoint already contains context messages. The real entries
+    # are serialized into ``result`` by the normal loop above and the
+    # frontend sees exactly one block per turn — matching what the LLM
+    # actually received. The synthetic rebuild path is preserved as
+    # the fallback for any instance that predates the Path A
+    # checkpointing behavior.
     #
     # Strictly read-only: no DB writes, no skill tracking. Errors are
     # swallowed so a flaky context build never breaks the GET endpoint.
     if ctx is not None and ctx["mode"] == "human_messages":
-        try:
-            context_dicts = await _build_context_dicts_for_response(
-                instance_id=instance_id,
-                ctx=ctx,
-                manager=manager,
-                messages=messages,
-            )
-            if context_dicts:
-                # Insert AFTER the synthetic system message (if any) but
-                # BEFORE the most recent user message. ``human_messages``
-                # mode rebuilds context for the *current* turn, so only
-                # the last user turn is preceded by context — historical
-                # turns remain bare in the API response, matching what
-                # the LLM actually received on those earlier turns.
-                insert_at = _locate_context_insertion_index(result)
-                result[insert_at:insert_at] = context_dicts
-        except Exception as exc:
-            # Best-effort — never fail GET /messages because context
-            # rebuild broke.
+        if _messages_have_context_block(messages):
+            # Two-path conflict: checkpoint already carries context
+            # messages from Path A. The normal serialization loop above
+            # has already emitted them — skip the synthetic rebuild so
+            # the API response does not duplicate every [SYSTEM CONTEXT]
+            # block. Logged at DEBUG so the dedup path is observable in
+            # the daemon log without surfacing to the API caller.
             logger.debug(
-                f"get_instance_messages: skipping context rebuild for "
-                f"{instance_id[:8] if instance_id else '?'}: {exc}"
+                f"get_instance_messages: checkpoint already contains "
+                f"context messages for {instance_id[:8] if instance_id else '?'}; "
+                f"skipping synthetic rebuild to avoid duplicates"
             )
+        else:
+            # Legacy / fallback path: rebuild context messages for the
+            # *current* turn using the same helper ``agent_node`` uses
+            # every turn. The rebuilt entries are stamped with
+            # ``is_synthetic=True`` and a stable ``synthetic-context-<kind>-…``
+            # ``message_id`` so the frontend can identify them.
+            try:
+                context_dicts = await _build_context_dicts_for_response(
+                    instance_id=instance_id,
+                    ctx=ctx,
+                    manager=manager,
+                    messages=messages,
+                )
+                if context_dicts:
+                    # Insert AFTER the synthetic system message (if any) but
+                    # BEFORE the most recent user message. ``human_messages``
+                    # mode rebuilds context for the *current* turn, so only
+                    # the last user turn is preceded by context — historical
+                    # turns remain bare in the API response, matching what
+                    # the LLM actually received on those earlier turns.
+                    insert_at = _locate_context_insertion_index(result)
+                    result[insert_at:insert_at] = context_dicts
+            except Exception as exc:
+                # Best-effort — never fail GET /messages because context
+                # rebuild broke.
+                logger.debug(
+                    f"get_instance_messages: skipping context rebuild for "
+                    f"{instance_id[:8] if instance_id else '?'}: {exc}"
+                )
 
     return result
 
@@ -562,6 +597,61 @@ def _resolve_instance_message_context(
         "agent_meta": agent_meta,
         "mode": mode,
     }
+
+
+def _messages_have_context_block(messages: list[Any]) -> bool:
+    """Return True when any checkpoint message is a context HumanMessage.
+
+    Detects context messages by matching the ``additional_kwargs``
+    metadata that
+    :func:`daemon.services.context_messages._make_context_message`
+    sets on every emitted message: ``{"injected_message": True,
+    "context_kind": <kind>}`` where ``kind`` is one of
+    ``"project"``, ``"shared_context"``, or ``"skills"``. The metadata
+    is the canonical marker for ADR-5 — matching on it (rather than
+    the ``[SYSTEM CONTEXT: ...]`` content prefix) keeps the guard
+    robust against content rewrites by compaction, mangling, or any
+    other serialise/deserialise round-trip.
+
+    Used by ``get_instance_messages`` to skip the duplicate-context
+    synthetic rebuild when the LangGraph checkpoint already contains
+    context messages — the desired behavior when Path A
+    (``_build_graph_input`` in ``instance_messaging.py``) checks
+    those messages through LangGraph's ``add_messages`` reducer.
+
+    The canonical ``context_kind`` set is duplicated here as a
+    module-local constant so the early-skip guard stays a cheap,
+    import-free dict lookup. The values are kept in sync with
+    ``daemon.services.context_messages.CONTEXT_KIND_*`` constants
+    by test coverage (``tests/integration/test_context_injection_integration.py``).
+
+    Args:
+        messages: The persisted checkpoint messages list (LangChain
+            ``BaseMessage`` subclasses read from
+            ``saver.aget(...)['channel_values']['messages']``).
+
+    Returns:
+        True as soon as one context message is found; False otherwise.
+        Defensive: any malformed message (missing attribute, wrong
+        type, etc.) is silently treated as "not a context message"
+        so the synthetic rebuild path stays load-bearing for any
+        unexpected branch.
+    """
+    # Mirrors ``context_messages.CONTEXT_KIND_*`` — keep in sync.
+    _CONTEXT_KINDS = frozenset({"project", "shared_context", "skills"})
+
+    for msg in messages:
+        try:
+            kwargs = getattr(msg, "additional_kwargs", None) or {}
+        except Exception:
+            continue
+        if not kwargs:
+            continue
+        if not kwargs.get("injected_message"):
+            continue
+        if kwargs.get("context_kind") in _CONTEXT_KINDS:
+            return True
+    return False
 
 
 async def _build_context_dicts_for_response(
