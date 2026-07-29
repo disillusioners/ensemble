@@ -132,8 +132,15 @@ def _make_mock_checkpointer(messages):
 
 
 def _context_human_messages():
-    """Two context HumanMessages carrying ``context_kind`` markers."""
-    return [
+    """Two context HumanMessages carrying ``context_kind`` markers.
+
+    Returns the ``(persistent_msgs, ephemeral_msgs)`` tuple that
+    :func:`daemon.services.context_messages.assemble_context_messages`
+    actually produces. Tests assert that the persistent half is
+    surfaced as synthetic context entries before the most recent user
+    turn; the ephemeral half is documented as a no-op for this mode.
+    """
+    persistent = [
         HumanMessage(
             content="[SYSTEM CONTEXT: Related Project]\n\nproject body",
             additional_kwargs={
@@ -149,6 +156,8 @@ def _context_human_messages():
             },
         ),
     ]
+    ephemeral: list[HumanMessage] = []
+    return (persistent, ephemeral)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
