@@ -657,7 +657,7 @@ class TestChildReportsFilterExcludesSyntheticContext:
 
         # Apply the EXACT filter expression from child_reports.py:523.
         # If the filter expression changes in the source, mirror it here.
-        filtered = [m for m in response if not m.get("is_synthetic")]
+        filtered = [m for m in response if not (m.get("is_synthetic") or m.get("context_kind"))]
 
         # ALL synthetic entries are dropped — both the synthetic system
         # message AND every synthetic context message.
@@ -692,7 +692,7 @@ class TestChildReportsFilterExcludesSyntheticContext:
         text = path.read_text(encoding="utf-8")
 
         # Both lines use the same expression — pin both.
-        expected = "[m for m in messages if not m.get(\"is_synthetic\")]"
+        expected = "[m for m in messages if not (m.get(\"is_synthetic\") or m.get(\"context_kind\"))]"
         assert expected in text, (
             f"child_reports.py no longer contains the canonical filter "
             f"expression: {expected!r}. Update tests/integration/"

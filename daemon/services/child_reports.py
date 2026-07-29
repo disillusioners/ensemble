@@ -520,7 +520,10 @@ class ChildReportsService:
         # Get instance messages
         if self._checkpointer:
             messages = await get_instance_messages(self._checkpointer, instance_id)
-            messages = [m for m in messages if not m.get("is_synthetic")]
+            # Exclude both synthetic system messages (is_synthetic) and real checkpointed
+            # context messages (context_kind: project/shared/skills) so they do not leak
+            # into report summaries.
+            messages = [m for m in messages if not (m.get("is_synthetic") or m.get("context_kind"))]
         else:
             messages = []
         
@@ -1004,7 +1007,10 @@ Provide a concise summary:"""
         """
         if self._checkpointer:
             messages = await get_instance_messages(self._checkpointer, instance_id)
-            messages = [m for m in messages if not m.get("is_synthetic")]
+            # Exclude both synthetic system messages (is_synthetic) and real checkpointed
+            # context messages (context_kind: project/shared/skills) so they do not leak
+            # into report content.
+            messages = [m for m in messages if not (m.get("is_synthetic") or m.get("context_kind"))]
         else:
             messages = []
         
