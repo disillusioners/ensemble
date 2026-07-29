@@ -2773,6 +2773,65 @@ class InstanceMessagingService:
                 persistent_context_msgs=persistent_context_msgs or None,
             )
         
+        # Persistent context HumanMessages are graph inputs rather than normal
+        # user turns, so they are not seen by the streaming loop's HumanMessage
+        # skip below. Echo each newly prepended context message explicitly using
+        # the same envelope as the regular user-message pre-emit. In legacy
+        # mode, the equivalent prepended message is ``skill_injection_msg``.
+        # Stable ids/content hashes make this safe when a message is encountered
+        # again during retries or a repeated assembly path.
+        context_messages_to_emit = list(persistent_context_msgs)
+        if not context_messages_to_emit:
+            from .instance_lifecycle import _resolve_injection_mode
+
+            if (
+                _resolve_injection_mode(_messaging_agent_meta)
+                == ContextInjectionMode.LEGACY
+                and _skill_injection_msg is not None
+            ):
+                context_messages_to_emit = [_skill_injection_msg]
+        if context_messages_to_emit:
+            emitted_context_content = getattr(
+                self._manager, "_emitted_message_content", None
+            )
+            if not isinstance(emitted_context_content, dict):
+                emitted_context_content = {}
+                self._manager._emitted_message_content = emitted_context_content
+            for context_msg in context_messages_to_emit:
+                context_serialized = serialize_message(context_msg)
+                context_serialized["instance_id"] = instance_id
+                context_id = context_serialized.get("message_id")
+                context_hash = _compute_message_content_hash(context_serialized)
+                # Include the content hash in the key as a fallback for legacy
+                # skill messages whose generated id can differ on retry.
+                context_key = (
+                    f"{instance_id}:context:{context_id or context_hash}"
+                )
+                if (
+                    emitted_context_content.get(context_key) == context_hash
+                    or any(
+                        key.startswith(f"{instance_id}:context:")
+                        and value == context_hash
+                        for key, value in emitted_context_content.items()
+                    )
+                ):
+                    continue
+                try:
+                    await self._manager._live_hub.stream_message(
+                        instance_id=instance_id,
+                        message=context_serialized,
+                        event_type="user_message",
+                        checkpoint_id="user",
+                    )
+                except Exception as _context_emit_exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        f"[Hybrid] Persistent context user_message SSE emit failed for "
+                        f"{instance_id[:8]}...: {type(_context_emit_exc).__name__}: "
+                        f"{_context_emit_exc}"
+                    )
+                else:
+                    emitted_context_content[context_key] = context_hash
+
         # Build user message for pre-emit - use multimodal content if images present
         user_msg = HumanMessage(content=_build_message_content(message, images), id=message_id)
         

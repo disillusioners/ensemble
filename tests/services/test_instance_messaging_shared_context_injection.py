@@ -11,6 +11,13 @@ leader→child delivery path: the new
 ``format_shared_context_for_message_body`` call + the
 ``shared_context_injected`` once-per-instance flag.
 
+Also covers the **persistent-context SSE emission** path —
+``user_message`` events for the persistent block (project / shared-
+context / skills) injected on the first turn. Without those events,
+the frontend never sees a user bubble for the persistent context and
+the conversation appears to start at the actual user query, even
+though the agent received the context.
+
 Implementation strategy
 -----------------------
 
@@ -44,6 +51,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from daemon.services.instance_messaging import InstanceMessagingService
 
@@ -1073,3 +1081,238 @@ class TestMessageBodySharedContextInjection:
         # then the formatter fell back to ``parent_id`` itself when
         # the mock returned None.
         manager._instance_repository.get_tree_root_id.assert_called_with("parent-1")
+
+
+# ============================================================
+# Regression tests — persistent context SSE emission (CapFix 2026-07-29)
+# ============================================================
+
+
+class TestPersistentContextSseEmission:
+    """Pins the ``user_message`` SSE emission for the persistent context block.
+
+    CapFix 2026-07-29 added SSE emission for the persistent context
+    HumanMessages (project + shared-context + skills) so the
+    frontend sees a user bubble for each one on the first turn.
+    Without these emissions the conversation appears to start at the
+    actual user query even though ``agent_node`` receives the
+    persistent block — the frontend is told a different story than
+    the agent gets.
+
+    These tests exercise the emission path through ``_process_message_with_tracking``
+    with ``assemble_context_messages`` patched to return a known
+    list of context messages, then inspect the ``stream_message``
+    calls recorded by the manager mock.
+    """
+
+    async def test_persistent_context_emits_user_message_per_context_msg(self):
+        """Each persistent context HumanMessage emits a ``user_message`` SSE event.
+
+        Regression for the CapFix 2026-07-29 SSE emissions path: when
+        ``assemble_context_messages`` returns N persistent context
+        messages, the SSE layer MUST emit N+1 ``stream_message`` calls
+        — N for the context (each carrying ``event_type="user_message"``,
+        ``checkpoint_id="user"``, and the serialized context payload),
+        plus 1 for the actual user message that follows.
+
+        Mirrors the production ``user_message`` SSE envelope documented
+        in ``daemon/graph.py:1867-1886`` (``checkpoint_id="user"`` for
+        proper UI bubble rendering).
+        """
+        from langchain_core.messages import HumanMessage as _HM  # local for grouping
+
+        # Two persistent context messages — the orchestrator's output.
+        ctx_1 = _HM(
+            content="[SYSTEM CONTEXT: Project]\nProject X is a test fixture.",
+            id="ctx-pm-1",
+        )
+        ctx_2 = _HM(
+            content="[SYSTEM CONTEXT: Shared Context]\nscope=LARGE priority=1",
+            id="ctx-pm-2",
+        )
+
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        manager = _make_manager(
+            shared_context_kvs={},  # legacy branch disabled; we drive context directly
+            shared_context_injected=False,
+            project_injected=False,  # first-turn state → orchestrator builds persistent block
+        )
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            # Opt into ``human_messages`` mode so the persistent block
+            # is built via ``assemble_context_messages`` rather than
+            # landed in the legacy system-prompt appenders.
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="human_messages")
+            )
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(return_value=([ctx_1, ctx_2], [])),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="Please implement feature X.",
+                    message_id="msg-1",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        # Tightened: the body MUST have run and captured the graph_input.
+        assert captured.get("graph_input") is not None, (
+            "test must reach the body — if not, the assertions below are silent"
+        )
+
+        # Inspect every stream_message call on the live_hub mock.
+        # We expect N context messages + 1 user message = N+1 user_message
+        # calls total.
+        stream_calls = manager._live_hub.stream_message.call_args_list
+        user_message_calls = [
+            c for c in stream_calls
+            if c.kwargs.get("event_type") == "user_message"
+        ]
+        # Both context emissions AND the regular user message use
+        # event_type="user_message" + checkpoint_id="user", so the
+        # count is N+1.
+        assert len(user_message_calls) == 2 + 1, (
+            f"expected one user_message SSE call per persistent context msg "
+            f"plus the user message itself (3 total), got {len(user_message_calls)} "
+            f"calls. All stream_message calls: {stream_calls!r}"
+        )
+
+        # Every user_message call MUST carry checkpoint_id="user"
+        # (the documented SSE envelope from agent_node).
+        for call in user_message_calls:
+            assert call.kwargs.get("checkpoint_id") == "user", (
+                "user_message SSE events must carry checkpoint_id='user' — "
+                f"got {call.kwargs!r}"
+            )
+
+        # Identify the two context-message calls and verify their content
+        # is the injected context payload, NOT the user's actual message.
+        # ``serialize_message`` returns a dict with ``content``; extract
+        # the human-readable text for the substring check.
+        def _call_message_text(call) -> str:
+            message = call.kwargs.get("message") or {}
+            text = message.get("content", "")
+            if isinstance(text, list):
+                # Multimodal content — pull the first text block.
+                for block in text:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        return block.get("text", "")
+                return ""
+            return str(text)
+
+        context_call_texts = [
+            _call_message_text(c) for c in user_message_calls[:2]
+        ]
+        # Both pre-emit context messages carry the SYSTEM CONTEXT prefix
+        # (mirrors the production format produced by
+        # ``_make_context_message`` in ``daemon.services.context_messages``).
+        assert any("SYSTEM CONTEXT: Project" in t for t in context_call_texts), (
+            f"expected one user_message call to carry the project context "
+            f"payload — got context_call_texts={context_call_texts!r}"
+        )
+        assert any("SYSTEM CONTEXT: Shared Context" in t for t in context_call_texts), (
+            f"expected one user_message call to carry the shared-context "
+            f"payload — got context_call_texts={context_call_texts!r}"
+        )
+
+        # The final user_message call carries the actual user query.
+        # Note: user_msg may have been wrapped via _build_message_content,
+        # so we assert on substring rather than exact match.
+        user_call_text = _call_message_text(user_message_calls[2])
+        assert "Please implement feature X." in user_call_text, (
+            f"the final user_message call must carry the user's actual "
+            f"query — got {user_call_text!r}"
+        )
+
+    async def test_persistent_context_dedup_suppresses_repeat_emission(self):
+        """Repeated invocations with the same context hash must not re-emit.
+
+        Pin the dedup contract from
+        ``InstanceMessagingService._process_message_with_tracking``
+        around the SSE pre-emit loop: the manager-level
+        ``_emitted_message_content`` dict is checked before each
+        ``stream_message`` call so a retry (or any second invocation
+        with the same persistent block) does not duplicate the
+        frontend bubbles. Without this, retried messages would each
+        re-emit N context bubbles, causing the frontend to display
+        the same context repeatedly.
+        """
+        ctx_1 = HumanMessage(
+            content="[SYSTEM CONTEXT: Skills]\nSkill block.",
+            id="ctx-sk-1",
+        )
+
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        manager = _make_manager(
+            shared_context_kvs={},
+            shared_context_injected=False,
+            project_injected=False,
+        )
+
+        # Pre-seed the manager's dedup dict with the hash for ctx_1, so the
+        # second invocation short-circuits before calling stream_message
+        # for the context. The user message itself is still emitted.
+        from daemon.services.instance_messaging import (
+            _compute_message_content_hash,
+            serialize_message,
+        )
+        ctx_serialized = serialize_message(ctx_1)
+        ctx_serialized["instance_id"] = "inst-1"
+        ctx_hash = _compute_message_content_hash(ctx_serialized)
+        manager._emitted_message_content = {
+            f"inst-1:context:{ctx_1.id}": ctx_hash,
+        }
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="human_messages")
+            )
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(return_value=([ctx_1], [])),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="redo after retry",
+                    message_id="msg-1",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        stream_calls = manager._live_hub.stream_message.call_args_list
+        user_message_calls = [
+            c for c in stream_calls
+            if c.kwargs.get("event_type") == "user_message"
+        ]
+        # Only the user's own message emits — the context dedup short-circuits.
+        assert len(user_message_calls) == 1, (
+            "pre-seeded context dedup must suppress the context re-emit "
+            f"— got {len(user_message_calls)} user_message calls: "
+            f"{user_message_calls!r}"
+        )
+        # The single emission carries the user query (NOT the context block).
+        message = user_message_calls[0].kwargs.get("message") or {}
+        text = message.get("content", "")
+        if isinstance(text, list):
+            for block in text:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    break
+        assert "redo after retry" in str(text)
+        assert "SYSTEM CONTEXT" not in str(text)

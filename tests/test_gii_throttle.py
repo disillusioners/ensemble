@@ -93,6 +93,15 @@ def _make_manager_with_cleanup_surface():
             self._graph_tasks: dict[str, Any] = {}
             self._pending_injections: dict[str, Any] = {}
             self._context_usage_cleared: list[str] = []
+            # CapFix 2026-07-29 — SSE message-tracking dicts. The real
+            # ``InstanceManager`` defines these as ``dict[str, str]`` with
+            # keys shaped ``{instance_id}:{msg_id}`` (or
+            # ``{instance_id}:context:{...}`` for the persistent context
+            # pre-emit). The cleanup helper uses prefix-based pop to
+            # scrub both — model that on the stub so the cleanup test
+            # below can exercise the full surface.
+            self._original_timestamps: dict[str, str] = {}
+            self._emitted_message_content: dict[str, str] = {}
             # Mirror the surface ``_cleanup_instance_state`` touches today:
             # * ``_question_manager.clear_question_pack`` (question cleanup)
             # * ``clear_question_pause_requested`` which in turn mutates
@@ -298,6 +307,108 @@ class TestManagerThrottle:
         assert mgr.get_gii_throttle_count("iid-never-bumped") == 0
         assert result is not None
         assert result["context_usage_cleared"] is True
+
+    def test_cleanup_instance_state_clears_sse_tracking_dicts(self):
+        """Regression for CapFix 2026-07-29 SSE tracking-dict memory leak.
+
+        ``_emitted_message_content`` and ``_original_timestamps`` are
+        keyed by ``{instance_id}:{...}`` — the cleanup helper MUST
+        scrub the per-instance prefix or the dicts grow unbounded for
+        long-lived daemons terminating many short-lived instances.
+
+        Seeds keys for two instances plus one cross-instance noise
+        key, runs cleanup for ``iid-1``, and asserts the per-iid-1
+        prefix was scrubbed while the other instance's keys survived.
+        """
+        mgr = _make_manager_with_cleanup_surface()
+        # Three flavors of keys per the production convention:
+        #   * plain msg-id entry:           ``{iid}:{msg_id}``
+        #   * persistent-context entry:     ``{iid}:context:{hash}``
+        mgr._original_timestamps = {
+            "iid-1:msg-A": "2026-07-29T10:00:00+00:00",
+            "iid-1:msg-B": "2026-07-29T10:00:01+00:00",
+            "iid-1:context:ctx-1": "2026-07-29T10:00:02+00:00",
+            "iid-2:msg-C": "2026-07-29T10:00:03+00:00",
+        }
+        mgr._emitted_message_content = {
+            "iid-1:msg-A": "hash-A",
+            "iid-1:msg-B": "hash-B",
+            "iid-1:context:ctx-2": "hash-ctx-2",
+            "iid-2:msg-D": "hash-D",
+        }
+        # Sanity: both dicts hold the cross-instance noise key
+        assert len(mgr._original_timestamps) == 4
+        assert len(mgr._emitted_message_content) == 4
+
+        # Cleanup MUST scrub the iid-1 prefix from BOTH dicts
+        mgr._cleanup_instance_state("iid-1")
+
+        # iid-1 entries are gone — both plain-msg and persistent-context keys.
+        assert "iid-1:msg-A" not in mgr._original_timestamps
+        assert "iid-1:msg-B" not in mgr._original_timestamps
+        assert "iid-1:context:ctx-1" not in mgr._original_timestamps
+        assert "iid-1:msg-A" not in mgr._emitted_message_content
+        assert "iid-1:msg-B" not in mgr._emitted_message_content
+        assert "iid-1:context:ctx-2" not in mgr._emitted_message_content
+
+        # Cross-instance keys MUST survive (mirrors the per-iid prefix
+        # semantics — the helper cannot affect iid-2's bookkeeping).
+        assert "iid-2:msg-C" in mgr._original_timestamps
+        assert "iid-2:msg-D" in mgr._emitted_message_content
+
+    def test_cleanup_instance_state_safe_when_sse_dicts_absent(self):
+        """Cleanup must remain safe when the SSE dicts haven't been created.
+
+        Mirrors the ``_context_skill_results`` defensive ``getattr``
+        pattern: tests that build a minimal ``InstanceManager`` stub
+        for unrelated cleanup paths must not raise when the SSE
+        tracking dicts are also missing. Uses the dedicated
+        surface-only stub (which already lacks the SSE dicts) to
+        exercise the no-op branch.
+        """
+        # The dedicated throttle-only stub deliberately omits the SSE
+        # dicts. Binding the real helper on top exercises the
+        # ``getattr(self, "X", None)`` defensive branches.
+        from daemon import manager as manager_module
+
+        class _MinimalStub:
+            _gii_throttle: dict[str, int]
+            _loop_breaker_state: dict[str, dict]
+            _graph_tasks: dict[str, Any]
+            _pending_injections: dict[str, Any]
+            _context_usage_cleared: list[str]
+
+            def __init__(self):
+                self._gii_throttle = {}
+                self._loop_breaker_state = {}
+                self._graph_tasks = {}
+                self._pending_injections = {}
+                self._context_usage_cleared = []
+                from unittest.mock import MagicMock
+
+                self._question_manager = MagicMock()
+                self._question_pause_requested: dict[str, Any] = {}
+                self._deferred_question_pause: set[str] = set()
+                self.clear_question_pause_requested = (
+                    manager_module.InstanceManager.clear_question_pause_requested.__get__(self)
+                )
+                self.bump_gii_throttle = (
+                    manager_module.InstanceManager.bump_gii_throttle.__get__(self)
+                )
+                self._cleanup_instance_state = (
+                    manager_module.InstanceManager._cleanup_instance_state.__get__(self)
+                )
+                # Intentionally NO ``_original_timestamps`` and NO
+                # ``_emitted_message_content`` attributes.
+
+            def release_context_usage_cache(self, instance_id: str) -> None:
+                self._context_usage_cleared.append(instance_id)
+
+        mgr = _MinimalStub()
+        # Must NOT raise AttributeError when SSE dicts are absent.
+        result = mgr._cleanup_instance_state("iid-1")
+        assert result["context_usage_cleared"] is True
+        assert "iid-1" in mgr._context_usage_cleared
 
 
 # ---------------------------------------------------------------------------

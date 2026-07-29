@@ -2327,6 +2327,39 @@ class InstanceManager:
         )
         if _ctx_skill_results is not None:
             _ctx_skill_results.pop(instance_id, None)
+        # SSE message-tracking dicts leak fix: ``_original_timestamps``
+        # and ``_emitted_message_content`` are keyed by ``{instance_id}:{...}``
+        # (msg_id for normal messages, ``context:{...}`` for the persistent
+        # context HumanMessages emitted via the SSE user_message path in
+        # ``InstanceMessagingService._process_message_with_tracking``).
+        # They cannot be popped with the ``instance_id`` key directly — we
+        # must scan for the prefix and drop the matching entries. Without
+        # this, both dicts grow unbounded for long-lived daemons that
+        # process many short-lived instances (the original CapFix 2026-07-29
+        # for the user_message SSE path explicitly missed this cleanup,
+        # so a fresh instance termination left the keys in place for the
+        # lifetime of the process). Build the key list BEFORE the pop
+        # loop to avoid ``RuntimeError: dictionary changed size during
+        # iteration`` (mirrors the SYNCHRONOUSITY INVARIANT documented
+        # on ``_cleanup_stale_injections``).
+        _emitted_content = getattr(
+            self, "_emitted_message_content", None
+        )
+        if isinstance(_emitted_content, dict) and _emitted_content:
+            _prefix = f"{instance_id}:"
+            _stale_emitted_keys = [
+                k for k in _emitted_content if k.startswith(_prefix)
+            ]
+            for _k in _stale_emitted_keys:
+                _emitted_content.pop(_k, None)
+        _original_ts = getattr(self, "_original_timestamps", None)
+        if isinstance(_original_ts, dict) and _original_ts:
+            _prefix = f"{instance_id}:"
+            _stale_ts_keys = [
+                k for k in _original_ts if k.startswith(_prefix)
+            ]
+            for _k in _stale_ts_keys:
+                _original_ts.pop(_k, None)
         self.release_context_usage_cache(instance_id)
         # Question-tool cleanup (F5): drop any pending QuestionPack and the
         # pause-requested flag so the dicts cannot grow unbounded across many
