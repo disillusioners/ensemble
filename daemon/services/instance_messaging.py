@@ -758,12 +758,48 @@ class InstanceMessagingService:
             return 0
 
     def _maybe_trigger_title_generation(self, instance_id: str, message: str, should_trigger: bool) -> None:
-        """Fire-and-forget title generation if conditions are met."""
+        """Fire-and-forget title generation and initiative-message capture if conditions are met."""
         if should_trigger:
             MainLoopBridge.run_async_no_wait(
                 self._manager._generate_and_broadcast_title(instance_id, message)
             )
+            MainLoopBridge.run_async_no_wait(
+                self._maybe_store_initiative_message(instance_id, message)
+            )
             logger.debug(f"Title generation triggered for first message to instance {instance_id[:8]}...")
+
+    async def _maybe_store_initiative_message(self, instance_id: str, message: str) -> None:
+        """Persist the first real user message as ``initiative_message``.
+
+        Captured on the IDLE -> RUNNING transition (the same hook used for
+        title generation). First message wins: subsequent transitions are
+        no-ops because ``initiative_message`` is already present. Stores a
+        truncated (1000-char) copy via the atomic
+        :meth:`SQLModelInstanceRepository.set_metadata` so concurrent writes
+        against different metadata keys compose correctly.
+        """
+        # Read the instance off-loop to avoid sync DB writes on the event loop.
+        instance = await asyncio.to_thread(
+            self._manager._instance_repository.get, instance_id
+        )
+        if instance is None:
+            return
+        # Idempotent guard: first message wins.
+        if instance.instance_metadata and "initiative_message" in instance.instance_metadata:
+            logger.debug(
+                f"Initiative message already set for instance {instance_id[:8]}..., skipping"
+            )
+            return
+        if not message or not message.strip():
+            return
+        truncated_message = message[:1000]
+        await asyncio.to_thread(
+            self._manager._instance_repository.set_metadata,
+            instance_id,
+            "initiative_message",
+            truncated_message,
+        )
+        logger.debug(f"Initiative message stored for instance {instance_id[:8]}...")
 
     async def send_message(self, instance_id: str, message: str) -> "MessageResult":
         """Send a message to an instance and get the response.

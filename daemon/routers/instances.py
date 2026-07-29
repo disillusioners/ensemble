@@ -269,6 +269,7 @@ async def create_instance(
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),
         title=instance_meta.get("title"),
+        initiative_message=instance_meta.get("initiative_message"),
         children=instance_meta.get("children", []),
         mcp_tool_names=instance_meta.get("metadata", {}).get("mcp_tool_names"),
         created_at=parse_utc_datetime(instance_meta["created_at"]),
@@ -290,7 +291,8 @@ async def list_instances(
         None,
         description=(
             "Case-insensitive substring filter matched against "
-            "instance_metadata.title, agent_name, and agent_id. "
+            "instance_metadata.title, instance_metadata.initiative_message, "
+            "agent_name, and agent_id. "
             "% and _ are treated as literals."
         ),
     ),
@@ -349,6 +351,7 @@ async def list_instances(
             status=InstanceStatus(inst["status"]),
             parent_id=inst.get("parent_id"),
             title=inst.get("title"),
+            initiative_message=inst.get("initiative_message"),
             children=inst.get("children", []),
             mcp_tool_names=inst.get("metadata", {}).get("mcp_tool_names"),
             created_at=parse_utc_datetime(inst["created_at"]),
@@ -404,6 +407,7 @@ async def get_instance(
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),
         title=instance_meta.get("title"),
+        initiative_message=instance_meta.get("initiative_message"),
         children=instance_meta.get("children", []),
         mcp_tool_names=instance_meta.get("metadata", {}).get("mcp_tool_names"),
         created_at=parse_utc_datetime(instance_meta["created_at"]),

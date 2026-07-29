@@ -94,6 +94,7 @@ class SQLModelInstanceRepository:
 
         Matches the (escaped) ``search`` term against:
         * ``instance_metadata.title`` (JSONB on PostgreSQL, JSON on SQLite)
+        * ``instance_metadata.initiative_message`` (JSONB on PostgreSQL, JSON on SQLite)
         * ``agent_name`` (column)
         * ``agent_id`` (column)
 
@@ -118,11 +119,14 @@ class SQLModelInstanceRepository:
         is_postgres = db_session.bind.dialect.name == "postgresql"
         if is_postgres:
             title_expr = sa_cast(Instance.instance_metadata["title"], String)
+            initiative_expr = sa_cast(Instance.instance_metadata["initiative_message"], String)
         else:
             title_expr = sa_cast(func.json_extract(Instance.instance_metadata, "$.title"), String)
+            initiative_expr = sa_cast(func.json_extract(Instance.instance_metadata, "$.initiative_message"), String)
 
         return or_(
             title_expr.ilike(search_term, escape="\\"),
+            initiative_expr.ilike(search_term, escape="\\"),
             Instance.agent_name.ilike(search_term, escape="\\"),
             Instance.agent_id.ilike(search_term, escape="\\"),
         )
@@ -403,7 +407,8 @@ class SQLModelInstanceRepository:
                 list of all matching instances. When True, paginate by root and
                 BFS-load all descendants of each root in the current page.
             search: Optional case-insensitive substring filter. Matches the
-                escaped term against ``instance_metadata.title``, ``agent_name``,
+                escaped term against ``instance_metadata.title``,
+                ``instance_metadata.initiative_message``, ``agent_name``,
                 and ``agent_id``. ``%`` and ``_`` in the search term are treated
                 as literals.
 

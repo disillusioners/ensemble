@@ -80,6 +80,11 @@ class Instance(SQLModel, table=True):
         """Extract title from instance_metadata."""
         return self.instance_metadata.get("title") if self.instance_metadata else None
 
+    @property
+    def initiative_message(self) -> str | None:
+        """Extract initiative message from instance_metadata."""
+        return self.instance_metadata.get("initiative_message") if self.instance_metadata else None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -92,6 +97,7 @@ class Instance(SQLModel, table=True):
             "parent_id": self.parent_id,
             "status": self.status,
             "title": self.title,
+            "initiative_message": self.initiative_message,
             "metadata": dict(self.instance_metadata) if self.instance_metadata else {},
             "version": self.version,
             "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,

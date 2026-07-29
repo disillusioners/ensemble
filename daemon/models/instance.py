@@ -42,6 +42,14 @@ class InstanceInfo(BaseModel):
     agent_dir: str = Field(..., description="Path to the agent directory (derived from agent_id)")
     status: InstanceStatus = Field(..., description="Current instance status")
     title: str | None = Field(default=None, description="Auto-generated instance title from first message")
+    initiative_message: str | None = Field(
+        default=None,
+        description=(
+            "The first real user message sent to the instance (captured on IDLE -> RUNNING "
+            "transition). Provides search-friendly recall of what the user originally asked, "
+            "independent of the auto-generated title."
+        ),
+    )
     parent_id: str | None = Field(default=None, description="Parent instance ID if this is a child instance")
     children: list[str] | None = Field(
         default=None,
