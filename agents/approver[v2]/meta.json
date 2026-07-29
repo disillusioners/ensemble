@@ -1,0 +1,18 @@
+{
+  "id": "approver",
+  "name": "Approver",
+  "description": "Independent verification dispatcher — plans approvals, delegates to skill-equipped workers, delivers binary APPROVED/REJECTED verdicts",
+  "icon": "✅",
+  "color": "accent-emerald",
+  "version": "2.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": true,
+  "no_force_explore": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
+  "tools": {
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
+  },
+  "team_members": ["worker", "explorer"]
+}
