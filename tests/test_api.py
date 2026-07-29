@@ -393,7 +393,7 @@ async def test_list_instances_no_project_id_filter(client, mock_manager):
     assert len(data["instances"]) == 1
     # Verify manager was called with project_id=None
     mock_manager.list_instances.assert_called_once_with(
-        limit=10, offset=0, project_id=None, exclude_kb=True, include_descendants=True
+        limit=10, offset=0, project_id=None, exclude_kb=True, include_descendants=True, search=None
     )
 
 
@@ -425,7 +425,7 @@ async def test_list_instances_filter_by_project_id(client, mock_manager):
     assert data["instances"][0]["project_id"] == "test-project-123"
     # Verify manager was called with the correct project_id
     mock_manager.list_instances.assert_called_once_with(
-        limit=10, offset=0, project_id="test-project-123", exclude_kb=True, include_descendants=True
+        limit=10, offset=0, project_id="test-project-123", exclude_kb=True, include_descendants=True, search=None
     )
 
 
@@ -443,7 +443,7 @@ async def test_list_instances_filter_by_nonexistent_project_id(client, mock_mana
     assert data["total"] == 0
     # Verify manager was called with the nonexistent project_id
     mock_manager.list_instances.assert_called_once_with(
-        limit=10, offset=0, project_id="nonexistent", exclude_kb=True, include_descendants=True
+        limit=10, offset=0, project_id="nonexistent", exclude_kb=True, include_descendants=True, search=None
     )
 
 
@@ -473,7 +473,7 @@ async def test_list_instances_project_id_with_status_filter(client, mock_manager
     assert len(data["instances"]) == 1
     # Verify project_id was passed to manager
     mock_manager.list_instances.assert_called_once_with(
-        limit=10, offset=0, project_id="test-project", exclude_kb=True, include_descendants=True
+        limit=10, offset=0, project_id="test-project", exclude_kb=True, include_descendants=True, search=None
     )
 
 
