@@ -841,6 +841,7 @@ class TestLoadToolsDocForAgent:
         # (registry.get_resolved / registry.resolve_pure_id) since the
         # coder→developer rename; stub them so the filter lookup succeeds.
         self.mock_registry.get_resolved.return_value = self.mock_agent_meta
+        self.mock_registry.get_version.return_value = self.mock_agent_meta
         self.mock_registry.resolve_pure_id.return_value = "test_agent"
 
         # Patch the registry getter at the module level where it's imported

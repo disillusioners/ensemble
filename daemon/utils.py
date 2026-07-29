@@ -450,6 +450,10 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     """
     registry = get_registry()
 
+    # version-independent: only reads `id` and `path`, both structural fields
+    # that are identical for all versions of an agent. Validation just needs
+    # to confirm the agent exists — version resolution happens at the call
+    # site that actually uses version-dependent fields (tools config, etc.).
     metadata = registry.get_resolved(agent_id)
     if metadata is None:
         raise HTTPException(

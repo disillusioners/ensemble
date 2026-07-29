@@ -644,6 +644,7 @@ class TestDevopsToolConfiguration:
                 mock_agent_meta.tools = mock_filter
                 mock_agent_meta.innate_skills = []
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
+                mock_registry.return_value.get_version.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "devops")
                 tool_names = {t.name for t in result}

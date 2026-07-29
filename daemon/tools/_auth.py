@@ -40,7 +40,11 @@ TOOL_REQUIRED_AGENTS: dict[str, list[str]] = {
 }
 
 
-def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str | None:
+def _check_team_membership(
+    caller_agent_id: str,
+    requested_agent_id: str,
+    version_tag: str | None = None,
+) -> str | None:
     """Verify the caller agent is allowed to spawn the requested agent.
 
     Reads the caller's ``meta.json`` ``team_members`` list and checks that the
@@ -64,6 +68,11 @@ def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str
         caller_agent_id: The agent_id of the instance invoking
             ``spawn_instance`` (the parent instance's agent).
         requested_agent_id: The agent_id the caller wants to spawn.
+        version_tag: Optional version tag (e.g., ``"v2"``) used to resolve the
+            caller's metadata. When ``None``, falls back to the base resolved
+            agent meta so versioned caller instances enforce the correct
+            ``team_members`` / ``tools.allow`` policy (C1 fix — base/v1 was
+            being applied to v2 instances).
 
     Returns:
         ``None`` when the spawn is authorized, otherwise a human-readable
@@ -89,7 +98,14 @@ def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str
         )
 
     # Look up the caller's metadata.
-    caller_meta = registry.get_resolved(caller_agent_id)
+    # Prefer versioned meta when a version_tag is provided; fall back to
+    # base resolved meta so versioned callers enforce the correct
+    # team_members / tools.allow policy (C1 fix — base/v1 was being applied
+    # to v2 instances).
+    caller_meta = (
+        registry.get_version(caller_agent_id, version_tag)
+        or registry.get_resolved(caller_agent_id)
+    )
     if caller_meta is None:
         # Caller agent_id is unknown — this is a wiring/misconfiguration
         # bug, but we fail closed (deny). The downstream lifecycle service

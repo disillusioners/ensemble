@@ -384,6 +384,7 @@ class TestWandererToolFilter:
             with patch("daemon.registry.get_registry") as mock_registry:
                 mock_list_tools.return_value = TOOL_CATEGORIES
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
+                mock_registry.return_value.get_version.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "wanderer")
                 tool_names = {t.name for t in result}

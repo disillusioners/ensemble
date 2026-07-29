@@ -478,6 +478,7 @@ class TestCoderToolConfiguration:
                 mock_list_tools.return_value = TOOL_CATEGORIES
                 # _apply_tool_filter calls registry.get_resolved (not .get)
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
+                mock_registry.return_value.get_version.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "coder")
                 tool_names = {t.name for t in result}

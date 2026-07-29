@@ -560,6 +560,9 @@ def create_inner_soul_tool(
     # Resolve agent_id to path for internal use
     from ..registry import get_registry
     registry = get_registry()
+    # version-independent: only reads `path` (same dir for all versions —
+    # tags live as subdirs or alternative agent dirs, not as a property of
+    # `path`). No version_tag needed here.
     agent_meta = registry.get_resolved(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
     

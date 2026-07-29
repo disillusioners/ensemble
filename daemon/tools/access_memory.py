@@ -34,6 +34,8 @@ def create_access_memory_tool(agent_id: str):
     from ..registry import get_registry
 
     registry = get_registry()
+    # version-independent: only reads `path` (same dir for all versions).
+    # No version_tag needed here.
     agent_meta = registry.get_resolved(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
 

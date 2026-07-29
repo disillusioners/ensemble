@@ -2236,8 +2236,26 @@ class InstanceMessagingService:
                     if skill_instance_meta is not None:
                         from ..registry import get_registry
                         registry = get_registry()
-                        agent_meta = registry.get_resolved(
-                            skill_instance_meta.agent_id
+                        # C1 fix: thread the instance's bound ``agent_tag``
+                        # so the versioned (not base) meta's
+                        # ``skill_injection`` flag wins for v2/etc.
+                        # callers. Same ``get_version() or
+                        # get_resolved()`` fallback pattern used by
+                        # ``_apply_tool_filter`` and
+                        # ``_check_team_membership``. ``getattr`` with
+                        # ``None`` default keeps tests using
+                        # ``SimpleNamespace``-style instance_meta
+                        # compatible.
+                        agent_meta = (
+                            registry.get_version(
+                                skill_instance_meta.agent_id,
+                                getattr(
+                                    skill_instance_meta, "agent_tag", None
+                                ),
+                            )
+                            or registry.get_resolved(
+                                skill_instance_meta.agent_id
+                            )
                         )
 
                         if agent_meta and getattr(

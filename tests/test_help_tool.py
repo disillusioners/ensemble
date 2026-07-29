@@ -236,6 +236,7 @@ class TestToolHelpFiltering:
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_agent_meta
         mock_registry.get_resolved.return_value = mock_agent_meta
+        mock_registry.get_version.return_value = mock_agent_meta
 
         return mock_registry
 
@@ -248,6 +249,7 @@ class TestToolHelpFiltering:
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_agent_meta
         mock_registry.get_resolved.return_value = mock_agent_meta
+        mock_registry.get_version.return_value = mock_agent_meta
 
         return mock_registry
 
@@ -440,6 +442,7 @@ class TestToolHelpSecurity:
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_agent_meta
         mock_registry.get_resolved.return_value = mock_agent_meta
+        mock_registry.get_version.return_value = mock_agent_meta
 
         return mock_registry
 
@@ -454,6 +457,7 @@ class TestToolHelpSecurity:
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_agent_meta
         mock_registry.get_resolved.return_value = mock_agent_meta
+        mock_registry.get_version.return_value = mock_agent_meta
 
         return mock_registry
 

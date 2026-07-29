@@ -34,13 +34,22 @@ Usage:
 """
 
 
-def _get_allowed_tools(agent_id: str, mcp_tool_names: list[str] | None = None) -> set[str] | None:
+def _get_allowed_tools(
+    agent_id: str,
+    mcp_tool_names: list[str] | None = None,
+    version_tag: str | None = None,
+) -> set[str] | None:
     """Get the set of allowed tools for an agent.
-    
+
     Args:
         agent_id: The agent identifier.
         mcp_tool_names: Optional list of MCP tool names for category expansion.
-    
+        version_tag: Optional version tag (e.g. "v2"). When set, the versioned
+            meta is consulted so tools.allow/deny/innate_skills match the
+            version the instance is bound to. Falls back to the base
+            (untagged) meta when the version is unknown — same fallback as
+            create_instance_tools() (Batches 1-2 fix).
+
     Returns:
         Set of allowed tool names, or None if all tools are allowed.
     """
@@ -48,7 +57,9 @@ def _get_allowed_tools(agent_id: str, mcp_tool_names: list[str] | None = None) -
     from .instance import resolve_tool_filter, expand_allow_for_innate_skills
 
     registry = get_registry()
-    agent_meta = registry.get_resolved(agent_id)
+    # Prefer versioned meta so tools.allow/deny/innate_skills match the
+    # version the instance is bound to (fixes version-blind tool filtering).
+    agent_meta = registry.get_version(agent_id, version_tag) or registry.get_resolved(agent_id)
 
     if agent_meta is None or agent_meta.tools is None:
         return None
@@ -71,17 +82,25 @@ def _get_allowed_tools(agent_id: str, mcp_tool_names: list[str] | None = None) -
     )
 
 
-def create_help_tool(all_tools: list, agent_id: str, mcp_tool_names: list[str] | None = None):
+def create_help_tool(
+    all_tools: list,
+    agent_id: str,
+    mcp_tool_names: list[str] | None = None,
+    version_tag: str | None = None,
+):
     """Create a help tool that provides filtered documentation for tools.
-    
+
     This should be called AFTER all other tools are created, so it can
     scan them for documentation.
-    
+
     Args:
         all_tools: List of all tool functions in the session.
         agent_id: The agent identifier for filtering.
         mcp_tool_names: Optional list of MCP tool names for category expansion.
-    
+        version_tag: Optional version tag (e.g. "v2") for version-aware tool
+            filtering. Forwarded to ``_get_allowed_tools`` so help docs match
+            the version the instance is bound to.
+
     Returns:
         A tool_help tool function.
     """
@@ -121,7 +140,7 @@ def create_help_tool(all_tools: list, agent_id: str, mcp_tool_names: list[str] |
             tool_help(category="project")  # List project tools
         """
         # Get allowed tools for this agent (pass MCP tool names for category expansion)
-        allowed_tools = _get_allowed_tools(agent_id, mcp_tool_names)
+        allowed_tools = _get_allowed_tools(agent_id, mcp_tool_names, version_tag)
         
         # Get help for specific tool
         if tool_name:

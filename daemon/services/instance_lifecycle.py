@@ -1597,7 +1597,10 @@ class InstanceLifecycleService:
         # Create tools with this manager reference
         # Import from manager to pick up test patches
         from ..manager import create_instance_tools
-        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id)
+        # C1 fix: thread effective_version_tag so _apply_tool_filter resolves
+        # the versioned meta (e.g., reviewer v2) instead of falling back to the
+        # base/v1 tools.allow list.
+        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id, version_tag=effective_version_tag)
 
         # Build LLM config (override_model takes HIGHEST priority over
         # metadata.llm_model and env OPENAI_MODEL — see _build_llm_config).
@@ -2986,7 +2989,10 @@ class InstanceLifecycleService:
         # Create tools with this manager reference
         # Import from manager to pick up test patches
         from ..manager import create_instance_tools
-        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id)
+        # C1 fix: thread resolved_tag (resolved from agent_meta.version_tag after
+        # the base-fallback reconciliation above) so _apply_tool_filter resolves
+        # the correct versioned meta instead of always using base tools.allow.
+        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id, version_tag=resolved_tag)
 
         # Build LLM config — restore spawn-time model override if one was
         # persisted (highest priority over env + meta.json's llm_model).

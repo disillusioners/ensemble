@@ -336,7 +336,11 @@ async def _resolve_default_version_tag(
     return configured_tag
 
 
-def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str | None:
+def _check_team_membership(
+    caller_agent_id: str,
+    requested_agent_id: str,
+    version_tag: str | None = None,
+) -> str | None:
     """Backward-compatible re-export of the authorization check.
 
     The implementation lives in :mod:`daemon.tools._auth` (single source of
@@ -345,10 +349,14 @@ def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str
     This module-level binding is kept so existing callers and tests that
     reference ``daemon.tools.instance._check_team_membership`` (including
     ``mock.patch`` callsites) continue to resolve.
+
+    ``version_tag`` is threaded through to :func:`daemon.tools._auth._check_team_membership`
+    so callers that live in versioned instances consult the correct
+    ``team_members`` / ``tools.allow`` policy (C1 fix).
     """
     from ._auth import _check_team_membership as _impl
 
-    return _impl(caller_agent_id, requested_agent_id)
+    return _impl(caller_agent_id, requested_agent_id, version_tag)
 
 
 def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | None:
@@ -705,13 +713,19 @@ class SpawnInstanceInput(BaseModel):
         return self
 
 
-def create_instance_tools(manager: "InstanceManager", current_instance_id: str, agent_id: str = ""):
+def create_instance_tools(manager: "InstanceManager", current_instance_id: str, agent_id: str = "", version_tag: str | None = None):
     """Create tools with injected manager reference.
     
     Args:
         manager: The InstanceManager instance to use for operations
         current_instance_id: The ID of the current instance (used as parent for spawned instances)
         agent_id: The agent identifier (e.g., "developer").
+        version_tag: Optional agent version tag (e.g., ``"v2"``) used to resolve
+            the versioned tool filter (``tools.allow`` / ``tools.deny``). When
+            ``None``, falls back to the base resolved agent meta. Threaded from
+            ``spawn_instance`` / ``_restore_instance`` so versioned agents see
+            the correct allow/deny list (C1 fix — base/v1 was being applied to
+            v2 instances).
     
     Returns:
         List of tool functions
@@ -731,6 +745,28 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     # too (it shadows the outer var), so we pin the caller's id here under
     # a distinct name for the team_members authorization check.
     caller_agent_id: str = agent_id or ""
+
+    # Capture the caller's version_tag (the outer scope's ``version_tag``)
+    # under a distinct name. The pin protects TWO things:
+    #
+    # 1. ``spawn_instance`` closure (defined below) reassigns ``version_tag``
+    #    locally for the *new* spawned instance's default tag
+    #    (line ~818, ``await _resolve_default_version_tag``); without this
+    #    pin, Python would treat ``version_tag`` as a local variable in
+    #    that closure (compile-time scoping) and the earlier
+    #    ``_check_team_membership()`` call would hit ``UnboundLocalError``.
+    #    C1 fix.
+    #
+    # 2. ``spawn_councilor`` closure (further below, line ~893) takes
+    #    ``version_tag`` as a *parameter* — that parameter name shadows
+    #    the outer-scope ``version_tag``. Without this pin, the
+    #    ``_check_team_membership(caller_agent_id, resolved_agent_id,
+    #    caller_version_tag)`` call would silently fall through to
+    #    ``caller_version_tag=None`` (an implicit capture of the outer
+    #    name) and resolve against the base agent meta, allowing a v2
+    #    governor to spawn councilors under whatever policy the base
+    #    agent declares — an authorization bypass for the council path.
+    caller_version_tag: str | None = version_tag
 
     @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
@@ -772,7 +808,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 "ERROR: agent_id is required to spawn_instance. "
                 "Pass a non-empty agent_id (e.g. 'developer', 'leader')."
             )
-        membership_error = _check_team_membership(caller_agent_id, agent_id)
+        membership_error = _check_team_membership(caller_agent_id, agent_id, caller_version_tag)
         if membership_error is not None:
             return f"ERROR: {membership_error}"
 
@@ -904,7 +940,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             )
 
         # ─── STEP 2: Validate team membership (C3: _check_team_membership returns str|None, never raises) ───
-        err = _check_team_membership(caller_agent_id, resolved_agent_id)
+        err = _check_team_membership(caller_agent_id, resolved_agent_id, caller_version_tag)
         if err is not None:  # C3 FIX: check return value, not rely on exception
             raise ValueError(err)
 
@@ -1026,7 +1062,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # convene_council requires "governor" in the caller's team_members.
         # Add "governor" to meta.json team_members for any agent that should
         # be able to convene councils.
-        membership_error = _check_team_membership(caller_agent_id, "governor")
+        membership_error = _check_team_membership(caller_agent_id, "governor", caller_version_tag)
         if membership_error is not None:
             raise ValueError(membership_error)
 
@@ -1100,7 +1136,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
 
         # convene_council_with_skill requires "governor" in the caller's team_members.
-        membership_error = _check_team_membership(caller_agent_id, "governor")
+        membership_error = _check_team_membership(caller_agent_id, "governor", caller_version_tag)
         if membership_error is not None:
             raise ValueError(membership_error)
 
@@ -1674,8 +1710,10 @@ Returns:
     language_tool_list = create_language_tools()
     tools.extend(language_tool_list)
 
-    # Create help tool - needs mcp_tool_names for MCP category expansion
-    help_tool = create_help_tool(tools, agent_id, mcp_tool_names)
+    # Create help tool - needs mcp_tool_names for MCP category expansion.
+    # Forward version_tag so help docs reflect the version's tools.allow/deny
+    # (Batch 3 fix: create_help_tool was version-blind).
+    help_tool = create_help_tool(tools, agent_id, mcp_tool_names, version_tag=version_tag)
     tools.append(help_tool)
 
     # Scan ALL tools (including MCP + help) to populate _tool_metadata
@@ -1683,18 +1721,21 @@ Returns:
     scan_tools_for_full_docs(tools)
     
     # Apply tool filtering based on agent's tools config
-    tools = _apply_tool_filter(tools, agent_id, mcp_tool_names)
+    tools = _apply_tool_filter(tools, agent_id, mcp_tool_names, version_tag=version_tag)
     
     return tools
 
 
-def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str] | None = None) -> list[Any]:
+def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str] | None = None, version_tag: str | None = None) -> list[Any]:
     """Apply tool filtering based on agent's tools configuration.
     
     Args:
         tools: List of all tools (before filtering)
         agent_id: The agent identifier to look up tools config
         mcp_tool_names: Optional list of MCP tool names for category expansion.
+        version_tag: Optional version tag to resolve tools config from the
+            versioned registry (e.g., ``"v2"``). Falls back to base resolved
+            meta if the tagged version is not found.
         
     Returns:
         Filtered list of tools based on agent's tools config.
@@ -1703,9 +1744,13 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
     # Import registry locally to avoid circular imports
     from ..registry import get_registry
 
-    # Get agent metadata
+    # Get agent metadata — prefer versioned meta when a version_tag is provided,
+    # fall back to base resolved meta to preserve backward compatibility
+    # (fix: reviewerv2 instances were getting base v1 tools.allow).
     registry = get_registry()
-    agent_meta = registry.get_resolved(agent_id)
+    agent_meta = registry.get_version(agent_id, version_tag)
+    if agent_meta is None:
+        agent_meta = registry.get_resolved(agent_id)
 
     if agent_meta is None or agent_meta.tools is None:
         # No tools config → all tools allowed (backward compatible)

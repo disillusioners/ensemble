@@ -1069,8 +1069,31 @@ class InstanceManager:
             # to gate on ``skill_injection``. Wrapped in a closure so
             # the metrics service stays decoupled from the registry
             # module (and trivially mockable in tests).
-            def _resolve_agent_meta(agent_id: str) -> Any:
-                return get_registry().get_resolved(agent_id)
+            def _resolve_agent_meta(
+                agent_id: str, version_tag: str | None = None,
+            ) -> Any:
+                # C1 fix: prefer the versioned meta when ``version_tag``
+                # is supplied so the ``skill_injection`` gate matches
+                # the caller's resolved variant. Falls back to the
+                # base (resolved) meta when the tag is missing or the
+                # version is unknown — same ``get_version() or
+                # get_resolved()`` fallback pattern used by
+                # ``_apply_tool_filter`` and
+                # ``_check_team_membership``.
+                #
+                # TODO: the current ``SkillMetricsService`` call sites
+                # do not thread ``version_tag`` from the originating
+                # instance — they only pass ``agent_id``. Once the
+                # metrics-service signature supports a per-instance
+                # version tag, propagate it here from the relevant
+                # call paths so v2/etc. callers gate on their v2 flag,
+                # not the base one (same class of bug as
+                # ``_apply_tool_filter``).
+                registry = get_registry()
+                return (
+                    registry.get_version(agent_id, version_tag)
+                    or registry.get_resolved(agent_id)
+                )
 
             self._skill_metrics_service = SkillMetricsService(
                 usage_repo=self._skill_usage_repo,

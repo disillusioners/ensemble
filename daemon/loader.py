@@ -55,7 +55,10 @@ def _ensure_tool_metadata_populated() -> None:
     access_memory = create_access_memory_tool("")
     project_tools = create_project_tools(None, "", "")
     
-    # Create help tool with empty tool list first
+    # Create help tool with empty tool list first. version_tag is intentionally
+    # omitted here — this is a metadata-scanning stub (agent_id=""), so tool
+    # filtering never executes. The production path is in create_instance_tools()
+    # which forwards the instance's bound version_tag.
     help_tool = create_help_tool([], "")
     
     # Scan all discovered tools
@@ -73,7 +76,11 @@ def _ensure_tool_metadata_populated() -> None:
     scan_tools_for_full_docs(all_tools)
 
 
-def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = None) -> str:
+def load_tools_doc_for_agent(
+    agent_id: str,
+    mcp_tool_names: list[str] | None = None,
+    version_tag: str | None = None,
+) -> str:
     """Build tool documentation for an agent based on their allowed tools.
     
     Dynamically generates tool documentation by:
@@ -84,6 +91,11 @@ def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = N
     Args:
         agent_id: The agent identifier to get tool documentation for.
         mcp_tool_names: Optional list of MCP tool names for "mcp" category expansion.
+        version_tag: Optional version tag (e.g., ``"v2"``) used to resolve the
+            versioned tool filter (``tools.allow`` / ``tools.deny``). When
+            ``None``, falls back to the base resolved agent meta so versioned
+            agents see the correct allow/deny list (C1 fix — base/v1 was being
+            applied to v2 instances).
         
     Returns:
         Formatted string with tool documentation sections.
@@ -98,12 +110,18 @@ def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = N
     if not _tool_metadata:
         _ensure_tool_metadata_populated()
 
-    # Get agent's tool filter from registry
+    # Get agent's tool filter from registry.
+    # Prefer versioned meta when a version_tag is provided; fall back to
+    # base resolved meta so versioned agents see the correct
+    # allow/deny list (C1 fix — base/v1 was being applied to v2 instances).
     tool_filter: ToolFilter | None = None
     agent_innate_skills: list[str] | None = None
     try:
         registry = get_registry()
-        agent_meta = registry.get_resolved(agent_id)
+        agent_meta = (
+            registry.get_version(agent_id, version_tag)
+            or registry.get_resolved(agent_id)
+        )
         if agent_meta is not None:
             tool_filter = agent_meta.tools
             agent_innate_skills = agent_meta.innate_skills
@@ -682,7 +700,7 @@ def load_and_cache_prompt(
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir, meta)
-    dynamic_tools = load_tools_doc_for_agent(agent_id, mcp_tool_names)
+    dynamic_tools = load_tools_doc_for_agent(agent_id, mcp_tool_names, version_tag)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)
     shared_knowledge = load_shared_knowledge(no_force_explore=no_force_explore)
