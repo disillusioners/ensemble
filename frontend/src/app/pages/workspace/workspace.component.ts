@@ -94,66 +94,68 @@ import {
         }
 
         <mat-sidenav-content class="content-area">
-          <mat-toolbar class="content-toolbar">
-            <span class="toolbar-title">
-              {{ selectedPath() || 'Select a file' }}
-              @if (isCodeViewerDirty()) {
-                <span
-                  class="dirty-indicator"
-                  data-testid="dirty-indicator"
-                  aria-label="Unsaved changes"
-                  title="Unsaved changes"
-                >*</span>
+          @if (editorMode() === 'builtin') {
+            <mat-toolbar class="content-toolbar">
+              <span class="toolbar-title">
+                {{ selectedPath() || 'Select a file' }}
+                @if (isCodeViewerDirty()) {
+                  <span
+                    class="dirty-indicator"
+                    data-testid="dirty-indicator"
+                    aria-label="Unsaved changes"
+                    title="Unsaved changes"
+                  >*</span>
+                }
+              </span>
+              @if (currentFile()) {
+                <span class="file-meta">{{ currentFile()?.total_lines }} lines · {{ formatSize(currentFile()?.size_bytes) }}</span>
+                @if (currentFile()?.binary) { <span class="badge badge-binary">BIN</span> }
+                @if (currentFile()?.truncated) { <span class="badge badge-truncated">TRUNC</span> }
               }
-            </span>
-            @if (currentFile()) {
-              <span class="file-meta">{{ currentFile()?.total_lines }} lines · {{ formatSize(currentFile()?.size_bytes) }}</span>
-              @if (currentFile()?.binary) { <span class="badge badge-binary">BIN</span> }
-              @if (currentFile()?.truncated) { <span class="badge badge-truncated">TRUNC</span> }
-            }
-            <span class="spacer"></span>
-            @if (selectedPath()) {
-              <mat-button-toggle-group [value]="viewMode()">
-                <mat-button-toggle value="code" (change)="onSelectCode()">
-                  <mat-icon>code</mat-icon> Code
-                </mat-button-toggle>
-                <mat-button-toggle value="diff" (change)="onSelectDiff()">
-                  <mat-icon>compare_arrows</mat-icon> Diff
-                </mat-button-toggle>
-              </mat-button-toggle-group>
-            }
-            @if (selectedPath()) {
-              <button mat-icon-button data-testid="save-button" aria-label="Save" [disabled]="!canSave()" (click)="saveFile()" matTooltip="Save (Ctrl+S)">
-                @if (saving()) { <mat-icon class="spin">hourglass_empty</mat-icon> }
-                @else { <mat-icon>save</mat-icon> }
+              <span class="spacer"></span>
+              @if (selectedPath()) {
+                <mat-button-toggle-group [value]="viewMode()">
+                  <mat-button-toggle value="code" (change)="onSelectCode()">
+                    <mat-icon>code</mat-icon> Code
+                  </mat-button-toggle>
+                  <mat-button-toggle value="diff" (change)="onSelectDiff()">
+                    <mat-icon>compare_arrows</mat-icon> Diff
+                  </mat-button-toggle>
+                </mat-button-toggle-group>
+              }
+              @if (selectedPath()) {
+                <button mat-icon-button data-testid="save-button" aria-label="Save" [disabled]="!canSave()" (click)="saveFile()" matTooltip="Save (Ctrl+S)">
+                  @if (saving()) { <mat-icon class="spin">hourglass_empty</mat-icon> }
+                  @else { <mat-icon>save</mat-icon> }
+                </button>
+              }
+              <span
+                class="sse-indicator"
+                [class.sse-connected]="workspace.sseConnected()"
+                [attr.aria-label]="workspace.sseConnected() ? 'Live' : 'Disconnected'"
+              >
+                <span class="sse-dot"></span>
+                <span class="sse-label">{{ workspace.sseConnected() ? 'Live' : 'Disconnected' }}</span>
+              </span>
+              <button
+                mat-icon-button
+                type="button"
+                class="hide-button"
+                aria-label="Hide workspace"
+                data-testid="workspace-hide"
+                (click)="onHide()"
+              >
+                <mat-icon>visibility_off</mat-icon>
               </button>
-            }
-            <span
-              class="sse-indicator"
-              [class.sse-connected]="workspace.sseConnected()"
-              [attr.aria-label]="workspace.sseConnected() ? 'Live' : 'Disconnected'"
-            >
-              <span class="sse-dot"></span>
-              <span class="sse-label">{{ workspace.sseConnected() ? 'Live' : 'Disconnected' }}</span>
-            </span>
-            <button
-              mat-icon-button
-              type="button"
-              class="hide-button"
-              aria-label="Hide workspace"
-              data-testid="workspace-hide"
-              (click)="onHide()"
-            >
-              <mat-icon>visibility_off</mat-icon>
-            </button>
-          </mat-toolbar>
+            </mat-toolbar>
 
-          <app-file-tabs
-            [openFiles]="workspace.openFiles()"
-            [activePath]="workspace.activeFilePath()"
-            (tabClick)="onTabClick($event)"
-            (closeTab)="onTabClose($event)"
-          />
+            <app-file-tabs
+              [openFiles]="workspace.openFiles()"
+              [activePath]="workspace.activeFilePath()"
+              (tabClick)="onTabClick($event)"
+              (closeTab)="onTabClose($event)"
+            />
+          }
 
           <div class="viewer-content">
             @if (workspace.error(); as errorMessage) {
@@ -182,10 +184,23 @@ import {
                 }
               }
               @case ('vscode') {
-                <app-vscode-viewer
-                  [projectId]="projectId"
-                  [workdir]="validatedWorkdir()"
-                ></app-vscode-viewer>
+                <div class="vscode-overlay-container">
+                  <button
+                    class="vscode-overlay-hide"
+                    mat-icon-button
+                    type="button"
+                    (click)="onHide()"
+                    matTooltip="Hide workspace"
+                    aria-label="Hide workspace"
+                    data-testid="vscode-overlay-hide"
+                  >
+                    <mat-icon>visibility_off</mat-icon>
+                  </button>
+                  <app-vscode-viewer
+                    [projectId]="projectId"
+                    [workdir]="validatedWorkdir()"
+                  ></app-vscode-viewer>
+                </div>
               }
             }
           </div>

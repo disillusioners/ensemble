@@ -782,6 +782,7 @@ describe('WorkspaceComponent', () => {
     let hostFixture: ComponentFixture<WorkspaceHostComponent>;
     let host: WorkspaceHostComponent;
     let localHttp: HttpTestingController;
+    let localService: WorkspaceService;
 
     beforeEach(async () => {
       TestBed.resetTestingModule();
@@ -803,11 +804,16 @@ describe('WorkspaceComponent', () => {
       hostFixture = TestBed.createComponent(WorkspaceHostComponent);
       host = hostFixture.componentInstance;
       localHttp = TestBed.inject(HttpTestingController);
+      localService = TestBed.inject(WorkspaceService);
 
       // Drain the editor-preference request fired by the
       // WorkspaceService constructor.
       const editorReq = localHttp.expectOne('/api/settings/editor');
       editorReq.flush({ editor: 'builtin' });
+
+      // Explicitly drive editor mode to builtin so that toolbar/tabs
+      // assertions are mode-correct without relying on default flush.
+      localService.setEditorMode('builtin');
 
       host.projectId = 'route-project';
       hostFixture.detectChanges();
@@ -1942,6 +1948,78 @@ describe('WorkspaceComponent', () => {
         component.validatedWorkdir.set(workdir);
       }
     }
+
+    /** Render the workspace in one editor mode and drain its boot requests. */
+    function renderWithEditorMode(mode: 'builtin' | 'vscode'): void {
+      setupWithEditorMode(mode);
+      fixture.detectChanges();
+
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      treeReq.flush(makeTreeResponse());
+
+      const workdirReq = httpMock.expectOne(
+        '/api/projects/test-project-id/vscode-folder'
+      );
+      workdirReq.flush({ folder: '/Users/test/projects/foo' });
+      fixture.detectChanges();
+    }
+
+    it('renders the content toolbar and file tabs when editorMode="builtin"', () => {
+      renderWithEditorMode('builtin');
+
+      expect(
+        fixture.debugElement.query(By.css('mat-toolbar.content-toolbar'))
+      ).not.toBeNull();
+      expect(
+        fixture.debugElement.query(By.css('app-file-tabs'))
+      ).not.toBeNull();
+    });
+
+    it('does not render the content toolbar or file tabs when editorMode="vscode"', () => {
+      renderWithEditorMode('vscode');
+
+      expect(
+        fixture.debugElement.query(By.css('mat-toolbar.content-toolbar'))
+      ).toBeNull();
+      expect(
+        fixture.debugElement.query(By.css('app-file-tabs'))
+      ).toBeNull();
+    });
+
+    it('renders the overlay hide button in vscode mode with the 50%-opacity class', () => {
+      renderWithEditorMode('vscode');
+
+      const hideButton = fixture.debugElement.query(
+        By.css('[data-testid="vscode-overlay-hide"]')
+      );
+      expect(hideButton).not.toBeNull();
+      expect(hideButton.nativeElement.classList).toContain('vscode-overlay-hide');
+    });
+
+    it('does not render the overlay hide button in builtin mode', () => {
+      renderWithEditorMode('builtin');
+
+      expect(
+        fixture.debugElement.query(By.css('[data-testid="vscode-overlay-hide"]'))
+      ).toBeNull();
+    });
+
+    it('calls onHide and emits hide when the overlay hide button is clicked', () => {
+      renderWithEditorMode('vscode');
+      const onHideSpy = jest.spyOn(component, 'onHide');
+      const hideEmitSpy = jest.spyOn(component.hide, 'emit');
+      const hideButton = fixture.debugElement.query(
+        By.css('[data-testid="vscode-overlay-hide"]')
+      );
+
+      hideButton.nativeElement.click();
+      fixture.detectChanges();
+
+      expect(onHideSpy).toHaveBeenCalledTimes(1);
+      expect(hideEmitSpy).toHaveBeenCalledTimes(1);
+    });
 
     it('editorMode="builtin" does NOT render the VsCodeViewerComponent', () => {
       setupWithEditorMode('builtin');

@@ -204,6 +204,28 @@ mat-button-toggle mat-icon {
   word-break: break-word;
 }
 
+.vscode-overlay-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.vscode-overlay-hide {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  opacity: 0.5;
+  transition: opacity 0.2s ease;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+
+  &:hover,
+  &:focus {
+    opacity: 1;
+  }
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;
