@@ -313,6 +313,7 @@ class TestApplyToolFilter:
         with patch("daemon.registry.get_registry") as mock_registry:
             mock_agent_meta = MagicMock()
             mock_agent_meta.tools = None
+            mock_registry.return_value.get_version.return_value = None
             mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
             result = _apply_tool_filter(tools, "test_agent")
@@ -334,6 +335,7 @@ class TestApplyToolFilter:
                 mock_filter.allow = ["bash", "filesystem"]
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -356,6 +358,7 @@ class TestApplyToolFilter:
                 mock_filter.allow = None
                 mock_filter.deny = ["write_file"]
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -379,6 +382,7 @@ class TestApplyToolFilter:
                 mock_filter.allow = ["bash", "filesystem"]
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 tools = [
@@ -398,6 +402,7 @@ class TestApplyToolFilter:
         ]
 
         with patch("daemon.registry.get_registry") as mock_registry:
+            mock_registry.return_value.get_version.return_value = None
             mock_registry.return_value.get_resolved.return_value = None
 
             result = _apply_tool_filter(tools, "nonexistent_agent")
@@ -421,6 +426,7 @@ class TestApplyToolFilter:
                 mock_filter.allow = ["func_based_tool"]
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -444,6 +450,7 @@ class TestApplyToolFilter:
                 mock_filter.allow = ["coroutine_based_tool"]
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -464,6 +471,7 @@ class TestApplyToolFilter:
                 mock_filter.allow = ["bash"]  # Only bash allowed
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -627,6 +635,7 @@ class TestMcpToolFiltering:
                 mock_filter.allow = None
                 mock_filter.deny = ["mcp"]
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -662,6 +671,7 @@ class TestMcpToolFiltering:
                 mock_filter.allow = ["mcp"]
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "test_agent")
@@ -777,6 +787,7 @@ class TestExpandAllowForInnateSkills:
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
                 mock_agent_meta.innate_skills = ["opencode"]
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "developer")
@@ -806,6 +817,7 @@ class TestExpandAllowForInnateSkills:
                 mock_filter.deny = ["external_opencode"]
                 mock_agent_meta.tools = mock_filter
                 mock_agent_meta.innate_skills = ["opencode"]
+                mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "developer")
