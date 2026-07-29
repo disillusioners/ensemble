@@ -611,7 +611,7 @@ class TestColdResume:
 
         # Step 5: Mock _restore_instance to verify it gets called
         # (Full restore requires too many dependencies - we verify the call)
-        mock_manager._lifecycle_service._restore_instance = MagicMock(return_value=mock_graph)
+        mock_manager._lifecycle_service._restore_instance = AsyncMock(return_value=mock_graph)
 
         # Step 6: Call get_instance - should trigger cold resume
         from daemon.manager import InstanceManager
@@ -636,7 +636,7 @@ class TestColdResume:
         mock_manager.instances[instance_id] = (mock_graph, mock_agent_dir)
 
         # Mock _restore_instance on the lifecycle service to track if it's called
-        mock_manager._lifecycle_service._restore_instance = MagicMock()
+        mock_manager._lifecycle_service._restore_instance = AsyncMock()
 
         # Call get_instance
         from daemon.manager import InstanceManager
@@ -669,7 +669,7 @@ class TestColdResume:
         mock_manager._instance_repository.get.return_value = mock_instance_meta
 
         # Mock _restore_instance
-        mock_manager._lifecycle_service._restore_instance = MagicMock(return_value=mock_graph)
+        mock_manager._lifecycle_service._restore_instance = AsyncMock(return_value=mock_graph)
 
         # Call get_instance
         from daemon.manager import InstanceManager

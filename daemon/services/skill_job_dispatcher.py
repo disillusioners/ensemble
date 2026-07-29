@@ -251,6 +251,7 @@ class SkillJobDispatcher:
         normalized_project_id = normalize_project_id(project_id)
 
         job = await self._job_service.enqueue(
+            # agent_tag intentionally omitted: SKILL_KEEPER is an internal system agent, not versioned
             agent_id=SKILL_KEEPER_AGENT_ID,
             message=message,
             source=SOURCE_TAG,

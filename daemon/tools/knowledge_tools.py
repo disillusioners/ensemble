@@ -315,6 +315,7 @@ async def _enqueue_kb_update_job(
         )
 
         # Create the job
+        # agent_tag intentionally omitted: kb-importer is an internal system agent, not versioned
         await job_service.enqueue(
             agent_id="kb-importer",
             message=kb_importer_message,
@@ -380,6 +381,7 @@ async def _enqueue_experience_job(
         )
 
         # Create the job
+        # agent_tag intentionally omitted: kb-writer is an internal system agent, not versioned
         await job_service.enqueue(
             agent_id="kb-writer",
             message=kb_writer_message,

@@ -687,6 +687,7 @@ class JobQueueService:
                 job_type=job_type,
                 instance_id=instance_id,
                 job_id=job_id,
+                agent_tag=agent_tag,  # F1: persist for retry-time recovery
             )
 
             if not created and job is not None:
@@ -812,6 +813,7 @@ class JobQueueService:
             job_type=job_type,
             instance_id=instance_id,
             job_id=job_id,
+            agent_tag=agent_tag,  # F1: persist for retry-time recovery
         )
 
         # Notify dispatch bus of new job (for event-driven processing)
@@ -1285,6 +1287,10 @@ class JobQueueService:
         # Create a new job and use enqueue logic to determine if it should
         # start immediately or be queued
         # W13: Carry over the original queue_id to preserve queue routing
+        # F1: Carry over the original agent_tag so a retried job for a
+        # versioned agent (e.g. agent_dir contains [v2]) re-enqueues
+        # into the versioned directory instead of silently downgrading
+        # to the base agent_dir.
         new_job = await self.enqueue(
             agent_id=job.agent_id,
             message=job.message,
@@ -1293,6 +1299,7 @@ class JobQueueService:
             queue_id=job.queue_id,  # Carry over the original queue
             priority=job.priority,
             metadata=job.job_metadata,
+            agent_tag=job.agent_tag,  # F1: preserve version tag through retry
         )
         
         return new_job

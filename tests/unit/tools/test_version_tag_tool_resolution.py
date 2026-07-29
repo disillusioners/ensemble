@@ -1311,6 +1311,7 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
             agent_id="governor",
             parent_id="parent-iid",
             instance_name=None,
+            version_tag=None,
         )
         # enqueue_message was awaited with the governor's id.
         manager.enqueue_message.assert_awaited_once()

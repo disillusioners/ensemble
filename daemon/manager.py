@@ -3509,6 +3509,14 @@ class InstanceManager:
             # no-op on fresh databases where ``create_all`` already
             # created the column from the model.
             "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS terminal_reason TEXT",
+            # F1: agent_tag column for retry-time version recovery (Agent Versioning Phase 3).
+            # Stores the agent version tag that was in effect when the job was
+            # originally enqueued, so retry_job() can re-enqueue into the
+            # versioned agent_dir instead of silently downgrading to base.
+            # Matches ``daemon/repositories/job_queue/models.py::JobItem.agent_tag``
+            # (default=None, nullable=True). No index — agent_tag is read-after-write
+            # only, not used in predicates.
+            "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
             # NOTE: the four backfill UPDATE statements that reference
             # the legacy ``status`` column were moved out of the main
             # ``statements`` list below — on PostgreSQL databases where
@@ -5568,7 +5576,7 @@ class InstanceManager:
         """
         return await self._lifecycle_service.get_instance(instance_id)
 
-    def _restore_instance(self, instance_id: str, meta: "Instance") -> CompiledStateGraph:
+    async def _restore_instance(self, instance_id: str, meta: "Instance") -> CompiledStateGraph:
         """Restore an instance from database into memory.
 
         Rebuilds the graph with the same instance_id. The checkpointer will
@@ -5581,7 +5589,7 @@ class InstanceManager:
         Returns:
             The restored CompiledStateGraph instance.
         """
-        return self._lifecycle_service._restore_instance(instance_id, meta)
+        return await self._lifecycle_service._restore_instance(instance_id, meta)
 
     def list_instances(
         self,

@@ -271,6 +271,7 @@ async def create_job(
 
     # Enqueue the job (service.enqueue handles idempotency check internally)
     try:
+        # agent_tag intentionally omitted: HTTP API does not expose version_tag; jobs use base agent resolution
         job = await service.enqueue(
             agent_id=resolved_agent_id,
             message=body.message,

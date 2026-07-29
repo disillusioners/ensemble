@@ -208,10 +208,15 @@ class TestConveneCouncil:
                 request="Refactor X",
             )
 
+        # F6: convene_council resolves the per-project default version_tag for
+        # the governor (mirrors spawn_councilor W3). These tests do not seed
+        # ``default_agent_versions`` metadata, so resolution returns ``None``
+        # and the tool forwards ``version_tag=None`` to the manager.
         manager.spawn_instance.assert_called_once_with(
             agent_id="governor",
             parent_id="parent-instance-id",
             instance_name=None,
+            version_tag=None,
         )
         manager.enqueue_message.assert_awaited_once()
         enqueue_kwargs = manager.enqueue_message.await_args.kwargs
@@ -681,6 +686,7 @@ class TestConveneCouncilWithSkill:
             agent_id="governor",
             parent_id="parent-instance-id",
             instance_name=None,
+            version_tag=None,
         )
         manager.enqueue_message.assert_awaited_once()
         enqueue_kwargs = manager.enqueue_message.await_args.kwargs
@@ -871,6 +877,7 @@ class TestConveneCouncilWithSkill:
             agent_id="governor",
             parent_id="parent-instance-id",
             instance_name="my-council",
+            version_tag=None,
         )
         manager.enqueue_message.assert_awaited_once()
         enqueue_kwargs = manager.enqueue_message.await_args.kwargs

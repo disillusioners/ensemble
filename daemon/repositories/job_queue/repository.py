@@ -184,6 +184,7 @@ class JobRepository:
         instance_id: str | None = None,
         job_id: str | None = None,
         max_retries: int | None = None,
+        agent_tag: str | None = None,
     ) -> JobItem:
         """Create a new job queue item.
 
@@ -254,6 +255,7 @@ class JobRepository:
                 job_type=job_type,
                 instance_id=instance_id,
                 max_retries=max_retries,
+                agent_tag=agent_tag,
             )
 
             db_session.add(job)
@@ -277,6 +279,7 @@ class JobRepository:
         job_type: str = "task",
         instance_id: str | None = None,
         job_id: str | None = None,
+        agent_tag: str | None = None,
     ) -> tuple[JobItem | None, bool]:
         """Atomically insert a job or return the existing one with the same key.
 
@@ -352,6 +355,7 @@ class JobRepository:
                 "job_type": job_type,
                 "instance_id": instance_id,
                 "created_at": now,
+                "agent_tag": agent_tag,
             }
 
             # ON CONFLICT keyed on the partial unique index

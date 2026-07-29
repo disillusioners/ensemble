@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Final
 
 from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Column, Index, Integer, String, Text, UniqueConstraint, text
 from sqlmodel import SQLModel, Field
 
 from daemon.repositories.infra.types import JSONBType
@@ -314,6 +314,14 @@ class JobItem(SQLModel, table=True):
     # Job content
     agent_id: str
     agent_dir: str
+    # F1: Agent version tag captured at enqueue time. Read by retry_job()
+    # so a retried job for a versioned agent (e.g. agent_dir contains
+    # [v2]) re-enqueues into the versioned directory instead of silently
+    # downgrading to the base. Mirrors Instance.agent_tag (W9: no index).
+    agent_tag: str | None = Field(
+        default=None,
+        sa_column=Column("agent_tag", String, nullable=True)
+    )
     message: str
     source: str = Field(default="api")  # "api", "telegram", "scheduler", "webhook"
 
@@ -423,6 +431,7 @@ class JobItem(SQLModel, table=True):
             "job_id": self.job_id,
             "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
+            "agent_tag": self.agent_tag,
             "message": self.message,
             "source": self.source,
             "project_id": self.project_id,

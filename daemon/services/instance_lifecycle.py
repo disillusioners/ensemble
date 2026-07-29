@@ -2896,13 +2896,19 @@ class InstanceLifecycleService:
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
 
-        return self._restore_instance(instance_id, meta)
+        return await self._restore_instance(instance_id, meta)
 
-    def _restore_instance(self, instance_id: str, meta: Instance) -> CompiledStateGraph:
+    async def _restore_instance(self, instance_id: str, meta: Instance) -> CompiledStateGraph:
         """Restore an instance from database into memory.
 
         Rebuilds the graph with the same instance_id. The checkpointer will
         restore conversation state from LangGraph's checkpoint tables.
+
+        NOTE on thread context (F5 fix): this method runs directly on the
+        event loop when called via ``get_instance()``. The registry lookup
+        with ``validate_path=True`` performs a blocking ``Path.exists()``
+        syscall, so we off-load it to a worker thread via
+        ``asyncio.to_thread`` to avoid stalling the event loop.
 
         Args:
             instance_id: The ID of the instance to restore.
@@ -2915,17 +2921,97 @@ class InstanceLifecycleService:
         instance_repository = self._manager._instance_repository
         project_repository = self._manager._project_repository
         prompt_cache = self._manager.prompt_cache
-        
+
         # Load MCP tool names for prompt generation (prefer cache, fallback to stored)
         stored_mcp = meta.instance_metadata.get("mcp_tool_names") if meta.instance_metadata else None
         mcp_tool_names = self._get_mcp_tool_names(instance_id, stored_mcp)
-        
+
         registry = get_registry()
         agent_tag = getattr(meta, "agent_tag", None)
+        agent_meta: AgentMetadata | None = None
+
+        # F3 fix: S5 re-elevation consumer. If a previous restore fell back
+        # from a tagged version to base and persisted the original tag in
+        # ``instance_metadata['original_agent_tag']``, attempt to re-elevate
+        # to that original version now — the versioned directory may have
+        # reappeared on disk since the last restore. When the re-elevation
+        # succeeds, the existing F2 fallback block below is skipped because
+        # the resolved ``version_tag`` matches the requested ``original_tag``.
+        instance_metadata = getattr(meta, "instance_metadata", None) or {}
+        original_tag = (
+            instance_metadata.get("original_agent_tag")
+            if isinstance(instance_metadata, dict)
+            else None
+        )
+        re_elevated = False
+        if original_tag:
+            # F5 fix: validate_path=True performs a blocking Path.exists()
+            # syscall; off-load to a worker thread so we don't stall the
+            # event loop while the versioned dir check runs.
+            versioned_meta = await asyncio.to_thread(
+                registry.get_version,
+                meta.agent_id,
+                original_tag,
+                validate_path=True,
+            )
+            if versioned_meta is not None:
+                logger.info(
+                    f"Re-elevating instance {instance_id[:8]} from "
+                    f"agent_tag={agent_tag!r} to original_agent_tag="
+                    f"{original_tag!r}; versioned dir reappeared at "
+                    f"{versioned_meta.path}"
+                )
+                # Promote back to the original version. From here on, the
+                # resolved ``versioned_meta`` is used as ``agent_meta`` for
+                # the rest of the restore; the F2 fallback block below is
+                # skipped because ``versioned_meta.version_tag ==
+                # original_tag == agent_tag_after_assignment`` (we set
+                # ``meta.agent_tag = original_tag`` first so the equality
+                # check in the F2 block matches and short-circuits the
+                # fallback branch).
+                meta.agent_tag = original_tag
+                meta.agent_dir = str(versioned_meta.path)
+                # Clear the stale original_agent_tag so we don't retry
+                # re-elevation on every subsequent restore. Persisted via
+                # ``delete_metadata`` (jsonb_set/json_set) — atomic and
+                # avoids the read-modify-write race that
+                # ``update(instance_metadata=...)`` would create.
+                if isinstance(meta.instance_metadata, dict):
+                    meta.instance_metadata.pop("original_agent_tag", None)
+                try:
+                    instance_repository.update(
+                        instance_id,
+                        agent_tag=meta.agent_tag,
+                        agent_dir=meta.agent_dir,
+                    )
+                    instance_repository.delete_metadata(
+                        instance_id, "original_agent_tag"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to persist re-elevation for instance "
+                        f"{instance_id[:8]}: {exc}"
+                    )
+                re_elevated = True
+                # Stash the resolved meta on a local so the rest of the
+                # restore can use it via the existing ``agent_meta`` var.
+                agent_meta = versioned_meta
+                # Update agent_tag for the F2 fallback block's skip-check
+                # below: ``agent_meta.version_tag == meta.agent_tag`` after
+                # this assignment, so the F2 block will short-circuit.
+                agent_tag = original_tag
+
         # S6-restore fix: validate_path=True so that if the versioned directory
         # is missing on disk we cleanly fall back to the base version instead
         # of returning stale AgentMetadata pointing at a non-existent path.
-        agent_meta = registry.get_version(meta.agent_id, agent_tag, validate_path=True)
+        # F5 fix: off-load to a worker thread (Path.exists() is blocking).
+        if not re_elevated:
+            agent_meta = await asyncio.to_thread(
+                registry.get_version,
+                meta.agent_id,
+                agent_tag,
+                validate_path=True,
+            )
         if agent_meta is None:
             if agent_tag is not None:
                 logger.warning(
@@ -2938,7 +3024,9 @@ class InstanceLifecycleService:
 
         # F2 fix: If we fell back from a tagged version to base, update the
         # in-memory meta so list_instances reports the correct path/tag.
-        if agent_tag is not None and agent_meta is not None:
+        # Skipped when F3 re-elevation already promoted meta.agent_tag to
+        # the original tag (resolved version_tag matches requested).
+        if not re_elevated and agent_tag is not None and agent_meta is not None:
             if getattr(agent_meta, "version_tag", None) != agent_tag:
                 # S5 fix: capture the originally-requested tag BEFORE the
                 # in-memory mutation so a future restore can re-elevate back

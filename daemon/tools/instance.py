@@ -652,8 +652,18 @@ def _make_instance_id_aware(
         return wrapped_func
 
 
-def create_job_tools_if_available(manager, current_instance_id: str, agent_id: str) -> list:
-    """Create job tools if job services are available on the manager."""
+def create_job_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create job tools if job services are available on the manager.
+
+    Args:
+        manager: InstanceManager holding job-queue services.
+        current_instance_id: Current instance ID.
+        agent_id: Caller's agent_id.
+        agent_tag: F2 — caller's version tag (e.g. ``"v2"``). Forwarded to
+            ``create_job_tools`` so the agent-facing ``job_create`` tool can
+            thread it into ``enqueue(agent_tag=...)``. Defaults to ``None``
+            (base resolution) when the caller is not versioned.
+    """
     job_service = getattr(manager, '_job_queue_service', None)
     if job_service is None:
         return []
@@ -673,6 +683,7 @@ def create_job_tools_if_available(manager, current_instance_id: str, agent_id: s
         agent_id=agent_id,
         watcher_repo=watcher_repo,
         manager=manager,
+        agent_tag=agent_tag,
     )
 
 
@@ -1089,7 +1100,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         """
         from ..registry import get_registry
 
-        canonical = get_registry().resolve_to_id(councilor_agent_id)
+        registry = get_registry()
+        canonical = registry.resolve_to_id(councilor_agent_id)
         if not canonical:
             raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
 
@@ -1100,11 +1112,24 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if membership_error is not None:
             raise ValueError(membership_error)
 
+        # ── F6 FIX: Resolve per-project default version_tag for the governor ──
+        # Mirrors the ``spawn_councilor`` W3 contract: ``version_tag`` is
+        # intentionally NOT exposed (frontend never picks the governor's tag).
+        # Without this resolution, ``manager.spawn_instance`` would receive
+        # ``version_tag=None`` and ``lifecycle`` would fall back to base —
+        # meaning a configured ``governor[v2]`` is never spawned via
+        # ``convene_council``. Stale / missing / corrupt defaults fall back
+        # to ``None`` → base, exactly like ``spawn_councilor``.
+        gov_version_tag = await _resolve_default_version_tag(
+            manager._project_repository, "governor", registry
+        )
+
         # No W1 identity guard: any caller authorized by team_members may convene.
         gov_instance_id, _ = manager.spawn_instance(
             agent_id="governor",
             parent_id=current_instance_id,
             instance_name=instance_name,
+            version_tag=gov_version_tag,
         )
 
         message_text = (
@@ -1165,7 +1190,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
 
         from ..registry import get_registry
 
-        canonical = get_registry().resolve_to_id(councilor_agent_id)
+        registry = get_registry()
+        canonical = registry.resolve_to_id(councilor_agent_id)
         if not canonical:
             raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
 
@@ -1217,11 +1243,24 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 f"skill_bank tables — councilors will run without skill injection"
             )
 
+        # ── F6 FIX: Resolve per-project default version_tag for the governor ──
+        # Mirrors the ``spawn_councilor`` W3 contract (and the
+        # ``convene_council`` F6 fix above): ``version_tag`` is intentionally
+        # NOT exposed to the LLM, and without this resolution the lifecycle
+        # would receive ``version_tag=None`` and silently fall back to base —
+        # a configured ``governor[v2]`` would never be selected via
+        # ``convene_council_with_skill``. Stale / missing / corrupt defaults
+        # fall back to ``None`` → base, exactly like ``spawn_councilor``.
+        gov_version_tag = await _resolve_default_version_tag(
+            manager._project_repository, "governor", registry
+        )
+
         # No W1 identity guard: any caller authorized by team_members may convene.
         gov_instance_id, _ = manager.spawn_instance(
             agent_id="governor",
             parent_id=current_instance_id,
             instance_name=instance_name,
+            version_tag=gov_version_tag,
         )
 
         message_text = (
@@ -1599,7 +1638,9 @@ Returns:
     tools.extend(history_tools)
     
     # Create job tools if job service is available
-    job_tools = create_job_tools_if_available(manager, current_instance_id, agent_id)
+    # F2: forward ``version_tag`` as ``agent_tag`` so the agent-facing
+    # ``job_create`` tool resolves jobs to the correct versioned ``agent_dir``.
+    job_tools = create_job_tools_if_available(manager, current_instance_id, agent_id, agent_tag=version_tag)
     tools.extend(job_tools)
     
     # Add mother tools if this is the _mother agent

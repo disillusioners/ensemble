@@ -268,6 +268,7 @@ def create_job_tools(
     agent_id: str = "",
     watcher_repo: "JobWatcherRepository | None" = None,
     manager: "InstanceManager | None" = None,
+    agent_tag: str | None = None,
 ):
     """Create job queue management tools with injected services.
 
@@ -279,11 +280,20 @@ def create_job_tools(
         agent_id: The current agent ID.
         watcher_repo: JobWatcherRepository instance for watch functionality. Optional.
         manager: InstanceManager for tools that need access to instance/messaging APIs (e.g., job_continue). Optional.
+        agent_tag: Optional caller's version tag (e.g., ``"v2"``) — threaded into
+            ``job_create`` so the enqueued job resolves to the correct versioned
+            ``agent_dir`` instead of the base. Forwarded from
+            ``create_instance_tools(version_tag=...)`` via
+            ``create_job_tools_if_available``.
 
     Returns:
         List of tool functions for job queue management.
     """
     caller_agent_id = agent_id
+    # F2: capture the caller's version tag so ``job_create`` (agent-facing)
+    # threads it into ``job_service.enqueue(agent_tag=...)``. When None
+    # (e.g. non-versioned callers), the enqueue falls back to base resolution.
+    caller_agent_tag = agent_tag
 
     class JobCreateInput(BaseModel):
         """Input schema for job_create tool."""
@@ -325,6 +335,11 @@ def create_job_tools(
                 metadata=metadata,
                 queue_id=queue_id,
                 idempotency_key=idempotency_key,
+                # F2: thread the caller's version tag so a versioned agent
+                # (e.g. ``reviewer[v2]``) creating a job targets the same
+                # versioned ``agent_dir`` instead of the base. Falls back to
+                # base resolution when None (non-versioned caller).
+                agent_tag=caller_agent_tag,
             )
             # Register watch if requested (job is PENDING here, no race with observer)
             if watch and watcher_repo is not None and current_instance_id:

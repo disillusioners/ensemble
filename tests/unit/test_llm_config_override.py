@@ -588,7 +588,7 @@ class TestRestoreInstanceModelOverride:
     "permissive-now-strict" compliance hazard.
     """
 
-    def test_stored_override_reapplied_on_restore(self) -> None:
+    async def test_stored_override_reapplied_on_restore(self) -> None:
         """Stored ``model_override='gpt-4'`` + ``allowed_models=['gpt-4']`` → reapplied.
 
         The stored value is still in the allow-list, so it must pass through
@@ -603,7 +603,7 @@ class TestRestoreInstanceModelOverride:
 
         lifecycle = InstanceLifecycleService(manager, MagicMock())
         with _patch_restore_dependencies(agent_meta, captured):
-            lifecycle._restore_instance(meta.instance_id, meta)
+            await lifecycle._restore_instance(meta.instance_id, meta)
 
         llm_config = captured.get("llm_config", {})
         assert llm_config.get("model") == "gpt-4", (
@@ -611,7 +611,7 @@ class TestRestoreInstanceModelOverride:
             f"{llm_config.get('model')!r}"
         )
 
-    def test_stored_override_removed_from_allowed_falls_back(
+    async def test_stored_override_removed_from_allowed_falls_back(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Stored ``model_override='gpt-4'`` but ``allowed_models=['gpt-4o']`` → fallback.
@@ -634,7 +634,7 @@ class TestRestoreInstanceModelOverride:
             logging.WARNING, logger="daemon.services.instance_lifecycle"
         ):
             with _patch_restore_dependencies(agent_meta, captured):
-                lifecycle._restore_instance(meta.instance_id, meta)
+                await lifecycle._restore_instance(meta.instance_id, meta)
 
         llm_config = captured.get("llm_config", {})
         # override_model resolves to None → falls back to config.llm.model
@@ -660,7 +660,7 @@ class TestRestoreInstanceModelOverride:
             f"WARNING must mention allowed_models; got: {combined!r}"
         )
 
-    def test_no_stored_override_uses_default(self) -> None:
+    async def test_no_stored_override_uses_default(self) -> None:
         """No ``model_override`` key in metadata → fallback to default (backwards compat).
 
         Pre-feature instances (and instances spawned without the override
@@ -676,14 +676,14 @@ class TestRestoreInstanceModelOverride:
 
         lifecycle = InstanceLifecycleService(manager, MagicMock())
         with _patch_restore_dependencies(agent_meta, captured):
-            lifecycle._restore_instance(meta.instance_id, meta)
+            await lifecycle._restore_instance(meta.instance_id, meta)
 
         llm_config = captured.get("llm_config", {})
         assert llm_config.get("model") == "default-model", (
             f"Expected default 'default-model', got {llm_config.get('model')!r}"
         )
 
-    def test_corrupt_stored_override_graceful_fallback(self) -> None:
+    async def test_corrupt_stored_override_graceful_fallback(self) -> None:
         """Stored override is ``None`` or ``""`` → no crash, graceful fallback.
 
         Guards against rows where ``model_override`` was set but contains no
@@ -703,7 +703,7 @@ class TestRestoreInstanceModelOverride:
         # Case A: explicit None (e.g. INSERT with NULL value)
         meta_none = _make_restore_meta({"model_override": None})
         with _patch_restore_dependencies(agent_meta, captured):
-            lifecycle._restore_instance(meta_none.instance_id, meta_none)
+            await lifecycle._restore_instance(meta_none.instance_id, meta_none)
         assert captured["llm_config"]["model"] == "default-model", (
             "None model_override must fall back to default"
         )
@@ -711,7 +711,7 @@ class TestRestoreInstanceModelOverride:
         # Case B: empty string (e.g. partial write that left an empty value)
         meta_empty = _make_restore_meta({"model_override": ""})
         with _patch_restore_dependencies(agent_meta, captured):
-            lifecycle._restore_instance(meta_empty.instance_id, meta_empty)
+            await lifecycle._restore_instance(meta_empty.instance_id, meta_empty)
         assert captured["llm_config"]["model"] == "default-model", (
             "Empty-string model_override must fall back to default"
         )

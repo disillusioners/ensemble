@@ -1,6 +1,6 @@
 """Unit tests for restoring instances while preserving the original version tag.
 
-These tests pin the contract for two related fixes in
+These tests pin the contract for several related fixes in
 ``daemon.services.instance_lifecycle._restore_instance``:
 
 * **S5 — preserve ``original_agent_tag`` across restore fallbacks.** When an
@@ -22,6 +22,20 @@ These tests pin the contract for two related fixes in
   in so a missing versioned directory cleanly falls back to the base
   version rather than handing back cached metadata pointing at a
   non-existent path.
+
+* **F3 — re-elevation consumer.** At restore time, BEFORE the existing
+  fallback path, attempt to re-elevate to ``original_agent_tag`` if the
+  versioned directory has reappeared on disk. On success, promote
+  ``meta.agent_tag`` back to the original version, update ``meta.agent_dir``
+  to the versioned path, and clear the stale ``original_agent_tag`` from
+  ``instance_metadata``. On failure (dir still missing), the existing F2
+  fallback logic proceeds unchanged.
+
+* **F5 — thread context.** The ``get_version(..., validate_path=True)``
+  call performs a blocking ``Path.exists()`` syscall. The restore path
+  runs directly on the event loop (called from the async
+  ``get_instance()`` without a ``to_thread`` wrapper), so the lookup is
+  off-loaded via ``asyncio.to_thread`` to avoid stalling the loop.
 
 The tests intentionally use ``MagicMock`` for the registry so the
 ``get_version`` / ``get_resolved`` return values can be swapped per test
@@ -245,7 +259,7 @@ class TestS5FallbackPreservesOriginalAgentTag:
     can re-elevate if the versioned dir reappears.
     """
 
-    def test_fallback_persists_original_agent_tag(self) -> None:
+    async def test_fallback_persists_original_agent_tag(self) -> None:
         """Fallback must capture ``original_agent_tag='v2'`` and persist it.
 
         Setup:
@@ -318,7 +332,7 @@ class TestS5FallbackPreservesOriginalAgentTag:
             "daemon.manager.build_instance_graph",
             return_value=MagicMock(),
         ):
-            result = service._restore_instance(meta.instance_id, meta)
+            result = await service._restore_instance(meta.instance_id, meta)
 
         # Restore path must succeed (no exception) and produce a graph.
         assert result is not None, (
@@ -397,9 +411,18 @@ class TestS5ClearOnSuccess:
     from a previous fallback must be removed. Otherwise the metadata would
     carry an obsolete version reference even though the instance is now
     running on the requested version.
+
+    NOTE: with the F3 re-elevation consumer active, the F3 probe fires
+    first. If ``original_agent_tag`` is set AND the corresponding
+    versioned dir is on disk, re-elevation takes precedence over
+    S5-clear-on-success. These tests use a ``side_effect`` that returns
+    ``None`` for the F3 probe (v1 dir still missing) and the requested
+    meta for the regular lookup, simulating the realistic state where
+    the operator has moved on to a different version and the stale
+    original_agent_tag should be cleared.
     """
 
-    def test_stale_original_agent_tag_is_cleared(self) -> None:
+    async def test_stale_original_agent_tag_is_cleared(self) -> None:
         """Restore with matching tag must pop ``original_agent_tag`` and persist.
 
         Setup:
@@ -446,11 +469,30 @@ class TestS5ClearOnSuccess:
 
         # Success: get_version returns a meta whose version_tag matches
         # the requested tag, so the F2 fallback block is skipped.
+        # BUT the F3 re-elevation block fires first (because
+        # ``original_agent_tag='v1'`` is set in instance_metadata). We
+        # use ``side_effect`` to differentiate the F3 probe (with
+        # original_tag='v1') from the regular lookup (with
+        # agent_tag='v2'):
+        #   * F3 probe: v1 dir is missing on disk → return None
+        #     (re-elevation skipped, original_agent_tag survives)
+        #   * Regular lookup: v2 dir is present → return success_meta
+        #     (clean restore succeeds, S5 clear-on-success fires)
         success_meta = MagicMock()
         success_meta.path = Path("/agents/test-agent/v2")
         success_meta.version_tag = "v2"
         success_meta.id = "test-agent"
-        mock_registry.get_version.return_value = success_meta
+
+        def _resolve_by_tag(agent_id: str, version_tag, *, validate_path: bool = False):
+            # F3 probe uses the ORIGINAL tag ("v1") — simulate the v1
+            # dir still being missing.
+            if version_tag == "v1":
+                return None
+            # Regular lookup uses the requested agent_tag ("v2") — v2
+            # dir is present.
+            return success_meta
+
+        mock_registry.get_version.side_effect = _resolve_by_tag
 
         service = InstanceLifecycleService(manager, MagicMock())
         meta = _make_meta(
@@ -474,7 +516,7 @@ class TestS5ClearOnSuccess:
             "daemon.manager.build_instance_graph",
             return_value=MagicMock(),
         ):
-            result = service._restore_instance(meta.instance_id, meta)
+            result = await service._restore_instance(meta.instance_id, meta)
 
         assert result is not None, (
             "_restore_instance must succeed when get_version returns the "
@@ -540,7 +582,7 @@ class TestS6RestoreUsesValidatePath:
     builds a broken graph.
     """
 
-    def test_get_version_called_with_validate_path_true(self) -> None:
+    async def test_get_version_called_with_validate_path_true(self) -> None:
         """``registry.get_version`` must receive ``validate_path=True``.
 
         Setup:
@@ -604,7 +646,7 @@ class TestS6RestoreUsesValidatePath:
             "daemon.manager.build_instance_graph",
             return_value=MagicMock(),
         ):
-            service._restore_instance(meta.instance_id, meta)
+            await service._restore_instance(meta.instance_id, meta)
 
         # S6 core assertion: get_version received the validate_path kwarg.
         mock_registry.get_version.assert_called_with(
@@ -626,4 +668,384 @@ class TestS6RestoreUsesValidatePath:
         assert len(set_metadata_calls) == 1, (
             f"Fallback path must fire (set_metadata for original_agent_tag), "
             f"got {len(set_metadata_calls)} calls: {set_metadata_calls!r}"
+        )
+
+
+class TestF3ReelevationConsumer:
+    """F3 fix: S5 re-elevation consumer at restore time.
+
+    The previous fix (commit 93e4911c) captured the originally-requested tag
+    in ``instance_metadata['original_agent_tag']`` when a restore fell back
+    from a tagged version to base because the versioned directory was
+    missing on disk. F3 is the missing consumer: at restore time, BEFORE
+    the existing fallback path, attempt to re-elevate back to the original
+    tagged version in case the versioned directory has reappeared on disk.
+
+    When the re-elevation succeeds:
+      * ``meta.agent_tag`` is promoted back to ``original_agent_tag``
+      * ``meta.agent_dir`` is updated to the versioned dir's path
+      * ``instance_metadata['original_agent_tag']`` is popped and
+        persisted via ``delete_metadata`` (atomic JSONB / JSON write)
+
+    When the re-elevation fails (versioned dir is STILL missing),
+    the existing F2 fallback logic must proceed unchanged — the original
+    ``original_agent_tag`` MUST survive so a *future* restore can still
+    attempt re-elevation.
+    """
+
+    async def test_reelevation_succeeds_when_versioned_dir_reappeared(self) -> None:
+        """Re-elevate when ``original_agent_tag='v2'`` and versioned dir is back.
+
+        Setup:
+          * ``meta.agent_tag = None`` (fell back to base on a prior restore)
+          * ``meta.instance_metadata = {"original_agent_tag": "v2",
+              "mcp_tool_names": []}``
+          * First ``registry.get_version(..., 'v2', validate_path=True)``
+            call (the re-elevation probe) returns a versioned meta with
+            ``version_tag='v2'`` and ``path='/agents/test-agent/v2'`` —
+            simulates the versioned dir having reappeared on disk.
+          * Second ``registry.get_version(..., None, validate_path=True)``
+            call (the normal restore path, skipped when re-elevated) is
+            NOT exercised.
+
+        Assertions:
+          * ``meta.agent_tag`` was promoted back to ``"v2"``
+          * ``meta.agent_dir`` was updated to ``"/agents/test-agent/v2"``
+          * ``original_agent_tag`` is removed from
+            ``meta.instance_metadata``
+          * ``mcp_tool_names`` survives (we only pop the one key)
+          * ``instance_repository.update`` was called with the new
+            ``agent_tag='v2'`` and ``agent_dir``
+          * ``instance_repository.delete_metadata`` was called with
+            ``('test-instance-uuid', 'original_agent_tag')``
+          * ``instance_repository.set_metadata`` was NOT called (no
+            fallback occurred — re-elevation succeeded instead)
+        """
+        manager = _make_mock_manager()
+
+        update_calls: list = []
+        set_metadata_calls: list = []
+        delete_metadata_calls: list = []
+
+        manager._instance_repository.update.side_effect = (
+            lambda instance_id, **kwargs: update_calls.append((instance_id, dict(kwargs)))
+            or MagicMock()
+        )
+        manager._instance_repository.set_metadata.side_effect = (
+            lambda instance_id, key, value: set_metadata_calls.append(
+                (instance_id, key, value)
+            )
+            or MagicMock()
+        )
+        manager._instance_repository.delete_metadata.side_effect = (
+            lambda instance_id, key: delete_metadata_calls.append((instance_id, key))
+            or MagicMock()
+        )
+
+        # Configure registry mock: re-elevation probe returns a truthy
+        # versioned meta, simulating the versioned dir reappearing.
+        mock_registry = MagicMock()
+        versioned_meta = MagicMock()
+        versioned_meta.path = Path("/agents/test-agent/v2")
+        versioned_meta.version_tag = "v2"
+        versioned_meta.id = "test-agent"
+        # Use ``side_effect`` to return the versioned meta on the FIRST
+        # call (the re-elevation probe with original_tag="v2") and
+        # ``None`` on any subsequent call. We never expect a second call
+        # because re-elevation short-circuits the regular path.
+        mock_registry.get_version.side_effect = [versioned_meta]
+
+        service = InstanceLifecycleService(manager, MagicMock())
+        # Previous restore fell back to base, so agent_tag is None but
+        # original_agent_tag='v2' is preserved in instance_metadata.
+        meta = _make_meta(
+            agent_id="test-agent",
+            agent_tag=None,
+            instance_id="test-instance-uuid",
+            instance_metadata={"original_agent_tag": "v2", "mcp_tool_names": []},
+        )
+        original_mcp = list(meta.instance_metadata.get("mcp_tool_names", []))
+
+        with patch(
+            "daemon.services.instance_lifecycle.get_registry",
+            return_value=mock_registry,
+        ), patch(
+            "daemon.manager.load_and_cache_prompt",
+            return_value=("prompt", 100),
+        ), patch(
+            "daemon.manager.create_instance_tools",
+            return_value=[],
+        ), patch(
+            "daemon.manager.build_instance_graph",
+            return_value=MagicMock(),
+        ):
+            result = await service._restore_instance(meta.instance_id, meta)
+
+        assert result is not None, (
+            "_restore_instance must return the compiled graph after "
+            "successful re-elevation"
+        )
+
+        # F3 core assertion: meta.agent_tag promoted back to 'v2'.
+        assert meta.agent_tag == "v2", (
+            f"Re-elevation must set meta.agent_tag back to 'v2', got "
+            f"{meta.agent_tag!r}"
+        )
+        # And agent_dir updated to the versioned dir path.
+        assert meta.agent_dir == "/agents/test-agent/v2", (
+            f"Re-elevation must update meta.agent_dir to the versioned "
+            f"path '/agents/test-agent/v2', got {meta.agent_dir!r}"
+        )
+
+        # original_agent_tag is gone from in-memory metadata.
+        assert "original_agent_tag" not in meta.instance_metadata, (
+            f"original_agent_tag must be popped after successful "
+            f"re-elevation. Full metadata: {meta.instance_metadata!r}"
+        )
+        # Unrelated keys survive.
+        assert meta.instance_metadata.get("mcp_tool_names") == original_mcp, (
+            f"mcp_tool_names key must survive the re-elevation pop; got "
+            f"{meta.instance_metadata.get('mcp_tool_names')!r}"
+        )
+
+        # update() was called with the promoted tag + dir.
+        assert len(update_calls) == 1, (
+            f"Expected exactly one update() call for re-elevation, got "
+            f"{len(update_calls)}: {update_calls!r}"
+        )
+        uid, ukwargs = update_calls[0]
+        assert uid == "test-instance-uuid"
+        assert ukwargs.get("agent_tag") == "v2", (
+            f"update() must persist agent_tag='v2', got "
+            f"{ukwargs.get('agent_tag')!r}"
+        )
+        assert ukwargs.get("agent_dir") == "/agents/test-agent/v2", (
+            f"update() must persist agent_dir='/agents/test-agent/v2', got "
+            f"{ukwargs.get('agent_dir')!r}"
+        )
+
+        # delete_metadata('original_agent_tag') was called to clear the
+        # stale key.
+        assert len(delete_metadata_calls) == 1, (
+            f"Expected exactly one delete_metadata call after "
+            f"re-elevation, got {len(delete_metadata_calls)}: "
+            f"{delete_metadata_calls!r}"
+        )
+        did, dkey = delete_metadata_calls[0]
+        assert did == "test-instance-uuid"
+        assert dkey == "original_agent_tag", (
+            f"delete_metadata must target 'original_agent_tag', got "
+            f"{dkey!r}"
+        )
+
+        # set_metadata must NOT fire — re-elevation succeeded, no
+        # fallback occurred.
+        assert set_metadata_calls == [], (
+            f"set_metadata must NOT fire on successful re-elevation "
+            f"(no fallback occurred). Got: {set_metadata_calls!r}"
+        )
+
+        # Sanity: get_version was called exactly once (the re-elevation
+        # probe). The regular lookup was short-circuited by the
+        # ``if not re_elevated`` guard.
+        assert mock_registry.get_version.call_count == 1, (
+            f"Expected exactly one get_version call (re-elevation probe), "
+            f"got {mock_registry.get_version.call_count}: "
+            f"{mock_registry.get_version.call_args_list!r}"
+        )
+        # And the probe was called with the original_tag, NOT the
+        # current (base) agent_tag.
+        call_args, call_kwargs = mock_registry.get_version.call_args
+        assert call_args == ("test-agent", "v2"), (
+            f"Re-elevation probe must call get_version with original_tag "
+            f"'v2', got {call_args!r}"
+        )
+        assert call_kwargs.get("validate_path") is True, (
+            f"Re-elevation probe must call get_version with "
+            f"validate_path=True, got {call_kwargs.get('validate_path')!r}"
+        )
+
+    async def test_reelevation_skipped_when_versioned_dir_still_missing(self) -> None:
+        """Re-elevation is skipped when versioned dir is STILL missing.
+
+        Setup:
+          * ``meta.agent_tag = "v2"`` (input was the tagged version; the
+            versioned dir was previously missing so the DB row is still
+            tagged 'v2' AND ``original_agent_tag='v2'`` is set from the
+            original F2-fallback capture)
+          * ``meta.instance_metadata = {"original_agent_tag": "v2",
+              "mcp_tool_names": []}``
+          * First ``registry.get_version(..., 'v2', validate_path=True)``
+            call (the re-elevation probe) returns ``None`` — v2 dir is
+            STILL missing on disk.
+          * Second ``registry.get_version(..., 'v2', validate_path=True)``
+            call (the regular restore path) ALSO returns ``None``.
+          * ``registry.get_resolved`` returns the base meta.
+
+        Assertions:
+          * Re-elevation was NOT performed (``re_elevated=False``):
+            - ``meta.agent_tag`` was DOWNGRADED to ``None`` by the F2
+              fallback (NOT promoted back to 'v2' as re-elevation would
+              do)
+            - ``meta.agent_dir`` was UPDATED to the base path string by
+              the F2 fallback
+            - ``original_agent_tag`` is RECAPTURED (preserved for a
+              future restore attempt — this is the whole point of F3)
+          * ``set_metadata('original_agent_tag', 'v2')`` was called
+            (existing F2 fallback re-writes it)
+          * ``delete_metadata`` was NOT called (we keep the original_tag
+            so a future restore can re-elevate)
+        """
+        manager = _make_mock_manager()
+
+        update_calls: list = []
+        set_metadata_calls: list = []
+        delete_metadata_calls: list = []
+
+        manager._instance_repository.update.side_effect = (
+            lambda instance_id, **kwargs: update_calls.append((instance_id, dict(kwargs)))
+            or MagicMock()
+        )
+        manager._instance_repository.set_metadata.side_effect = (
+            lambda instance_id, key, value: set_metadata_calls.append(
+                (instance_id, key, value)
+            )
+            or MagicMock()
+        )
+        manager._instance_repository.delete_metadata.side_effect = (
+            lambda instance_id, key: delete_metadata_calls.append((instance_id, key))
+            or MagicMock()
+        )
+
+        # Configure registry mock: both get_version calls return None
+        # (re-elevation probe misses; regular lookup also misses).
+        # CRITICAL gotcha: ``MagicMock.get_version.return_value = None``
+        # is required because the default MagicMock return is a truthy
+        # MagicMock object — setting ``return_value = None`` explicitly
+        # is what makes both probes "miss".
+        mock_registry = MagicMock()
+        mock_registry.get_version.return_value = None
+
+        base_meta = MagicMock()
+        base_meta.path = Path("/some/base/path")
+        base_meta.version_tag = None
+        base_meta.id = "test-agent"
+        mock_registry.get_resolved.return_value = base_meta
+
+        service = InstanceLifecycleService(manager, MagicMock())
+        # Input agent_tag="v2" so the F2 fallback mutation fires when the
+        # regular restore lookup also misses. The instance_metadata
+        # already has original_agent_tag="v2" preserved from a prior
+        # restore.
+        meta = _make_meta(
+            agent_id="test-agent",
+            agent_tag="v2",
+            instance_id="test-instance-uuid",
+            instance_metadata={"original_agent_tag": "v2", "mcp_tool_names": []},
+        )
+
+        with patch(
+            "daemon.services.instance_lifecycle.get_registry",
+            return_value=mock_registry,
+        ), patch(
+            "daemon.manager.load_and_cache_prompt",
+            return_value=("prompt", 100),
+        ), patch(
+            "daemon.manager.create_instance_tools",
+            return_value=[],
+        ), patch(
+            "daemon.manager.build_instance_graph",
+            return_value=MagicMock(),
+        ):
+            result = await service._restore_instance(meta.instance_id, meta)
+
+        assert result is not None, (
+            "_restore_instance must return the compiled graph even when "
+            "re-elevation is skipped and the existing fallback fires"
+        )
+
+        # F3 skip-assertion 1: meta.agent_tag was DOWNGRADED to None by
+        # the F2 fallback (NOT promoted back to 'v2' as re-elevation
+        # would do). This proves re-elevation did NOT fire.
+        assert meta.agent_tag is None, (
+            f"meta.agent_tag must be downgraded to None by the F2 "
+            f"fallback when re-elevation is skipped (NOT promoted to "
+            f"'v2' by re-elevation), got {meta.agent_tag!r}"
+        )
+
+        # F3 skip-assertion 2: meta.agent_dir was UPDATED to the base
+        # path by the F2 fallback. The input was '/tmp/test' (from
+        # _make_meta); the fallback rewrites it to '/some/base/path'.
+        assert meta.agent_dir == "/some/base/path", (
+            f"F2 fallback must update meta.agent_dir to base path when "
+            f"re-elevation fails, got {meta.agent_dir!r}"
+        )
+
+        # F3 skip-assertion 3: original_agent_tag is RECAPTURED (preserved
+        # for a future restore attempt — this is the whole point of F3).
+        assert meta.instance_metadata.get("original_agent_tag") == "v2", (
+            f"original_agent_tag must be preserved when re-elevation "
+            f"fails, got {meta.instance_metadata.get('original_agent_tag')!r}. "
+            f"Full metadata: {meta.instance_metadata!r}"
+        )
+
+        # get_version was called TWICE: once for the re-elevation probe
+        # (original_tag='v2'), once for the regular restore path
+        # (agent_tag='v2').
+        assert mock_registry.get_version.call_count == 2, (
+            f"Expected exactly two get_version calls (re-elevation probe "
+            f"then regular restore), got {mock_registry.get_version.call_count}: "
+            f"{mock_registry.get_version.call_args_list!r}"
+        )
+        # First call was the re-elevation probe with original_tag='v2'.
+        first_call_args, first_call_kwargs = mock_registry.get_version.call_args_list[0]
+        assert first_call_args == ("test-agent", "v2"), (
+            f"First get_version call must be the re-elevation probe with "
+            f"original_tag='v2', got {first_call_args!r}"
+        )
+        assert first_call_kwargs.get("validate_path") is True, (
+            f"Re-elevation probe must call get_version with "
+            f"validate_path=True, got {first_call_kwargs.get('validate_path')!r}"
+        )
+
+        # Second call was the regular restore path with agent_tag='v2'.
+        second_call_args, second_call_kwargs = mock_registry.get_version.call_args_list[1]
+        assert second_call_args == ("test-agent", "v2"), (
+            f"Second get_version call must be the regular restore path "
+            f"with agent_tag='v2', got {second_call_args!r}"
+        )
+        assert second_call_kwargs.get("validate_path") is True, (
+            f"Regular restore path must call get_version with "
+            f"validate_path=True, got {second_call_kwargs.get('validate_path')!r}"
+        )
+
+        # set_metadata('original_agent_tag', 'v2') was called by the F2
+        # fallback to re-capture the original tag.
+        assert len(set_metadata_calls) == 1, (
+            f"Expected exactly one set_metadata call (F2 fallback "
+            f"re-capturing original_agent_tag), got "
+            f"{len(set_metadata_calls)}: {set_metadata_calls!r}"
+        )
+        smid, smkey, smvalue = set_metadata_calls[0]
+        assert smid == "test-instance-uuid"
+        assert smkey == "original_agent_tag"
+        assert smvalue == "v2"
+
+        # update() was called by the F2 fallback to persist the new
+        # agent_tag=None and agent_dir='/some/base/path'.
+        assert len(update_calls) == 1, (
+            f"Expected exactly one update() call (F2 fallback), got "
+            f"{len(update_calls)}: {update_calls!r}"
+        )
+        uid, ukwargs = update_calls[0]
+        assert uid == "test-instance-uuid"
+        assert ukwargs.get("agent_tag") is None
+        assert ukwargs.get("agent_dir") == "/some/base/path"
+
+        # delete_metadata must NOT fire — re-elevation failed and the
+        # original_agent_tag must survive for a future restore attempt.
+        assert delete_metadata_calls == [], (
+            f"delete_metadata must NOT fire when re-elevation fails "
+            f"(the original_agent_tag must survive for a future "
+            f"restore attempt). Got: {delete_metadata_calls!r}"
         )

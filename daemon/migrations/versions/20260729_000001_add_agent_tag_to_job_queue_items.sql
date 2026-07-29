@@ -1,0 +1,43 @@
+-- Migration: add agent_tag column to job_queue_items table
+-- Created: 2026-07-29
+-- Author: system
+-- Description:
+--   Agent Versioning Phase 2 data layer. ``agent_tag`` records the version
+--   tag the job was enqueued with (None = base). Read by retry_job() so a
+--   retried job for a versioned agent (e.g. agent_dir contains [v2])
+--   re-enqueues into the versioned directory instead of silently
+--   downgrading to the base. The column is nullable, so no backfill is
+--   required — existing rows default to the base version.
+--
+--   Schema mirrors daemon/repositories/job_queue/models.py
+--   (JobItem.agent_tag, default None). F1 follow-up: SQLite lacked an
+--   equivalent of the PostgreSQL ``ALTER TABLE`` registered in
+--   ``_ensure_postgres_columns()`` and would fail on INSERT/SELECT of
+--   the new column. This file closes that gap.
+--
+-- DUAL-DRIVER NOTES:
+--   This .sql is applied by MigrationRunner ONLY when the engine
+--   dialect is sqlite (runner.py skips non-sqlite). For PostgreSQL:
+--     - Fresh DBs: SQLModel.metadata.create_all() picks up the new
+--       ``agent_tag`` column from the JobItem SQLModel automatically
+--       (nullable=True, default=None).
+--     - Existing DBs: handled by the ``ALTER TABLE job_queue_items ADD
+--       COLUMN IF NOT EXISTS agent_tag VARCHAR`` statement registered
+--       in ``daemon/manager.py::_ensure_postgres_columns``. Mirrors
+--       W9 on instances.agent_tag: no index is created — agent_tag
+--       filtering is rare and the column is only used for read-after-
+--       write (retry-job version preservation).
+--
+--   The runner treats "duplicate column name" errors as idempotent,
+--   so re-running this file is safe on SQLite.
+
+-- UP
+
+ALTER TABLE job_queue_items ADD COLUMN agent_tag VARCHAR;
+
+-- DOWN
+-- Reverse the column addition. SQLite 3.35+ supports DROP COLUMN; older
+-- versions will leave the column in place but it is unused by code.
+-- Trailing semicolons are deliberately omitted below because runner.py
+-- splits DOWN SQL on the statement-terminator character.
+-- ALTER TABLE job_queue_items DROP COLUMN agent_tag  -- SQLite <3.35 cannot drop columns
