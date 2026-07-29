@@ -1070,7 +1070,9 @@ class InstanceManager:
             # the metrics service stays decoupled from the registry
             # module (and trivially mockable in tests).
             def _resolve_agent_meta(
-                agent_id: str, version_tag: str | None = None,
+                agent_id: str,
+                version_tag: str | None = None,
+                instance_id: str | None = None,
             ) -> Any:
                 # C1 fix: prefer the versioned meta when ``version_tag``
                 # is supplied so the ``skill_injection`` gate matches
@@ -1081,17 +1083,33 @@ class InstanceManager:
                 # ``_apply_tool_filter`` and
                 # ``_check_team_membership``.
                 #
-                # TODO: the current ``SkillMetricsService`` call sites
-                # do not thread ``version_tag`` from the originating
-                # instance — they only pass ``agent_id``. Once the
-                # metrics-service signature supports a per-instance
-                # version tag, propagate it here from the relevant
-                # call paths so v2/etc. callers gate on their v2 flag,
-                # not the base one (same class of bug as
-                # ``_apply_tool_filter``).
+                # W2 fix: when ``version_tag`` is not supplied but
+                # ``instance_id`` is, look up the instance to read its
+                # bound ``agent_tag`` so v2/etc. callers gate on their
+                # v2 ``skill_injection`` flag rather than the base
+                # one. ``record_task_completion`` now passes
+                # ``instance_id`` so the resolver is version-aware
+                # without changing ``SkillMetricsService.record_task_completion``'s
+                # public signature.
                 registry = get_registry()
+                resolved_tag = version_tag
+                if resolved_tag is None and instance_id is not None:
+                    try:
+                        _instance = self._instance_repository.get(
+                            instance_id
+                        )
+                        if _instance is not None:
+                            resolved_tag = getattr(
+                                _instance, "agent_tag", None
+                            )
+                    except Exception as _resolve_exc:  # pragma: no cover
+                        logger.debug(
+                            f"_resolve_agent_meta: instance lookup "
+                            f"failed for {instance_id[:8]}...: "
+                            f"{_resolve_exc}"
+                        )
                 return (
-                    registry.get_version(agent_id, version_tag)
+                    registry.get_version(agent_id, resolved_tag)
                     or registry.get_resolved(agent_id)
                 )
 

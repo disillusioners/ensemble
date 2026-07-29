@@ -1919,8 +1919,24 @@ class InstanceMessagingService:
             if _instance_row_for_meta is not None:
                 from ..registry import get_registry
                 _registry = get_registry()
-                _messaging_agent_meta = _registry.get_resolved(
-                    _instance_row_for_meta.agent_id
+                # S2 fix: thread the instance's bound ``agent_tag``
+                # so versioned (e.g. v2) callers get the versioned
+                # agent's ``context_injection_mode`` instead of the
+                # base one. Same ``get_version() or
+                # get_resolved()`` fallback pattern used by the
+                # C1 fix in this file (skill-injection block
+                # below) and the W2 fix in
+                # ``SkillMetricsService._check_capture_eligibility``.
+                _messaging_agent_meta = (
+                    _registry.get_version(
+                        _instance_row_for_meta.agent_id,
+                        getattr(
+                            _instance_row_for_meta, "agent_tag", None
+                        ),
+                    )
+                    or _registry.get_resolved(
+                        _instance_row_for_meta.agent_id
+                    )
                 )
         except Exception as _meta_exc:  # pragma: no cover - defensive
             logger.debug(

@@ -21,7 +21,7 @@ and ``team_members`` differ between the versioned and base views.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1000,3 +1000,317 @@ class TestGetAllowedToolsUsesVersionedMeta:
             f"v2 allow=['bash']; expected bash in tool_help output, "
             f"got: {result!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 9: closure-level — spawn_instance honors v2 team_members
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestClosureLevelSpawnInstanceUsesVersionedMeta:
+    """Closure-level integration: build the actual ``spawn_instance``
+    tool via ``create_instance_tools(..., version_tag='v2')`` and verify
+    it honors the v2 ``team_members`` list (not the base empty list).
+
+    Complements the unit-level ``_check_team_membership`` tests above by
+    exercising the full closure wiring (capture of ``caller_version_tag``,
+    forwarding into the auth helper, and the manager dispatch path).
+    """
+
+    async def test_v2_team_members_authorize_coder_and_deny_developer(self):
+        """v2 ``reviewer.team_members=['coder']``; base ``team_members=[]``.
+
+        Closure path:
+          * ``agent_id='coder'`` → allowed (v2 policy), spawn succeeds.
+          * ``agent_id='developer'`` → denied (v2 doesn't include it).
+
+        Without the version-tag fix the v2 caller would see the base
+        empty list and both spawns would be rejected. We deliberately
+        do NOT patch ``_check_team_membership`` — the whole point is to
+        verify the closure passes ``version_tag='v2'`` into it.
+        """
+        from daemon.tools.instance import create_instance_tools
+
+        # Registry: base has empty team_members (deny-by-default); v2
+        # adds 'coder'. ``resolve_pure_id`` is identity so reviewer /
+        # coder / developer all canonicalize to themselves (matches the
+        # production registry with no aliases).
+        base_meta = _make_meta("reviewer", team_members=[])
+        v2_meta = _make_meta("reviewer", team_members=["coder"])
+        registry = _make_registry_with_versions(
+            base_meta=base_meta, versioned_meta=v2_meta,
+        )
+
+        # Manager wired per tests/test_spawn_team_members.py so the
+        # spawn_instance closure reaches manager.spawn_instance(...).
+        manager = MagicMock()
+        manager._lifecycle_service = MagicMock()
+        manager._lifecycle_service._format_model_fallback_notice = (
+            MagicMock(return_value="")
+        )
+        manager.spawn_instance = MagicMock(
+            return_value=("new-instance-id-12345", None)
+        )
+        manager._instance_repository = MagicMock()
+        manager._instance_repository.get = MagicMock(return_value=None)
+
+        # Mirror the heavy-helper stub pattern (lines 416-443) so the
+        # factory only exercises the version-tag plumbing.
+        # ``_apply_tool_filter`` is a no-op so spawn_instance remains
+        # in the returned tool list.
+        def _noop_filter(tools, agent_id, mcp_tool_names=None,
+                          version_tag=None):
+            return tools
+
+        heavy_patches = [
+            patch("daemon.tools.instance.is_rag_enabled", return_value=False),
+            patch("daemon.tools.instance.create_rag_tools", return_value=[]),
+            patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
+            patch("daemon.tools.instance.create_inner_soul_tool",
+                  return_value=_MockTool("inner_soul")),
+            patch("daemon.tools.instance.create_access_memory_tool",
+                  return_value=_MockTool("access_memory")),
+            patch("daemon.tools.instance.create_project_tools", return_value=[]),
+            patch("daemon.tools.instance.create_job_tools_if_available",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_help_tool",
+                  return_value=_MockTool("tool_help")),
+            patch("daemon.tools.instance.create_critical_notes_tools",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_project_history_tools",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_opencode_tools",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_db_tools", return_value=[]),
+            patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+            patch("daemon.tools.instance.create_context_tools", return_value=[]),
+            patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+            patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
+            patch("daemon.tools.instance.scan_tools_for_full_docs"),
+            patch("daemon.tools.instance._apply_tool_filter",
+                  side_effect=_noop_filter),
+        ]
+
+        # Build the real spawn_instance tool with version_tag='v2'.
+        # CRITICAL: the ``patch`` for ``get_registry`` MUST stay active
+        # across BOTH factory build-time AND the closure invocation —
+        # ``_check_team_membership`` calls ``get_registry()`` inside
+        # ``spawn_instance`` at run-time. We keep the tool invocation
+        # inside the ``with`` block instead of exiting it prematurely.
+        for p in heavy_patches:
+            p.start()
+        try:
+            with patch("daemon.registry.get_registry", return_value=registry):
+                tools = create_instance_tools(
+                    manager,
+                    current_instance_id="parent-iid",
+                    agent_id="reviewer",
+                    version_tag="v2",
+                )
+                spawn = next(
+                    t for t in tools
+                    if getattr(t, "name", None) == "spawn_instance"
+                )
+
+                # ── Allowed: 'coder' is in v2's team_members → spawn
+                # succeeds. Must run inside the registry-patch context
+                # so the auth gate consults our v2_meta.
+                result_ok = await spawn.coroutine(
+                    agent_id="coder", project_id="test-project-id",
+                )
+                # ── Denied: 'developer' is NOT in v2's team_members →
+                # ERROR. Same registry-patch context required.
+                result_denied = await spawn.coroutine(agent_id="developer")
+        finally:
+            for p in reversed(heavy_patches):
+                p.stop()
+        assert isinstance(result_ok, str)
+        assert not result_ok.startswith("ERROR"), (
+            f"v2 reviewer.team_members=['coder'] must authorize 'coder'; "
+            f"got: {result_ok!r}"
+        )
+        assert "new-instance-id-12345" in result_ok, (
+            f"Success result must include the spawned instance_id; "
+            f"got: {result_ok!r}"
+        )
+        manager.spawn_instance.assert_called_once()
+        first_kwargs = manager.spawn_instance.call_args.kwargs
+        assert first_kwargs["agent_id"] == "coder"
+
+        assert isinstance(result_denied, str)
+        assert result_denied.startswith("ERROR"), (
+            f"v2 reviewer.team_members=['coder'] must deny 'developer'; "
+            f"got: {result_denied!r}"
+        )
+        assert "not allowed to spawn" in result_denied, (
+            f"Closure must surface the team_members denial; "
+            f"got: {result_denied!r}"
+        )
+        # CRITICAL: no additional manager.spawn_instance call — the
+        # auth gate runs BEFORE the manager dispatch.
+        manager.spawn_instance.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 10: closure-level — convene_council honors v2 team_members gate
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestClosureLevelConveneCouncilUsesVersionedMeta:
+    """Closure-level integration for the council convening tool.
+
+    The ``convene_council`` closure gates the council convening path
+    on the caller's ``team_members`` containing ``"governor"`` (the
+    agent the closure spawns to run the council). With
+    ``version_tag='v2'``, this gate MUST consult the versioned meta —
+    not the base empty list.
+
+    NOTE on the user's stated fixture: the task brief described the
+    v2 governor as ``team_members=['reviewer']``, but the closure
+    hard-codes the authorization target as ``"governor"`` (the agent
+    it spawns). We therefore reconcile by setting
+    ``v2_meta.team_members=['governor']`` so the closure's actual gate
+    passes; this still faithfully exercises
+    ``get_version('governor', 'v2')`` (the central C1 contract) and
+    proves the v2 membership gate is consulted end-to-end. We also
+    do NOT patch ``_check_team_membership`` — the closure threads
+    ``caller_version_tag`` into the real helper.
+    """
+
+    async def test_v2_governor_team_members_authorize_convene_council(self):
+        """v2 ``governor.team_members=['governor']``; base ``team_members=[]``.
+
+        Closure path:
+          * ``convene_council(...)`` → authorization passes (v2 policy
+            includes 'governor'), ``manager.spawn_instance`` is called
+            with ``agent_id='governor'``.
+
+        Without the version-tag fix, the closure would consult the base
+        empty ``team_members`` and ``_check_team_membership`` would
+        reject with the standard "not allowed to spawn 'governor'"
+        denial — and the closure would raise ``ValueError`` before
+        reaching ``manager.spawn_instance``.
+        """
+        from daemon.tools.instance import create_instance_tools
+
+        # Registry: base has empty team_members; v2 includes 'governor'
+        # (reconciled with the closure's hard-coded target).
+        # ``resolve_pure_id`` is identity so 'governor' canonicalizes to
+        # itself.
+        base_meta = _make_meta("governor", team_members=[])
+        v2_meta = _make_meta("governor", team_members=["governor"])
+        registry = _make_registry_with_versions(
+            base_meta=base_meta, versioned_meta=v2_meta,
+        )
+        # ``convene_council`` calls ``get_registry().resolve_to_id(...)``
+        # on the *councilor_agent_id* (a separate lookup from the auth
+        # helper). Our mock must return a truthy canonical id so the
+        # closure proceeds past the ``if not canonical`` guard.
+        registry.resolve_to_id.return_value = "developer"
+
+        # Manager: spawn_instance returns a tuple; enqueue_message is an
+        # AsyncMock because the closure awaits it.
+        manager = MagicMock()
+        manager.spawn_instance = MagicMock(
+            return_value=("governor-instance-id", None)
+        )
+        manager.enqueue_message = AsyncMock()
+
+        # Mirror the heavy-helper stub pattern (lines 416-443) so the
+        # factory only exercises the version-tag plumbing.
+        # ``_apply_tool_filter`` is a no-op so convene_council survives.
+        def _noop_filter(tools, agent_id, mcp_tool_names=None,
+                          version_tag=None):
+            return tools
+
+        heavy_patches = [
+            patch("daemon.tools.instance.is_rag_enabled", return_value=False),
+            patch("daemon.tools.instance.create_rag_tools", return_value=[]),
+            patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
+            patch("daemon.tools.instance.create_inner_soul_tool",
+                  return_value=_MockTool("inner_soul")),
+            patch("daemon.tools.instance.create_access_memory_tool",
+                  return_value=_MockTool("access_memory")),
+            patch("daemon.tools.instance.create_project_tools", return_value=[]),
+            patch("daemon.tools.instance.create_job_tools_if_available",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_help_tool",
+                  return_value=_MockTool("tool_help")),
+            patch("daemon.tools.instance.create_critical_notes_tools",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_project_history_tools",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_opencode_tools",
+                  return_value=[]),
+            patch("daemon.tools.instance.create_db_tools", return_value=[]),
+            patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+            patch("daemon.tools.instance.create_context_tools", return_value=[]),
+            patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+            patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
+            patch("daemon.tools.instance.scan_tools_for_full_docs"),
+            patch("daemon.tools.instance._apply_tool_filter",
+                  side_effect=_noop_filter),
+        ]
+
+        # Build the real convene_council tool with version_tag='v2'.
+        for p in heavy_patches:
+            p.start()
+        try:
+            with patch("daemon.registry.get_registry", return_value=registry):
+                tools = create_instance_tools(
+                    manager,
+                    current_instance_id="parent-iid",
+                    agent_id="governor",
+                    version_tag="v2",
+                )
+            convene = next(
+                t for t in tools
+                if getattr(t, "name", None) == "convene_council"
+            )
+        finally:
+            for p in reversed(heavy_patches):
+                p.stop()
+
+        # Invoke with minimal valid arguments per the closure signature
+        # (councilor_agent_id + request are required; models /
+        # max_councilors / instance_name are optional).
+        result = await convene.coroutine(
+            councilor_agent_id="developer",
+            request="Refactor X",
+        )
+
+        # The v2 team-membership gate MUST have PASSED — i.e. the
+        # closure did NOT raise a ValueError carrying a team-members
+        # denial. The gate's signature rejection is
+        # ``"not allowed to spawn 'governor'"`` so we explicitly assert
+        # that string is absent from the result path.
+        assert isinstance(result, dict), (
+            f"convene_council must return a dict on success; got: "
+            f"{type(result).__name__}: {result!r}"
+        )
+        assert "not allowed to spawn" not in str(result), (
+            f"v2 governor.team_members=['governor'] must satisfy the "
+            f"membership gate; result should NOT carry a denial. "
+            f"Got: {result!r}"
+        )
+        assert result.get("status") == "convened", (
+            f"v2-authorized convene_council must reach the success "
+            f"branch; got: {result!r}"
+        )
+        assert result.get("governor_instance_id") == "governor-instance-id", (
+            f"Result must echo the spawned governor's instance_id; "
+            f"got: {result!r}"
+        )
+
+        # Spawn fired exactly once with the right kwargs — the closure's
+        # non-block dispatch path. If the membership gate had rejected,
+        # the closure would have raised ValueError BEFORE this call.
+        manager.spawn_instance.assert_called_once_with(
+            agent_id="governor",
+            parent_id="parent-iid",
+            instance_name=None,
+        )
+        # enqueue_message was awaited with the governor's id.
+        manager.enqueue_message.assert_awaited_once()
+        enqueue_kwargs = manager.enqueue_message.await_args.kwargs
+        assert enqueue_kwargs["instance_id"] == "governor-instance-id"

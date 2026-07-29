@@ -746,26 +746,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     # a distinct name for the team_members authorization check.
     caller_agent_id: str = agent_id or ""
 
-    # Capture the caller's version_tag (the outer scope's ``version_tag``)
-    # under a distinct name. The pin protects TWO things:
-    #
-    # 1. ``spawn_instance`` closure (defined below) reassigns ``version_tag``
-    #    locally for the *new* spawned instance's default tag
-    #    (line ~818, ``await _resolve_default_version_tag``); without this
-    #    pin, Python would treat ``version_tag`` as a local variable in
-    #    that closure (compile-time scoping) and the earlier
-    #    ``_check_team_membership()`` call would hit ``UnboundLocalError``.
-    #    C1 fix.
-    #
-    # 2. ``spawn_councilor`` closure (further below, line ~893) takes
-    #    ``version_tag`` as a *parameter* — that parameter name shadows
-    #    the outer-scope ``version_tag``. Without this pin, the
-    #    ``_check_team_membership(caller_agent_id, resolved_agent_id,
-    #    caller_version_tag)`` call would silently fall through to
-    #    ``caller_version_tag=None`` (an implicit capture of the outer
-    #    name) and resolve against the base agent meta, allowing a v2
-    #    governor to spawn councilors under whatever policy the base
-    #    agent declares — an authorization bypass for the council path.
+    # Defensively capture the caller's version tag before defining closures.
+    # This snapshot is a regression guard against future closure code that
+    # might reassign ``version_tag`` locally; the distinct name remains bound
+    # to the caller's tag regardless of any such closure-local reassignment.
     caller_version_tag: str | None = version_tag
 
     @register_tool_category("instance")
@@ -1481,11 +1465,15 @@ Returns:
     Instance info dictionary
 """
     
-    # Create inner_soul tool for self-modification
-    inner_soul = create_inner_soul_tool(manager, agent_id, current_instance_id)
-    
-    # Create access_memory tool for reading memory files
-    access_memory = create_access_memory_tool(agent_id)
+    # Create inner_soul tool for self-modification.
+    # Thread version_tag so v2+ agents self-modify the versioned agent
+    # subtree (C1 fix — base/v1 was being written by v2 instances).
+    inner_soul = create_inner_soul_tool(manager, agent_id, current_instance_id, version_tag=version_tag)
+
+    # Create access_memory tool for reading memory files.
+    # Thread version_tag so v2+ agents read the versioned memories/
+    # subtree (C1 fix — base/v1 was being read for v2 instances).
+    access_memory = create_access_memory_tool(agent_id, version_tag=version_tag)
     
     # Create project management tools (with instance context for creator tracking)
     # and job queue management service for system queue provisioning

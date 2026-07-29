@@ -29,14 +29,23 @@ Returns:
 """
 
 
-def create_access_memory_tool(agent_id: str):
-    """Create access_memory tool bound to specific agent."""
+def create_access_memory_tool(agent_id: str, version_tag: str | None = None):
+    """Create access_memory tool bound to specific agent.
+
+    Args:
+        agent_id: The base agent identifier (e.g., ``"developer"``).
+        version_tag: Optional version tag (e.g., ``"v2"``) used to resolve the
+            versioned agent directory so memory reads target the correct
+            version's ``memories/`` subtree. When ``None``, falls back to the
+            base resolved agent meta. Threaded from
+            ``daemon.tools.instance.create_instance_tools`` so versioned
+            agents read their own memory subtree (C1 fix — base/v1 was being
+            read for v2 instances).
+    """
     from ..registry import get_registry
 
     registry = get_registry()
-    # version-independent: only reads `path` (same dir for all versions).
-    # No version_tag needed here.
-    agent_meta = registry.get_resolved(agent_id)
+    agent_meta = registry.get_version(agent_id, version_tag) or registry.get_resolved(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
 
     @register_tool_category("self")

@@ -554,10 +554,22 @@ class SkillMetricsService:
         # ``agent_id_resolver`` is a callable the manager wires
         # up against the registry. When ``None`` or it returns
         # ``None``, we treat the agent as non-injection (skip).
+        #
+        # W2 fix: thread ``instance_id`` so the resolver can look
+        # up the instance's bound ``agent_tag`` and gate on the
+        # versioned agent's ``skill_injection`` flag instead of
+        # the base one. Without this, v2/etc. callers were gated
+        # on the base (v1) flag — same class of bug as
+        # ``_apply_tool_filter`` and ``_check_team_membership``.
+        # The closure accepts ``instance_id`` as a kwarg so the
+        # public ``record_task_completion`` signature is
+        # unchanged.
         skill_injection_enabled = False
         if self.agent_id_resolver is not None:
             try:
-                agent_meta = self.agent_id_resolver(agent_id)
+                agent_meta = self.agent_id_resolver(
+                    agent_id, instance_id=instance_id
+                )
                 skill_injection_enabled = bool(
                     getattr(agent_meta, "skill_injection", False)
                 )

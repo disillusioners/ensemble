@@ -546,24 +546,29 @@ def create_inner_soul_tool(
     manager: "InstanceManager",
     agent_id: str,
     instance_id: str,
+    version_tag: str | None = None,
 ):
     """Create inner_soul tool bound to a specific agent.
-    
+
     Args:
         manager: InstanceManager for cache invalidation
         agent_id: The agent identifier (e.g., "developer")
         instance_id: Current instance ID for logging
-    
+        version_tag: Optional version tag (e.g., ``"v2"``) used to resolve the
+            versioned agent directory so persona/soul/workflow updates target
+            the correct version's files. When ``None``, falls back to the base
+            resolved agent meta. Threaded from
+            ``daemon.tools.instance.create_instance_tools`` so versioned agents
+            self-modify their own subtree (C1 fix — base/v1 was being written
+            by v2 instances).
+
     Returns:
         The inner_soul tool function
     """
     # Resolve agent_id to path for internal use
     from ..registry import get_registry
     registry = get_registry()
-    # version-independent: only reads `path` (same dir for all versions —
-    # tags live as subdirs or alternative agent dirs, not as a property of
-    # `path`). No version_tag needed here.
-    agent_meta = registry.get_resolved(agent_id)
+    agent_meta = registry.get_version(agent_id, version_tag) or registry.get_resolved(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
     
     # Run archival sweep if configured
