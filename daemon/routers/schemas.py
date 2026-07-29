@@ -732,6 +732,27 @@ class VSCodeStatus(BaseModel):
         default=False,
         description="Whether the server is configured to allow remote access",
     )
+    # Auto-restart contract (Phase: vscode-reliability-fixes): when the
+    # watchdog flips state.status to ``crashed`` it also records the
+    # exit code and a log-tail diagnostic on the manager's state. These
+    # two fields expose that diagnostic to the frontend so operators can
+    # see WHY the server crashed (e.g. last 50 lines of code-server's
+    # stdout/stderr) without having to SSH into the host.
+    last_error: str | None = Field(
+        default=None,
+        description=(
+            "Last crash diagnostic from the watchdog — includes the "
+            "exit code and the tail of the code-server log buffer. "
+            "None when no crash has been recorded yet."
+        ),
+    )
+    exit_code: int | None = Field(
+        default=None,
+        description=(
+            "Last process exit code observed by the watchdog (None "
+            "while the process is still alive)."
+        ),
+    )
     # C4: port and pid REMOVED — defeats proxy boundary
 
 

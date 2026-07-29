@@ -64,6 +64,18 @@ logger = logging.getLogger(__name__)
 # 16 KB is generous for a "why did it die" diagnostic.
 VSCODE_CRASH_LOG_TAIL_MAX_BYTES: int = 16 * 1024  # 16 KB
 
+# Maximum number of auto-restart attempts the watchdog will make after a
+# runtime crash before giving up and leaving ``status="crashed"``. Each
+# retry sleeps for ``backoff_seconds`` (doubled per attempt, capped at
+# ``VSCODE_RESTART_BACKOFF_MAX_S``). Per the auto-restart spec: 1, 2, 4,
+# 8, 16 — total ~31s of backoff before the manager surfaces a permanent
+# crash to the API. Module-level constants (rather than ``VSCodeConfig``
+# fields) because the policy is not user-tunable today and matches the
+# existing module-level style for ``VSCODE_CRASH_LOG_TAIL_MAX_BYTES``.
+VSCODE_RESTART_MAX_ATTEMPTS: int = 5
+VSCODE_RESTART_BACKOFF_INITIAL_S: float = 1.0
+VSCODE_RESTART_BACKOFF_MAX_S: float = 30.0
+
 # Env vars code-server reads (see ``code-server --help``) that must NOT
 # leak from the daemon into the child. ``PORT`` causes EADDRINUSE by
 # overriding ``--bind-addr``'s port; the auth/token vars are
@@ -220,12 +232,26 @@ class VSCodeServerManager:
                 workdir,
             ]
 
+            # Issue 1 fix: reset per-process fields that are stale from a
+            # previous (possibly crashed) invocation. Without this,
+            # auto-restart would leave ``state.port`` set to the dead
+            # process's port; ``_wait_for_port()`` would short-circuit
+            # (port already non-None), the reader's ``if state.port is
+            # None`` port-parsing guard would never fire, and the
+            # manager would report the dead port as live.
+            # ``log_buffer`` is intentionally preserved (per the
+            # watchdog's diagnostic-preservation contract). ``workdir``
+            # and ``config`` are kept because they're not per-process.
             self.state.status = "starting"
             self.state.workdir = workdir
             self.state.config = self.config
             self.state.last_error = None
             self.state.exit_code = None
             self.state.user_stopped = False
+            self.state.port = None
+            self.state.pid = None
+            self.state.pgid = None
+            self.state.started_at = None
 
             # Spawn — start_new_session puts the child in its own process
             # group so we can later signal the whole tree via killpg.
@@ -722,34 +748,10 @@ class VSCodeServerManager:
 
                 # Surface the crash output so the operator can see why
                 # code-server failed (e.g. bind error, missing dependency).
-                # Decode the in-memory log buffer and take the tail of the
-                # last ~50 lines. This buffer is bounded by
-                # VSCODE_LOG_BUFFER_LIMIT (with oldest-half spill), so it
-                # is always bounded in size.
-                log_tail = ""
-                if self.state.log_buffer:
-                    try:
-                        decoded = self.state.log_buffer.decode(
-                            "utf-8", errors="replace"
-                        )
-                        lines = decoded.strip().splitlines()
-                        log_tail = "\n".join(lines[-50:])
-                    except Exception as exc:
-                        log_tail = ""
-                        logger.debug(
-                            "vscode log buffer decode failed: %s", exc
-                        )
-
-                # Cap total tail size to avoid bloating the exception /
-                # 503 response with a single pathological multi-MB line.
-                # 16 KB is generous for a "why did it die" diagnostic.
-                tail_bytes = log_tail.encode("utf-8", errors="replace")
-                if len(tail_bytes) > VSCODE_CRASH_LOG_TAIL_MAX_BYTES:
-                    log_tail = (
-                        tail_bytes[:VSCODE_CRASH_LOG_TAIL_MAX_BYTES]
-                        .decode("utf-8", errors="replace")
-                        + "\n... [truncated]"
-                    )
+                # Delegates to the shared log-tail helper so the
+                # watchdog's runtime-crash path uses the same extraction
+                # rules (lines, byte cap, [truncated] marker).
+                log_tail = self._build_crash_log_tail()
 
                 logger.error(
                     "code-server exited during startup (code=%s)"
@@ -878,12 +880,75 @@ class VSCodeServerManager:
         except asyncio.CancelledError:
             raise
 
-    async def _watchdog_loop(self) -> None:
-        """Monitor process exit; mark ``crashed`` if not user-initiated.
+    def _build_crash_log_tail(self) -> str:
+        """Return the last ``~50`` lines of the log buffer, capped at 16 KB.
 
-        Polls ``process.returncode`` once per second. On exit, records
-        the exit code and either leaves the status as-is (if ``stop()``
-        is driving teardown via ``user_stopped``) or marks ``crashed``.
+        Shared by the startup crash path in :meth:`_wait_for_port` and the
+        runtime watchdog crash path. Keeps the log-tail extraction rules
+        (line count, byte cap, ``[truncated]`` marker) in a single place
+        so the two paths cannot drift apart.
+
+        Returns:
+            ``""`` when the buffer is empty or decode fails; otherwise a
+            newline-joined tail bounded by
+            :data:`VSCODE_CRASH_LOG_TAIL_MAX_BYTES`. When the cap is
+            exceeded the OLDEST bytes are dropped and a leading
+            ``"... [truncated] ...\\n"`` marker is prepended so the
+            freshest output — where the crash reason is most likely to
+            appear — is always at the end of the returned string.
+        """
+        if not self.state.log_buffer:
+            return ""
+        try:
+            decoded = self.state.log_buffer.decode(
+                "utf-8", errors="replace"
+            )
+            lines = decoded.strip().splitlines()
+            log_tail = "\n".join(lines[-50:])
+        except Exception as exc:
+            logger.debug("vscode log buffer decode failed: %s", exc)
+            return ""
+
+        # Cap total tail size to avoid bloating the exception /
+        # 503 response / ``last_error`` payload with a single
+        # pathological multi-MB line.
+        #
+        # Issue 3 fix: keep the SUFFIX (newest bytes), where the crash
+        # reason is most likely to appear. The previous implementation
+        # took the prefix (oldest bytes), which discarded the freshest
+        # diagnostic output. When truncation occurs, prepend the marker
+        # (instead of appending) so the marker stays at the front and
+        # the fresh output is at the end.
+        tail_bytes = log_tail.encode("utf-8", errors="replace")
+        if len(tail_bytes) > VSCODE_CRASH_LOG_TAIL_MAX_BYTES:
+            log_tail = (
+                "... [truncated] ...\n"
+                + tail_bytes[-VSCODE_CRASH_LOG_TAIL_MAX_BYTES:].decode(
+                    "utf-8", errors="replace"
+                )
+            )
+        return log_tail
+
+    async def _watchdog_loop(self) -> None:
+        """Monitor process exit; auto-restart with backoff on unexpected exit.
+
+        Polls ``process.returncode`` once per second. On unexpected exit
+        (``user_stopped=False``) the loop attempts up to
+        :data:`VSCODE_RESTART_MAX_ATTEMPTS` restarts with exponential
+        backoff, starting at :data:`VSCODE_RESTART_BACKOFF_INITIAL_S` and
+        doubling each retry up to :data:`VSCODE_RESTART_BACKOFF_MAX_S`.
+        On a successful restart the new ``start()`` call spawns fresh
+        reader/health/watchdog tasks, so this watchdog simply returns —
+        the new watchdog takes over.
+
+        If all restart attempts fail, ``status`` is set to ``"crashed"``
+        and ``last_error`` carries the attempt count and final exit code
+        so the failure is observable via ``get_status()`` / the API.
+        The ``log_buffer`` is intentionally preserved across restarts
+        for diagnostics (the new ``start()`` appends to it).
+
+        When ``user_stopped=True`` (``stop()`` driving teardown) the
+        watchdog leaves the status alone and does not attempt restart.
         """
         process = self._process
         if process is None:
@@ -892,30 +957,118 @@ class VSCodeServerManager:
         try:
             while True:
                 await asyncio.sleep(1.0)
-                if process.returncode is not None:
-                    self.state.exit_code = process.returncode
-                    if self.state.user_stopped:
-                        # ``stop()`` is driving teardown and will set the
-                        # final status; don't clobber it here.
-                        pass
-                    else:
-                        self.state.status = "crashed"
-                        self.state.last_error = (
-                            "code-server exited unexpectedly "
-                            f"(code={process.returncode})"
-                        )
-                        logger.warning(
-                            "code-server crashed: pid=%d exit_code=%d",
-                            self.state.pid,
-                            process.returncode,
-                        )
-                    # Stop health checks once the process is gone.
-                    if (
-                        self.state.health_task
-                        and not self.state.health_task.done()
-                    ):
-                        self.state.health_task.cancel()
+                if process.returncode is None:
+                    continue  # still alive; keep polling
+
+                # Process exited.
+                self.state.exit_code = process.returncode
+                if self.state.user_stopped:
+                    # ``stop()`` is driving teardown and will set the
+                    # final status; don't clobber it here.
                     break
+
+                # Build a crash reason from the log buffer tail so the
+                # operator can see WHY it died (same extraction pattern
+                # as ``_wait_for_port``'s startup crash path).
+                log_tail = self._build_crash_log_tail()
+                self.state.last_error = (
+                    f"code-server exited unexpectedly "
+                    f"(code={process.returncode})"
+                    + (
+                        f"\n--- code-server output (tail) ---\n{log_tail}"
+                        if log_tail
+                        else ""
+                    )
+                )
+                logger.warning(
+                    "code-server crashed: pid=%d exit_code=%d; "
+                    "attempting auto-restart",
+                    self.state.pid,
+                    process.returncode,
+                )
+
+                # Cancel the (now-stale) health task; the new start()
+                # will spawn a fresh one tied to the new process.
+                if (
+                    self.state.health_task
+                    and not self.state.health_task.done()
+                ):
+                    self.state.health_task.cancel()
+
+                # Auto-restart loop with exponential backoff.
+                backoff = VSCODE_RESTART_BACKOFF_INITIAL_S
+                last_exit_code = process.returncode
+                restart_succeeded = False
+                for attempt in range(1, VSCODE_RESTART_MAX_ATTEMPTS + 1):
+                    logger.warning(
+                        "code-server auto-restart attempt %d/%d "
+                        "in %.1fs",
+                        attempt,
+                        VSCODE_RESTART_MAX_ATTEMPTS,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    try:
+                        await self.start()
+                    except Exception as exc:
+                        logger.warning(
+                            "code-server auto-restart attempt %d/%d "
+                            "failed: %s: %s",
+                            attempt,
+                            VSCODE_RESTART_MAX_ATTEMPTS,
+                            type(exc).__name__,
+                            exc,
+                        )
+                        # Track the most recent exit code (the new
+                        # process may have died too) for the final
+                        # crash message below.
+                        if self.state.exit_code is not None:
+                            last_exit_code = self.state.exit_code
+                        backoff = min(
+                            backoff * 2, VSCODE_RESTART_BACKOFF_MAX_S
+                        )
+                        continue
+
+                    # Success: ``start()`` flipped status to "running"
+                    # and spawned a new watchdog task. The old watchdog
+                    # (this task) must just return — the new one takes
+                    # over monitoring the new process.
+                    logger.info(
+                        "code-server auto-restart succeeded on "
+                        "attempt %d/%d: pid=%d port=%d",
+                        attempt,
+                        VSCODE_RESTART_MAX_ATTEMPTS,
+                        self.state.pid,
+                        self.state.port,
+                    )
+                    restart_succeeded = True
+                    return
+
+                # All attempts exhausted: surface a permanent crash.
+                # Re-build the log tail at this final path too (per the
+                # spec: "build a log tail at the top of the restart
+                # loop AND in the all-attempts-exhausted path"). The
+                # tail at this point may differ from the initial crash
+                # tail if subsequent restart attempts logged anything.
+                final_log_tail = self._build_crash_log_tail()
+                self.state.status = "crashed"
+                self.state.last_error = (
+                    f"code-server crashed and "
+                    f"{VSCODE_RESTART_MAX_ATTEMPTS} auto-restart attempts "
+                    f"failed (last exit_code={last_exit_code})"
+                    + (
+                        f"\n--- code-server output (tail) ---\n{final_log_tail}"
+                        if final_log_tail
+                        else ""
+                    )
+                )
+                logger.error(
+                    "code-server auto-restart exhausted after %d "
+                    "attempts; marking crashed (last exit_code=%s)",
+                    VSCODE_RESTART_MAX_ATTEMPTS,
+                    last_exit_code,
+                )
+                return
         except asyncio.CancelledError:
             raise
 

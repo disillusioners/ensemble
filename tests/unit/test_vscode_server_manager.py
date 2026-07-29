@@ -29,6 +29,7 @@ import json
 import os
 import signal
 import sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
@@ -238,6 +239,51 @@ def slow_down_health_check(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def fast_watchdog_pacing(
+    monkeypatch: pytest.MonkeyPatch,
+    max_attempts: int = 3,
+) -> None:
+    """Make the watchdog poll loop and restart backoff run instantly.
+
+    The real ``_watchdog_loop`` calls ``asyncio.sleep(1.0)`` per poll and
+    waits ``VSCODE_RESTART_BACKOFF_INITIAL_S`` between attempts. Both
+    are noise for unit tests — we replace ``asyncio.sleep`` with a
+    zero-yield passthrough and zero out the backoff constants so each
+    test runs in milliseconds. ``max_attempts`` lets a test shrink the
+    retry budget if it wants to assert on a specific attempt count.
+
+    Implementation note: ``monkeypatch.setattr`` on
+    ``daemon.services.vscode_server_manager.asyncio.sleep`` mutates
+    the ``asyncio`` module globally (since ``asyncio`` is a module
+    reference, not a copy), so the helper MUST NOT recursively call
+    ``asyncio.sleep`` — capture the real implementation at call time.
+    """
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(*_a: Any, **_kw: Any) -> None:
+        # Yield to the loop once so awaited tasks can make progress,
+        # but don't actually delay. ``real_sleep(0)`` is captured
+        # outside the patched namespace so it doesn't recurse into
+        # ``fast_sleep`` itself.
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "daemon.services.vscode_server_manager.asyncio.sleep", fast_sleep
+    )
+    monkeypatch.setattr(
+        "daemon.services.vscode_server_manager.VSCODE_RESTART_BACKOFF_INITIAL_S",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "daemon.services.vscode_server_manager.VSCODE_RESTART_BACKOFF_MAX_S",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "daemon.services.vscode_server_manager.VSCODE_RESTART_MAX_ATTEMPTS",
+        max_attempts,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Test class
 # ═══════════════════════════════════════════════════════════════════════════
@@ -398,12 +444,16 @@ class TestVSCodeServerManager:
         assert fake_proc.kill_called is False
 
     async def test_state_crashed_when_process_exits_unexpectedly(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Watchdog marks ``crashed`` when process exits without user_stopped.
+        """Watchdog marks ``crashed`` after restart attempts are exhausted.
 
-        Drives ``_watchdog_loop`` directly with a process whose
-        ``returncode`` is set, bypassing the real polling interval.
+        With auto-restart (vscode-reliability-fixes), a runtime exit is no
+        longer immediately promoted to ``crashed``. The watchdog first
+        attempts up to ``VSCODE_RESTART_MAX_ATTEMPTS`` restarts; only when
+        every retry fails does the status flip to ``crashed``. This test
+        pins the "exhausted → crashed" path by mocking ``start()`` to
+        raise on every attempt.
         """
         manager = make_manager(tmp_path)
         fake_proc = FakeProcess(pid=12345, returncode=1)  # crashed
@@ -413,15 +463,30 @@ class TestVSCodeServerManager:
         manager.state.port = 12345
         manager.state.status = "running"
         manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # ``start()`` always fails — the watchdog exhausts attempts and
+        # flips status to ``crashed``.
+        async def fake_start_always_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated spawn failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_always_fails)
 
         await manager._watchdog_loop()
 
         assert manager.state.status == "crashed"
         assert manager.state.exit_code == 1
         assert manager.state.user_stopped is False
-        assert "exited unexpectedly" in (
+        assert "auto-restart attempts failed" in (
             manager.state.last_error or ""
-        ).lower()
+        ), (
+            f"exhaustion message must mention the attempt count + "
+            f"'failed'; got {manager.state.last_error!r}"
+        )
+        assert "exit_code=1" in (manager.state.last_error or ""), (
+            f"exhaustion message must include the final exit code (1); "
+            f"got {manager.state.last_error!r}"
+        )
 
     async def test_state_not_crashed_when_user_stopped(
         self, tmp_path: Path
@@ -1816,3 +1881,490 @@ class TestVSCodeServerManager:
             )
 
         await manager.cleanup()
+
+    # ── Auto-restart on runtime crash (vscode-reliability-fixes) ─────────
+
+    async def test_watchdog_auto_restarts_on_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On unexpected runtime exit, the watchdog auto-restarts with
+        exponential backoff and flips the manager back to ``running``.
+
+        Drives ``_watchdog_loop`` directly with a ``FakeProcess`` whose
+        ``returncode`` is already set; the loop must call ``self.start()``
+        and (because the patched ``start`` succeeds on the first attempt)
+        return cleanly with ``state.status == "running"``. The new pid
+        must differ from the crashed one to prove a fresh process was
+        spawned, not the old one reanimated.
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=1)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Stand-in for ``start()`` that flips state to ``running`` with a
+        # fresh pid/port — proves a new process took over.
+        start_call_count = 0
+
+        async def fake_restart_start() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            # The real start() resets these fields; mirror that.
+            manager.state.status = "running"
+            manager.state.pid = 99999
+            manager.state.port = 55555
+            manager.state.exit_code = None
+            manager.state.last_error = None
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_restart_start)
+
+        await manager._watchdog_loop()
+
+        # First attempt succeeded → exactly one restart call, state is running.
+        assert start_call_count == 1, (
+            f"watchdog must call start() exactly once when the first "
+            f"retry succeeds; got {start_call_count}"
+        )
+        assert manager.state.status == "running"
+        assert manager.state.pid == 99999
+        assert manager.state.port == 55555
+
+    async def test_watchdog_successful_restart_after_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a successful auto-restart the manager ends in ``running``.
+
+        Explicitly-named companion to ``test_watchdog_auto_restarts_on_crash``
+        so a future regression that reverts the success path is caught by
+        name. Verifies ``state.status == "running"`` (NOT ``"crashed"``)
+        after the watchdog returns — the spec rule: "on success, do NOT
+        set status='crashed'".
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=137)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        async def fake_restart_start() -> "VSCodeServerState":
+            manager.state.status = "running"
+            manager.state.pid = 42424
+            manager.state.port = 11111
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_restart_start)
+
+        await manager._watchdog_loop()
+
+        assert manager.state.status == "running", (
+            "watchdog must leave status='running' after a successful "
+            "auto-restart, not flip it back to 'crashed'"
+        )
+
+    async def test_watchdog_marks_crashed_after_max_attempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After ``VSCODE_RESTART_MAX_ATTEMPTS`` failed restarts, the
+        watchdog flips ``status`` to ``"crashed"`` and records the
+        attempt count + last exit code in ``last_error``.
+
+        Mirrors the spec: "After all attempts exhausted: set
+        status='crashed', set last_error to a message naming max_attempts
+        and the last exit code".
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=42)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        start_call_count = 0
+
+        async def fake_start_always_fails() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            # Each failed attempt bumps ``state.exit_code`` to a
+            # recognisable sentinel so the final ``last_error`` carries
+            # it through (per the spec: "last exit code").
+            manager.state.exit_code = 99
+            raise VSCodeServerStartError(
+                f"simulated spawn failure #{start_call_count}"
+            )
+
+        monkeypatch.setattr(manager, "start", fake_start_always_fails)
+
+        await manager._watchdog_loop()
+
+        # All 3 attempts were tried.
+        assert start_call_count == 3, (
+            f"watchdog must attempt exactly max_attempts restarts; "
+            f"got {start_call_count}, expected 3"
+        )
+        assert manager.state.status == "crashed", (
+            "watchdog must mark status='crashed' after exhausting all "
+            "auto-restart attempts"
+        )
+        assert manager.state.last_error is not None
+        # Message names the attempt count (per spec) and the last exit
+        # code (per spec). The last exit code is the post-attempt
+        # sentinel ``99`` from the failing ``fake_start``.
+        assert "3 auto-restart attempts" in manager.state.last_error, (
+            f"last_error must mention the attempt count; got "
+            f"{manager.state.last_error!r}"
+        )
+        assert "exit_code=99" in manager.state.last_error, (
+            f"last_error must mention the last exit code; got "
+            f"{manager.state.last_error!r}"
+        )
+
+    async def test_watchdog_crash_reason_surfaces_log_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On crash, ``last_error`` includes the tail of the in-memory
+        log buffer so operators can see WHY code-server died.
+
+        The watchdog's crash path delegates to ``_build_crash_log_tail``
+        which uses the same ``lines[-50:]`` + byte cap pattern as
+        ``_wait_for_port``'s startup crash path. This test seeds the
+        log buffer with a known line and asserts it appears in the
+        final ``last_error``.
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=137)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        # Pre-populate the log buffer with a recognisable line that MUST
+        # appear in the surfaced crash reason.
+        known_marker = "fatal: cannot bind port 1234"
+        manager.state.log_buffer.extend(
+            f"some startup noise\n{known_marker}\nanother diagnostic line\n"
+            .encode("utf-8")
+        )
+        # Single attempt so the test converges quickly and the final
+        # ``last_error`` is the per-crash one (the auto-restart attempts
+        # otherwise overwrite it on the success path).
+        fast_watchdog_pacing(monkeypatch, max_attempts=1)
+
+        async def fake_start_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated spawn failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_fails)
+
+        await manager._watchdog_loop()
+
+        assert manager.state.status == "crashed"
+        assert manager.state.last_error is not None
+        # The log-tail marker line is present (same wording as the
+        # startup crash path — consistency rule from the task spec).
+        assert "code-server output (tail)" in manager.state.last_error
+        # The seeded buffer content is surfaced verbatim.
+        assert known_marker in manager.state.last_error
+        # And the exit code is named too (matches the spec message shape).
+        assert "code=137" in manager.state.last_error
+
+    async def test_watchdog_backoff_doubles_per_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backoff doubles each attempt up to the configured cap.
+
+        Asserts the spec rule: "backoff_seconds starting at 1.0, doubling
+        each retry, capped at 30.0". We capture the sleep durations
+        passed to ``asyncio.sleep`` during the restart loop and check
+        the expected progression (1.0, 2.0, 4.0, 8.0, 16.0). We mock
+        ``start()`` to fail so the loop runs through all attempts.
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=1)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+
+        # Real backoff values per spec; don't shrink — we want to assert
+        # the actual progression. The 1-second poll at the top of the
+        # watchdog loop is also patched to zero so only the restart
+        # backoffs show up in the captured list.
+        backoff_calls: List[float] = []
+        real_asyncio_sleep = asyncio.sleep
+
+        async def recording_sleep(seconds: float) -> None:
+            # Capture only positive backoffs; skip the zero/None yields
+            # we inject for instant polling.
+            if seconds and seconds > 0:
+                backoff_calls.append(float(seconds))
+            # Yield to the loop briefly so other tasks (none here) can run.
+            await real_asyncio_sleep(0)
+
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.asyncio.sleep",
+            recording_sleep,
+        )
+        # Five attempts per spec; one initial sleep + 5 backoffs =
+        # total of 5 captured backoff values (the 1.0s poll sleep is
+        # also captured but we'll filter to just the backoff sequence).
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_RESTART_MAX_ATTEMPTS",
+            5,
+        )
+
+        async def fake_start_always_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_always_fails)
+
+        await manager._watchdog_loop()
+
+        # The watchdog's outer loop sleeps 1.0s once at the top before
+        # detecting the crash; the per-attempt backoffs come after that.
+        # With ``VSCODE_RESTART_MAX_ATTEMPTS=5`` there should be exactly
+        # one initial poll + 5 backoff calls captured.
+        assert len(backoff_calls) == 1 + 5, (
+            f"expected 1 poll + 5 backoffs, got {len(backoff_calls)}: "
+            f"{backoff_calls}"
+        )
+        # Slice off the initial 1.0s poll; what's left is the backoff
+        # sequence between retries.
+        restart_backoffs = backoff_calls[-5:]
+        # The cap is 30.0, so 16.0 is the last value (next would be 32.0,
+        # capped to 30.0, but with 5 attempts the max is 2**4 = 16.0).
+        assert restart_backoffs == [1.0, 2.0, 4.0, 8.0, 16.0], (
+            f"backoff must double each attempt; got {restart_backoffs}"
+        )
+
+    async def test_watchdog_backoff_capped_at_max(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backoff does NOT exceed ``VSCODE_RESTART_BACKOFF_MAX_S`` (30s).
+
+        Forces the loop to take enough attempts that an uncapped double
+        would exceed 30s; verifies the cap kicks in.
+        """
+        manager = make_manager(tmp_path)
+        crashed_proc = FakeProcess(pid=12345, returncode=1)
+        manager._process = crashed_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+
+        backoff_calls: List[float] = []
+        real_asyncio_sleep = asyncio.sleep
+
+        async def recording_sleep(seconds: float) -> None:
+            if seconds and seconds > 0:
+                backoff_calls.append(float(seconds))
+            await real_asyncio_sleep(0)
+
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.asyncio.sleep",
+            recording_sleep,
+        )
+        # 8 attempts → expected uncapped: 1,2,4,8,16,30,30,30 (cap at 30).
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_RESTART_MAX_ATTEMPTS",
+            8,
+        )
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_RESTART_BACKOFF_MAX_S",
+            30.0,
+        )
+
+        async def fake_start_always_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_always_fails)
+
+        await manager._watchdog_loop()
+
+        # 1 initial poll + 8 backoff calls (one per attempt).
+        assert len(backoff_calls) == 1 + 8, (
+            f"expected 1 poll + 8 backoffs, got {len(backoff_calls)}: "
+            f"{backoff_calls}"
+        )
+        # Drop the initial poll; the rest are the backoff sequence.
+        backoffs_only = backoff_calls[-8:]
+        # All backoffs must be <= 30.0.
+        assert all(s <= 30.0 for s in backoffs_only), (
+            f"backoff must be capped at 30.0; got {backoffs_only}"
+        )
+        # Once the cap kicks in (after attempt 5 doubles past 16), the
+        # last three values must all equal 30.0.
+        last_three = backoffs_only[-3:]
+        assert last_three == [30.0, 30.0, 30.0], (
+            f"once cap is hit, backoff must stay at 30.0; got {last_three}"
+        )
+
+    async def test_watchdog_does_not_restart_when_user_stopped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``user_stopped=True`` (stop() driving teardown), the
+        watchdog MUST NOT attempt any auto-restart and MUST NOT flip
+        status to ``crashed``.
+
+        Existing behavior: the ``user_stopped`` guard short-circuits the
+        crash handling. The new auto-restart block lives inside the
+        ``else`` branch so the guard still applies — this test pins that.
+        """
+        manager = make_manager(tmp_path)
+        fake_proc = FakeProcess(pid=12345, returncode=-signal.SIGTERM)
+        manager._process = fake_proc  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "stopping"  # stop() is driving teardown
+        manager.state.user_stopped = True
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        start_call_count = 0
+
+        async def fake_start_must_not_be_called() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_start_must_not_be_called)
+
+        await manager._watchdog_loop()
+
+        assert start_call_count == 0, (
+            f"watchdog must NOT call start() when user_stopped=True; "
+            f"got {start_call_count} calls"
+        )
+        # Status remains as ``stop()`` left it.
+        assert manager.state.status == "stopping"
+        # Exit code is still recorded.
+        assert manager.state.exit_code == -signal.SIGTERM
+        # last_error is NOT set (no "crashed" message).
+        assert manager.state.last_error is None
+
+    # ── Issue 1: Auto-restart must reset stale per-process state ─────────
+
+    async def test_start_resets_stale_port_on_auto_restart(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: ``start()`` invoked as an auto-restart MUST reset
+        the stale ``port``/``pid``/``pgid``/``started_at`` left behind by
+        the crashed process. Otherwise ``_wait_for_port()`` short-circuits
+        on the stale non-None port, the reader loop never parses the new
+        process's port line, and the manager reports the OLD (dead) port
+        as the live one.
+
+        Drives the watchdog directly against a fake process whose
+        ``returncode`` is already set; the real (un-mocked) ``start()``
+        runs end-to-end and is observed parsing the NEW process's port
+        from its stdout. This test MUST FAIL on the pre-fix code
+        (``state.port`` retained as the stale value) and PASS after the
+        Issue 1 fix lands in ``start()``.
+        """
+        manager = make_manager(tmp_path)
+
+        # Pre-seed a "previous process" so start() sees a stale state
+        # when the watchdog invokes it as a restart. The stale values
+        # are intentionally distinct from the new process's pid/port so
+        # we can prove the fresh values win.
+        stale_started_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+        manager.state.status = "running"
+        manager.state.pid = 11111
+        manager.state.pgid = 22222
+        manager.state.port = 33333
+        manager.state.started_at = stale_started_at
+        manager.state.user_stopped = False
+
+        # Captured-before reference for the watchdog task assertion.
+        # A real ``asyncio.Future`` stands in for the previous watchdog
+        # task; ``start()`` will overwrite ``state.watchdog_task`` with
+        # a fresh asyncio.Task, so the assertion below proves the
+        # replacement happened.
+        sentinel_watchdog: asyncio.Future = asyncio.Future()
+        manager.state.watchdog_task = sentinel_watchdog  # type: ignore[assignment]
+
+        # Crashed process handle that the watchdog observes.
+        crashed_proc = FakeProcess(pid=11111, returncode=1)
+        manager._process = crashed_proc  # type: ignore[assignment]
+
+        # Wire the real spawn path: a fresh FakeProcess emits the port
+        # line for the NEW port (44444), distinct from the stale 33333.
+        patch_resolve_binary(monkeypatch, manager)
+        new_proc = FakeProcess(
+            pid=55555,
+            stdout_chunks=[
+                b"HTTP server listening on http://127.0.0.1:44444\n",
+                b"",
+            ],
+        )
+        patch_create_subprocess(monkeypatch, new_proc)
+        patch_process_signals(monkeypatch, new_proc)
+        monkeypatch.setattr("os.getpgid", lambda pid: pid + 1000)
+        slow_down_health_check(monkeypatch)
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Drive the watchdog directly. With ``fast_watchdog_pacing`` the
+        # 1.0s poll becomes instant; the watchdog detects ``returncode``
+        # already set and calls the REAL ``self.start()`` (which
+        # spawns ``new_proc`` and parses 44444).
+        await manager._watchdog_loop()
+
+        # ── Per-process fields are the NEW process's, not the stale one.
+        assert manager.state.status == "running", (
+            f"restart must leave status='running'; got {manager.state.status}"
+        )
+        assert manager.state.pid == 55555, (
+            "Issue 1: start() must overwrite the stale pid with the new "
+            f"process's pid; got {manager.state.pid} (stale was 11111)"
+        )
+        assert manager.state.port == 44444, (
+            "Issue 1: start() must reset the stale port to None so the "
+            "new process's port line gets parsed; got "
+            f"{manager.state.port} (stale was 33333)"
+        )
+        assert manager.state.pgid is not None and manager.state.pgid != 22222, (
+            "Issue 1: start() must overwrite the stale pgid with the new "
+            f"process's pgid; got {manager.state.pgid} (stale was 22222)"
+        )
+        # started_at must be re-stamped to a fresh value (the reset
+        # leaves it None inside start(), then the running transition
+        # assigns now() — so it must be strictly later than the stale).
+        assert manager.state.started_at is not None
+        assert manager.state.started_at > stale_started_at, (
+            "Issue 1: start() must reset started_at to a new value; "
+            f"got {manager.state.started_at} (was {stale_started_at})"
+        )
+
+        # ── Replacement watchdog task is fresh.
+        assert manager.state.watchdog_task is not sentinel_watchdog, (
+            "Issue 1: start() must replace state.watchdog_task with a new "
+            "active task on auto-restart; the stale sentinel reference "
+            "was not replaced"
+        )
+        import asyncio as _asyncio
+
+        assert isinstance(manager.state.watchdog_task, _asyncio.Task), (
+            f"replacement watchdog must be a real asyncio.Task; got "
+            f"{type(manager.state.watchdog_task)!r}"
+        )
+        assert not manager.state.watchdog_task.done(), (
+            "replacement watchdog task must be active (not yet completed)"
+        )
+
+        # ── Bounded log_buffer: the new start() appends to the
+        # existing buffer (does NOT clear it), per the watchdog's
+        # diagnostic preservation contract.
+        new_proc_alive = new_proc.returncode is None
+
+        # Cleanup: cancel the new watchdog/health tasks via stop().
+        if new_proc_alive:
+            await manager.cleanup()
