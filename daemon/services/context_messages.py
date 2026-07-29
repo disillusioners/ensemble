@@ -865,23 +865,28 @@ async def assemble_context_messages(
     """Async orchestrator returning ``(persistent_msgs, ephemeral_msgs)``.
 
     Hybrid Context Injection (2026-07-29): project context + shared
-    context (heuristic ``.md`` matches) are now **persistent** — built
-    once on the first user turn and prepended to ``graph_input`` so
-    LangGraph's ``add_messages`` reducer checkpoints them with the
-    user message. Subsequent turns read them straight from
-    ``state['messages']`` for free, preserving the LLM prefix-cache.
+    context (heuristic ``.md`` matches) **and** skills are now
+    **persistent** — built once on the first user turn and prepended
+    to ``graph_input`` so LangGraph's ``add_messages`` reducer
+    checkpoints them with the user message. Subsequent turns read
+    them straight from ``state['messages']`` for free, preserving
+    the LLM prefix-cache and making the skill block visible in the
+    message history for debugging.
 
-    Skills remain **ephemeral** — rebuilt every turn by
-    :class:`ContextSlot` inside ``agent_node`` and never checkpointed.
-    The split is returned as a tuple so callers can route each part
-    to its own delivery surface.
+    The split is still returned as a ``(persistent, ephemeral)``
+    tuple so callers can route each part to its own delivery
+    surface — but the **ephemeral** half is now a documented
+    no-op (always ``[]`` outside of legacy mode). The pre-refactor
+    per-turn ephemeral architecture is kept in place for future use
+    (e.g. when explicit per-turn skill lifecycles are introduced).
 
-    Partition rule (ADR-15 — Hybrid split):
+    Partition rule (ADR-15 — Hybrid split, refactored 2026-07-29):
 
-    * Persistent: ``"project"`` + ``"shared_context"`` — injected via
-      ``graph_input`` once, then read from checkpoint.
-    * Ephemeral: ``"skills"`` — injected per-turn into the local
-      ``full_messages`` inside ``agent_node``.
+    * Persistent: ``"project"`` + ``"shared_context"`` + ``"skills"``
+      — injected via ``graph_input`` once, then read from checkpoint.
+    * Ephemeral: always ``[]`` (architectural code kept but disabled).
+      Future versions may re-enable ephemeral injection with explicit
+      skill lifecycles (e.g. per-turn debug, ephemeral scratch pads).
 
     When ``project_already_injected=True`` the orchestrator skips the
     entire project + shared_context build section (no project_repo /
@@ -906,19 +911,24 @@ async def assemble_context_messages(
 
     Per-turn freshness guarantee (ADR-2) for the ephemeral part:
 
-    The skills builder is called inside ``agent_node`` on every LLM
-    turn; it is **not** a one-shot snapshot captured at graph
-    compile time. Every invocation performs a live BM25 / embedding
-    search via :class:`SkillInjectionService` (unless the caller
-    passed a pre-computed ``skill_injection_result``).
+    Although the skill ``HumanMessage`` itself is now checkpointed,
+    the **search** is still re-run on every turn — a skill
+    added/changed mid-session will be picked up by the next call to
+    :func:`assemble_context_messages`. The orchestrator is **not** a
+    one-shot snapshot captured at graph compile time; every
+    invocation performs a live BM25 / embedding search via
+    :class:`SkillInjectionService` (unless the caller passed a
+    pre-computed ``skill_injection_result``).
 
-    The persistent part is intentionally rebuilt ONCE — its freshness
-    guarantee is replaced by the once-per-instance contract enforced
-    via the ``project_injected`` flag in instance metadata. Mid-
-    session mutations to project data, KV metadata, or shared-
-    context ``.md`` files are **not** reflected in the persistent
-    block after the first turn. This is the explicit trade-off for
-    prefix-cache stability documented in the hybrid plan.
+    The persistent part is intentionally rebuilt ONCE for
+    project + shared-context — its freshness guarantee is replaced
+    by the once-per-instance contract enforced via the
+    ``project_injected`` flag in instance metadata. Skills, in
+    contrast, are searched every turn but the resulting
+    HumanMessage becomes part of the persisted state, so a NEW
+    skill result on turn 2 is APPENDED to the existing skill
+    message in the checkpoint (LangGraph ``add_messages`` reducer
+    semantics).
 
     Args:
         instance_id: The current instance id.
@@ -958,13 +968,13 @@ async def assemble_context_messages(
             for backward-compatible first-turn callers.
 
     Returns:
-        ``(persistent_msgs, ephemeral_msgs)`` tuple. ``persistent_msgs``
-        carries zero-to-two tagged :class:`HumanMessage` instances
-        (``[project?, shared_context?]``); ``ephemeral_msgs`` carries
-        zero-to-one ``[skills?]``. Both lists are empty when the
-        resolved injection mode is ``legacy`` (the 3 CONTEXT appenders
-        own the legacy system-prompt path in that case) or when
-        ``project_already_injected=True`` and skills are also off.
+        ``(persistent_msgs, ephemeral_msgs)`` tuple.
+        ``persistent_msgs`` carries zero-to-three tagged
+        :class:`HumanMessage` instances (``[project?, shared_context?,
+        skills?]``). ``ephemeral_msgs`` is **always** an empty list
+        in ``human_messages`` mode (architectural code retained for
+        future use); both halves are empty in ``legacy`` mode (the 3
+        CONTEXT appenders own the legacy system-prompt path).
     """
     # Lazy imports to keep DB-touching imports out of unit-test
     # import paths where the test mocks the repos directly.
@@ -989,9 +999,15 @@ async def assemble_context_messages(
 
     # Hybrid split — when persistent context was already injected on
     # a previous turn, skip the project + shared_context builders
-    # entirely (no DB / RAG I/O) and only emit ephemeral skills.
-    # This is the steady-state hot path: every turn after the first
-    # for a given instance pays only the skills-search cost.
+    # entirely (no DB / RAG I/O) and only emit skills. This is the
+    # steady-state hot path: every turn after the first for a given
+    # instance pays only the skills-search cost.
+    #
+    # Skills have been moved into the persistent half (2026-07-29):
+    # even on subsequent turns a freshly-found skill is appended to
+    # the checkpoint via LangGraph's ``add_messages`` reducer, so the
+    # skill block keeps growing turn-over-turn and is visible in
+    # message history for debugging.
     if project_already_injected:
         skills_enabled_only = bool(getattr(agent_meta, "skill_injection", False))
         if not skills_enabled_only:
@@ -1009,7 +1025,13 @@ async def assemble_context_messages(
         skills_msg = build_skills_message(injection_text)
         if skills_msg is None:
             return ([], [])
-        return ([], [skills_msg])
+        # Skills are now PERSISTENT (checkpointed). The pre-refactor
+        # ephemeral path returned ``([], [skills_msg])`` — kept as a
+        # comment here for traceability:
+        #   return ([], [skills_msg])
+        # Future versions may re-enable ephemeral injection with
+        # explicit skill lifecycles.
+        return ([skills_msg], [])
 
     persistent_msgs: list[HumanMessage] = []
     ephemeral_msgs: list[HumanMessage] = []
@@ -1066,10 +1088,29 @@ async def assemble_context_messages(
         if shared_msg is not None:
             persistent_msgs.append(shared_msg)
 
-    # ── 3. Skills message — EPHEMERAL ──
+    # ── 3. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
+    # Ephemeral skill injection is currently disabled. Skills are
+    # persistent (checkpointed) for debugging and improvement. The
+    # skill ``HumanMessage`` produced here is prepended to
+    # ``graph_input`` by the messaging path so LangGraph's
+    # ``add_messages`` reducer appends it to ``state['messages']``
+    # alongside the user message — every subsequent turn then reads
+    # the skill from the checkpoint via ``list(messages)``, no
+    # per-turn rebuild required.
+    #
     # Skill injection remains opt-in via the legacy ``skill_injection``
     # boolean — independent of the resolved injection mode so an agent
     # in legacy mode can still opt-in to per-turn skills if it wants.
+    #
+    # Per-turn freshness is preserved by re-running the BM25 / embedding
+    # search on every orchestrator call (not by re-injecting into the
+    # LLM-bound ``full_messages``): a new skill result is appended to
+    # the checkpoint as a fresh ``HumanMessage``, leaving earlier
+    # entries untouched.
+    #
+    # Future versions may re-enable ephemeral injection with explicit
+    # skill lifecycles — see the partition rule in the module docstring
+    # and the docstring of :func:`assemble_context_messages`.
     skills_enabled = bool(getattr(agent_meta, "skill_injection", False))
     if skills_enabled:
         if skill_injection_result is not None:
@@ -1085,7 +1126,13 @@ async def assemble_context_messages(
 
         skills_msg = build_skills_message(injection_text)
         if skills_msg is not None:
-            ephemeral_msgs.append(skills_msg)
+            # Skills are now PERSISTENT (checkpointed) — prepended to
+            # ``graph_input`` by the messaging path, not re-injected
+            # into the local ``full_messages`` by ``agent_node``.
+            # The pre-refactor ephemeral append is preserved as a
+            # comment for traceability:
+            #   ephemeral_msgs.append(skills_msg)
+            persistent_msgs.append(skills_msg)
 
     return (persistent_msgs, ephemeral_msgs)
 

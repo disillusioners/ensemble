@@ -313,25 +313,39 @@ class TestContextMessagesCanonicalOrder:
 # ─── 2. Context Messages Are NOT in Checkpoint State ───────────────────────────
 
 
-class TestContextMessagesEphemerality:
-    """Context messages injected for the LLM are never checkpointed.
+class TestContextMessagesPersistence:
+    """Context messages reach the LLM via ``state['messages']`` and are NOT
+    re-emitted in the ``agent_node`` return value.
 
     The orchestrator returns ``{'messages': [response]}`` from
-    ``agent_node``. Context messages live only in the local
-    ``full_messages`` closure — they never enter graph state, never
-    reach the ``add_messages`` reducer, and never round-trip through
-    the LangGraph checkpoint. We verify this end-to-end by patching
-    the LLM so we can intercept the ``full_messages`` it sees, then
-    inspecting the returned state.
+    ``agent_node``. Context messages are NOT appended to that returned
+    dict — they reach the LLM via ``state['messages']`` (the LangGraph
+    checkpoint) instead, having been prepended to ``graph_input`` by
+    the messaging path on the first turn (and on every turn a new
+    skill triggers). We verify this end-to-end by patching the LLM so
+    we can intercept the ``full_messages`` it sees, then inspecting
+    the returned state.
+
+    2026-07-29 refactor: skills moved from ephemeral to PERSISTENT.
+    This test now models the production architecture — the context
+    messages (including skills) arrive at ``agent_node`` via
+    ``state['messages']`` rather than via the ephemeral half of
+    ``context_slot.assemble()``'s return value. The slot's return
+    value is now discarded by ``agent_node`` (the persistent half
+    was already prepended to ``graph_input`` by the messaging path
+    and is therefore already in ``state['messages']``).
 
     The relevant code path lives at ``daemon.graph`` lines 2294-2816
     (the ``agent_node`` closure). Concretely:
 
-    * ``full_messages = [SystemMessage, *context_msgs, *state.messages]``
-      is built locally (line 2337).
+    * ``full_messages = [SystemMessage, *state.messages]`` is built
+      locally (line 2337). State messages include the persistent
+      context block (project + shared-context + skills) which was
+      prepended to ``graph_input`` by the messaging path.
     * LLM is invoked with ``full_messages`` (line 2678).
     * Return value is ``{'messages': [response]}`` only (line 2816).
-      Context msgs never enter the returned dict.
+      Context msgs never enter the returned dict — the LLM sees
+      them via ``state['messages']``, not via the return value.
     """
 
     def test_agent_node_return_excludes_context_messages(self) -> None:
@@ -340,12 +354,21 @@ class TestContextMessagesEphemerality:
         Build a ``ContextSlot`` that returns a known list of ``[SYSTEM
         CONTEXT: ...]`` HumanMessages and call ``create_agent_node``
         with a stub LLM. Inspect the return dict.
+
+        2026-07-29 refactor: in production the context messages are
+        PRE-EXISTING in ``state['messages']`` (they were prepended to
+        ``graph_input`` by the messaging path on the first turn).
+        To verify the agent_node reads them from state rather than
+        re-injecting them, we put them in ``state["messages"]``
+        directly and mock the slot to return ``([], [])`` (the
+        new always-empty ephemeral half).
         """
         from daemon.graph import create_agent_node
 
-        # Context messages that the orchestrator would normally inject.
-        # Mocking ``ContextSlot.assemble`` lets us drive the agent_node
-        # without spinning up DBs / services.
+        # Context messages that the orchestrator would normally
+        # produce. In the 2026-07-29 production architecture these
+        # arrive at ``agent_node`` via ``state['messages']`` (the
+        # LangGraph checkpoint) — they are persistent, not ephemeral.
         context_msg_project = HumanMessage(
             content="[SYSTEM CONTEXT: Related Project]\n\nproject body",
             id="ctx-proj-1",
@@ -362,17 +385,27 @@ class TestContextMessagesEphemerality:
                 "context_kind": CONTEXT_KIND_SHARED_CONTEXT,
             },
         )
+        # 2026-07-29 refactor: skills are now persistent too. They
+        # arrive via ``state['messages']`` (checkpointed on turn 1).
+        context_msg_skills = HumanMessage(
+            content="[SYSTEM CONTEXT: Skills]\n\nskill body",
+            id="ctx-skills-1",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": CONTEXT_KIND_SKILLS,
+            },
+        )
 
         context_slot = MagicMock(spec=ContextSlot)
         # ``assemble`` is async; AsyncMock gives the right awaitable.
-        # Hybrid Context Injection (2026-07-29): the slot returns a
-        # ``(persistent_msgs, ephemeral_msgs)`` tuple. The agent_node
-        # only consumes the ephemeral half — feeding the same
-        # context messages as ephemeral exercises the re-append /
-        # pass-through path.
-        context_slot.assemble = AsyncMock(
-            return_value=([], [context_msg_project, context_msg_shared])
-        )
+        # 2026-07-29 refactor: ephemeral is always ``[]``. The slot
+        # is called by ``agent_node`` (so a new skill triggered on
+        # turn 2 is built + prepended to ``graph_input`` by the
+        # messaging path) but its return value is discarded — the
+        # persistent half (which now includes skills) is already at
+        # the start of ``state['messages']`` because the messaging
+        # path put it there.
+        context_slot.assemble = AsyncMock(return_value=([], []))
         context_slot.resolve_project_id = MagicMock(return_value="proj-1")
 
         # Stub LLM that records its input and returns a canned response.
@@ -402,9 +435,18 @@ class TestContextMessagesEphemerality:
             context_slot=context_slot,
         )
 
-        state_messages = [HumanMessage(content="user turn", id="u-1")]
+        # 2026-07-29 refactor: state messages include the persistent
+        # context block (prepended to ``graph_input`` by the messaging
+        # path on the first turn and checkpointed). The user message
+        # follows.
+        state_messages = [
+            context_msg_project,
+            context_msg_shared,
+            context_msg_skills,
+            HumanMessage(content="user turn", id="u-1"),
+        ]
         state = {"messages": state_messages}
-        config = {"configurable": {"thread_id": "inst-ephemeral"}}
+        config = {"configurable": {"thread_id": "inst-persistent"}}
 
         result = _run(agent_node(state, config))
 
@@ -416,33 +458,46 @@ class TestContextMessagesEphemerality:
         assert returned.content == "llm-reply"
 
         # No context message ids are present in the return value.
-        for ctx_msg in (context_msg_project, context_msg_shared):
+        for ctx_msg in (
+            context_msg_project,
+            context_msg_shared,
+            context_msg_skills,
+        ):
             assert ctx_msg not in result["messages"]
             assert getattr(ctx_msg, "id", None) not in {
                 getattr(m, "id", None) for m in result["messages"]
             }
 
         # ── Local ``full_messages`` (LLM input) DID include them ─────────
-        # This is the per-turn ephemeral contract: visible to the LLM but
-        # absent from the checkpoint.
+        # 2026-07-29 refactor: context messages reach the LLM via
+        # ``state['messages']`` (the checkpoint) — the agent_node
+        # does NOT re-inject them via the (now-empty) ephemeral
+        # half. ``full_messages`` reads them through ``list(messages)``.
         llm_input = captured["messages"]
         llm_input_ids = [getattr(m, "id", None) for m in llm_input]
         assert context_msg_project.id in llm_input_ids
         assert context_msg_shared.id in llm_input_ids
+        assert context_msg_skills.id in llm_input_ids
 
-        # Position contract: SystemMessage first, context messages next,
-        # then state messages.
+        # Position contract: SystemMessage first, then state messages
+        # (which now include the persistent context block), then the
+        # user message at the end. There is no separate ephemeral
+        # slot in between — the slot is called but its return value
+        # is discarded.
         assert isinstance(llm_input[0], SystemMessage)
         assert llm_input[0].content == "persona prompt"
-        # The two context msgs are inserted AFTER the SystemMessage.
+        # The persistent context block comes right after the SystemMessage
+        # (preserved order: project → shared_context → skills).
         assert llm_input.index(context_msg_project) == 1
         assert llm_input.index(context_msg_shared) == 2
+        assert llm_input.index(context_msg_skills) == 3
         # State message(s) come after context messages.
         user_msg_index = next(
             i for i, m in enumerate(llm_input) if getattr(m, "id", None) == "u-1"
         )
         assert user_msg_index > llm_input.index(context_msg_project)
         assert user_msg_index > llm_input.index(context_msg_shared)
+        assert user_msg_index > llm_input.index(context_msg_skills)
 
     def test_context_slot_assembly_failure_falls_back_legacy(self) -> None:
         """If ``assemble()`` raises, the agent_node must not crash.
@@ -991,27 +1046,39 @@ class TestPromptInjectionDefense:
 
 
 class TestCompactionReappendContextMessages:
-    """Phase 3 / Task 8: compaction retry rebuilds context messages.
+    """Phase 3 / Task 8: compaction retry rebuilds the LLM-bound layout.
 
     When reactive compaction triggers (``ContextLengthExceededError``),
     ``agent_node`` re-reads state from the checkpoint via
-    ``graph.aget_state`` — and the checkpoint has no context messages
-    (they live only in the local closure, never checkpointed per
-    ADR-2). The C3-analog block at ``daemon.graph`` lines 2743-2764
-    rebuilds ``compact_messages`` so the LLM retry sees them exactly
-    as the first attempt did.
+    ``graph.aget_state``. 2026-07-29 refactor: ALL context kinds
+    (project + shared-context + skills) are now persistent in the
+    checkpoint, so the compacted ``replacement_messages`` already
+    contains them. The C3 re-append block at ``daemon.graph`` lines
+    2743-2814 is therefore a documented no-op in production — but
+    the ``_reassemble_with_context`` helper is preserved for future
+    use (e.g. when explicit per-turn ephemeral context is
+    re-enabled).
 
-    Layout on retry:
+    This test verifies the layout rule that the helper preserves so
+    any future re-enablement does not have to rebuild the layout
+    logic. The actual production flow now has the context block
+    inside ``replacement_messages`` (the freshly-read compacted
+    state), not in the ``ephemeral_context_msgs`` closure variable.
+
+    Layout on retry (future-use helper contract):
 
         compact_messages = (
             [SystemMessage(system_prompt)]
-            + context_msgs
+            + ephemeral_context_msgs
             + non_system
         )
 
     where ``non_system`` is the freshly-read compacted state messages
     plus the user-injection / report messages this turn had appended
-    (which also live only in the local closure).
+    (which also live only in the local closure). In the current
+    production path, ``ephemeral_context_msgs`` is always ``[]`` and
+    the ``if ephemeral_context_msgs:`` guard short-circuits the
+    re-append.
     """
 
     def test_rebuild_layout_preserves_context_messages(self) -> None:

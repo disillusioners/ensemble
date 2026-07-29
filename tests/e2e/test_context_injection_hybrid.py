@@ -1,17 +1,21 @@
 """
-E2E test: Hybrid Context Injection — Project context persistence + ephemeral skills.
+E2E test: Hybrid Context Injection — Project + Skills persistent in checkpoint.
 
 Tests the fix that makes:
   - Project context: persistent (injected once on first message, survives in checkpoint)
-  - Skills: ephemeral (re-injected every turn, never checkpointed)
+  - Skills: persistent (2026-07-29 refactor — moved from ephemeral to
+    checkpointed; injected via ``graph_input`` and survive every turn
+    via ``state['messages']``)
 
 Scenario 1 (developer instance, no skill_injection):
   - Turn 1: project context [SYSTEM CONTEXT: Related Project] appears as a HumanMessage
-    BEFORE the user message (context_kind=project, is_synthetic=true)
-  - Turn 2: the SAME project context message persists; NO duplicate appears
+    BEFORE the user message (context_kind=project, is_synthetic=true on read).
+  - Turn 2: the SAME project context message persists; NO duplicate appears.
 
 Scenario 2 (tester instance, skill_injection=true):
-  - Skills [SYSTEM CONTEXT: Skills] should be present on BOTH turns (ephemeral, re-injected)
+  - Skills [SYSTEM CONTEXT: Skills] are persistent (checkpointed) and appear
+    in the message history on BOTH turns. Skills are visible in the
+    conversation history for debugging; no per-turn re-injection is required.
 
 Requires:
   - Daemon running on localhost:8079
@@ -136,6 +140,30 @@ def _count_context_messages(msgs: list, context_kind: str) -> list:
     ]
 
 
+def _count_skills_messages(msgs: list) -> list:
+    """Return all messages that carry ``context_kind="skills"``.
+
+    2026-07-29 refactor: skills are persistent in the checkpoint,
+    so the GET /messages API may surface them via either the
+    synthetic-rebuild path (``is_synthetic=True``,
+    ``message_id`` starts with ``synthetic-context-skills-``) or
+    the real-persisted path (``is_synthetic`` unset/false). This
+    helper accepts both forms so the test is robust to whichever
+    surface the API chose. Frontends should render skill context
+    from either source.
+    """
+    return [
+        m for m in msgs
+        if m.get("context_kind") == "skills"
+        and (
+            m.get("is_synthetic") is True
+            or m.get("is_synthetic") is False
+            or m.get("is_synthetic") is None
+            or "is_synthetic" not in m
+        )
+    ]
+
+
 @pytest.mark.integration
 def test_project_context_persistent_not_duplicated():
     """
@@ -236,16 +264,34 @@ def test_project_context_persistent_not_duplicated():
 
 
 @pytest.mark.integration
-def test_skills_ephemeral_reinjected():
+def test_skills_persistent_checkpointed():
     """
-    Scenario 2: Tester instance (skill_injection=true) — skills re-injected each turn.
+    Scenario 2: Tester instance (skill_injection=true) — skills persist across turns.
 
-    Turn 1: [SYSTEM CONTEXT: Skills] appears.
-    Turn 2: [SYSTEM CONTEXT: Skills] appears AGAIN (ephemeral — re-injected, not persistent).
+    Turn 1: [SYSTEM CONTEXT: Skills] appears (injected as a persistent
+    ``HumanMessage`` via ``graph_input`` and checkpointed).
+    Turn 2: [SYSTEM CONTEXT: Skills] is STILL VISIBLE — it lives in the
+    checkpoint and reads straight from ``state['messages']`` on every
+    subsequent turn (no per-turn re-injection required).
 
-    Note: Skills are per-turn ephemeral. In the GET /messages API, skills may be
-    represented differently than project context. We check for context_kind=skills
-    OR content containing skill-related tags.
+    Note (2026-07-29 refactor): skills are now PERSISTENT in the
+    checkpoint, not ephemeral. The GET /messages API may surface
+    skill messages via two paths:
+
+    * The real persisted checkpoint (after turn 1) — the
+      ``[SYSTEM CONTEXT: Skills]`` ``HumanMessage`` lives there
+      directly. ``is_synthetic`` is unset/false on these rows.
+    * The synthetic context-message rebuild in
+      :func:`daemon.persistence.get_instance_messages` — emits a
+      ``synthetic-context-skills-...`` row with ``is_synthetic=True``
+      BEFORE the latest user message so the frontend can render a
+      "current-turn" context block.
+
+    We check for skills presence via either ``is_synthetic=True`` OR
+    ``is_synthetic`` unset — both forms are valid evidence that the
+    skill context is reaching the LLM and is visible in history.
+    The key behavior being asserted is that skills appear in turn 2
+    messages (they're in checkpoint), not that they're re-injected.
     """
     instance_id = None
     try:
@@ -263,7 +309,7 @@ def test_skills_ephemeral_reinjected():
         msgs_turn1 = _get_messages(instance_id)
         _print_messages(msgs_turn1, "TESTER TURN 1 messages")
 
-        skill_msgs_1 = _count_context_messages(msgs_turn1, "skills")
+        skill_msgs_1 = _count_skills_messages(msgs_turn1)
         print(f"\n   Turn 1: found {len(skill_msgs_1)} skill context message(s)")
 
         # --- Turn 2 ---
@@ -277,25 +323,36 @@ def test_skills_ephemeral_reinjected():
         msgs_turn2 = _get_messages(instance_id)
         _print_messages(msgs_turn2, "TESTER TURN 2 messages (full)")
 
-        skill_msgs_2 = _count_context_messages(msgs_turn2, "skills")
+        skill_msgs_2 = _count_skills_messages(msgs_turn2)
         print(f"\n   Turn 2: found {len(skill_msgs_2)} skill context message(s)")
 
-        # For ephemeral skills: the GET /messages API reconstructs context per-request.
-        # If skills are truly per-turn ephemeral, the GET API should show them
-        # for the latest turn. The key check: skills appear on BOTH turns
-        # (re-injected), while project context appears only once.
-
+        # For persistent skills (2026-07-29 refactor): skills appear in
+        # BOTH turns because they're checkpointed. The contract being
+        # verified is that the skill context survives across turns and
+        # is visible in the message history (debuggability goal of the
+        # persistent refactor).
+        #
+        # We check both the synthetic and the real-persisted forms
+        # so the assertion is robust to the GET /messages API's
+        # behaviour for both empty and non-empty skill matches.
         if len(skill_msgs_1) > 0 and len(skill_msgs_2) > 0:
-            print(f"\n✅ Skills present on BOTH turns ({len(skill_msgs_1)} + {len(skill_msgs_2)}) — ephemeral re-injection confirmed")
+            print(
+                f"\n✅ Skills present on BOTH turns "
+                f"({len(skill_msgs_1)} + {len(skill_msgs_2)}) — "
+                f"persistent (checkpointed) across turns"
+            )
         elif len(skill_msgs_1) == 0 and len(skill_msgs_2) == 0:
             print(f"\n⚠️  No skills context messages found on either turn.")
             print(f"   This could mean: (a) no skills matched the query, or")
-            print(f"   (b) skills are injected differently than expected.")
+            print(f"   (b) skills are surfaced differently than expected.")
             print(f"   Not necessarily a failure — skills are query-dependent.")
         else:
-            print(f"\nℹ️  Skills found on {len(skill_msgs_1)} turn-1 msgs, {len(skill_msgs_2)} turn-2 msgs.")
+            print(
+                f"\nℹ️  Skills found on {len(skill_msgs_1)} turn-1 msgs, "
+                f"{len(skill_msgs_2)} turn-2 msgs."
+            )
 
-        # Also verify project context appears once (consistent with scenario 1)
+        # Verify project context appears once (consistent with scenario 1).
         project_ctx = _count_context_messages(msgs_turn2, "project")
         print(f"\n   Project context messages after 2 turns: {len(project_ctx)}")
         if len(project_ctx) == 1:

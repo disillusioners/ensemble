@@ -375,11 +375,19 @@ class ContextSlot:
 
         Hybrid Context Injection (2026-07-29): returns the
         ``(persistent_msgs, ephemeral_msgs)`` tuple from
-        :func:`assemble_context_messages`. ``agent_node`` consumes
-        ONLY the ephemeral half (skills) per turn — the persistent
-        half (project + shared context) was prepended to
-        ``graph_input`` by the messaging path on the first turn and
-        lives in ``state['messages']`` from then on.
+        :func:`assemble_context_messages`. The persistent half
+        (project + shared context **+ skills** as of the
+        2026-07-29 refactor) is prepended to ``graph_input`` by
+        the messaging path and lives in ``state['messages']`` from
+        then on. ``agent_node`` reads the persistent messages via
+        ``list(messages)`` directly — it does NOT re-inject the
+        persistent half into the local ``full_messages`` (which
+        would double-inject). The slot's ``assemble()`` call still
+        runs on every turn so a new skill triggered on turn 2 is
+        BUILT and appended to the persistent block via
+        ``graph_input`` (the messaging path's
+        ``persistent_context_msgs`` consumes it), but the slot's
+        return value is discarded by ``agent_node``.
 
         The ``project_injected`` flag is read fresh from instance
         metadata on every call so the once-per-instance contract is
@@ -387,8 +395,11 @@ class ContextSlot:
         handoff. On the first turn the flag is unset, so the
         orchestrator builds the full triple (project + shared
         context + skills); on every subsequent turn the flag is
-        set, the orchestrator skips the persistent builders and
-        emits only skills.
+        set, the orchestrator skips the project + shared-context
+        builders (no DB / RAG I/O) but STILL runs the skills search
+        — the freshly matched skill message lands in the persistent
+        half and is prepended to ``graph_input`` for that turn so
+        the reducer appends it to the checkpoint.
 
         Calls :func:`assemble_context_messages` with the slot's
         captured dependencies plus the per-call inputs (instance_id,
@@ -408,8 +419,10 @@ class ContextSlot:
         data-source reads (project JSON, critical notes, recent
         history, shared-context KV, shared-context files, skills)
         to :func:`assemble_context_messages`, which performs them
-        live each time (for the skills half — the persistent half
-        is intentionally built once).
+        live each time. Skills in particular are re-searched on
+        every call: a skill added mid-session is picked up by the
+        next ``assemble()`` and APPENDED to the checkpoint via the
+        LangGraph ``add_messages`` reducer.
 
         Args:
             instance_id: The current instance id.
@@ -420,13 +433,14 @@ class ContextSlot:
                 from the instance metadata at call time.
 
         Returns:
-            ``(persistent_msgs, ephemeral_msgs)`` tuple. In
-            ``human_messages`` mode the persistent list is empty
-            after the first turn (the orchestrator is told via
-            ``project_already_injected=True`` to skip the
-            persistent builders). The ephemeral list carries zero
-            or one ``[SYSTEM CONTEXT: Skills]`` HumanMessage.
-            ``([], [])`` when the agent is in ``legacy`` mode.
+            ``(persistent_msgs, ephemeral_msgs)`` tuple. After
+            the 2026-07-29 refactor the ephemeral list is always
+            ``[]`` in ``human_messages`` mode (skills have been
+            moved to the persistent half). The persistent list
+            carries zero-to-three ``[SYSTEM CONTEXT: ...]``
+            HumanMessages (``[project?, shared_context?,
+            skills?]``). ``([], [])`` when the agent is in
+            ``legacy`` mode.
         """
         # Lazy imports — see top-of-file note about the graph ↔
         # services cycle. ``_resolve_injection_mode`` and
@@ -2332,22 +2346,31 @@ def create_agent_node(
         # half is built ONCE per instance on the first turn and
         # prepended to ``graph_input`` by the messaging path so it
         # lives in ``state['messages']`` (and the checkpoint) from
-        # that turn forward. This node only consumes the EPHEMERAL
-        # half — the persistent half is already at the start of
-        # ``state['messages']`` because the messaging path put it
-        # there. The result feeds straight into the local
-        # ``full_messages`` build below; ephemeral messages never
-        # enter ``state['messages']`` or the checkpoint, preserving
-        # the per-turn freshness contract for skills.
+        # that turn forward.
         #
-        # ``ephemeral_context_msgs`` is captured so the B1 re-append
-        # (after ``_maybe_repair_loop``) and the C3-analog compaction
+        # 2026-07-29 refactor: skills moved from ephemeral to
+        # PERSISTENT alongside project + shared-context. The slot's
+        # ``assemble()`` call still runs on every turn (so a new
+        # skill triggered on turn 2 is appended to the persistent
+        # block and prepended to ``graph_input``), but its return
+        # value is now discarded — ``ephemeral_context_msgs`` is
+        # **always** ``[]`` in ``human_messages`` mode. Skills
+        # already live in ``state['messages']`` (via the checkpoint),
+        # so the local ``full_messages`` list below reads them
+        # straight from ``list(messages)`` and would double-inject
+        # if we re-prepended them here. The persistent block's
+        # storage location is unchanged — it is still at the start
+        # of ``state['messages']`` because the messaging path put it
+        # there on the first turn.
+        #
+        # ``ephemeral_context_msgs`` is kept in scope (and the slot
+        # call is kept in place) so the B1 re-append (after
+        # ``_maybe_repair_loop``) and the C3-analog compaction
         # re-append can both rebuild ``full_messages`` correctly
         # when the loop breaker or reactive compaction rewrites
-        # ``full_messages`` from scratch. Only ephemeral messages
-        # need re-appending — the persistent block is part of the
-        # state and survives any ``full_messages`` rebuild as long
-        # as the rebuild reads from ``list(messages)``.
+        # ``full_messages`` from scratch. Per the refactor these
+        # re-append blocks are now documented no-ops — see the
+        # inline comments at each site.
         ephemeral_context_msgs: list[HumanMessage] = []
         if context_slot is not None:
             user_query = _extract_last_user_text(messages)
@@ -2356,6 +2379,13 @@ def create_agent_node(
                 _persistent_msgs, ephemeral_context_msgs = await context_slot.assemble(
                     instance_id, user_query, project_id
                 )
+                # ``_persistent_msgs`` is intentionally discarded —
+                # the messaging path already prepended those messages
+                # to ``graph_input`` (and they now live in
+                # ``state['messages']`` from the checkpoint), so they
+                # arrive at this node via ``list(messages)`` below.
+                # Reading them again here would double-inject.
+                _ = _persistent_msgs
             except Exception as exc:  # pragma: no cover - defensive
                 # Context assembly must never crash the agent_node.
                 # Log and continue with the legacy full_messages layout.
@@ -2367,18 +2397,21 @@ def create_agent_node(
                 ephemeral_context_msgs = []
 
             if ephemeral_context_msgs:
-                # Insert AFTER SystemMessage, BEFORE state messages
-                # — same position the pre-restructure context block
-                # held. The persistent block lives at the very
-                # start of ``state['messages']`` (it was prepended
-                # to ``graph_input`` by the messaging path on the
-                # first turn), so the final layout seen by the LLM
-                # is:
+                # DOCUMENTED NO-OP (2026-07-29 refactor): skills moved
+                # from ephemeral to persistent, so
+                # ``ephemeral_context_msgs`` is now always ``[]`` in
+                # ``human_messages`` mode. The slot is still called
+                # above so a new skill triggered on turn 2 is BUILT
+                # and appended to the persistent block via
+                # ``graph_input`` — see ``_process_message_with_tracking``.
+                # If a future refactor re-enables ephemeral injection
+                # the build below is preserved verbatim: insert AFTER
+                # SystemMessage, BEFORE state messages. The persistent
+                # block lives at the very start of ``state['messages']``
+                # (it was prepended to ``graph_input`` by the
+                # messaging path on the first turn), so the final
+                # layout seen by the LLM would be:
                 #   ``[SystemMessage] + ephemeral + [persistent (in state)] + history``
-                # which matches the existing per-turn behaviour for
-                # the ephemeral half — only the persistent half's
-                # storage location changed (system-prompt-closure →
-                # state.messages).
                 full_messages = (
                     [SystemMessage(content=system_prompt)]
                     + ephemeral_context_msgs
@@ -2699,14 +2732,17 @@ def create_agent_node(
         # matches the original insertion and we skip the append (no
         # double-injection).
         #
-        # Hybrid Context Injection (2026-07-29): the persistent block
-        # is now part of ``state['messages']`` (checkpointed on the
-        # first turn) — it survives the ``full_messages`` rebuild via
-        # ``list(messages)`` automatically. Only the ephemeral block
-        # (skills) needs re-appending. The position is preserved by
-        # stripping any SystemMessage from the rebuilt list before
-        # prepending the ephemeral_context_msgs + a fresh
-        # SystemMessage.
+        # 2026-07-29 refactor: this block is now a DOCUMENTED NO-OP.
+        # Skills have been moved from the ephemeral half to the
+        # persistent half — they live in ``state['messages']`` via
+        # the checkpoint, so the ``full_messages`` rebuild survives
+        # them automatically through ``list(messages)``.
+        # ``ephemeral_context_msgs`` is therefore always ``[]`` in
+        # ``human_messages`` mode, so the ``if`` guard short-circuits
+        # and the re-append never fires. The re-append call is
+        # intentionally preserved so a future refactor that
+        # re-enables ephemeral injection with explicit skill
+        # lifecycles does not have to rebuild the layout logic.
         if ephemeral_context_msgs and not any(
             ephemeral_context_msgs[0] is m for m in full_messages
         ):
@@ -2803,6 +2839,17 @@ def create_agent_node(
             # first-attempt ``full_messages`` is preserved on the
             # compaction retry:
             #   ``[SystemMessage] + state (incl. persistent) + ephemeral + injected + report``
+            #
+            # 2026-07-29 refactor: this block is now a DOCUMENTED
+            # NO-OP. Skills have been moved from the ephemeral half
+            # to the persistent half — ``graph.aget_state`` reads
+            # the compacted ``replacement_messages`` from the
+            # checkpoint, which now includes every prior skill
+            # message via the ``add_messages`` reducer.
+            # ``ephemeral_context_msgs`` is therefore always ``[]``
+            # in ``human_messages`` mode and the ``if`` guard
+            # short-circuits. The re-append call is intentionally
+            # preserved for future use.
             if ephemeral_context_msgs:
                 compact_messages = _reassemble_with_context(
                     compact_messages, ephemeral_context_msgs, system_prompt
