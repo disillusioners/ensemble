@@ -70,6 +70,7 @@ def mock_registry(temp_agent):
     mock_reg = MagicMock()
     mock_reg.get.return_value = agent_metadata
     mock_reg.get_resolved.return_value = agent_metadata
+    mock_reg.get_version.return_value = None  # fallback to get_resolved
     mock_reg.resolve_to_id.return_value = "test_agent"
     return mock_reg
 
@@ -132,6 +133,7 @@ class TestIntegrationFlow:
         mock_reg = MagicMock()
         mock_reg.get.return_value = agent_metadata
         mock_reg.get_resolved.return_value = agent_metadata
+        mock_reg.get_version.return_value = None  # fallback to get_resolved
         mock_reg.resolve_to_id.return_value = "test_agent"
 
         with patch("daemon.registry.get_registry", return_value=mock_reg):
@@ -474,6 +476,7 @@ class TestArchivePathTraversal:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # fallback to get_resolved
             mock_get_registry.return_value = mock_registry
             return create_access_memory_tool("test-agent")
 
@@ -591,6 +594,7 @@ class TestSymlinkSecurity:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # fallback to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -622,6 +626,7 @@ class TestMissingArchiveDirectory:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # fallback to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")

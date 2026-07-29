@@ -53,6 +53,7 @@ def mock_registry(temp_agent):
     )
     mock_reg = MagicMock()
     mock_reg.get_resolved.return_value = agent_metadata
+    mock_reg.get_version.return_value = None  # fallback to get_resolved
     mock_reg.resolve_to_id.return_value = "test_agent"
     return mock_reg
 
