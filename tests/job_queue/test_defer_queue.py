@@ -62,6 +62,7 @@ class MockJob:
         self.message = "test message"
         self.source = "api"
         self.instance_id = None
+        self.job_type = "task"
 
 
 @pytest.fixture
