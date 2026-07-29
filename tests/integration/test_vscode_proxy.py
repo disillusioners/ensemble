@@ -37,12 +37,14 @@ fires first.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 from urllib.parse import unquote
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketState
 
 from daemon.routers import vscode_proxy
 from daemon.routers.vscode_proxy import (
@@ -53,6 +55,7 @@ from daemon.routers.vscode_proxy import (
     _response_headers,
     _validate_folder_param,
     create_vscode_proxy_app,
+    upstream_to_browser,
 )
 
 
@@ -744,3 +747,271 @@ class TestValidateFolderParam:
                 "folder=../etc", project_repo=repo
             )
         assert exc_info.value.status_code == 403
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. WebSocket proxy crash resilience — ASGI-after-close RuntimeError
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeUpstream:
+    """Minimal async iterator mimicking ``websockets.connect()``.
+
+    ``upstream_to_browser`` only reads via ``async for message in upstream``,
+    so we only need ``__aiter__`` / ``__anext__``. Optional ``send`` /
+    ``close`` exist so the proxy closure (``browser_to_upstream`` and the
+    ``finally`` block) can call them without exploding when the test
+    drives the full proxy.
+    """
+
+    def __init__(self, messages, *, raise_after: BaseException | None = None):
+        self._messages = list(messages)
+        self._raise_after = raise_after
+        self.yielded = 0
+        self.sent: list = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.yielded >= len(self._messages):
+            if self._raise_after is not None:
+                # Surface the configured exception exactly once, then
+                # behave as a closed stream so the loop exits cleanly.
+                exc = self._raise_after
+                self._raise_after = None
+                raise exc
+            raise StopAsyncIteration
+        msg = self._messages[self.yielded]
+        self.yielded += 1
+        return msg
+
+    async def send(self, data):  # pragma: no cover - exercised via closure
+        self.sent.append(data)
+
+    async def close(self):  # pragma: no cover - exercised via finally
+        self.closed = True
+
+
+class _FakeWebSocket:
+    """Minimal WebSocket stub.
+
+    Records ``send_bytes`` / ``send_text`` calls and allows tests to
+    simulate a closed browser by flipping ``client_state``. If
+    ``raise_runtime_error`` is true, the send methods raise the
+    "Unexpected ASGI message 'websocket.send'" RuntimeError Starlette
+    raises after ``websocket.close``.
+    """
+
+    def __init__(
+        self,
+        *,
+        state: WebSocketState = WebSocketState.CONNECTED,
+        raise_runtime_error: bool = False,
+    ):
+        self.client_state = state
+        self._raise_runtime_error = raise_runtime_error
+        self.sent_bytes: list[bytes] = []
+        self.sent_text: list[str] = []
+        self.closed = False
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self._raise_runtime_error:
+            raise RuntimeError(
+                "Unexpected ASGI message 'websocket.send', "
+                "after sending 'websocket.close'"
+            )
+        self.sent_bytes.append(data)
+
+    async def send_text(self, data: str) -> None:
+        if self._raise_runtime_error:
+            raise RuntimeError(
+                "Unexpected ASGI message 'websocket.send', "
+                "after sending 'websocket.close'"
+            )
+        self.sent_text.append(data)
+
+    async def close(self):  # pragma: no cover - exercised via finally
+        self.closed = True
+
+
+class TestUpstreamToBrowserCrashResilience:
+    """Pin the three defenses against ``RuntimeError`` from a stale WS.
+
+    Bug: when the browser disconnects while code-server is still
+    streaming, ``websocket.send_bytes()`` raises ``RuntimeError: Unexpected
+    ASGI message 'websocket.send', after sending 'websocket.close'``.
+    Before the fix this propagated out of ``proxy_websocket``, crashing
+    the daemon. Three fixes were applied:
+
+    * Fix 1: wrap each send in try/except RuntimeError → break.
+    * Fix 2: add RuntimeError to the enclosing ``except*``.
+    * Fix 3: pre-send ``WebSocketState.CONNECTED`` check.
+
+    These tests cover all three — if any layer regresses, at least one
+    test fails.
+    """
+
+    async def test_upstream_to_browser_breaks_on_runtime_error_from_send(self):
+        """Fix 1: when ``send_bytes`` raises RuntimeError the loop MUST
+        break cleanly — no RuntimeError propagates out of the helper.
+
+        Simulates the exact bug: code-server is still streaming but the
+        browser WS has been closed (Starlette raises on the next send).
+        """
+        fake_ws = _FakeWebSocket(raise_runtime_error=True)
+        fake_upstream = _FakeUpstream(
+            messages=[b"msg-1", b"msg-2", b"msg-3"],
+        )
+
+        # No exception must escape — that's the contract.
+        await upstream_to_browser(cast(Any, fake_ws), fake_upstream)
+
+        # And we must have stopped after the first failing send.
+        assert fake_ws.sent_bytes == [], (
+            "send_bytes must NOT record data when it raises RuntimeError"
+        )
+        assert fake_upstream.yielded == 1, (
+            "upstream_to_browser must break on the first RuntimeError, "
+            "not drain remaining messages"
+        )
+
+    async def test_upstream_to_browser_breaks_on_runtime_error_from_send_text(self):
+        """Fix 1, text-frame variant: ``send_text`` raising RuntimeError
+        also stops the loop cleanly.
+        """
+        fake_ws = _FakeWebSocket(raise_runtime_error=True)
+        fake_upstream = _FakeUpstream(
+            messages=["text-1", "text-2", "text-3"],
+        )
+
+        await upstream_to_browser(cast(Any, fake_ws), fake_upstream)
+
+        assert fake_ws.sent_text == []
+        assert fake_upstream.yielded == 1
+
+    async def test_upstream_to_browser_breaks_when_ws_state_not_connected(self):
+        """Fix 3: pre-send state check — when ``client_state`` is
+        ``DISCONNECTED`` the loop must break BEFORE any send is issued.
+        """
+        fake_ws = _FakeWebSocket(state=WebSocketState.DISCONNECTED)
+        fake_upstream = _FakeUpstream(messages=[b"a", b"b", b"c"])
+
+        await upstream_to_browser(cast(Any, fake_ws), fake_upstream)
+
+        # Pre-send check fired as soon as the first message was pulled.
+        # The async-for pulls one item before the state check runs, so
+        # the loop breaks AFTER pulling the first message — but no send
+        # happens because the state check rejects it.
+        assert fake_ws.sent_bytes == [], (
+            "no send must occur when client_state != CONNECTED"
+        )
+        assert fake_upstream.yielded == 1, (
+            "the state check runs after the first item is pulled; "
+            "remaining items must NOT be pulled after the break"
+        )
+
+    async def test_upstream_to_browser_forwards_when_ws_open(self):
+        """Sanity guard: with a connected WS and a well-behaved upstream,
+        ``upstream_to_browser`` forwards everything cleanly. If this
+        regresses the other tests' setup is suspect.
+        """
+        fake_ws = _FakeWebSocket(state=WebSocketState.CONNECTED)
+        fake_upstream = _FakeUpstream(
+            messages=["hello", b"\x00\x01", "world"],
+        )
+
+        await upstream_to_browser(cast(Any, fake_ws), fake_upstream)
+
+        assert fake_ws.sent_text == ["hello", "world"]
+        assert fake_ws.sent_bytes == [b"\x00\x01"]
+        assert fake_upstream.yielded == 3
+
+    async def test_proxy_except_star_swallows_runtime_error_from_helper(self):
+        """Fix 2 + Fix 1: even if ``upstream_to_browser`` somehow escapes
+        a RuntimeError, the proxy's ``except*`` must catch it and not
+        propagate out of ``proxy_websocket``.
+
+        We exercise this by driving the real ``proxy_websocket``
+        endpoint via TestClient with a patched ``websockets.connect``
+        that returns a fake upstream whose iterator raises RuntimeError
+        on the first message. The browser side is left untouched so the
+        handler runs the TaskGroup path. The test asserts the WS server
+        side exits cleanly (the server closes the client connection)
+        rather than raising an unhandled exception.
+        """
+        import websockets as websockets_module
+
+        fake_upstream = _FakeUpstream(
+            messages=[],
+            raise_after=RuntimeError(
+                "Unexpected ASGI message 'websocket.send', "
+                "after sending 'websocket.close'"
+            ),
+        )
+
+        async def _fake_connect(*args, **kwargs):
+            return fake_upstream
+
+        original_connect = websockets_module.connect
+        websockets_module.connect = _fake_connect
+        try:
+            manager = _make_mock_manager(running=True, port=1)
+            app = create_vscode_proxy_app(manager)
+
+            with TestClient(app) as client:
+                # The proxy should accept, run TaskGroup, and the
+                # upstream's RuntimeError must be caught by the
+                # ``except*``. From the client side this just looks
+                # like the server closing the WS — no client-side
+                # exception escapes.
+                with client.websocket_connect("/ws") as ws:
+                    # Wait for the server to close the connection.
+                    with pytest.raises(Exception):
+                        ws.receive_text()
+        finally:
+            websockets_module.connect = original_connect
+
+        # Upstream was closed by the proxy's finally block.
+        assert fake_upstream.closed is True, (
+            "proxy must close the upstream in the finally block "
+            "even when the TaskGroup raises RuntimeError"
+        )
+
+    def test_proxy_closes_both_sides_when_upstream_dies(self):
+        """When the upstream disconnects mid-stream, the proxy must
+        close the browser WS too. We patch ``websockets.connect`` to
+        return an upstream that yields a message then raises
+        ``ConnectionError`` (the signal code-server uses when it dies),
+        and assert the browser WS gets a clean close from the server.
+        """
+        import websockets as websockets_module
+
+        fake_upstream = _FakeUpstream(
+            messages=["hi"],
+            raise_after=ConnectionError("upstream code-server crashed"),
+        )
+
+        async def _fake_connect(*args, **kwargs):
+            return fake_upstream
+
+        original_connect = websockets_module.connect
+        websockets_module.connect = _fake_connect
+        try:
+            manager = _make_mock_manager(running=True, port=1)
+            app = create_vscode_proxy_app(manager)
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws") as ws:
+                    # Server should send us the first message, then
+                    # close when upstream dies.
+                    text = ws.receive_text()
+                    assert text == "hi"
+                    # Subsequent receive must surface the server close.
+                    with pytest.raises(Exception):
+                        ws.receive_text()
+        finally:
+            websockets_module.connect = original_connect
+
+        assert fake_upstream.closed is True
