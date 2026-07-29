@@ -73,6 +73,8 @@ def _build_vscode_status(manager: VSCodeServerManager | None) -> VSCodeStatus:
             binary_path=binary,
             status="stopped",
             allow_remote=False,
+            # last_error / exit_code default to None — no manager means
+            # no observed crashes yet.
         )
 
     state: VSCodeServerState = manager.state
@@ -83,6 +85,12 @@ def _build_vscode_status(manager: VSCodeServerManager | None) -> VSCodeStatus:
         binary_path=binary_path,
         status=state.status,
         allow_remote=bool(getattr(config, "allow_remote", False)),
+        # Surface the watchdog's crash diagnostic (exit code + log tail)
+        # so the frontend can show operators WHY code-server died.
+        # Both fields are reset to ``None`` by ``start()`` on each fresh
+        # spawn, so non-None values imply a recent crash worth surfacing.
+        last_error=state.last_error,
+        exit_code=state.exit_code,
     )
 
 

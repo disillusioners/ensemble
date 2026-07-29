@@ -103,6 +103,12 @@ def _make_mock_manager(*, running: bool = True, port: int = 1) -> MagicMock:
     # C4: state carries port/pid internally — schemas must NOT serialize them.
     state.port = 41293
     state.pid = 67890
+    # vscode-reliability-fixes: ``_build_vscode_status`` now reads
+    # ``state.last_error`` and ``state.exit_code``. Explicit ``None``
+    # defaults (NOT MagicMock auto-attrs) so existing C4 tests don't
+    # trip Pydantic's string/int validation.
+    state.last_error = None
+    state.exit_code = None
     mgr.state = state
     mgr.config = MagicMock(name="config")
     mgr.config.allow_remote = False

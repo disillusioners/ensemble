@@ -144,6 +144,44 @@ def _validate_folder_param(
     )
 
 
+async def upstream_to_browser(websocket: WebSocket, upstream: Any) -> None:
+    """Forward messages from ``upstream`` (code-server) to ``websocket`` (browser).
+
+    Defense-in-depth against a race: when the browser disconnects while
+    code-server is still streaming messages, sending on a closed WS raises
+    ``RuntimeError: Unexpected ASGI message 'websocket.send', after sending
+    'websocket.close'``. Without a guard this propagates out of the
+    TaskGroup and the proxy crashes with an unhandled exception.
+
+    Three layers of defense:
+
+    1. **Pre-send state check** (Fix 3): best-effort — if the browser WS
+       is no longer in ``CONNECTED`` state, stop before issuing a write.
+    2. **try/except around send** (Fix 1): catches the ``RuntimeError``
+       that Starlette raises when the WS is already closed, breaking
+       the loop cleanly.
+    3. The enclosing ``except*`` (Fix 2) also catches ``RuntimeError`` as
+       a final backstop in case either (1) or (2) misses.
+    """
+    async for message in upstream:
+        # (Fix 3) Skip writes if the browser has already disconnected.
+        # WebSocketState is imported at module top — if starlette ever
+        # stops exporting it, we still fall through to layer 2 below.
+        if websocket.client_state != WebSocketState.CONNECTED:
+            break
+        try:
+            # (Fix 1) Wrap the actual write so a stale WS doesn't crash
+            # the TaskGroup. We catch RuntimeError specifically and
+            # break out — propagating up would crash the proxy.
+            if isinstance(message, bytes):
+                await websocket.send_bytes(message)
+            else:
+                await websocket.send_text(message)
+        except RuntimeError:
+            # Browser WS closed mid-stream; stop forwarding.
+            break
+
+
 def create_vscode_proxy_app(
     manager: VSCodeServerManager,
     project_repo=None,
@@ -279,18 +317,18 @@ def create_vscode_proxy_app(
                     elif message.get("bytes") is not None:
                         await upstream.send(message["bytes"])
 
-            async def upstream_to_browser() -> None:
-                async for message in upstream:
-                    if isinstance(message, bytes):
-                        await websocket.send_bytes(message)
-                    else:
-                        await websocket.send_text(message)
-
             async with asyncio.TaskGroup() as group:
                 group.create_task(browser_to_upstream())
-                group.create_task(upstream_to_browser())
-        except* (WebSocketDisconnect, ConnectionError, asyncio.CancelledError):
-            pass
+                group.create_task(upstream_to_browser(websocket, upstream))
+        # (Fix 2) Add RuntimeError so the outer handler swallows the
+        # ASGI-after-close crash even if Fixes 1/3 miss an edge case.
+        except* (WebSocketDisconnect, ConnectionError, asyncio.CancelledError, RuntimeError) as eg:
+            # RuntimeError is expected when sending after the browser WS closes.
+            # Log at debug for observability — non-send RuntimeErrors are rare but
+            # would be invisible without this.
+            for exc in eg.exceptions:
+                if isinstance(exc, RuntimeError):
+                    logger.debug(f"WebSocket proxy RuntimeError swallowed: {exc}")
         finally:
             if upstream is not None:
                 await upstream.close()

@@ -67,6 +67,12 @@ def _make_vscode_manager(
     state.status = status
     state.port = port
     state.pid = pid
+    # vscode-reliability-fixes: ``_build_vscode_status`` now reads
+    # ``state.last_error`` and ``state.exit_code``. Explicit ``None``
+    # defaults (NOT MagicMock auto-attrs) so existing tests that don't
+    # care about crashes don't trip Pydantic's string/int validation.
+    state.last_error = None
+    state.exit_code = None
     mgr.state = state
     mgr.is_running.return_value = running
     mgr.ensure_running = AsyncMock(name="ensure_running")
@@ -894,3 +900,137 @@ class TestVscodeStatusNoPortNoPid:
         body = resp.json()
         assert "port" not in body
         assert "pid" not in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# vscode-reliability-fixes: ``last_error`` + ``exit_code`` surfaced in API
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestVSCodeStatusCrashFields:
+    """``VSCodeStatus`` exposes ``last_error`` and ``exit_code`` so the
+    frontend can render WHY code-server crashed.
+
+    These fields are populated by the watchdog (``_watchdog_loop``) when
+    code-server dies at runtime and by ``_wait_for_port`` when it dies
+    during startup. Both paths converge through ``state.last_error`` /
+    ``state.exit_code`` and surface via ``_build_vscode_status()``.
+    """
+
+    def test_vscode_status_schema_declares_crash_fields(self):
+        """Pydantic model declares both fields with ``None`` defaults."""
+        from daemon.routers.schemas import VSCodeStatus
+
+        # Empty constructor → both fields default to None.
+        status = VSCodeStatus()
+        assert status.last_error is None
+        assert status.exit_code is None
+
+        # Explicit construction round-trips through the model.
+        status = VSCodeStatus(
+            available=True,
+            binary_path="/usr/bin/code-server",
+            status="crashed",
+            allow_remote=False,
+            last_error="code-server exited unexpectedly (code=137)",
+            exit_code=137,
+        )
+        assert status.last_error == (
+            "code-server exited unexpectedly (code=137)"
+        )
+        assert status.exit_code == 137
+
+    @pytest.mark.asyncio
+    async def test_build_vscode_status_populates_crash_fields_from_state(
+        self, client
+    ) -> None:
+        """``_build_vscode_status()`` reads ``state.last_error`` and
+        ``state.exit_code`` when the manager has recorded a crash.
+
+        Drives the pure helper directly (not through HTTP) because the
+        surface contract is the helper's job, not the route layer.
+        """
+        from daemon.routers.settings import _build_vscode_status
+
+        ac, mocks = client
+        # Simulate a post-crash snapshot in the manager's state.
+        mocks.vscode_manager.state.status = "crashed"
+        mocks.vscode_manager.state.last_error = (
+            "code-server exited unexpectedly (code=42)"
+        )
+        mocks.vscode_manager.state.exit_code = 42
+
+        result = _build_vscode_status(mocks.vscode_manager)
+
+        assert result.last_error == (
+            "code-server exited unexpectedly (code=42)"
+        )
+        assert result.exit_code == 42
+        # Other fields are still populated from the manager.
+        assert result.status == "crashed"
+        assert result.allow_remote is False
+        assert result.binary_path == "/usr/local/bin/code-server"
+
+    @pytest.mark.asyncio
+    async def test_build_vscode_status_returns_none_when_no_crash(
+        self, client
+    ) -> None:
+        """When ``state.last_error`` / ``state.exit_code`` are ``None``
+        (no crash yet), the helper round-trips them as ``None`` —
+        the contract is that ``None`` means "no crash recorded".
+        """
+        from daemon.routers.settings import _build_vscode_status
+
+        ac, mocks = client
+        mocks.vscode_manager.state.status = "running"
+        mocks.vscode_manager.state.last_error = None
+        mocks.vscode_manager.state.exit_code = None
+
+        result = _build_vscode_status(mocks.vscode_manager)
+
+        assert result.last_error is None
+        assert result.exit_code is None
+        assert result.status == "running"
+
+    @pytest.mark.asyncio
+    async def test_build_vscode_status_none_when_no_manager(self):
+        """When no manager is wired, the no-manager branch also returns
+        ``None`` for both crash fields (the defaults) — there is no
+        observed crash to surface."""
+        from daemon.routers.settings import _build_vscode_status
+
+        result = _build_vscode_status(None)
+
+        assert result.last_error is None
+        assert result.exit_code is None
+        assert result.status == "stopped"
+
+    @pytest.mark.asyncio
+    async def test_editor_endpoint_includes_crash_fields(self, client):
+        """End-to-end: GET /api/settings/editor surfaces ``last_error``
+        and ``exit_code`` in the JSON body so the frontend can render
+        them.
+
+        C4 (port/pid removed) still holds — the new fields MUST NOT
+        reintroduce the removed ones.
+        """
+        ac, mocks = client
+        mocks.vscode_manager.state.status = "crashed"
+        mocks.vscode_manager.state.last_error = (
+            "code-server crashed\n"
+            "--- code-server output (tail) ---\n"
+            "fatal: cannot bind port 4321\n"
+        )
+        mocks.vscode_manager.state.exit_code = 137
+
+        resp = await ac.get("/api/settings/editor")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        vscode_block = body["vscode"]
+        # New fields are present and carry the manager's values.
+        assert vscode_block["last_error"] == mocks.vscode_manager.state.last_error
+        assert vscode_block["exit_code"] == 137
+        # C4 still holds: no port/pid in the response.
+        assert "port" not in vscode_block
+        assert "pid" not in vscode_block
