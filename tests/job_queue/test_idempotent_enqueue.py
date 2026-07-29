@@ -73,20 +73,35 @@ def make_mock_job(
     return job
 
 
-def make_mock_registry(agent_id: str = "developer", agent_path: str = "/agents/developer") -> MagicMock:
+def make_mock_registry(
+    agent_id: str = "developer",
+    agent_path: str = "/agents/developer",
+    agent_version_meta: MagicMock | None = None,
+) -> MagicMock:
     """Create a mock registry that returns agent metadata.
-    
+
     Args:
         agent_id: Agent ID to return.
-        agent_path: Agent path to return.
-        
+        agent_path: Base agent path returned by ``get_resolved``.
+        agent_version_meta: Optional metadata returned by
+            ``get_version(agent_id, agent_tag)``. ``None`` (default)
+            mimics real ``AgentRegistry`` behavior when no versioned
+            variant exists — the caller must pass an explicit mock
+            here when the test wants to exercise the versioned
+            resolution path.
     Returns:
-        Mock registry with get() method.
+        Mock registry with ``get``, ``get_resolved``, and ``get_version``
+        stubs configured.
     """
     registry = MagicMock()
     agent_meta = MagicMock()
     agent_meta.path = agent_path
-    registry.get.return_value = agent_meta
+    registry.get.return_value = agent_meta  # Legacy strict path
+    registry.get_resolved.return_value = agent_meta  # Alias-aware base path
+    # Version-aware path: default to ``None`` so the ``or
+    # get_resolved(...)`` fallback in ``enqueue`` behaves like a real
+    # registry call when no versioned variant exists.
+    registry.get_version.return_value = agent_version_meta
     return registry
 
 
@@ -648,8 +663,11 @@ class TestIdempotentEnqueueEdgeCases:
         
         with patch("daemon.services.job_queue_service.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
-            # ``enqueue`` now uses ``get_resolved`` (alias-aware) instead of bare
-            # ``get`` so the lookup must be mocked on the alias-aware method.
+            # ``enqueue`` now uses ``get_version(agent_id, agent_tag) or
+            # get_resolved(agent_id)`` (version-aware path) instead of
+            # bare ``get`` so the lookup must be mocked on both the
+            # versioned and the alias-aware methods.
+            mock_registry.get_version.return_value = None  # No versioned variant
             mock_registry.get_resolved.return_value = None  # Agent not found
             mock_registry.get.return_value = None  # Legacy strict path
             mock_get_registry.return_value = mock_registry
@@ -880,3 +898,178 @@ class TestIdempotentEnqueueTTL:
         # This test documents the boundary behavior
         assert result.job_id == "new-job-boundary"
         mock_repository.create.assert_called_once()
+
+
+class TestEnqueueAgentTagResolution:
+    """Version-aware ``agent_dir`` resolution tests.
+
+    Phase 3 thread-through: ``JobQueueService.enqueue`` accepts an
+    optional ``agent_tag`` parameter. When set, the service resolves
+    ``agent_dir`` from the versioned variant of the agent (via
+    ``registry.get_version(agent_id, agent_tag)``); otherwise it falls
+    back to the base metadata (via ``registry.get_resolved``). These
+    tests pin down both the versioned-success and the fallback paths.
+    """
+
+    @pytest.fixture
+    def mock_repository(self) -> MagicMock:
+        """Mock JobRepository: must call ``create`` directly (no key) so
+        we exercise the second registry lookup site (line ~751 in
+        ``job_queue_service.py``)."""
+        repo = MagicMock()
+        repo.find_by_idempotency_key = MagicMock(return_value=None)
+        repo.create = MagicMock()
+        return repo
+
+    @pytest.fixture
+    def mock_lock_manager(self) -> MagicMock:
+        """Create mock JobLockManager."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_queue_repo(self) -> MagicMock:
+        """Mock JobQueueRepository."""
+        return create_queue_repo_with_system_queue()
+
+    @pytest.fixture
+    def service(
+        self, mock_repository, mock_lock_manager, mock_queue_repo
+    ) -> JobQueueService:
+        """JobQueueService with mocked dependencies."""
+        return JobQueueService(
+            repository=mock_repository,
+            lock_manager=mock_lock_manager,
+            queue_repo=mock_queue_repo,
+        )
+
+    @pytest.mark.asyncio
+    async def test_versioned_agent_resolves_to_versioned_directory(
+        self,
+        service: JobQueueService,
+        mock_repository: MagicMock,
+        mock_queue_repo: MagicMock,
+    ):
+        """When ``agent_tag`` is set and a versioned variant exists,
+        ``agent_dir`` MUST be derived from the versioned meta, NOT the
+        base. This is the headline behavior of the version-aware
+        resolution path.
+        """
+        # Build a versioned meta with a distinct directory.
+        versioned_meta = MagicMock()
+        versioned_meta.path = "/agents/reviewer_v2"
+
+        new_job = make_mock_job(job_id="job-versioned")
+        mock_repository.create.return_value = new_job
+
+        with patch(
+            "daemon.services.job_queue_service.get_registry"
+        ) as mock_get_registry:
+            # The base meta still resolves to ``/agents/reviewer`` —
+            # using this we can prove the code preferred the
+            # versioned path over the base fallback.
+            mock_get_registry.return_value = make_mock_registry(
+                agent_path="/agents/reviewer",
+                agent_version_meta=versioned_meta,
+            )
+
+            result = await service.enqueue(
+                agent_id="reviewer",
+                message="test message",
+                source="api",
+                agent_tag="v2",
+            )
+
+        # Insert was performed exactly once with the versioned directory.
+        mock_repository.create.assert_called_once()
+        call_kwargs = mock_repository.create.call_args.kwargs
+        assert call_kwargs["agent_dir"] == "/agents/reviewer_v2"
+        assert result.job_id == "job-versioned"
+
+    @pytest.mark.asyncio
+    async def test_agent_tag_none_falls_back_to_base(
+        self,
+        service: JobQueueService,
+        mock_repository: MagicMock,
+        mock_queue_repo: MagicMock,
+    ):
+        """When ``agent_tag`` is ``None`` (default), ``enqueue`` MUST
+        use the base metadata's ``path``. This pins down the "no
+        thread-through" / "caller didn't supply a tag" path.
+
+        Per the gotcha in the design doc: the real registry returns
+        ``None`` from ``get_version(agent_id, None)``, so we mirror
+        that here by setting ``get_version.return_value = None``. If
+        ``get_version`` were left at its MagicMock default (truthy),
+        the ``or`` fallback would prefer it and ``agent_dir`` would
+        not be derived from the base.
+        """
+        new_job = make_mock_job(job_id="job-base")
+        mock_repository.create.return_value = new_job
+
+        with patch(
+            "daemon.services.job_queue_service.get_registry"
+        ) as mock_get_registry:
+            mock_registry = make_mock_registry(agent_path="/agents/reviewer")
+            # CRITICAL: explicitly set to ``None`` so the ``or
+            # get_resolved(...)`` fallback actually fires (matches
+            # real ``AgentRegistry.get_version(agent_id, None)``
+            # behavior).
+            mock_registry.get_version.return_value = None
+            mock_get_registry.return_value = mock_registry
+
+            result = await service.enqueue(
+                agent_id="reviewer",
+                message="test message",
+                source="api",
+                # agent_tag defaults to None — pinned explicitly here
+                # for readability.
+                agent_tag=None,
+            )
+
+        # Registry was queried with the (agent_id, None) pair.
+        mock_registry.get_version.assert_called_with("reviewer", None)
+        # Base directory was used.
+        mock_repository.create.assert_called_once()
+        call_kwargs = mock_repository.create.call_args.kwargs
+        assert call_kwargs["agent_dir"] == "/agents/reviewer"
+        assert result.job_id == "job-base"
+
+    @pytest.mark.asyncio
+    async def test_agent_tag_provided_but_version_not_found_falls_back_to_base(
+        self,
+        service: JobQueueService,
+        mock_repository: MagicMock,
+        mock_queue_repo: MagicMock,
+    ):
+        """When ``agent_tag`` is set but the versioned variant does NOT
+        exist (``get_version`` returns ``None``), ``enqueue`` MUST
+        fall back to the base meta. This is the
+        "versioned-lookup-miss" path.
+        """
+        new_job = make_mock_job(job_id="job-missing-version")
+        mock_repository.create.return_value = new_job
+
+        with patch(
+            "daemon.services.job_queue_service.get_registry"
+        ) as mock_get_registry:
+            mock_registry = make_mock_registry(agent_path="/agents/reviewer")
+            # CRITICAL: explicitly set ``None`` — do not rely on the
+            # MagicMock default (which would be truthy and shadow the
+            # base lookup).
+            mock_registry.get_version.return_value = None
+            mock_get_registry.return_value = mock_registry
+
+            result = await service.enqueue(
+                agent_id="reviewer",
+                message="test message",
+                source="api",
+                agent_tag="v9",
+            )
+
+        # The version lookup was attempted with the requested tag.
+        mock_registry.get_version.assert_called_with("reviewer", "v9")
+        # Base directory was used (fallback fired).
+        mock_repository.create.assert_called_once()
+        call_kwargs = mock_repository.create.call_args.kwargs
+        assert call_kwargs["agent_dir"] == "/agents/reviewer"
+        assert result.job_id == "job-missing-version"

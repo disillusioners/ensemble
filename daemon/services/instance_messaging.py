@@ -1503,6 +1503,16 @@ class InstanceMessagingService:
             instance_meta.agent_id if instance_meta is not None else None
         ) or "default"
 
+        # 1b'. Resolve agent_tag from the instance when available.
+        # Older Instance rows may not have ``agent_tag`` set — use
+        # ``getattr`` with a default of None so the registry falls
+        # back to the base metadata in that case.
+        agent_tag_for_job = (
+            getattr(instance_meta, "agent_tag", None)
+            if instance_meta is not None
+            else None
+        )
+
         # 1c. Resolve queue_id (cross-project guard).
         queue_id_for_job: str | None = None
         queue_repo = getattr(
@@ -1623,6 +1633,7 @@ class InstanceMessagingService:
             queue_id=queue_id_for_job,
             job_type="message",
             instance_id=instance_id,
+            agent_tag=agent_tag_for_job,
             job_id=job_id,
         )
 

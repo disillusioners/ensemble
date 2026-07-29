@@ -556,6 +556,7 @@ class JobQueueService:
         idempotency_key: str | None = None,
         job_type: str = "task",
         instance_id: str | None = None,
+        agent_tag: str | None = None,
         job_id: str | None = None,
     ) -> JobItem:
         """Submit a job for processing.
@@ -588,6 +589,10 @@ class JobQueueService:
             job_type: Job type — ``"task"`` (default) or ``"message"``.
             instance_id: Optional pre-set instance ID (for message jobs,
                         this is the existing target instance).
+            agent_tag: Optional agent version tag (e.g. ``"v2"``). When set, ``agent_dir``
+                       is resolved from the versioned variant of the agent instead of the
+                       base. Falls back to base metadata when the versioned variant
+                       doesn't exist or when this is ``None``.
             job_id: Optional explicit JobItem UUID. When supplied, the
                     repository uses this exact ID; this is used by Option B
                     to link ``JobItem.job_id`` to ``Task.work_id``.
@@ -614,8 +619,12 @@ class JobQueueService:
             # Derive agent_dir from agent_id using registry before the
             # atomic insert — we still need it for both the insert path
             # and the registry validation below.
+            # Version-aware: when ``agent_tag`` is set, prefer the
+            # versioned agent's directory; otherwise fall back to the
+            # base metadata (matches the pattern used in
+            # ``instance_lifecycle.py`` / ``instance_messaging.py``).
             registry = get_registry()
-            agent_meta = registry.get_resolved(agent_id)
+            agent_meta = registry.get_version(agent_id, agent_tag) or registry.get_resolved(agent_id)
             if agent_meta is None:
                 raise ValueError(f"Agent not found: {agent_id}")
             agent_dir = str(agent_meta.path)
@@ -738,8 +747,12 @@ class JobQueueService:
 
         # Non-idempotency path (or terminal-fallback path above).
         # Derive agent_dir from agent_id using registry.
+        # Version-aware: when ``agent_tag`` is set, prefer the
+        # versioned agent's directory; otherwise fall back to the
+        # base metadata (matches the pattern used in
+        # ``instance_lifecycle.py`` / ``instance_messaging.py``).
         registry = get_registry()
-        agent_meta = registry.get_resolved(agent_id)
+        agent_meta = registry.get_version(agent_id, agent_tag) or registry.get_resolved(agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {agent_id}")
         agent_dir = str(agent_meta.path)

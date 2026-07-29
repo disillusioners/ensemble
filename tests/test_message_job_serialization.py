@@ -198,6 +198,7 @@ def _build_manager(
         idempotency_key=None,
         job_type="task",
         instance_id=None,
+        agent_tag=None,
         job_id=None,
     ):
         """Async shim that mirrors ``JobQueueService.enqueue``'s DB write.
@@ -210,6 +211,10 @@ def _build_manager(
         code does — a real registry call would require an
         ``agents/`` directory, which the unit-test engine does not
         provision.
+
+        ``agent_tag`` is accepted (S3 thread-through) so the signature
+        stays in sync with the production ``JobQueueService.enqueue``.
+        The test seam does not use it for ``agent_dir`` resolution.
         """
         return await asyncio.to_thread(
             job_repository.create,

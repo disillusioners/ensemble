@@ -2922,7 +2922,10 @@ class InstanceLifecycleService:
         
         registry = get_registry()
         agent_tag = getattr(meta, "agent_tag", None)
-        agent_meta = registry.get_version(meta.agent_id, agent_tag)
+        # S6-restore fix: validate_path=True so that if the versioned directory
+        # is missing on disk we cleanly fall back to the base version instead
+        # of returning stale AgentMetadata pointing at a non-existent path.
+        agent_meta = registry.get_version(meta.agent_id, agent_tag, validate_path=True)
         if agent_meta is None:
             if agent_tag is not None:
                 logger.warning(
@@ -2937,24 +2940,62 @@ class InstanceLifecycleService:
         # in-memory meta so list_instances reports the correct path/tag.
         if agent_tag is not None and agent_meta is not None:
             if getattr(agent_meta, "version_tag", None) != agent_tag:
+                # S5 fix: capture the originally-requested tag BEFORE the
+                # in-memory mutation so a future restore can re-elevate back
+                # to this version if the versioned dir reappears on disk.
+                original_tag = agent_tag
                 logger.info(
                     f"Updating instance {instance_id[:8]} agent_tag from '{agent_tag}' to "
                     f"'{getattr(agent_meta, 'version_tag', None)}' and agent_dir to '{agent_meta.path}'"
                 )
                 meta.agent_tag = getattr(agent_meta, "version_tag", None)
                 meta.agent_dir = str(agent_meta.path)
-                # Persist the fallback to DB so list_instances reports correct data.
+                # S5 fix: preserve the original requested tag in
+                # instance_metadata so a future restore can re-elevate to this
+                # version if the versioned dir reappears on disk. Persisted via
+                # ``set_metadata`` (jsonb_set / json_set) instead of
+                # ``update(instance_metadata=...)`` because ``update``
+                # explicitly rejects the ``instance_metadata`` key to avoid
+                # a read-modify-write race with concurrent writers.
+                if not isinstance(meta.instance_metadata, dict):
+                    meta.instance_metadata = {}
+                meta.instance_metadata["original_agent_tag"] = original_tag
+                # Persist the fallback to DB so list_instances reports correct
+                # data and the original_agent_tag survives future restores.
                 try:
                     instance_repository.update(
                         instance_id,
                         agent_tag=meta.agent_tag,
                         agent_dir=meta.agent_dir,
                     )
+                    instance_repository.set_metadata(
+                        instance_id, "original_agent_tag", original_tag
+                    )
                 except Exception as exc:
                     logger.warning(
                         f"Failed to persist agent version fallback for instance "
                         f"{instance_id[:8]}: {exc}"
                     )
+
+        # S5 fix (clear-on-success): if restore succeeded with the correct
+        # version (no fallback needed), clear any stale original_agent_tag so
+        # we don't carry obsolete metadata forward. Opposite branch from the
+        # F2 fallback block above (which captured original_tag); here the
+        # resolved tag MATCHES the requested tag so no fallback occurred.
+        if (
+            agent_tag is not None
+            and getattr(agent_meta, "version_tag", None) == agent_tag
+            and isinstance(meta.instance_metadata, dict)
+            and "original_agent_tag" in meta.instance_metadata
+        ):
+            meta.instance_metadata.pop("original_agent_tag", None)
+            try:
+                instance_repository.delete_metadata(instance_id, "original_agent_tag")
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to clear original_agent_tag for instance "
+                    f"{instance_id[:8]}: {exc}"
+                )
         resolved_agent_id = meta.agent_id
         resolved_tag = getattr(agent_meta, "version_tag", None)
 

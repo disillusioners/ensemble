@@ -358,7 +358,12 @@ class AgentRegistry:
         """
         return self._agents.get(agent_id)
 
-    def get_resolved(self, agent_id: str) -> AgentMetadata | None:
+    def get_resolved(
+        self,
+        agent_id: str,
+        *,
+        validate_path: bool = False,
+    ) -> AgentMetadata | None:
         """Get agent metadata, resolving aliases first.
 
         Use this when ``agent_id`` may come from an external source (DB row,
@@ -372,6 +377,11 @@ class AgentRegistry:
 
         Args:
             agent_id: The agent identifier (may be an alias).
+            validate_path: When ``True`` (opt-in), verify the resolved
+                agent's directory still exists on disk. If the cached
+                meta's ``path`` is missing, log a warning and return
+                ``None`` instead of returning stale metadata. Defaults
+                to ``False`` to preserve existing call-site behavior.
 
         Returns:
             AgentMetadata for the canonical agent if found, else ``None``.
@@ -379,7 +389,14 @@ class AgentRegistry:
         resolved = self.resolve_pure_id(agent_id)
         if resolved is None:
             return None
-        return self._agents.get(resolved)
+        meta = self._agents.get(resolved)
+        if meta is not None and validate_path:
+            if not Path(meta.path).exists():
+                logger.warning(
+                    f"Agent path does not exist on disk: {meta.path} for {agent_id}"
+                )
+                return None
+        return meta
 
     def resolve_to_id(self, agent_dir_or_id: str) -> str | None:
         """Resolve agent_dir or agent_id to canonical agent_id.
@@ -492,7 +509,13 @@ class AgentRegistry:
         """
         return sorted(self._agents.values(), key=lambda a: a.id)
 
-    def get_version(self, agent_id: str, version_tag: str | None = None) -> AgentMetadata | None:
+    def get_version(
+        self,
+        agent_id: str,
+        version_tag: str | None = None,
+        *,
+        validate_path: bool = False,
+    ) -> AgentMetadata | None:
         """Resolve an agent by id and optional version tag.
 
         Resolution order:
@@ -505,22 +528,38 @@ class AgentRegistry:
         Args:
             agent_id: Base agent identifier (never a composite key).
             version_tag: Optional directory-name tag (e.g., ``"v2"``).
+            validate_path: When ``True`` (opt-in), verify the resolved
+                agent's directory still exists on disk. If the cached
+                meta's ``path`` is missing, log a warning and return
+                ``None`` instead of returning stale metadata. Defaults
+                to ``False`` to preserve existing call-site behavior.
 
         Returns:
             The matching ``AgentMetadata``, or ``None`` if unknown.
         """
         if version_tag is not None:
             composite_key = f"{agent_id}[{version_tag}]"
-            return self._versioned_agents.get(composite_key)
-        base_meta = self._agents.get(agent_id)
-        if base_meta is not None:
-            return base_meta
-        versions = self._versions.get(agent_id, [])
-        tagged_versions = sorted([v for v in versions if v is not None])
-        if tagged_versions:
-            composite_key = f"{agent_id}[{tagged_versions[0]}]"
-            return self._versioned_agents.get(composite_key)
-        return None
+            meta = self._versioned_agents.get(composite_key)
+        else:
+            base_meta = self._agents.get(agent_id)
+            if base_meta is not None:
+                meta = base_meta
+            else:
+                versions = self._versions.get(agent_id, [])
+                tagged_versions = sorted([v for v in versions if v is not None])
+                if tagged_versions:
+                    composite_key = f"{agent_id}[{tagged_versions[0]}]"
+                    meta = self._versioned_agents.get(composite_key)
+                else:
+                    meta = None
+        if meta is not None and validate_path:
+            if not Path(meta.path).exists():
+                logger.warning(
+                    f"Agent path does not exist on disk: {meta.path} for "
+                    f"{agent_id}[{version_tag}]"
+                )
+                return None
+        return meta
 
     def list_versions(self, agent_id: str) -> list[str | None]:
         """Return the known versions for a base agent id.

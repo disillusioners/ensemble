@@ -4,12 +4,19 @@ from typing import Literal
 
 
 class SpawnCouncilorInput(BaseModel):
-    """Contract for spawn_councilor tool input."""
+    """Contract for spawn_councilor tool input.
+
+    ``version_tag`` is intentionally NOT exposed: ``spawn_councilor``
+    resolves the per-project default version internally via
+    ``_resolve_default_version_tag`` — matching ``spawn_instance``'s UX
+    (frontend never lets the user pick the councilor's version tag).
+    A v2 governor cannot accidentally spawn a v1 councilor with more
+    tools than intended.
+    """
     councilor_agent_id: str = Field(..., min_length=1, description="Agent ID of the councilor (e.g., 'developer')")
     model: str = Field(..., min_length=1, description="REQUIRED LLM model to use for this councilor")
     instance_name: str | None = Field(None, description="Optional short name for the instance")
     initial_message: str = Field(..., min_length=1, description="The request/message to forward to this councilor")
-    version_tag: str | None = Field(None, description="Optional agent version tag")
 
 
 # Contract 2: spawn_councilor return type

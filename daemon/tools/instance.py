@@ -796,6 +796,24 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if membership_error is not None:
             return f"ERROR: {membership_error}"
 
+        # ── S7 TOCTOU note (comment-only fix) ──────────────────────────────
+        # The auth check above reads ``caller_agent_id``'s ``team_members``
+        # from the live registry. After this check passes, the only await
+        # before spawn is ``_resolve_default_version_tag`` (a synchronous
+        # DB read in a worker thread) and the parent-instance project-id
+        # fetch. Theoretically a mid-flight registry reload could change
+        # the caller's team_members — granting a previously-denied spawn
+        # access during this narrow window.
+        #
+        # Accepted risk: registry reloads are rare admin-level operations;
+        # the window is bounded by two short awaits (typically <100ms total);
+        # and every spawn path re-checks auth at spawn time inside
+        # ``_check_team_membership`` so admin changes apply on the very
+        # next spawn. Threading a snapshot through manager/lifecycle adds
+        # plumbing + regression risk for a marginal defensive gain; we
+        # accept the narrow window instead. See ``spawn_councilor`` for the
+        # same rationale.
+
         try:
             # Auto-inherit project_id from parent if not explicitly provided
             if project_id is None:
@@ -892,7 +910,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         model: Annotated[str, Field(description="REQUIRED. LLM model. Must be in <allowed_models>. RAISES on invalid — no fallback.")],
         initial_message: Annotated[str, Field(description="REQUIRED. The request/message to forward to this councilor. Used in the returned instructions.")],
         instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'councilor-gpt4o').")] = None,
-        version_tag: Annotated[str | None, Field(default=None, description="Optional agent version tag.")] = None,
     ) -> str:
         """Spawn a councilor instance with a REQUIRED, validated model.
 
@@ -902,6 +919,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         The model is normalized to the canonical name from
         ``config.llm.allowed_models`` before spawn (W7) so different
         capitalizations of the same model do not produce duplicate councilors.
+
+        Like ``spawn_instance``: ``version_tag`` is NOT exposed — the tool
+        resolves the per-project default version internally via
+        ``_resolve_default_version_tag``. This mirrors the frontend UX
+        (the user never picks the councilor's version tag) and prevents
+        a v2 governor from accidentally spawning a v1 councilor with a
+        broader tool set than intended. Stale / missing defaults fall
+        back to base; a stale configured tag also falls back to base.
 
         Returns:
             A string containing the new ``instance_id``, the canonical model
@@ -924,6 +949,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             )
 
         # ─── STEP 2: Validate team membership (C3: _check_team_membership returns str|None, never raises) ───
+        # ── S7 TOCTOU note (comment-only fix) ──────────────────────────────
+        # The auth check below reads ``caller_agent_id``'s ``team_members``
+        # from the live registry. After this check passes, the next await
+        # is ``_resolve_default_version_tag`` (a synchronous DB read in a
+        # worker thread). Theoretically a mid-flight registry reload could
+        # change the caller's team_members — granting a previously-denied
+        # agent spawn access during this narrow window.
+        #
+        # Accepted risk: registry reloads are rare admin-level operations;
+        # the window is bounded by a single DB read (typically <50ms); and
+        # every spawn path re-checks auth at spawn time inside
+        # ``_check_team_membership`` so admin changes apply on the very
+        # next spawn. Threading a snapshot through manager/lifecycle adds
+        # plumbing + regression risk for a marginal defensive gain; we
+        # accept the narrow window instead.
         err = _check_team_membership(caller_agent_id, resolved_agent_id, caller_version_tag)
         if err is not None:  # C3 FIX: check return value, not rely on exception
             raise ValueError(err)
@@ -960,6 +1000,16 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         canonical_model = next(
             (m for m in allowed if m.lower() == validated_model.lower()),
             validated_model,  # fallback to caller spelling if unrestricted
+        )
+
+        # ─── STEP 3c: W3 — Resolve per-project default version tag ───
+        # The frontend never exposes ``version_tag`` for councilor spawns
+        # (mirroring ``spawn_instance``). Internally we resolve the
+        # user-configured default; missing / stale / corrupt → ``None`` →
+        # base agent. A v2 governor therefore cannot accidentally spawn a
+        # v1 councilor with a wider tool set.
+        version_tag = await _resolve_default_version_tag(
+            manager._project_repository, resolved_agent_id, registry
         )
 
         # ─── STEP 4: Delegate to lifecycle (W6: pass canonical, not raw) ───

@@ -1130,3 +1130,79 @@ class TestCoderAgentResolution:
 
         instance = InstanceCreate(agent_id="coder")
         assert instance.agent_id == "coder"
+
+
+class TestRegistryValidatePath:
+    """Tests for opt-in path existence validation on registry lookup methods."""
+
+    def test_get_resolved_validate_path_true_returns_none_for_missing_dir(
+        self, temp_agents_dir: Path, caplog
+    ) -> None:
+        """get_resolved(validate_path=True) returns None when the cached dir is deleted."""
+        import logging
+
+        create_agent_meta(temp_agents_dir, "ghost")
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        # Sanity: cached meta is reachable by default.
+        assert registry.get_resolved("ghost") is not None
+
+        # Delete the directory on disk; cached meta still resolves by default.
+        ghost_dir = temp_agents_dir / "ghost"
+        (ghost_dir / "meta.json").unlink()
+        ghost_dir.rmdir()
+
+        assert registry.get_resolved("ghost") is not None
+        assert registry.get_resolved("ghost", validate_path=False) is not None
+
+        caplog.set_level(logging.WARNING, logger="daemon.registry")
+        result = registry.get_resolved("ghost", validate_path=True)
+        assert result is None
+        assert any("ghost" in rec.message for rec in caplog.records)
+
+    def test_get_version_validate_path_true_returns_none_for_missing_dir(
+        self, temp_agents_dir: Path, caplog
+    ) -> None:
+        """get_version(validate_path=True) returns None when the cached dir is deleted."""
+        import logging
+
+        create_agent_meta(temp_agents_dir, "ghost")
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        # Add a tagged version sibling so we can exercise the tagged lookup branch too.
+        tagged_dir = temp_agents_dir / "ghost[v2]"
+        tagged_dir.mkdir()
+        meta = {
+            "id": "ghost",
+            "name": "Ghost",
+            "description": "Test agent ghost (v2)",
+            "icon": "g",
+            "color": "accent-blue",
+        }
+        with open(tagged_dir / "meta.json", "w") as f:
+            json.dump(meta, f)
+        registry.discover()
+
+        assert registry.get_version("ghost", "v2") is not None
+        # Default + explicit False keep stale-meta behavior.
+        assert registry.get_version("ghost", "v2") is not None
+        assert registry.get_version("ghost", "v2", validate_path=False) is not None
+
+        # Remove only the tagged directory; cached meta must still be returned by default.
+        (tagged_dir / "meta.json").unlink()
+        tagged_dir.rmdir()
+        assert registry.get_version("ghost", "v2") is not None
+
+        caplog.set_level(logging.WARNING, logger="daemon.registry")
+        result = registry.get_version("ghost", "v2", validate_path=True)
+        assert result is None
+        assert any("ghost" in rec.message for rec in caplog.records)
+
+    def test_get_version_validate_path_does_not_affect_unknown_agent(self) -> None:
+        """Unknown agent still resolves to None regardless of validate_path."""
+        registry = get_registry()
+        assert registry.get_version("definitely-not-an-agent", validate_path=True) is None
+        assert registry.get_version("definitely-not-an-agent", validate_path=False) is None
+        assert registry.get_version("definitely-not-an-agent", "v2", validate_path=True) is None
