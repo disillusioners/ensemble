@@ -18,7 +18,7 @@ Before listing packs, derive the change set. **Even on an explicit "full test su
 
 1. Request wording / user message
 2. `.agents/shared/planning/`, conventions, recent commits
-3. Spawn opencode to inspect `git diff` / changed files / affected modules (you cannot run git directly)
+3. Spawn worker (without `load_skill`) to inspect `git diff` / changed files / affected modules (you cannot run git directly)
 4. PACKS.md pack-to-module mapping (match file paths to pack names via naming convention)
 
 **Decision matrix:**

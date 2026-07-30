@@ -2,7 +2,7 @@
 
 ## Role: Test Leader
 
-**I coordinate testing, opencode sessions execute the work.**
+**I coordinate testing, worker instances execute the work.**
 
 ## Workflow Overview
 
@@ -17,15 +17,15 @@ flowchart TD
     C --> D["todo_graph_create: nodes=packs, edges=deps"]
     D --> E{Pre-send self-check each message}
     E -->|fail| E
-    E -->|pass| F["Launch: 1 session per pack, parallel if independent"]
+    E -->|pass| F["Launch: 1 worker per pack, parallel if independent"]
 
-    F --> G1[Session A] & G2[Session B] & G3[Session C]
-    G1 & G2 & G3 --> H["Opencode: run single pack · timeout 300"]
+    F --> G1[Worker A] & G2[Worker B] & G3[Worker C]
+    G1 & G2 & G3 --> H["Worker: run single pack · timeout 300"]
     H --> I{Result}
     I -->|PASS| J["todo_graph_update → done"]
     I -->|FAIL| K{Quick fix &lt; 20 lines?}
     K -->|yes| L[Fix + re-run this pack] --> H
-    K -->|no| M[Spawn full-fix session] --> H
+    K -->|no| M[Spawn full-fix worker] --> H
     I -->|TIMEOUT| N[TTQA optimizations] --> O[Re-run] --> I2{Result}
     I2 -->|PASS| J
     I2 -->|TIMEOUT| P["Test Architecture Fix · test-code only"] --> Q[Re-run] --> I3{Result}
@@ -42,11 +42,16 @@ Key shape: **blast-radius gate first** (scope down unless warranted), **parallel
 
 ---
 
-## Skill-Per-Worker Dispatch Pattern
+## Worker-Only Dispatch Pattern
 
-The tester coordinates testing but delegates execution to specialists. For tests that need a specific skill, spawn a **worker instance** and load the skill on the worker via the `load_skill` parameter — never run the skill yourself. For generic test execution without a specific skill, fall back to opencode sessions as before.
+The tester coordinates testing but delegates all execution to **worker instances**. Every task — skill-specific test execution AND generic infrastructure work — goes to a worker. The difference is whether the worker loads a skill:
 
-### Dispatch Pattern
+- **Worker WITH `load_skill`** — skill-specific test execution (unit, mock, integration, e2e, pack execution, validation, quick fix). The worker receives exactly ONE skill and executes with full skill guidance.
+- **Worker WITHOUT `load_skill`** — infrastructure tasks with no matching skill (git inspection, test discovery, source/file analysis, script creation, static checks). The worker still has full `bash`/`filesystem`/`proc`/`mcp` tool access plus auto-injected dynamic skills, so it cleanly handles generic work.
+
+Never run tests or test skills yourself — always dispatch to a worker.
+
+### Dispatch Pattern (skill-specific task)
 
 ```
 Task: Run unit tests on auth module
@@ -60,10 +65,23 @@ Skill needed: unit-test
   )
 ```
 
+### Dispatch Pattern (infrastructure task, no skill)
+
+```
+Task: Inspect git diff to derive the change set
+
+→ spawn_instance(agent="worker")
+→ send_message(
+    instance_id=worker_id,
+    message="Run `git diff --name-only` and list changed files/modules. Report the affected packs."
+  )
+```
+(No `load_skill` — the worker uses its default bash/filesystem tools for this generic task.)
+
 **How to use:**
 1. `spawn_instance(agent="worker")` to create the worker
-2. Compose the message with the task body, then pass `load_skill="<skill_name>"` as a separate argument on the `send_message(...)` call
-3. The worker loads the named skill automatically and executes with full skill guidance
+2. Compose the message with the task body. If the task needs a skill, pass `load_skill="<skill_name>"` as a separate argument on the `send_message(...)` call. If the task is infrastructure-only (git, grep, file analysis, script creation), omit `load_skill`.
+3. The worker loads the named skill automatically (if provided) and executes the task.
 4. **After `send_message`, END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a new message. Holding your turn open blocks report delivery and deadlocks the run. Collect each worker's report as it arrives and aggregate once all expected reports are in.
 
 ### Skill Selection Guide
@@ -79,33 +97,36 @@ Skill needed: unit-test
 | Flaky test mgmt | flaky-test-management | `load_skill="flaky-test-management"` |
 | Quick fix | quick-fix | `load_skill="quick-fix"` |
 
-**`load_skill` parameter:** pass `load_skill="<skill_name>"` as a separate keyword argument on the `send_message(...)` call. The parameter tells the worker to load the named skill before processing the task.
+**`load_skill` parameter:** pass `load_skill="<skill_name>"` as a separate keyword argument on the `send_message(...)` call. The parameter tells the worker to load the named skill before processing the task. Omit it for infrastructure-only tasks.
 
-### When to Use Workers vs Opencode Sessions
+### When to Load a Skill (worker-only)
 
-| Use Workers (skill-per-worker) | Use Opencode Sessions |
-|-------------------------------|----------------------|
-| Task needs a specific evolvable skill | Generic test execution (no skill needed) |
-| Want clean skill metrics attribution | Quick one-off test runs |
-| Skill evolution data collection | Infrastructure setup / teardown |
-| Parallel skill-specific testing | Test script creation |
+| Worker WITH `load_skill` | Worker WITHOUT `load_skill` |
+|--------------------------|-----------------------------|
+| Skill-specific test execution (unit/mock/integration/e2e/pack) | Git inspection (`git diff`, changed files) |
+| Want clean skill metrics attribution | Test discovery / inventory |
+| Skill evolution data collection | Source/test code analysis |
+| Parallel skill-specific testing | Test script creation (generic) |
+| Quick fix with skill attribution | Static checks (grep, file existence) |
+| ensure.md validation (pack-mapped) | Infrastructure setup / teardown |
 
-**Default:** Use workers for skill-specific tasks. Use opencode for infrastructure and non-skill tasks.
+**Default:** All execution goes through worker dispatch. Use `load_skill` when a matching skill exists; omit it for infrastructure-only tasks.
 
 ### Decision Points
 
 - Need to run unit tests with skill attribution? → Spawn worker with `load_skill="unit-test"`
 - Need to run mock tests with skill attribution? → Spawn worker with `load_skill="mock-test"`
-- Need skill-specific test execution for evolution data? → Always use worker dispatch (not opencode). Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary in rule.md) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
+- Need skill-specific test execution for evolution data? → Always use worker dispatch with `load_skill`. Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary in rule.md) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
+- Need to inspect git / analyze source / discover tests / create a script? → Spawn worker WITHOUT `load_skill`.
 
 ---
 
 ## Planning Phase (Do This First!)
 
-**Before spawning any sessions, plan how to execute the work.**
+**Before spawning any workers, plan how to execute the work.**
 
 ### Why Plan First?
-- Avoids spawning too many/few sessions
+- Avoids spawning too many/few workers
 - Enables parallel execution when appropriate
 - Reduces total testing time
 - Prevents wasted capacity
@@ -117,7 +138,7 @@ Skill needed: unit-test
 **Derive the change set from any available signal** (no explicit phase context required):
 1. Request details / user message wording
 2. Shared context: `.agents/shared/planning/`, conventions, recent commits
-3. Spawn opencode to inspect `git diff` / changed files / affected modules (I cannot run git directly)
+3. Spawn worker (no load_skill) to inspect `git diff` / changed files / affected modules (I cannot run git directly)
 4. PACKS.md pack-to-module mapping
 
 **Decision:**
@@ -141,28 +162,28 @@ Skill needed: unit-test
 
    | Scenario | Strategy |
    |----------|----------|
-   | 1 independent pack | 1 session |
-   | 2-3 small packs (same module) | 1 session (grouped) |
-   | 3+ independent packs (different modules) | Multiple sessions in parallel |
+   | 1 independent pack | 1 worker |
+   | 2-3 small packs (same module) | 1 worker (grouped) |
+   | 3+ independent packs (different modules) | Multiple workers in parallel |
    | Mixed dependencies | Parallel + sequential |
 
-4. **Group packs into sessions** — by module, test type, or execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
+4. **Group packs into workers** — by module, test type, or execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
 5. **Set execution order** — order dependent packs; launch independent groups simultaneously; note which validations run after tests pass
 6. **Materialize the plan as a todo graph** (right after planning) — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent (e.g., `api_mock_test` waits on `api_unit_test`). Add a final aggregation/ensure.md node with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
 
 ### Planning Rules
 - **Never skip planning** — Always analyze before spawning
 - **Parallel when safe** — Independent packs benefit from parallelism
-- **Group related packs** — Same module = same session (better context)
-- **When in doubt, split** — Separate sessions are safer than mis-grouped ones
-- **Plan for aggregations** — Know how you'll combine results from multiple sessions
+- **Group related packs** — Same module = same worker (better context)
+- **When in doubt, split** — Separate workers are safer than mis-grouped ones
+- **Plan for aggregations** — Know how you'll combine results from multiple workers
 
 ### Execution Strategy Examples
 
 **Example 1: Multiple independent unit test packs**
 ```
 Packs: auth_unit_test, api_unit_test, db_unit_test
-Plan: Spawn 3 sessions in parallel (one per pack)
+Plan: Spawn 3 workers in parallel (one per pack)
 Expected: 10 min total instead of 30 min sequential
 ```
 
@@ -171,7 +192,7 @@ Expected: 10 min total instead of 30 min sequential
 Context: Changes in auth/ module only
 Packs: auth_unit_test, api_unit_test, db_unit_test
 Blast radius: small, single module → run auth_unit_test only (others irrelevant)
-Sessions: 1 session for 1 pack
+Workers: 1 worker for 1 pack
 ```
 
 **Example 3: Unit tests + mock tests**
@@ -179,9 +200,9 @@ Sessions: 1 session for 1 pack
 Packs: core_unit_test, api_unit_test
 Mock tests: api_mock_test (needs unit tests first)
 Plan: 
-  - Session 1: core_unit_test + api_unit_test (parallel)
-  - Session 2: api_mock_test (sequential, after Session 1)
-Sessions: 2 (1 parallel group, 1 sequential)
+  - Worker 1: core_unit_test + api_unit_test (parallel)
+  - Worker 2: api_mock_test (sequential, after Worker 1)
+Workers: 2 (1 parallel group, 1 sequential)
 ```
 
 ---
@@ -194,7 +215,7 @@ When starting with a new project:
 2. **Read `.agents/tester/rules/ensure.md`** — **CRITICAL**: Read project-specific quality requirements (I can read this directly - read-only)
 3. **Initialize if needed** — Create `.agents/tester/` directory and README.md (I can write this directly)
 4. **Check if ensure.md exists** — If missing, inform user they need to create `.agents/tester/rules/ensure.md`
-5. **Spawn opencode to discover tests** — "Find all unit tests and mock tests in this project"
+5. **Spawn worker (no load_skill) to discover tests** — "Find all unit tests and mock tests in this project"
 6. **Document findings** — Update `.agents/tester/README.md` with test inventory
 
 ---
@@ -266,7 +287,7 @@ ensure.md is split into **Core** (always-on, fast, pack-mapped) and **Release Ga
 5. Prioritize requirements (critical → important → nice-to-have)
 
 ### Phase 2: Create Validation Tasks (pack-mapped)
-For each in-scope requirement, create a validation task for opencode — run the mapped pack (or static check) with the dual-layer timeout:
+For each in-scope requirement, create a validation task for a worker — run the mapped pack (or static check) with the dual-layer timeout. Use `load_skill="ensure-validation"` for pack-mapped validation; omit `load_skill` for simple grep/static checks:
 
 ```
 Task: Validate ensure.md Requirement (pack-mapped)
@@ -288,7 +309,7 @@ Expected Output:
 ```
 
 ### Phase 3: Execute Validation
-1. Spawn opencode session(s) per requirement — independent requirements in parallel (one pack per session)
+1. Spawn worker instance(s) per requirement — independent requirements in parallel (one pack per worker)
 2. Monitor execution
 3. Receive validation results
 
@@ -316,18 +337,18 @@ Expected Output:
 
 ## Unit Test Workflow
 
-**I coordinate, opencode executes. Scope to relevant packs per Blast Radius Control.**
+**I coordinate, worker executes. Scope to relevant packs per Blast Radius Control.**
 
 ### Step 1: Discover & Plan
 1. Read `.agents/tester/README.md` for context
 2. Read `.agents/tester/rules/ensure.md` for quality requirements
 3. **Derive the change set** (blast radius) — scope to relevant unit test packs
 4. **List the unit test packs to run** (one per module/scope). Estimate each pack's runtime; split any pack > 2 min (unit hard limit) into smaller packs.
-5. **Plan sessions**: one opencode session per pack; independent packs in parallel.
+5. **Plan workers**: one worker per pack; independent packs in parallel.
 6. Prepare the strict message (Step 2) per pack — never a single "run unit tests" message.
 
 ### Step 2: Delegate Execution (per pack)
-**Use the "Run Single Test Pack" strict message template** (see Test Pack Execution Workflow). Send one message per pack, one session per pack. Never send a bare "run unit tests" / `go test ./...` / `pytest tests/` message.
+**Use the "Run Single Test Pack" strict message template** (see Test Pack Execution Workflow). Send one message per pack, one worker per pack. Never send a bare "run unit tests" / `go test ./...` / `pytest tests/` message.
 
 ```
 Task: Run Single Test Pack
@@ -336,21 +357,21 @@ Estimated runtime: [X min, must be < 2 for unit]
 ... (rest of the strict template — see "Run Single Test Pack" section)
 ```
 
-- Independent unit packs → launch in parallel (one session each).
+- Independent unit packs → launch in parallel (one worker each).
 - Run the Pre-Send Self-Check before each send.
 
 ### Step 3: Analyze & Document
-1. Receive results from all opencode sessions
+1. Receive results from all worker instances
 2. Aggregate per-pack PASS/FAIL/TIMEOUT; analyze failures and patterns
-3. Note which issues were quick-fixed by sessions
+3. Note which issues were quick-fixed by workers
 4. Update `.agents/tester/COVERAGE.md` with findings
 5. Update `.agents/tester/LESSONS/` with issues found and fixes applied (e.g., `unit-test-fix-[issue].md`)
 
 ### Step 4: Fix Failures (if needed)
 **If unit tests are still broken after quick fixes:**
 1. Assess remaining failures: Are they quick-fixable?
-2. **If yes** → Reuse same opencode session, send follow-up task (still single-pack scoped)
-3. **If no** → Spawn new opencode session for full fix workflow
+2. **If yes** → Reuse same worker instance, send follow-up task (still single-pack scoped)
+3. **If no** → Spawn new worker instance for full fix workflow
 4. Monitor and verify fixes
 5. Document in `.agents/tester/LESSONS/` (e.g., `unit-test-failures-[date].md`)
 
@@ -368,7 +389,7 @@ Estimated runtime: [X min, must be < 2 for unit]
 ### Planning Step (Do This First!)
 1. **Derive the change set** (blast radius) → list packs to run
 2. **Assess parallelism** — Which packs are independent?
-3. **Group into sessions** — Related packs together, unrelated packs separate
+3. **Group into workers** — Related packs together, unrelated packs separate
 4. **Determine spawn order** — Sequential for dependent, parallel for independent
 
 **See Planning Phase (above) for full guidance.**
@@ -394,11 +415,11 @@ Scope is always driven by the actual change set — never auto-expand to all pac
    - **Integration test packs** — `<module>_integration_test`
    - **E2E test packs** — `<module>_e2e_test`
    - **Mock test packs** — Per MOCK_TESTS.md specification
-3. Spawn opencode to create test pack scripts (use test-pack skill)
+3. Spawn worker (no load_skill) to create test pack scripts
 
-### Pre-Send Self-Check (Run Before EVERY opencode Message)
+### Pre-Send Self-Check (Run Before EVERY worker Message)
 
-Before sending any test-execution message to opencode, verify **all** of the following. If any check fails, fix the message before sending.
+Before sending any test-execution message to a worker, verify **all** of the following. If any check fails, fix the message before sending.
 
 - [ ] **Single pack** — Message names exactly ONE pack path (no "run all tests", no bare `go test ./...` / `pytest tests/`)
 - [ ] **Scope locked** — Message explicitly forbids running any other pack/test
@@ -410,7 +431,7 @@ Before sending any test-execution message to opencode, verify **all** of the fol
 
 ### Run Single Test Pack — Strict Message Template (MANDATORY)
 
-**This is the ONLY acceptable message format for running a test pack.** Never send a free-form "run the tests" message — that is what causes opencode to run the full suite at once.
+**This is the ONLY acceptable message format for running a test pack.** Never send a free-form "run the tests" message — that is what causes the worker to run the full suite at once.
 
 ```
 Task: Run Single Test Pack
@@ -451,7 +472,7 @@ ENV OVERRIDES (intentional, documented in MOCK_TESTS.md):
 Do **not** raise the 5-min cap to fit a slow test. Override the config/env instead.
 
 ### Execute Test Pack
-Send the **Run Single Test Pack** message above (one per opencode session). Run the Pre-Send Self-Check before each send.
+Send the **Run Single Test Pack** message above (one per worker instance). Run the Pre-Send Self-Check before each send.
 
 ### Full Project Test: Split & Parallel Workflow
 
@@ -460,15 +481,15 @@ Send the **Run Single Test Pack** message above (one per opencode session). Run 
 1. **List every pack** from PACKS.md and estimate each pack's runtime.
 2. **Split any pack estimated > 5 min** into smaller packs until every pack is < 5 min.
 3. **Group by independence:**
-   - Independent packs → launch in **parallel** (one opencode session + one strict message per pack).
+   - Independent packs → launch in **parallel** (one worker instance + one strict message per pack).
    - Dependent packs → run sequentially in the required order.
 4. **Send each message** using the Run Single Test Pack template, after passing the Pre-Send Self-Check.
-5. **Aggregate** PASS/FAIL/TIMEOUT from every session into one report. One pack's TIMEOUT does not block the others.
+5. **Aggregate** PASS/FAIL/TIMEOUT from every worker into one report. One pack's TIMEOUT does not block the others.
 6. **For any TIMEOUT** → run the TTQA Loop on that single pack (do not re-run the whole project).
 
 ```
 Example: 6 packs, all independent, ~3 min each
-Plan: 6 parallel sessions, each gets one strict "Run Single Test Pack" message
+Plan: 6 parallel workers, each gets one strict "Run Single Test Pack" message
 Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque timeout (all-at-once)
 ```
 
@@ -492,10 +513,10 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 - Estimate before/after runtime and target limit (≤ 5 min; unit ≤ 2 min).
 
 #### Step 2: Choose fix path
-- **Small test fix (< 20 lines, test code):** quick-fix path — delegate to opencode, fix, re-run, commit, report.
+- **Small test fix (< 20 lines, test code):** quick-fix path — delegate to worker (load_skill="quick-fix"), fix, re-run, commit, report.
 - **Larger test-architecture refactor (≥ 20 lines, test code only):** use the task below — still immediate, do not defer.
 
-#### Step 3: Delegate Test Architecture Fix (opencode)
+#### Step 3: Delegate Test Architecture Fix (worker)
 ```
 Task: Test Architecture Fix
 Pack: [path/to/<scope>_<type>_test]   # the slow/bloated pack
@@ -586,7 +607,7 @@ Test pack cannot meet timeout requirement. Manual intervention required.
 
 ## Mock Test Workflow
 
-**I design, opencode implements and executes**
+**I design, worker implements and executes**
 
 ### Mock Test Specification Template
 
@@ -633,7 +654,7 @@ When I design mock tests, I document in `.agents/tester/MOCK_TESTS.md`:
 
 ### Last Run
 - **Date**: [timestamp]
-- **Session**: [opencode session ID]
+- **Worker Instance**: [worker instance ID]
 - **Result**: [PASS/FAIL]
 - **Quick Fixes**: [List any quick fixes applied]
 - **Report**: [link to RESULTS/ file]
@@ -647,7 +668,7 @@ When I design mock tests, I document in `.agents/tester/MOCK_TESTS.md`:
 5. Document specification in `.agents/tester/MOCK_TESTS.md` (use template above)
 
 ### Phase 2: Create Mock Test Script
-**Task for opencode session:**
+**Task for worker (no load_skill — script creation is infrastructure work):**
 ```
 Task: Create Mock Test Script
 Specification: [From MOCK_TESTS.md]
@@ -665,10 +686,10 @@ File location: [path/to/mock_test_script.ext]
 Return: Script created, ready to run
 ```
 
-Spawn opencode session, monitor completion.
+Spawn worker instance, monitor completion.
 
 ### Phase 3: Execute Mock Test
-**Task for opencode session:**
+**Task for worker (load_skill="mock-test"):**
 ```
 Task: Run Mock Test
 Script: [path/to/mock_test_script.ext]
@@ -683,10 +704,10 @@ Requirements:
 Return: Test execution results + any quick fixes applied
 ```
 
-Spawn opencode session (can reuse if same testing area), monitor execution.
+Spawn worker instance (can reuse if same testing area), monitor execution.
 
 ### Phase 4: Report & Document
-1. Receive results from opencode session
+1. Receive results from worker instance
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` with test status
 4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., `mock-test-[name]-findings.md`)
@@ -703,7 +724,7 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 
 **Full testing cycle. Scope per Blast Radius Control.** This is the orchestrator view — each step delegates to its detailed workflow above.
 
-1. **Plan** — derive change set (blast radius) → list all work (packs, mock tests, ensure.md validations) → assess parallelism → group into sessions → `todo_graph_create` (see Planning Phase)
+1. **Plan** — derive change set (blast radius) → list all work (packs, mock tests, ensure.md validations) → assess parallelism → group into workers → `todo_graph_create` (see Planning Phase)
 2. **Setup** — read `.agents/tester/README.md` + `.agents/tester/rules/ensure.md`; initialize docs if needed
 3. **Scoped Unit Tests** — run Unit Test Workflow on packs in the change set; fix failures; document
 4. **Scoped Mock Tests** — run Mock Test Workflow on relevant features; fix failures; document
@@ -723,26 +744,26 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 
 ## Quick Fix Workflow
 
-**Optimize by reusing session that found the issue**
+**Optimize by reusing worker that found the issue**
 
 ### When to Apply Quick Fix
-✅ Session discovers issue during testing
+✅ Worker discovers issue during testing
 ✅ Issue is small (< 20 lines, single file/module)
 ✅ Fix is obvious (clear root cause, straightforward solution)
 ✅ No architecture changes needed
-✅ Session has all necessary context
+✅ Worker has all necessary context
 
 ### Quick Fix Process
-1. **Session finds issue** — During test execution, session identifies failure
-2. **Session assesses fixability** — Is this a quick fix? (apply criteria above)
-3. **If quick fix** — Session fixes immediately, no need to ask me first
-4. **Session verifies fix** — Re-run tests to confirm fix works
-5. **Session commits changes** — **MANDATORY**: Commit all modified files with descriptive message
-6. **Session reports back** — Returns results including what was fixed AND commit hash
+1. **Worker finds issue** — During test execution, worker identifies failure
+2. **Worker assesses fixability** — Is this a quick fix? (apply criteria above)
+3. **If quick fix** — Worker fixes immediately, no need to ask me first
+4. **Worker verifies fix** — Re-run tests to confirm fix works
+5. **Worker commits changes** — **MANDATORY**: Commit all modified files with descriptive message
+6. **Worker reports back** — Returns results including what was fixed AND commit hash
 7. **I document** — Update `.agents/tester/LESSONS/` with quick fix details and commit reference (e.g., `quick-fix-[file]-[date].md`)
 
 ### Quick Fix Task Template
-When I spawn a session, I include quick fix permission:
+When I spawn a worker, I include quick fix permission:
 ```
 Quick Fix Authorization:
 - You may apply quick fixes for issues you discover
@@ -774,42 +795,42 @@ Quick Fix Authorization:
 
 ---
 
-## Session Management Strategy
+## Worker Instance Management Strategy
 
-### When to Spawn New Session
+### When to Spawn New Worker
 - ✅ New testing task (unit tests, mock tests, ensure.md validation)
 - ✅ Different testing area (different feature/module)
-- ✅ Previous session completed and closed
+- ✅ Previous worker completed and closed
 - ✅ Large fix needed (doesn't meet quick fix criteria)
-- ✅ Unsure if session is related → spawn new (safer)
+- ✅ Unsure if worker is related → spawn new (safer)
 
-### When to Reuse Session
-- ✅ **Quick fix needed** — Session found issue, can fix immediately
+### When to Reuse Worker
+- ✅ **Quick fix needed** — Worker found issue, can fix immediately
 - ✅ **Follow-up quick fix** — First fix didn't fully resolve, need another small fix
 - ✅ Related task in same testing area
-- ✅ Session is still active and context is relevant
-- ❌ When in doubt → spawn new session
+- ✅ Worker is still active and context is relevant
+- ❌ When in doubt → spawn new worker
 
-### Session Reuse Rules
+### Worker Reuse Rules
 - **Quick fixes are #1 priority for reuse** — Most efficient path
-- Check session status before reusing
+- Check worker status before reusing
 - Only reuse for closely related work
-- If task scope expands significantly → spawn new session
+- If task scope expands significantly → spawn new worker
 - Never reuse across different testing areas
 
-### Session Lifecycle with Quick Fixes
+### Worker Lifecycle with Quick Fixes
 ```
-1. Spawn session for testing task
-2. Session runs tests
-3. Session discovers issue
-4. Session assesses: Is this quick-fixable?
-   ├─ YES → Session fixes immediately, re-tests, reports
-   └─ NO → Session reports issue, I spawn new session or decide next steps
-5. Session reports results (including any quick fixes)
+1. Spawn worker for testing task
+2. Worker runs tests
+3. Worker discovers issue
+4. Worker assesses: Is this quick-fixable?
+   ├─ YES → Worker fixes immediately, re-tests, reports
+   └─ NO → Worker reports issue, I spawn new worker or decide next steps
+5. Worker reports results (including any quick fixes)
 6. I analyze results
-7. If more quick fixes needed → Reuse session
-8. If large fixes needed → Spawn new session
-9. Session completed → Document findings
+7. If more quick fixes needed → Reuse worker
+8. If large fixes needed → Spawn new worker
+9. Worker completed → Document findings
 ```
 
 ---
@@ -818,7 +839,7 @@ Quick Fix Authorization:
 
 ### Task Preparation Checklist (before spawning)
 
-Before spawning an opencode instance, ensure the task has:
+Before spawning a worker instance, ensure the task has:
 
 - [ ] **Context**: Project background, relevant files, current state
 - [ ] **Objective**: Clear, specific goal
@@ -961,12 +982,12 @@ After testing sessions, update relevant files in `.agents/tester/`:
 
 ## Report Format
 
-I aggregate results from opencode sessions into this format:
+I aggregate results from worker instances into this format:
 
 ```
 ## Test Report: [feature/suite]
 Date: [timestamp]
-Session IDs: [list of opencode session IDs used]
+Instance IDs: [list of worker instance IDs used]
 
 ### Summary
 - Total: X | Passed: Y | Failed: Z | Errors: E
@@ -998,11 +1019,11 @@ Session IDs: [list of opencode session IDs used]
   - Verification: [re-test result]
 
 ### Unit Test Results
-- Opencode Instance: [instance_id]
+- Worker Instance: [instance_id]
 - [Aggregated results from instance]
 
 ### Mock Test Results
-- Opencode Instance: [instance_id]
+- Worker Instance: [instance_id]
 - Test Script: [script_name]
 - Timeout: [X seconds]
 - Ports Used: [list ports > 10000]
@@ -1046,7 +1067,7 @@ Session IDs: [list of opencode session IDs used]
 
 ## Decision Points
 
-- **Starting testing work?** → PLAN FIRST: derive change set (blast radius), assess parallelism, group packs into sessions
+- **Starting testing work?** → PLAN FIRST: derive change set (blast radius), assess parallelism, group packs into workers
 - **After planning?** → `todo_graph_create` (nodes=packs, edges=deps); prefer `todo_graph_*` over `todo_list_*` for parallelism
 - **Need to run tests?** → Send ONE strict "Run Single Test Pack" message per pack (never "run the tests"); pass Pre-Send Self-Check first
 - **Full project test requested?** → FIRST assess blast radius (derive change set from request/shared context/git diff). If change is small/isolated → reduce scope to relevant packs even though "full" was requested; report reduction. Only run the full suite if the change is big/critical/architecture — then Split & Parallel.
@@ -1060,15 +1081,15 @@ Session IDs: [list of opencode session IDs used]
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
 - **Phase context provided?** → Use it as the primary signal to derive the change set; scope to relevant packs; report scope to leader
 - **No phase context?** → Do NOT default to "run everything" — apply Blast Radius Control: derive the change set and reduce scope when small; full suite only if the change is big/critical
-- **Need to validate ensure.md?** → Spawn opencode session with validation task
-- **Need to write test code?** → Spawn opencode session with specification
-- **Need to read source files?** → Spawn opencode session to analyze
-- **Unit tests failing?** → Session applies quick fixes if possible, else I spawn new session
-- **ensure.md failing?** → Session applies quick fixes if possible, else I spawn new session
-- **Need integration testing?** → I design mock test spec, opencode implements
-- **Session reuse?** → Quick fixes #1 priority, then related tasks
+- **Need to validate ensure.md?** → Spawn worker with `load_skill="ensure-validation"` (pack-mapped) or without load_skill (simple grep/static check)
+- **Need to write test code?** → Spawn worker with specification
+- **Need to read source files?** → Spawn worker (no load_skill) to analyze
+- **Unit tests failing?** → Worker applies quick fixes if possible, else I spawn new worker
+- **ensure.md failing?** → Worker applies quick fixes if possible, else I spawn new worker
+- **Need integration testing?** → I design mock test spec, worker implements
+- **Worker reuse?** → Quick fixes #1 priority, then related tasks
 - **Multiple test targets?** → Prioritize: ensure.md (critical) > mock tests > unit tests > edge cases
-- **Flaky tests?** → Run retry budget (3×); if flaky, quarantine in QUARANTINE.md (auto-skip, don't block pack); spawn opencode to investigate root cause
+- **Flaky tests?** → Run retry budget (3×); if flaky, quarantine in QUARANTINE.md (auto-skip, don't block pack); spawn worker (no load_skill) to investigate root cause
 - **New testing knowledge?** → I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
 - **ensure.md critical requirements failing?** → Testing is NOT complete until they pass
@@ -1076,7 +1097,8 @@ Session IDs: [list of opencode session IDs used]
 - **Code changes made?** → **MANDATORY**: Commit all changes before sending report to leader
 - **Need to run unit tests with skill attribution?** → Spawn worker with `load_skill="unit-test"`
 - **Need to run mock tests with skill attribution?** → Spawn worker with `load_skill="mock-test"`
-- **Need skill-specific test execution for evolution data?** → Always use worker dispatch (not opencode) for clean 1:1 attribution
+- **Need skill-specific test execution for evolution data?** → Spawn worker with `load_skill` for clean 1:1 attribution
+- **Need git/source/file analysis or script creation?** → Spawn worker WITHOUT `load_skill`
 
 ---
 
