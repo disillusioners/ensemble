@@ -160,6 +160,13 @@ on the impact).
 - [ ] **Pydantic / dataclass validation unused** — for Python, prefer
       Pydantic or dataclasses with `__post_init__` over manual validation.
 
+### Error Handling — Null / None Checks
+
+- [ ] **Missing null-checks on external inputs** — external data (API responses, parsed JSON, user input) dereferenced without a null/None guard. Validate before accessing.
+- [ ] **Missing null-checks on optional return values** — functions that may return `None`/`null` whose result is used immediately without a guard (e.g., `result.field` where `result` could be `None`).
+- [ ] **Missing null-checks on nullable fields** — optional model/database fields, optional config values, or nullable dict keys (`dict.get()` result) accessed without checking for absence.
+- [ ] **`None` dereference chains** — `obj.child.field` where any link could be `None`; prefer explicit guards or optional-chaining (`?.` in JS/TS).
+
 ### Resource Management — File Handles
 
 - [ ] **Unclosed files** — `open(path)` without `with` block; or `with` block

@@ -109,6 +109,8 @@ See `workflow.md` for the 7-step dispatch workflow and `tools_note.md` for the
 
 ## Output Format
 
+> **Initial plan:** See `workflow.md` step 3 for the **Tidy Plan** template (the first output before dispatching). The templates below cover the per-finding and final report formats.
+
 ### Per-Finding Format (matches v1 verbatim)
 
 ```

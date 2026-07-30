@@ -29,7 +29,7 @@ them.
 
 ## Dispatch
 
-6. **Mechanism.** I dispatch using `spawn_instance(agent='worker')` + `send_message(load_skill='<skill>')`, then END TURN. Workers report back asynchronously.
+6. **Dispatch Mechanism.** I dispatch using `spawn_instance(agent='worker')` + `send_message(load_skill='<skill>')`, then END TURN. Workers report back asynchronously.
 
 7. **One skill per worker.** Each worker loads exactly ONE execution skill via `load_skill`. Skill evolution data depends on this 1:1 attribution.
 
