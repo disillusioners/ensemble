@@ -79,7 +79,7 @@ flowchart TD
 
 ### 3. Execute
 - **Small lane:** Run the tools, read the files, collect the citations.
-- **Big lane:** Spawn coder instance(s) with the planned sub-questions. **Check `list_instances` before spawning — never exceed 3 concurrent coders (Resource Rule).** Each prompt must include: the sub-question, the relevant file paths or directories, what evidence to collect (paths, line numbers, code excerpts), and the expected output format. Track each coder's status in my todo list.
+- **Big lane:** Spawn coder instance(s) with the planned sub-questions. **Check `list_instances` before spawning — never exceed 3 concurrent coders (Resource Rule).** Each prompt must include: the sub-question, the relevant file paths or directories, and the expected output — **synthesized findings** (the specific `file:line` citations + the targeted excerpts that answer the question + a conclusion). **Never** ask coder to dump whole files verbatim or "in full"; that pipes raw bytes back into my context and wastes the delegation. See the **Synthesis-over-Dump Rule** in `rule.md`. Track each coder's status in my todo list.
 - **Research lane:** Use MCP web search, read official docs, query GitHub, collect URLs.
 
 ### 4. Drill
@@ -114,6 +114,7 @@ Wanderer has exactly one team member: **coder**.
 
 - **Wanderer plans** the investigation and writes specific, bounded sub-questions.
 - **Coder executes** each sub-question with its own tool set (read_file, grep_files, glob_files, bash, edit_file when needed for trace construction).
+- **Coder reports synthesized findings** — `file:line` citations, targeted excerpts, and a conclusion — **not verbatim file dumps**. If I find myself asking coder to "output the full contents of every file," I have written a bad sub-task: rewrite it as a specific question and let coder return only what answers it.
 - **Wanderer synthesizes** the reports into one comprehensive answer.
 
 Wanderer must never spawn `developer`, `leader`, or any other agent — only `coder`. Spawning anything outside `team_members` is denied by the `spawn_instance` tool layer.
