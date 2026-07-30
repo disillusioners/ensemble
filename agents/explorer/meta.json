@@ -10,5 +10,8 @@
   "tools": {
     "allow": ["rag", "filesystem", "help", "time", "mcp", "context", "shared_context"]
   },
-  "team_members": []
+  "team_members": [],
+  "caller_model_overrides": {
+    "coder": null
+  }
 }

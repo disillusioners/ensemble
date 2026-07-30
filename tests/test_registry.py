@@ -88,6 +88,30 @@ class TestDiscoverAgents:
         assert agent is not None
         assert agent.innate_skills == ["coding", "reviewing"]
 
+    def test_discover_non_dict_caller_model_overrides_loaded_as_empty(
+        self, temp_agents_dir: Path, caplog
+    ) -> None:
+        """A non-dict caller_model_overrides (e.g. admin typo: a string
+        instead of a map) must gracefully resolve to an empty dict instead
+        of failing Pydantic validation and making the agent disappear."""
+        import logging
+
+        # Admin typo: caller_model_overrides set to a plain string instead
+        # of the expected dict[str, str | None] map.
+        create_agent_meta(
+            temp_agents_dir, "typo_agent", caller_model_overrides="coder"
+        )
+
+        registry = AgentRegistry(temp_agents_dir)
+        with caplog.at_level(logging.WARNING, logger="daemon.registry"):
+            registry.discover()
+
+        # Agent must still load cleanly — it must NOT disappear from the
+        # registry due to a broad-except that swallowed the ValidationError.
+        agent = registry.get("typo_agent")
+        assert agent is not None
+        assert agent.caller_model_overrides == {}
+
     def test_skip_hidden_dirs(self, temp_agents_dir: Path) -> None:
         """Test that hidden directories are skipped during discovery."""
         create_agent_meta(temp_agents_dir, "visible")

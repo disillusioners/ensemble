@@ -514,6 +514,7 @@ async def invoke_agent_and_wait(
     images: list[str] | None = None,
     timeout: float = 300.0,
     return_instance_id: bool = False,
+    model: str | None = None,
 ) -> str | tuple[str, str]:
     """Spawn an agent, send a message, and synchronously wait for the result.
 
@@ -540,6 +541,14 @@ async def invoke_agent_and_wait(
             ``(content, instance_id)`` tuple, including all error and
             exception paths. When False (default), returns a plain ``str``
             for backward compatibility.
+        model: Optional model override forwarded to ``spawn_instance_with_mcp``.
+            When ``None`` (default), the spawned agent uses its own default
+            ``llm_model`` from ``meta.json``. Used by agent-backed tools (e.g.
+            ``explore``) to switch the spawned instance's model based on the
+            caller's identity. A string value forces a specific model; ``None``
+            preserves whatever model the spawned agent would otherwise pick.
+            Validation/allow-list enforcement happens inside
+            ``spawn_instance`` via ``_resolve_model_override``.
 
     Returns:
         On success: the agent's final response content (a ``str``) when
@@ -565,7 +574,9 @@ async def invoke_agent_and_wait(
 
     try:
         # 1. Spawn instance with MCP preload + cleanup on failure (synchronous — creates instance in DB)
-        instance_id = await manager.spawn_instance_with_mcp(
+        # ``model`` is forwarded only when provided — preserves pre-feature
+        # behavior (no override) for every existing caller.
+        spawn_kwargs: dict = dict(
             agent_id=agent_id,
             instance_id=instance_id,
             parent_id=parent_id,
@@ -573,6 +584,9 @@ async def invoke_agent_and_wait(
             instance_name=instance_name,
             invoked_as_tool=True,
         )
+        if model is not None:
+            spawn_kwargs["model"] = model
+        instance_id = await manager.spawn_instance_with_mcp(**spawn_kwargs)
 
         # 2. Register IMMEDIATELY after spawn (before enqueue)
         # Buffered completion handles race if complete() fires before this

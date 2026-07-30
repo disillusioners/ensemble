@@ -184,6 +184,17 @@ class AgentMetadata(BaseModel):
         default=None,
         description="Directory-name derived version tag (e.g., 'v2' for 'developer[v2]'). None = base.",
     )
+    caller_model_overrides: dict[str, str | None] = Field(
+        default_factory=dict,
+        description=(
+            "Per-caller model override map keyed by the caller's "
+            "agent_id. Used by agent-backed tools (e.g. explore) to "
+            "switch the spawned instance's model based on who is "
+            "calling. Values: a model name string forces that model; "
+            "None means fall back to the system default model. "
+            "Missing/empty map = no overrides, default llm_model always wins."
+        ),
+    )
 
     model_config = ConfigDict(
         extra="ignore",
@@ -332,6 +343,11 @@ class AgentRegistry:
                     ),
                     inject_allowed_models=meta.get("inject_allowed_models", False),
                     version_tag=version_tag,
+                    caller_model_overrides=(
+                        meta.get("caller_model_overrides")
+                        if isinstance(meta.get("caller_model_overrides"), dict)
+                        else {}
+                    ),
                 )
                 # Split storage: untagged → _agents, tagged → _versioned_agents.
                 # _agents keys are NEVER composite keys.

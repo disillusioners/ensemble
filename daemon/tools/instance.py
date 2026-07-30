@@ -1653,7 +1653,11 @@ Returns:
         rag_tool_list = create_rag_tools(manager, current_instance_id)
         tools.extend(rag_tool_list)
 
-        knowledge_tool_list = create_knowledge_tools(manager, current_instance_id)
+        # Forward agent_id so the explore() tool can resolve Explorer's
+        # ``caller_model_overrides`` for the calling agent (e.g. swap
+        # Explorer from its default "quick" model to the system default
+        # when the caller is "coder").
+        knowledge_tool_list = create_knowledge_tools(manager, current_instance_id, agent_id=agent_id)
         tools.extend(knowledge_tool_list)
 
     # ── OpenCode tools (external system integration, always available) ──

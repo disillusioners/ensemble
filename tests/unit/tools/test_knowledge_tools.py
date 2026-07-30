@@ -1266,7 +1266,10 @@ class TestKnowledgeToolsConditionalCreation:
                                                 tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
                 
                 # create_knowledge_tools SHOULD have been called
-                mock_create.assert_called_once_with(mock_manager, "test-instance")
+                # Note: ``agent_id`` is now forwarded so the explore() tool
+                # can resolve Explorer's ``caller_model_overrides`` for the
+                # calling agent. See ``TestExploreCallerModelOverrides``.
+                mock_create.assert_called_once_with(mock_manager, "test-instance", agent_id="test-agent")
                 # Verify explore and experience tools are in the result
                 tool_names = [t.name for t in tools]
                 assert "explore" in tool_names
@@ -1336,8 +1339,11 @@ class TestKnowledgeToolsConditionalCreation:
                                                 tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
                 
                 # create_knowledge_tools SHOULD have been called
-                mock_create.assert_called_once_with(mock_manager, "test-instance")
-                
+                # ``agent_id`` is now forwarded so the explore() tool can
+                # resolve Explorer's ``caller_model_overrides``. See
+                # ``TestExploreCallerModelOverrides`` for the new behavior.
+                mock_create.assert_called_once_with(mock_manager, "test-instance", agent_id="test-agent")
+
                 # Verify explore and experience tools are in the final tool list
                 tool_names = [t.name for t in tools]
                 assert "explore" in tool_names, "explore tool should be present when RAG is enabled"
@@ -2866,3 +2872,349 @@ class TestExperienceAutoSave:
                 "bad-context",
                 project_name=None,
             )
+
+
+# =============================================================================
+# Explore Caller-Model Override Tests
+# =============================================================================
+#
+# These tests cover the "explore tool auto-switch model when caller is coder"
+# feature: Explorer's ``meta.json`` may declare ``caller_model_overrides``,
+# a map of caller agent_id -> model name. When the explore() tool is
+# invoked, it resolves the override for the calling agent and forwards
+# the resulting model to ``invoke_agent_and_wait``.
+#
+# IMPORTANT — MagicMock.get_version() returns truthy by default. Each
+# test that exercises the fallback path explicitly sets
+# ``get_version.return_value = None`` so the fallback to ``get_resolved``
+# is actually exercised. (See the Explorer Result mock gotcha in the
+# agent-registry docs.)
+
+
+class TestExploreCallerModelOverrides:
+    """Verify ``caller_model_overrides`` resolves and forwards to the
+    spawned explorer instance.
+
+    The registry lookup MUST follow the project pattern:
+    ``get_version("explorer", None) or get_resolved("explorer")``.
+    """
+
+    def _make_explorer_meta(
+        self,
+        caller_model_overrides: dict | None = None,
+    ) -> MagicMock:
+        """Build a mock ``AgentMetadata`` carrying only the fields the
+        ``explore()`` tool reads. Other attributes fall through to
+        ``MagicMock`` defaults (which is fine — the tool only reads
+        ``caller_model_overrides``).
+        """
+        meta = MagicMock()
+        meta.caller_model_overrides = caller_model_overrides or {}
+        return meta
+
+    def _stub_registry(
+        self,
+        meta: MagicMock | None,
+    ) -> MagicMock:
+        """Build a mock registry whose ``get_version`` / ``get_resolved``
+        return ``meta`` for ``"explorer"`` lookups (and ``None`` for
+        everything else). The ``get_version``/``get_resolved`` branches
+        are spelled out explicitly so the test exercises the real
+        short-circuit (``get_version or get_resolved``) rather than
+        relying on MagicMock's truthy default.
+        """
+        registry = MagicMock()
+
+        def fake_get_version(agent_id: str, version_tag=None):
+            if agent_id == "explorer":
+                return meta
+            return None
+
+        def fake_get_resolved(agent_id: str):
+            if agent_id == "explorer":
+                return meta
+            return None
+
+        registry.get_version.side_effect = fake_get_version
+        registry.get_resolved.side_effect = fake_get_resolved
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_coder_with_null_override_forwards_system_default_model(
+        self, configured_env, mock_manager
+    ):
+        """``{"coder": null}`` means "use the system default model" — the
+        ``explore()`` tool must resolve the actual default model string
+        from ``manager.config.llm.model`` and forward it to
+        ``invoke_agent_and_wait``. Without this resolution, the
+        spawned explorer would fall back to its default ``"quick"``
+        model, defeating the purpose of the override.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # Wire the mock manager's config so the resolve path can
+        # discover the system default model. In production this comes
+        # from ``config.llm.model`` (which defaults to OPENAI_MODEL).
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm = MagicMock()
+        mock_manager.config.llm.model = "gpt-4o"
+
+        meta = self._make_explorer_meta(caller_model_overrides={"coder": None})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                # The resolved system default model MUST be forwarded.
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_coder_with_string_override_forwards_override_model(
+        self, configured_env, mock_manager
+    ):
+        """``{"coder": "reasoning"}`` means "force the 'reasoning' model"
+        — the explore() tool must forward ``model="reasoning"`` to
+        ``invoke_agent_and_wait``. Spawn-layer allow-list enforcement
+        happens via ``_resolve_model_override``.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        meta = self._make_explorer_meta(
+            caller_model_overrides={"coder": "reasoning"}
+        )
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") == "reasoning"
+
+    @pytest.mark.asyncio
+    async def test_non_coder_caller_does_not_forward_model(
+        self, configured_env, mock_manager
+    ):
+        """Caller NOT in the overrides map (e.g. "developer") → no
+        override is applied; ``model=None`` is forwarded (interpreted
+        by the boundary as "no override"). Explorer uses its default
+        ``llm_model``.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        meta = self._make_explorer_meta(caller_model_overrides={"coder": None})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="developer"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                # ``model`` is forwarded (always) but is None — no override.
+                assert mock_invoke.call_args.kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_no_override_config_does_not_forward_model(
+        self, configured_env, mock_manager
+    ):
+        """When Explorer's meta.json has no ``caller_model_overrides``
+        field (backward-compat case), the map is empty and no override
+        is applied regardless of caller. ``model=None`` is forwarded
+        (boundary-level "no override").
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # Empty map simulates an older meta.json without the field.
+        meta = self._make_explorer_meta(caller_model_overrides={})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_null_agent_id_does_not_forward_model(
+        self, configured_env, mock_manager
+    ):
+        """Backward-compat: legacy caller passes ``agent_id=""`` (default).
+        The override lookup is skipped entirely and ``model=None`` is
+        forwarded. This protects every existing test / call site that
+        still uses the 2-arg ``create_knowledge_tools(manager, id)`` form.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # Even if the registry IS configured for an override, the empty
+        # agent_id path must short-circuit before the lookup.
+        meta = self._make_explorer_meta(caller_model_overrides={"coder": None})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id=""
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_registry_returns_none_falls_back_to_no_override(
+        self, configured_env, mock_manager
+    ):
+        """When the registry has no entry for "explorer" (e.g. exploratory
+        test env), the override lookup is skipped and ``model=None`` is
+        forwarded. Ensures the fallback path tolerates a missing
+        ``AgentMetadata`` without raising.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # Registry has no explorer → get_version and get_resolved both
+        # return None. Critical: the bare MagicMock default returns a
+        # truthy object, so we must explicitly set return_value to None.
+        mock_registry = MagicMock()
+        mock_registry.get_version.return_value = None
+        mock_registry.get_resolved.return_value = None
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                # Should not raise even with no explorer meta.
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_registry_lookup_error_does_not_break_explore(
+        self, configured_env, mock_manager
+    ):
+        """If ``get_registry`` raises (e.g. wiring failure), the
+        override lookup is swallowed at DEBUG and ``explore()`` still
+        works — the tool must not propagate registry failures to the
+        caller.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        with patch(
+            "daemon.registry.get_registry",
+            side_effect=RuntimeError("registry unavailable"),
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                result = await explore_tool.ainvoke({"query": "What is X?"})
+
+                # Tool still returns the explorer's result.
+                assert "Explorer result" in result
+                # No override was applied — model=None.
+                assert mock_invoke.call_args.kwargs.get("model") is None

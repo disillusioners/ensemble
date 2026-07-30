@@ -561,12 +561,18 @@ def _save_experience_result(
         logger.debug("Failed to save experience result to shared context: %s", e)
 
 
-def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str) -> list:
+def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str, agent_id: str = "") -> list:
     """Create knowledge management tools with injected manager reference.
 
     Args:
         manager: The InstanceManager instance to use for operations.
         current_instance_id: The ID of the current instance (used as parent for spawned instances).
+        agent_id: The ``agent_id`` of the calling instance. Captured in the
+            closure so the ``explore()`` tool can resolve Explorer's
+            ``caller_model_overrides`` and switch the spawned instance's
+            model based on who is calling. Defaults to ``""`` for backward
+            compatibility — when empty, no override is applied and the
+            spawned explorer uses its default ``llm_model``.
 
     Returns:
         List of tool functions: [explore, experience]
@@ -671,9 +677,76 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             except Exception as e:
                 logger.info("[Explorer] Context auto-injection failed (exception): %s", e)
 
+        # Determine if the calling agent needs a model override.
+        # Explorer's meta.json may declare ``caller_model_overrides``: a map
+        # of caller agent_id -> model name (a string forces that model; ``None``
+        # falls back to the system default model from ``config.llm.model``).
+        # A missing key means no override — explorer uses its default
+        # ``llm_model`` (typically "quick").
+        #
+        # Registry lookup follows the project's critical-note pattern:
+        # ``get_version()`` first (versioned meta), falling back to
+        # ``get_resolved()`` (base meta). When the agent_id is missing
+        # (legacy callers), we skip the override entirely.
+        model_override: str | None = None
+        if agent_id:
+            try:
+                # Use the module-level registry singleton (same pattern as
+                # ``daemon.tools.instance._apply_tool_filter``). Lazy
+                # import avoids circular dependency on the registry module
+                # at tool-factory load time.
+                from daemon.registry import get_registry
+
+                registry = get_registry()
+                explorer_meta = (
+                    registry.get_version("explorer", None)
+                    or registry.get_resolved("explorer")
+                )
+                if explorer_meta is not None:
+                    overrides = getattr(explorer_meta, "caller_model_overrides", None) or {}
+                    # Use ``in`` rather than ``.get()`` so we can distinguish
+                    # "no override configured for this caller" (missing key)
+                    # from "explicit override configured" (key present, value
+                    # either a string or ``None``). Only the explicit case
+                    # yields a model override.
+                    if agent_id in overrides:
+                        explicit = overrides[agent_id]
+                        if explicit is None:
+                            # ``null`` in meta.json → "use the system default
+                            # model". Resolve the actual default model name
+                            # from the manager's config so the downstream
+                            # ``spawn_instance`` override layer sees a real
+                            # model string (not a sentinel). This is the
+                            # difference between "explorer keeps its quick
+                            # model" and "explorer upgrades to the system
+                            # default". Uses ``getattr`` defensively so tests
+                            # with bare MagicMock managers still work.
+                            config = getattr(manager, "config", None)
+                            llm_cfg = getattr(config, "llm", None) if config is not None else None
+                            default_model = getattr(llm_cfg, "model", None) if llm_cfg is not None else None
+                            if default_model:
+                                model_override = default_model
+                            else:
+                                # No config available — pass through None,
+                                # which downstream treats as "no override, use
+                                # explorer default". This is the safer
+                                # fallback than guessing a model name.
+                                model_override = None
+                        else:
+                            model_override = explicit
+            except Exception as e:
+                logger.debug(
+                    "[Explorer] Failed to resolve caller_model_overrides for %s: %s",
+                    agent_id, e,
+                )
+
         # Invoke explorer agent — always returns (content, child_instance_id) tuple
         # No try/except wrapper: errors propagate to the registry path below
         # so we can still inspect the checkpoint before bailing.
+        # ``model_override`` is forwarded unconditionally so the
+        # ``invoke_agent_and_wait`` boundary sees the value (None / string)
+        # directly. The boundary layer treats ``None`` as "no override" →
+        # the spawn layer keeps the explorer's default ``llm_model``.
         result, child_instance_id = await invoke_agent_and_wait(
             manager=manager,
             agent_id="explorer",
@@ -683,6 +756,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             instance_name=f"explore-{query[:30]}",
             timeout=300.0,
             return_instance_id=True,
+            model=model_override,
         )
 
         # Handle error results — but check checkpoint BEFORE returning
