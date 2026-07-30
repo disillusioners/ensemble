@@ -5,6 +5,7 @@
 - Unit: 173 | Integration: 17 | Mock: 7 | E2E: 13 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 - Context Injection Restructure: 2026-07-28 on `feature/context-injection-restructure` @ `2de4af3a` — 209 new feature tests ALL PASS, 694 core regression pass with 0 NEW failures (41 pre-existing matching baseline). See `RESULTS/2026-07-28-context-injection-restructure.md`
+- V2 Agent Validation: 2026-07-30 on `feature/v2-developer-planner` — static validation of developer[v2] + planner[v2] agent definitions (16/16 checks PASS: meta.json, file completeness, skill-set.yaml, opencode absence, mermaid syntax, registry compat). See `RESULTS/2026-07-30-v2-developer-planner-validation.md`
 
 ## Unit Test Packs
 
