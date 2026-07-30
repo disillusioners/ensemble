@@ -262,6 +262,7 @@ def create_kb_mcp_server() -> FastMCP:
             message = f"Query (mode={mode}): {query}\nProject: {project_id}"
 
             # Spawn explorer agent and wait for result
+            # No caller agent_id available in MCP path — model override does not apply (by design)
             result, child_instance_id = await invoke_agent_and_wait(
                 manager=_manager,
                 agent_id="explorer",

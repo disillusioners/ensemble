@@ -731,11 +731,16 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
                                 # which downstream treats as "no override, use
                                 # explorer default". This is the safer
                                 # fallback than guessing a model name.
+                                logger.warning(
+                                    "caller_model_overrides[%s] is null but config.llm.model is falsy; "
+                                    "falling back to default (no override applied)",
+                                    agent_id,
+                                )
                                 model_override = None
                         else:
                             model_override = explicit
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     "[Explorer] Failed to resolve caller_model_overrides for %s: %s",
                     agent_id, e,
                 )
