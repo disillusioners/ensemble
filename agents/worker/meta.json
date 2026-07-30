@@ -8,6 +8,7 @@
   "innate_skills": ["dynamic-skill", "todo"],
   "skill_injection": true,
   "no_force_explore": true,
+  "llm_model": "coding",
   "tools": {
     "allow": [
       "bash",
