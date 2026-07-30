@@ -108,6 +108,8 @@ todo_graph_update(node_id="coder-auth", status="done")
 
 ## Skill Selection Guide
 
+> **Note**: The `code-review` skill is owned by the reviewer agent and loaded globally from the project skill bank at runtime. No local template is required in developer[v2]'s skill-set.yaml. Developer[v2] dispatches workers with `load_skill="code-review"` for quick verification tasks; formal code review remains the reviewer agent's responsibility.
+
 | Task Type | Skill | `load_skill` |
 |-----------|-------|--------------|
 | Feature implementation (single-file, <2h) | `code-implementation` | `load_skill="code-implementation"` |

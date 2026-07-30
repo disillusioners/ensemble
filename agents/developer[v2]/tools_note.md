@@ -81,7 +81,7 @@ Unlike `reviewer[v2]` and `approver[v2]` (which use `worker` for everything they
 
 ### When to Use Directly
 
-- A single `Read` to peek at a config or `.agents/developer/` memory file
+- A single `Read` to peek at a config or a project knowledge entry — for project knowledge retrieval use `explore(query)` and record insights with `experience(text)`
 - A quick `grep` / `glob` to confirm a file exists or check project type
 - Reading plan / convention files to extract the path I need to pass to a worker (NOT to evaluate directly)
 - Verifying my own `meta.json` / `skill-set.yaml` structure

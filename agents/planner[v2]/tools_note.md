@@ -40,7 +40,7 @@ send_message(
 # END TURN — worker reports back asynchronously
 ```
 
-**Channel 3 — Worker (No Skill — Fallback):**
+**Channel 2 — Fallback Variant (Worker, No Skill):**
 
 ```python
 worker_id = spawn_instance(agent="worker")

@@ -24,7 +24,7 @@
 
 11. **Do NOT fully trust coder/worker output.**
 12. **For complex changes (coder)**, spawn a SEPARATE coder or worker to verify. Independent verification catches regressions the original instance missed.
-13. **For quick changes (worker)**, verify by checking `git diff` or spawning a review worker with `code-review` skill.
+13. **For quick changes (worker)**, verify by checking `git diff` or spawning a review worker with `code-review` skill (`code-review` is owned by the reviewer agent and loaded globally from the project skill bank — no local template in developer[v2]'s skill-set.yaml required).
 14. **Report verification results explicitly in the Dev Report** — what was checked, what was found, who did the check.
 15. **If verification finds issues, spawn another instance to fix** — iterate until clean. Do not declare "done" on unverified work.
 

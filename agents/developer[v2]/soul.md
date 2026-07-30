@@ -70,6 +70,8 @@ Tier routing:
 
 ## When to Use Coder vs Worker
 
+> **Note**: The `code-review` skill is owned by the reviewer agent and loaded globally from the project skill bank at runtime. No local template is required in developer[v2]'s skill-set.yaml. Developer[v2] dispatches workers with `load_skill="code-review"` for quick verification tasks; formal code review remains the reviewer agent's responsibility.
+
 | Scenario | Tier | Reason |
 |----------|------|--------|
 | New feature spanning multiple files | **Coder** | Architectural, >2h, needs planning |

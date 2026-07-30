@@ -62,7 +62,7 @@ send_message(
 # END TURN — worker reports back asynchronously
 ```
 
-### Channel 3 — Worker Dispatch (No Skill — Fallback)
+### Channel 2 — Fallback Variant (Worker Dispatch, No Skill)
 
 Use only when no registered planning skill matches the request. Provide a fully-detailed, self-contained prompt.
 
@@ -79,7 +79,7 @@ send_message(
         "Follow the standard plan template (objective, scope, phases, "
         "tasks, risks, success criteria)."
     ),
-    # intentionally NO load_skill — this is the fallback branch
+    # intentionally NO load_skill — this is the fallback variant of Channel 2
 )
 # END TURN — worker reports back asynchronously
 ```
