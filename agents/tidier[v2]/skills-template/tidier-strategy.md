@@ -68,7 +68,7 @@ REQUIREMENTS:
     * path to changed files
     * v1 category list
     * severity-grouped format requirement
-    * instruction to call skill_feedback after reporting
+    * instruction to call skill_feedback as a tool call ONLY first, then deliver the full report as the worker's FINAL message
 - Aggregate worker reports into the single severity-grouped Tidier report
   (see Aggregation Strategy below).
 

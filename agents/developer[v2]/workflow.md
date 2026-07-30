@@ -46,8 +46,10 @@ send_message(
     instance_id=worker_id,
     message=(
         "Fix <issue> in <file>. Report what changed and verification. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full report as your FINAL "
+        "message (that report is what I receive verbatim) and end your turn."
     ),
     load_skill="code-fix",          # exactly ONE skill per worker
 )

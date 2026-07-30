@@ -49,7 +49,9 @@ Requirements:
 - For each risk, attach impact (high/medium/low) + mitigation
 - For success criteria, make them measurable (not "works well" — "responds in <200ms at p95")
 - Produce the mandatory Plan Format below
-- After reporting, call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>).
+Output ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
+1. Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Put no report, summary, or prose in that turn.
+2. Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
 
 Return:
 - The Plan Format (template below) for plan-overview.md
@@ -203,7 +205,7 @@ Write each `phaseN-plan.md` in this shape:
 
 ## Skill Feedback
 
-After delivering the plan, call:
+Call this FIRST (step 1 above), as a tool call only — before you write your final report:
 
 ```python
 skill_feedback(

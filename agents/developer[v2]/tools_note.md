@@ -32,8 +32,10 @@ send_message(
     message=(
         "Implement <feature> in <target_path>. Follow project conventions, "
         "include tests, and report files changed plus test results. "
-        "End with skill_feedback(skill_id, applied=True, usefulness=<1-10>, "
-        "note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, "
+        "note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY "
+        "first, then deliver your full report as your FINAL message (that "
+        "report is what I receive verbatim) and end your turn."
     ),
     load_skill="code-implementation",   # exactly ONE skill
 )

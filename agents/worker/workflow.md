@@ -200,10 +200,26 @@ Proceed to Phase 7
 
 ## Phase 7: Feedback and Report
 
+> **CRITICAL — Output Order.** My dispatcher receives my **LAST** assistant
+> message verbatim as the completion report. Whatever I put in that final
+> message is the ONLY thing the dispatcher sees. If I emit a short summary
+> after the real report, the detailed report is lost and the dispatcher gets
+> the weak version. So:
+>
+> 1. Do the work (Phases 1–6).
+> 2. Call `skill_feedback` as a **tool call ONLY** — no report, summary, or
+>    prose in the same turn.
+> 3. Deliver my **full structured report** as my **final message** — this is
+>    the complete, detailed report.
+> 4. **End my turn immediately.** No follow-up summary, no condensed
+>    re-report, no todo update, no narration after the report.
+
 ```raw
-1. Leave skill feedback FIRST (always):
+1. Leave skill feedback FIRST (tool call only — no prose alongside it):
    - For every injected or searched skill I consumed:
-     skill_feedback(skill_id, applied=True/False/None, usefulness=X/10, note="<one-line>", improvement_note="<what to improve>")
+      skill_feedback(skill_id, applied=True/False/None, usefulness=X/10, note="<one-line>", improvement_note="<what to improve>")
+   - Feedback is recorded by the tool into the skill system — I must NOT also
+     echo it as a prose block in my report (that is noise for the dispatcher)
    - Even a one-word note compounds into corpus quality
 
 2. Aggregate the outcome:
@@ -211,22 +227,21 @@ Proceed to Phase 7
    - What was produced (files, data, format)
    - Any warnings, retries, or partial results
 
-3. Build structured report:
+3. Build the FULL structured report (this becomes my final message):
    """
    ✅ Task Complete: [one-line summary]
    
    Skill(s) Applied: [skill name(s), or "no skill matched", or "DIY (no skill)"]
    Result: [what was produced, where, in what format]
    Warnings: [any caveats — partial output, retries, fallbacks]
-   Skill Feedback: [skill_id → applied=True/False/none + usefulness=X/10 + note + improvement_note]
    
    [Optional: "Created new skill: [name]" if skill_create succeeded]
    [Optional: "Requested skill fix: [skill_id]" if skill_fix recorded]
    """
 
-4. Send the report back to my dispatcher:
-   - If dispatched as a job → report via the job result path
-   - If direct conversation → reply with the structured summary
+4. Deliver that report as my FINAL message and END MY TURN. Do not add a
+   second summary or any follow-up afterward — the report above is what the
+   dispatcher receives.
 
 5. Execution of this task is complete.
 ```
@@ -282,6 +297,13 @@ WRONG: Apply injected skill → complete task → never call skill_feedback
 RIGHT: Apply injected skill → complete task → skill_feedback(skill_id, applied=?, usefulness=?/10, note="...", improvement_note="...")
 ```
 
+### ❌ Losing the Detailed Report Under a Trailing Summary
+```
+WRONG: Deliver detailed report → call skill_feedback → write a short summary as the final turn
+       (dispatcher only sees the summary — the detail is lost)
+RIGHT: Call skill_feedback (tool only) → deliver the detailed report as the FINAL message → END TURN
+```
+
 ### ❌ Modifying Skills Inline
 ```
 WRONG: Skill body is wrong → edit the skill markdown directly
@@ -305,4 +327,4 @@ RIGHT: Task is too big → break it down myself (smaller scripts, todo tracking)
 
 ## My Workflow in One Line
 
-**Receive → Safety Gate (SemiAuto) → Skill Check (injected → search if ambiguous) → Decide (apply skill / DIY) → Execute → Verify → Feedback → Report.**
+**Receive → Safety Gate (SemiAuto) → Skill Check (injected → search if ambiguous) → Decide (apply skill / DIY) → Execute → Verify → Feedback (tool only) → Report (final message).**

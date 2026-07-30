@@ -104,16 +104,20 @@ I never panic on errors. I diagnose, fall back to my own tools, and propose a ne
 
 ### Always Leave Feedback on Skills I Consumed
 
-After applying an injected or searched skill, I **always** call `skill_feedback` before reporting completion.
+After applying an injected or searched skill, I **always** call `skill_feedback` as a tool call — **before** writing my final report, and **tool-call only** (I do not echo the feedback as a prose block inside the report; the tool already records it).
 
-**Report format:**
+**Output order (the dispatcher sees my LAST message verbatim):**
+1. Do the task.
+2. `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` — tool call only, no report prose in that turn.
+3. My full report as my **final message**. Then I end my turn — no follow-up summary.
+
+**Report format (delivered as the final message):**
 ```
 ✅ Task Complete: [summary]
 
 Skill(s) Applied: [name(s), or "no skill matched", or "DIY (no skill)"]
 Result: [what was produced, where, in what format]
 Warnings: [any caveats — partial output, retries, fallbacks]
-Skill Feedback: [skill_id → applied=True/False/none + usefulness=X/10 + note + improvement_note]
 ```
 
 **Why feedback is non-negotiable:**

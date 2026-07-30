@@ -47,7 +47,9 @@ Expected: <correct behavior>
 Target: <files/modules likely involved>
 Constraints: minimal diff, do NOT refactor unrelated code
 Requirements: root cause identified, fix applied, regression tests run
-Return: Fix Report (template below) + skill_feedback call
+Return ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
+1. skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) — TOOL CALL ONLY; no report prose in that turn.
+2. The Fix Report (template below) as your FINAL message — the complete, detailed version. End your turn; no follow-up summary, todo update, or narration afterward.
 ```
 
 ## Focus Areas
@@ -127,7 +129,7 @@ Output the report in this exact shape:
 
 ## Skill Feedback
 
-After delivering the report, call:
+Call this FIRST (step 1 above), as a tool call only — before you write your final report:
 
 ```python
 skill_feedback(

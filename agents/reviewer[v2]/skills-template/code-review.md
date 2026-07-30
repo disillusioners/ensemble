@@ -58,11 +58,14 @@ Requirements:
 - Read all target files end-to-end (or enough to cover the focus areas).
 - Cross-check patterns: globals, error handling, concurrency, resource cleanup.
 - Produce the mandatory Finding Report below.
-- After reporting, call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>).
+
+Output ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
+1. Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Put no report, summary, or prose in that turn.
+2. Deliver the Finding Report (template below) as your FINAL message — the complete, detailed report. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
 
 Return:
-- The Finding Report (template below).
-- skill_feedback call.
+- skill_feedback call (step 1).
+- The Finding Report as your final message (step 2).
 ```
 
 ## Focus Areas
@@ -140,7 +143,7 @@ Output the report in this exact shape:
 
 ## Skill Feedback
 
-After delivering the report, call:
+Call this FIRST (step 1 above), as a tool call only — before you write your final report:
 
 ```python
 skill_feedback(

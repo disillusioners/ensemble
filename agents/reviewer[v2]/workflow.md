@@ -31,8 +31,11 @@ send_message(
     message=(
         "Review [files/modules] for [specific concerns]. "
         "Report findings as: area, file:line, issue, severity (🔴/🟡/🟢), fix. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full Finding Report as your "
+        "FINAL message — that report is what I receive verbatim, so make it "
+        "complete and detailed, and end your turn right after it."
     ),
     load_skill="code-review",          # exactly ONE skill per worker
 )

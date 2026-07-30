@@ -36,8 +36,10 @@ send_message(
         "Verify the plan at <path> for completeness, feasibility, consistency, and safety. "
         "Report blocking issues with section/line references. "
         "Output the APPROVED/REJECTED verdict in your report. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full report as your FINAL "
+        "message (that report is what I receive verbatim) and end your turn."
     ),
     load_skill="plan-approval",          # exactly ONE skill per worker
 )
@@ -53,8 +55,10 @@ send_message(
         "Verify the decision <description> for correctness, trade-offs, alternatives, and risks. "
         "Report blocking issues with specific references to the decision artifact. "
         "Output the APPROVED/REJECTED verdict in your report. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full report as your FINAL "
+        "message (that report is what I receive verbatim) and end your turn."
     ),
     load_skill="decision-approval",      # exactly ONE skill per worker
 )

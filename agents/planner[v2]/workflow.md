@@ -34,7 +34,9 @@ send_message(
         "Research the <module/area> in this codebase. "
         "I need to understand: <specific questions>. "
         "Report: architecture, key files, patterns, dependencies, constraints. "
-        "After reporting, record any reusable findings with experience(text)."
+        "Record any reusable findings with experience(text) as a tool call "
+        "first, then deliver your full report as your FINAL message (that "
+        "report is what I receive verbatim) and end your turn."
     ),
 )
 # END TURN — explorer reports back asynchronously
@@ -54,8 +56,10 @@ send_message(
         "Context from research: <findings>. "
         "Output to .agents/shared/planning/<feature>/. "
         "Follow the standard plan template (plan-overview.md + phaseN-plan.md). "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full plan as your FINAL "
+        "message (that plan is what I receive verbatim) and end your turn."
     ),
     load_skill="plan-creation",  # exactly ONE skill per worker
 )
@@ -176,9 +180,11 @@ send_message(
     message=(
         "Decompose the requirements for <feature>: functional, non-functional, "
         "constraints, acceptance criteria. Output to .agents/shared/planning/"
-        "<feature>/requirements.md. After reporting, call skill_feedback "
+        "<feature>/requirements.md. Call skill_feedback "
         "(skill_id, applied=True, usefulness=<1-10>, note=<short>, "
-        "improvement_note=<actionable>)."
+        "improvement_note=<actionable>) as a TOOL CALL ONLY first, then "
+        "deliver your full requirements doc as your FINAL message (that doc "
+        "is what I receive verbatim) and end your turn."
     ),
     load_skill="requirements-analysis",
 )
@@ -190,8 +196,10 @@ send_message(
     message=(
         "Analyze the architecture and key trade-offs for <feature>. "
         "Output to .agents/shared/planning/<feature>/technical-analysis.md. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full analysis as your FINAL "
+        "message (that analysis is what I receive verbatim) and end your turn."
     ),
     load_skill="technical-analysis",
 )
@@ -204,7 +212,9 @@ send_message(
         "Create the structured plan for <feature> using the standard "
         "template (objective, scope, phases, tasks, risks, success criteria). "
         "Output to .agents/shared/planning/<feature>/plan-overview.md "
-        "and phaseN-plan.md. After reporting, call skill_feedback."
+        "and phaseN-plan.md. Call skill_feedback as a TOOL CALL ONLY first, "
+        "then deliver your full plan as your FINAL message (that plan is what "
+        "I receive verbatim) and end your turn."
     ),
     load_skill="plan-creation",
 )

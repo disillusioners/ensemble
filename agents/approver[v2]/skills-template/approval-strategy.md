@@ -132,8 +132,10 @@ send_message(
         "Evaluate FRESH — no prior context, no tracking history. "
         "Report blocking issues with section/line references. "
         "Output an APPROVED/REJECTED verdict in your report. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full report as your FINAL "
+        "message (that report is what I receive verbatim) and end your turn."
     ),
     load_skill="<selected skill from table above>"
 )

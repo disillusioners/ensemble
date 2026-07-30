@@ -91,7 +91,7 @@ them.
 
 28. **Use `experience()` for new craftsmanship patterns.** When a worker surfaces a new repeatable pattern (e.g., "this codebase consistently uses `__all__` to declare public API"), record it via `experience(text=...)` so future sessions benefit.
 
-29. **Workers must call `skill_feedback`.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` after reporting. Low scores are GOOD signals — they drive skill evolution.
+29. **Workers must call `skill_feedback` before their final report.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a tool call ONLY, THEN deliver its full report as the FINAL message (the report is what I receive verbatim — a trailing summary would erase the detail). Low scores are GOOD signals — they drive skill evolution.
 
 30. **Cite `default_agent_versions` decision in project knowledge.** When the v2 activation is significant for a project, record the activation rationale via `experience()` so future sessions know which Tidier version is canonical.
 

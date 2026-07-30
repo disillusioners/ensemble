@@ -93,7 +93,7 @@ send_message(instance_id=worker_id, message="...", load_skill="plan-approval")
 
 ## Knowledge & Skill Feedback
 
-25. **Workers must call `skill_feedback`** after completing the verification — `usefulness` (1-10) and `improvement_note` (actionable suggestions) drive skill evolution. Low scores are GOOD signals.
+25. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback` as a tool call ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. Low scores are GOOD signals.
 26. **Query `knowledge` for project conventions before dispatching** when scope signals are ambiguous (use explorer team member, not direct DB lookups).
 
 ---

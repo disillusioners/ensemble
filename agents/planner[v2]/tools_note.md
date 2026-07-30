@@ -32,8 +32,10 @@ send_message(
         "Context from research: <findings>. "
         "Output to .agents/shared/planning/<feature>/. "
         "Follow the standard plan template. "
-        "After reporting, call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full plan as your FINAL "
+        "message (that plan is what I receive verbatim) and end your turn."
     ),
     load_skill="plan-creation",   # exactly ONE skill per worker
 )

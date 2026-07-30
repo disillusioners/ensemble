@@ -28,8 +28,10 @@ send_message(
         "Report findings in severity-grouped format: "
         "[High] {Category}: {Title} — file:line — Problem / Impact / Fix. "
         "Cite file:line for every finding. "
-        "End with skill_feedback(skill_id, applied=True, usefulness=<1-10>, "
-        "note=<short>, improvement_note=<actionable>)."
+        "Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, "
+        "note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY "
+        "first, then deliver your full severity-grouped report as your FINAL "
+        "message (that report is what I receive verbatim) and end your turn."
     ),
     load_skill="tidier-readable-code",   # exactly ONE skill per worker
 )
