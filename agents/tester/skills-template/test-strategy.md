@@ -43,12 +43,12 @@ Before listing packs, derive the change set. **Even on an explicit "full test su
 
    | Scenario | Strategy |
    |---|---|
-   | 1 independent pack | 1 session |
-   | 2-3 small packs (same module) | 1 session (grouped) |
-   | 3+ independent packs (different modules) | Multiple sessions in parallel |
+   | 1 independent pack | 1 worker |
+   | 2-3 small packs (same module) | 1 worker (grouped) |
+   | 3+ independent packs (different modules) | Multiple workers in parallel |
    | Mixed dependencies | Parallel + sequential |
 
-4. **Group packs into sessions** — by module / test type / execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
+4. **Group packs into workers** — by module / test type / execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
 5. **Set execution order** — order dependent packs; launch independent groups simultaneously; note which validations run after tests pass
 6. **Materialize the plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent. Add a final aggregation/ensure.md node with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
 
@@ -56,8 +56,8 @@ Before listing packs, derive the change set. **Even on an explicit "full test su
 
 - **Never skip planning** — analyze before spawning
 - **Parallel when safe** — independent packs benefit from parallelism
-- **Group related packs** — same module = same session (better context)
-- **When in doubt, split** — separate sessions are safer than mis-grouped ones
+- **Group related packs** — same module = same worker (better context)
+- **When in doubt, split** — separate workers are safer than mis-grouped ones
 - **Plan for aggregations** — know how you'll combine results
 
 ## Worker Skill Selection (Dispatcher Contract)
@@ -82,7 +82,7 @@ Planning determines WHAT to test. Dispatching determines WHICH skill each worker
 - **Exactly one skill per worker** — never bundle multiple skills into one dispatch. One skill = one responsibility = one clear attribution in `RESULTS/`.
 - **Never send `test-strategy` to workers** — `test-strategy` is the tester's own auto-loaded planning skill. Workers receive execution skills only.
 - **Skill must match task type** — running a pack requires `test-pack-execution`, not `unit-test`. If a worker would need multiple skills, split the work into multiple workers (one skill each).
-- **The "session" in the execution strategy table is a WORKER instance**, not the tester. The tester spawns + sends_message; the worker runs the pack.
+- **Each entry in the execution strategy table is a WORKER instance**, not the tester. The tester spawns + sends_message; the worker runs the pack.
 
 ### Dispatch Pattern
 

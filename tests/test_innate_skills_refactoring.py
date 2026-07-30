@@ -8,10 +8,10 @@ These tests verify the complete end-to-end behavior of the refactored skill syst
 - Registry behavior (including find_skill)
 
 This specifically tests against the REAL agents/ directory to ensure:
-- developer, reviewer, tester, planner, tidier, approver all get opencode skill
+- developer, reviewer, planner, tidier, approver all get opencode skill
 - leader gets coordination skill
 - jober gets job-orchestration skill
-- tester gets BOTH opencode AND test-pack
+- tester gets test-pack, todo, and dynamic-skill (NO opencode after worker-only dispatch migration)
 - giter has NO skills section
 """
 import json
@@ -58,8 +58,8 @@ class TestInnateSkillsSystemPromptIdentity:
         test_cases = [
             ("developer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
             ("reviewer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
-            ("tester", ["opencode", "test-pack", "todo"], "OpenCode-Skill"),  # tester gets BOTH (chart removed in bfda2a95)
-            ("tester", ["opencode", "test-pack", "todo"], "Test Pack Skill"),  # tester gets BOTH
+            ("tester", ["test-pack", "todo", "dynamic-skill"], "Dynamic Skill"),  # opencode removed (worker-only dispatch migration)
+            ("tester", ["test-pack", "todo", "dynamic-skill"], "Test Pack Skill"),  # test-pack still innate
             ("planner", ["opencode", "chart", "todo"], "OpenCode-Skill"),
             ("tidier", ["opencode", "chart", "todo"], "OpenCode-Skill"),
             ("approver", ["opencode", "chart", "todo"], "OpenCode-Skill"),
@@ -90,23 +90,25 @@ class TestInnateSkillsSystemPromptIdentity:
             # Each agent has different soul.md structure, so just verify non-empty prompt
             assert len(prompt) > 100, f"{agent_id} should have substantial prompt content"
     
-    def test_tester_gets_both_skills(self, real_agents_dir, real_registry):
-        """Specifically verify tester gets BOTH opencode AND test-pack skills."""
+    def test_tester_gets_three_innate_skills(self, real_agents_dir, real_registry):
+        """Verify tester gets test-pack, todo, and dynamic-skill (opencode removed after worker-only dispatch migration)."""
         cache = PromptCache()
         tester_meta = real_registry.get("tester")
         assert tester_meta is not None
-        assert tester_meta.innate_skills == ["opencode", "test-pack", "todo"]  # chart removed in bfda2a95
+        assert tester_meta.innate_skills == ["test-pack", "todo", "dynamic-skill"]
         
         prompt, _ = load_and_cache_prompt("tester", tester_meta.path, cache)
         
-        # Should contain both skills
-        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
-        assert "OpenCode-Skill" in prompt
+        # Should contain all three skills
         assert "Test Pack Skill" in prompt
-        # Should appear in correct order (opencode before test-pack due to sorted())
-        opencode_pos = prompt.find("OpenCode-Skill")
+        assert "Todo Skill" in prompt
+        assert "Dynamic Skill" in prompt
+        # Should appear in correct sorted() order: dynamic-skill < test-pack < todo
+        dynamic_pos = prompt.find("Dynamic Skill")
         testpack_pos = prompt.find("Test Pack Skill")
-        assert opencode_pos < testpack_pos, "opencode should appear before test-pack in prompt"
+        todo_pos = prompt.find("Todo Skill")
+        assert dynamic_pos < testpack_pos, "dynamic-skill should appear before test-pack in prompt"
+        assert testpack_pos < todo_pos, "test-pack should appear before todo in prompt"
 
 
 class TestBackwardCompatibility:
@@ -293,8 +295,9 @@ class TestRegistryInnateSkills:
     def test_find_skill_checks_innate_first(self, real_registry):
         """find_skill() should check innate-skills first, then legacy."""
         # Test opencode skill - should find all agents that declare it via innate_skills
+        # tester was removed after worker-only dispatch migration
         agents_with_opencode = real_registry.find_skill("opencode")
-        expected = ["approver", "developer", "planner", "reviewer", "tester", "tidier"]
+        expected = ["approver", "developer", "planner", "reviewer", "tidier"]
         assert sorted(agents_with_opencode) == sorted(expected)
         
         # Test coordination skill
@@ -347,8 +350,8 @@ class TestInnateSkillsIntegration:
         
         # Verify specific skill content is present for key agents
         tester_prompt, _ = load_and_cache_prompt("tester", real_registry.get("tester").path, cache)
-        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
-        assert "OpenCode-Skill" in tester_prompt
+        # tester no longer has opencode (worker-only dispatch migration) — verify dynamic-skill instead
+        assert "Dynamic Skill" in tester_prompt
         assert "Test Pack Skill" in tester_prompt
         
         leader_prompt, _ = load_and_cache_prompt("leader", real_registry.get("leader").path, cache)

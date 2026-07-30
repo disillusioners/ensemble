@@ -22,7 +22,7 @@ All "delegation" rules below reference this model — short phrases like "dispat
 ### Todo Tracking (After Planning)
 - **Materialize every plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack, edges = dependencies
 - **Prefer `todo_graph_*` over `todo_list_*`** — the DAG expresses parallel fan-out/fan-in; a flat list cannot
-- **Keep the graph current** — `todo_graph_update(node_id, status)` as sessions launch (`in_progress`) and complete (`done`); one node per pack, not per session-bundle
+- **Keep the graph current** — `todo_graph_update(node_id, status)` as workers launch (`in_progress`) and complete (`done`); one node per pack, not per worker-bundle
 - **Per-node subtasks when useful** — `todo_graph_add_subtask` for pre-send self-check / fix-and-verify steps
 
 ### Scope: Blast Radius Control (Single Scope Model)
@@ -36,14 +36,14 @@ All "delegation" rules below reference this model — short phrases like "dispat
 
 ### Test Pack Execution (Split & Parallel)
 - **Follow the test-pack skill** for pack structure: 5-min hard cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output, partial-pass handling
-- **One pack per session** — dispatch one worker per pack (via `load_skill="test-pack-execution"`); never bundle multiple packs into one message
+- **One pack per worker** — dispatch one worker per pack (via `load_skill="test-pack-execution"`); never bundle multiple packs into one message
 - **Independent packs run in parallel** (separate workers); dependent packs run sequentially
 - **Always send the strict "Run Single Test Pack" template** (see workflow.md) — never a free-form "run the tests" / "run unit tests" / "run all tests" / `go test ./...` / `pytest tests/` message
 - **Run the Pre-Send Self-Check before every message** (see workflow.md); never send a message that fails it
 - **Never spawn without a time estimate** — every pack must have a runtime estimate before launch; split any pack estimated > 5 min before spawning
 - **Long-wait tests** (retries/sleeps/polls) use overridden config/env in a separate pack — never relax the 5-min cap; document the override in MOCK_TESTS.md / PACKS.md
 - **Pack timeout limits** (all ≤ 5-min hard cap): unit 2 min; integration/feature/e2e 5 min; mock per MOCK_TESTS.md
-- **Aggregate PASS/FAIL/TIMEOUT from every parallel session** — one pack's timeout must not block the others
+- **Aggregate PASS/FAIL/TIMEOUT from every parallel worker** — one pack's timeout must not block the others
 
 ### PACKS.md Integrity
 - **All pack scripts must be registered in PACKS.md** — one script per pack; verify PACKS.md is up-to-date before running
@@ -124,7 +124,7 @@ All "delegation" rules below reference this model — short phrases like "dispat
 - **Never run the full suite just because it was requested** — assess blast radius first
 - **Never skip blast-radius assessment** — even with no phase context, derive the change set first
 - **Never treat "no phase context" as "run everything"**
-- **Never burn parallel sessions on irrelevant packs**
+- **Never burn parallel workers on irrelevant packs**
 - **Never silently expand to full suite** — if expanding, state why
 - **Never omit the scope-reduction notice from the report**
 
