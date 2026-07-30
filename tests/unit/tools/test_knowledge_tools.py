@@ -3218,3 +3218,147 @@ class TestExploreCallerModelOverrides:
                 assert "Explorer result" in result
                 # No override was applied — model=None.
                 assert mock_invoke.call_args.kwargs.get("model") is None
+
+    # ------------------------------------------------------------------
+    # Defensive config-chain edge cases for the null-override branch
+    # (lines 724-734 in knowledge_tools.py).
+    #
+    # The null-override path resolves the system default model via a
+    # three-level ``getattr`` chain:
+    #     manager.config.llm.model
+    # At each level the code tolerates ``None`` (or a missing attr) and
+    # falls through to ``model_override = None`` (no forward). The happy
+    # path (all three present) is covered by
+    # ``test_coder_with_null_override_forwards_system_default_model``
+    # above. These three tests pin each broken-link branch.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_null_override_config_llm_model_none_forwards_no_model(
+        self, configured_env, mock_manager
+    ):
+        """``{"coder": null}`` with ``config.llm.model is None`` → the
+        ``if default_model:`` guard is False, so ``model_override`` stays
+        ``None`` (no forward). This is the misconfiguration case: LLM
+        config is present but no default model name is set. The tool must
+        silently fall back to "no override" rather than forwarding a
+        MagicMock or empty string.
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # config.llm exists but model is explicitly None.
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm = MagicMock()
+        mock_manager.config.llm.model = None
+
+        meta = self._make_explorer_meta(caller_model_overrides={"coder": None})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                # Must be None — not a MagicMock, not "".
+                assert mock_invoke.call_args.kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_null_override_manager_config_none_forwards_no_model(
+        self, configured_env, mock_manager
+    ):
+        """``{"coder": null}`` with ``manager.config is None`` → the
+        ``getattr(manager, "config", None)`` default kicks in,
+        ``llm_cfg`` and ``default_model`` both resolve to ``None``, and
+        ``model_override`` stays ``None``. This protects callers whose
+        manager was constructed without a config object (e.g. minimal
+        test fixtures or early boot before config load).
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # Explicitly no config on the manager.
+        mock_manager.config = None
+
+        meta = self._make_explorer_meta(caller_model_overrides={"coder": None})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") is None
+
+    @pytest.mark.asyncio
+    async def test_null_override_config_llm_none_forwards_no_model(
+        self, configured_env, mock_manager
+    ):
+        """``{"coder": null}`` with ``config.llm is None`` → the
+        ``getattr(config, "llm", None)`` default kicks in,
+        ``default_model`` resolves to ``None``, and ``model_override``
+        stays ``None``. This covers the case where the manager has a
+        config object but the LLM subsection is absent (e.g. a config
+        that only defines non-LLM settings).
+        """
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # config exists but llm is explicitly None.
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm = None
+
+        meta = self._make_explorer_meta(caller_model_overrides={"coder": None})
+        mock_registry = self._stub_registry(meta)
+
+        with patch(
+            "daemon.registry.get_registry", return_value=mock_registry
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value=("Explorer result.", "test-child-id"),
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager, "parent-instance-id", agent_id="coder"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+                mock_invoke.assert_called_once()
+                assert mock_invoke.call_args.kwargs.get("model") is None
