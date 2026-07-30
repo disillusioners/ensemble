@@ -1,0 +1,28 @@
+agent_id: tidier
+# Boundary: Tidier covers code-level craftsmanship ONLY (style, smells,
+# readability, hygiene, types, error handling). Architecture, correctness,
+# and security are Reviewer's domain — see meta.json description.
+skills:
+  - name: tidier-strategy
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "Strategy for planning a Tidier review: which execution skills to dispatch, in what order, with what scope."
+
+  - name: tidier-readable-code
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Review for coding style, code smells, and readability (3 v1 categories grouped)."
+
+  - name: tidier-static-hygiene
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Review for file hygiene and type cleanliness (2 v1 categories grouped)."
+
+  - name: tidier-robustness
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Review for error handling patterns (v1's Error Handling category). Aggregation of worker findings is a dispatcher responsibility performed in workflow.md step 6 and is NOT in scope of this skill."
