@@ -136,8 +136,8 @@ class TestRetryableStatusCodes:
     """Tests for RETRYABLE_STATUS_CODES constant."""
 
     def test_contains_expected_codes(self):
-        """RETRYABLE_STATUS_CODES should contain {429, 500, 502, 503, 504}."""
-        assert RETRYABLE_STATUS_CODES == {429, 500, 502, 503, 504}
+        """RETRYABLE_STATUS_CODES should contain standard + Cloudflare transient codes."""
+        assert RETRYABLE_STATUS_CODES == {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
     def test_contains_429_rate_limit(self):
         """RETRYABLE_STATUS_CODES should contain 429."""
@@ -371,6 +371,28 @@ class TestClassifyLLErrors:
             classified.invoke([])
 
         assert exc_info.value.status_code == 504
+        assert exc_info.value.original is original
+
+    def test_wraps_524_cloudflare_timeout_as_transient_api_error(self):
+        """HTTP 524 (Cloudflare origin timeout) should be wrapped as TransientAPIError.
+
+        524 is a Cloudflare-specific code returned when an origin behind the
+        proxy doesn't respond within its window; without retry it causes the
+        instance to fail on the first attempt.
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 524
+        original = openai.APIStatusError(
+            "A Timeout Occurred", response=mock_response, body=None
+        )
+
+        mock_llm = self._create_mock_llm(original)
+        classified = classify_llm_errors(mock_llm)
+
+        with pytest.raises(TransientAPIError) as exc_info:
+            classified.invoke([])
+
+        assert exc_info.value.status_code == 524
         assert exc_info.value.original is original
 
     def test_detects_context_length_exceeded_error(self):

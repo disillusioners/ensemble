@@ -12,8 +12,12 @@ from .response_validation import LLMResponseValidationError, validate_llm_respon
 
 logger = logging.getLogger(__name__)
 
-# Status codes that indicate transient/retryable errors
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# Status codes that indicate transient/retryable errors.
+# Includes Cloudflare-specific 5xx codes (520-524): 524 ("A Timeout Occurred")
+# is returned when an origin behind Cloudflare doesn't respond within its
+# ~100s window — functionally equivalent to a 504 gateway timeout but
+# without retrying it the system fails on the first attempt.
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 # Max length for error messages in logs (prevents HTML flooding)
 MAX_ERROR_LEN = 300
