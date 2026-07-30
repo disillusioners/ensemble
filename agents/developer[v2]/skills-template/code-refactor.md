@@ -47,9 +47,7 @@ Target: <files/functions>
 Behavior to preserve: <observable contract — inputs, outputs, side effects>
 Constraints: minimal diff, behavior preservation, run tests before AND after
 Requirements: structure improved, all tests pass (before + after), no public API change unless scoped
-Return ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
-1. skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) — TOOL CALL ONLY; no report prose in that turn.
-2. The Refactor Report (template below) as your FINAL message — the complete, detailed version. End your turn; no follow-up summary, todo update, or narration afterward.
+Return: The Refactor Report (template below) as your FINAL message — your dispatcher receives it verbatim, so make it complete and detailed; end your turn immediately with no follow-up summary, todo update, or narration.
 ```
 
 ## Focus Areas
@@ -128,19 +126,3 @@ Output the report in this exact shape:
 ### Issues Encountered
 - [anything out of scope, discovered follow-ups]
 ```
-
-## Skill Feedback
-
-Call this FIRST (step 1 above), as a tool call only — before you write your final report:
-
-```python
-skill_feedback(
-    skill_id="code-refactor",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this skill for the task
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Low scores are GOOD signals — they drive skill evolution. Be honest.

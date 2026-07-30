@@ -48,13 +48,10 @@ Requirements:
 - Identify the critical path (longest dependency chain)
 - Allocate resources per milestone (who, what, when)
 - Produce the mandatory Roadmap Format below
-Output ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
-1. Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Put no report, summary, or prose in that turn.
-2. Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
+Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
 
 Return:
 - The Roadmap Format (template below) for roadmap.md
-- skill_feedback call.
 ```
 
 ---
@@ -176,33 +173,4 @@ Phase 1.1    Phase 3.1     Phase 5.1     Phase 7.1
 ## Open Questions
 
 [Anything unresolved that needs caller input — e.g., "team X capacity in Q3 unknown")]
-```
-
----
-
-## Skill Feedback
-
-Call this FIRST (step 1 above), as a tool call only — before you write your final report:
-
-```python
-skill_feedback(
-    skill_id="roadmap-strategy",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this skill for the task
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Low scores are GOOD signals — they drive skill evolution. Be honest.
-
-**Example:**
-```python
-skill_feedback(
-    skill_id="roadmap-strategy",
-    applied=True,
-    usefulness=7,
-    note="Milestones + critical path were clear; resource allocation section felt sparse for a 4-team rollout.",
-    improvement_note="Add a template for cross-team FTE negotiation (which team owns shared milestones, escalation path on conflict).",
-)
 ```

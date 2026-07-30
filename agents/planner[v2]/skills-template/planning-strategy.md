@@ -146,32 +146,3 @@ When materializing the planning plan (first response), use this exact template:
 ```
 
 When delivering the final plan, use the **Plan Delivered** template from `soul.md` (date, instance IDs, status, plan location, summary, phases, insights, risks).
-
----
-
-## Skill Feedback
-
-After dispatching workers (and aggregating their output), call:
-
-```python
-skill_feedback(
-    skill_id="planning-strategy",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this skill for the planning cycle
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Low scores are GOOD signals — they drive skill evolution. Be honest.
-
-**Example:**
-```python
-skill_feedback(
-    skill_id="planning-strategy",
-    applied=True,
-    usefulness=8,
-    note="Scope assessment + research detection worked well for a 3-module feature plan.",
-    improvement_note="Add a concrete heuristic for when to skip research even on LARGE scope (e.g., when conventions.md fully covers the area).",
-)
-```

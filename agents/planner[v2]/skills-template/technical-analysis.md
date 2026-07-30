@@ -53,13 +53,10 @@ Requirements:
 - Identify scalability assumptions and bottlenecks
 - Surface existing technical debt (from research) that affects this analysis
 - Produce the mandatory Analysis Format below
-Output ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
-1. Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Put no report, summary, or prose in that turn.
-2. Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
+Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
 
 Return:
 - The Analysis Format (template below) for technical-analysis.md
-- skill_feedback call.
 ```
 
 ---
@@ -263,33 +260,4 @@ flowchart LR
 - [ADR-2: Title](link) — [1-line summary]
 - [Research finding 1] — file:line
 - [Research finding 2] — file:line
-```
-
----
-
-## Skill Feedback
-
-Call this FIRST (step 1 above), as a tool call only — before you write your final report:
-
-```python
-skill_feedback(
-    skill_id="technical-analysis",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this skill for the task
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Low scores are GOOD signals — they drive skill evolution. Be honest.
-
-**Example:**
-```python
-skill_feedback(
-    skill_id="technical-analysis",
-    applied=True,
-    usefulness=8,
-    note="Trade-off comparison + integration mapping gave leadership clear decision criteria.",
-    improvement_note="Add a template for capacity-planning projections (load profile + headroom + scaling cliff) — felt ad-hoc.",
-)
 ```

@@ -47,9 +47,7 @@ Expected: <correct behavior>
 Target: <files/modules likely involved>
 Constraints: minimal diff, do NOT refactor unrelated code
 Requirements: root cause identified, fix applied, regression tests run
-Return ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
-1. skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) — TOOL CALL ONLY; no report prose in that turn.
-2. The Fix Report (template below) as your FINAL message — the complete, detailed version. End your turn; no follow-up summary, todo update, or narration afterward.
+Return: The Fix Report (template below) as your FINAL message — your dispatcher receives it verbatim, so make it complete and detailed; end your turn immediately with no follow-up summary, todo update, or narration.
 ```
 
 ## Focus Areas
@@ -126,19 +124,3 @@ Output the report in this exact shape:
 ### Follow-ups
 - [anything discovered but out of scope; mark for future work]
 ```
-
-## Skill Feedback
-
-Call this FIRST (step 1 above), as a tool call only — before you write your final report:
-
-```python
-skill_feedback(
-    skill_id="code-fix",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this skill for the task
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Low scores are GOOD signals — they drive skill evolution. Be honest.

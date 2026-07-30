@@ -1,27 +1,27 @@
 agent_id: planner
 skills:
   - name: planning-strategy
-    version: "1.0.0"
+    version: "1.1.0"
     auto_load: true
     category: planning
     description: "Planning scope assessment, research need detection, skill selection, dispatch planning, output structure"
   - name: plan-creation
-    version: "1.1.0"
+    version: "1.2.0"
     auto_load: false
     category: execution
     description: "Structured plan creation: objective, scope, phases, tasks, risks, success criteria"
   - name: roadmap-strategy
-    version: "1.1.0"
+    version: "1.2.0"
     auto_load: false
     category: execution
     description: "Roadmap building: milestones, timeline, dependencies, resource allocation"
   - name: requirements-analysis
-    version: "1.1.0"
+    version: "1.2.0"
     auto_load: false
     category: execution
     description: "Requirements decomposition: functional/non-functional, constraints, acceptance criteria"
   - name: technical-analysis
-    version: "1.1.0"
+    version: "1.2.0"
     auto_load: false
     category: execution
     description: "Technical/architecture analysis: patterns, trade-offs, integration points, scalability"

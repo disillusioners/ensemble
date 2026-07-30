@@ -79,13 +79,10 @@ REQUIREMENTS:
 - Read all target files end-to-end (or enough to cover the categories).
 - Cross-check the Language Traps section below.
 - Produce the mandatory Finding Report (template below).
-Output ORDER (CRITICAL — your dispatcher receives your LAST message verbatim, so a trailing summary would erase the detailed report):
-1. Call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Put no report, summary, or prose in that turn.
-2. Deliver your full report as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
+Deliver your full report as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
 
 RETURN:
 - The Finding Report (template below).
-- skill_feedback call.
 ```
 
 ---
@@ -235,21 +232,3 @@ Output the report in this exact shape:
 | Speculative abstraction | 🟢 Low |
 
 (See `tidier-strategy.md` for the full severity guidelines.)
-
----
-
-## Skill Feedback
-
-Call this FIRST (step 1 above), as a tool call only — before you write your final report:
-
-```python
-skill_feedback(
-    skill_id="tidier-readable-code",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this skill for the task
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Low scores are GOOD signals — they drive skill evolution. Be honest.

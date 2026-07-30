@@ -6,12 +6,12 @@ skills:
     category: planning
     description: "Approval scope assessment, verification target selection, iteration tracking, dispatch planning"
   - name: plan-approval
-    version: "1.1.0"
+    version: "1.2.0"
     auto_load: false
     category: execution
     description: "Plan completeness, feasibility, consistency, safety verification"
   - name: decision-approval
-    version: "1.1.0"
+    version: "1.2.0"
     auto_load: false
     category: execution
     description: "Decision correctness, trade-off analysis, alternatives verification"

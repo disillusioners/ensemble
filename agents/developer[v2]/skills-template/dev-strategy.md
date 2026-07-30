@@ -210,21 +210,3 @@ My first response MUST be a Dev Plan. Use this exact template:
 ### Approach
 [How coder/worker will run; fan-in tracking via todo_graph if 2+ instances]
 ```
-
----
-
-## Skill Feedback
-
-`dev-strategy` is auto-loaded for my own planning, so it does not receive worker-style per-task feedback the same way execution skills do. However, I can still call `skill_feedback` at the end of a planning session to evolve this strategy skill:
-
-```python
-skill_feedback(
-    skill_id="dev-strategy",
-    applied=True,
-    usefulness=<1-10>,                 # how useful was this strategy for the task
-    note=<short summary>,                # one-line takeaway
-    improvement_note=<actionable>,       # what would make this skill better
-)
-```
-
-Rate usefulness 1-10. Low scores are GOOD signals — they drive skill evolution. Be honest.
