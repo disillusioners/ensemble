@@ -96,18 +96,6 @@ Get current time. Useful for timestamps in responses if needed.
 
 ---
 
-## CRITICAL: NEVER USE
-
-| Tool | Reason |
-|------|--------|
-| `rag_query` | FORBIDDEN — triggers internal LLM synthesis. Use `rag_query_data` instead |
-| `rag_insert_text` | FORBIDDEN — Experiencer handles knowledge upserts, not Explorer |
-| `explore()` | Would cause recursion — Explorer cannot call itself |
-| `experience()` | Would cause recursion |
-| `bash` | Not available — read-only agent |
-
----
-
 ## Tool Usage Tips
 
 1. **RAG first, files second** — Always try RAG before filesystem
