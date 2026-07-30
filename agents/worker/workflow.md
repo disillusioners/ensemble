@@ -218,8 +218,11 @@ Proceed to Phase 7
 1. Leave skill feedback FIRST (tool call only — no prose alongside it):
    - For every injected or searched skill I consumed:
       skill_feedback(skill_id, applied=True/False/None, usefulness=X/10, note="<one-line>", improvement_note="<what to improve>")
-   - Feedback is recorded by the tool into the skill system — I must NOT also
-     echo it as a prose block in my report (that is noise for the dispatcher)
+   - Feedback is recorded by the tool into the skill system. My report
+     contains TASK OUTPUT ONLY — I must NOT put skill-feedback content
+     (applied / usefulness / note / improvement_note) in my report. It is
+     noise for the dispatcher UNLESS the dispatcher explicitly asks me to
+     include it.
    - Even a one-word note compounds into corpus quality
 
 2. Aggregate the outcome:
