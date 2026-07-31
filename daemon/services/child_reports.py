@@ -1889,15 +1889,52 @@ Provide a concise summary:"""
             session.add(report_message)
             
             # Create task for parent to process the report.
-            # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
-            report_task = Task(
-                task_type=TaskType.PROCESS_REPORT.value,
-                instance_id=instance.parent_id,
-                message_id=report_message_id,
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
+            #
+            # C2 torn-state guard: the deferred-pause pattern exists because
+            # a graph task cannot call the pause cascade itself (the cascade
+            # would cancel the task while its transaction is still active).
+            # question_pause_node therefore sets _deferred_question_pause
+            # before the post-graph callback starts the cascade.  The DB
+            # commit in _pause_cascade_db_sync happens on a worker thread,
+            # leaving a short race window where the marker is set but the
+            # parent's status still reads RUNNING.  We need both checks:
+            # the marker catches that window, while the DB check catches the
+            # Path 4 user-click-stop cascade, which has no marker.
+            #
+            # MessageQueue and ReportInjection are intentionally created
+            # regardless of this decision.  ReportInjection is the durable
+            # fallback, drained before EVERY LLM call (not only on resume) by
+            # claim_for_injection (graph.py:2566-2590).  A terminated parent
+            # can still leave an orphaned PENDING row; cleanup is deferred to
+            # the follow-up reconcile_terminal_report_injections work.
+            # Phase 2 adds the companion guard in
+            # instance_messaging.py:_prepare_enqueued_message.
+            parent = session.get(Instance, instance.parent_id)
+            marker_paused = (
+                instance.parent_id in self._manager._deferred_question_pause
             )
-            session.add(report_task)
+            db_paused = (
+                parent is not None
+                and parent.status == InstanceStatus.PAUSED.value
+            )
+            if marker_paused or db_paused:
+                skip_reason = "marker" if marker_paused else "db_status"
+                logger.info(
+                    f"child_reports: skipping PROCESS_REPORT Task creation for parent "
+                    f"{instance.parent_id[:8]}... — reason={skip_reason}; "
+                    f"report_injection row will deliver on resume via "
+                    f"claim_for_injection (graph.py:2566-2590)"
+                )
+            else:
+                # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
+                report_task = Task(
+                    task_type=TaskType.PROCESS_REPORT.value,
+                    instance_id=instance.parent_id,
+                    message_id=report_message_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(report_task)
 
             # ─── Report-injection queue (deadlock fix) ───────────────────
             # Enqueue a row in ``report_injections`` in the SAME
@@ -1935,7 +1972,10 @@ Provide a concise summary:"""
             
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.
-            parent = session.get(Instance, instance.parent_id)
+            if parent is None:
+                raise RuntimeError(
+                    f"Parent {instance.parent_id} disappeared during child completion"
+                )
             parent.last_activity_at = datetime.now(timezone.utc)
             parent.version = (parent.version or 1) + 1
 
