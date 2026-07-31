@@ -37,7 +37,7 @@ The following agents are available:
 | `developer` | Developer | 💻 | Code generation and debugging via opencode sessions | opencode | bash, filesystem, time, self, help, knowledge, mcp |
 | `explorer` | Explorer | 🔍 | Queries RAG knowledge base and synthesizes project knowledge | — | rag, filesystem, help, time, mcp |
 | `reviewer` | Reviewer | 🔍 | Reviews plans, architecture, and code for quality | opencode | bash, filesystem, time, self, help, knowledge, mcp |
-| `tester` | Tester | 🧪 | Writes and runs tests, reports results | opencode, test-pack | bash, filesystem, time, self, help, knowledge, mcp |
+| `tester` | Tester | 🧪 | Test leader — dispatches test packs to workers and reports results | test-pack | instance, bash, proc, filesystem, time, self, help, image, knowledge, mcp, context, shared_context, db |
 | `tidier` | Tidier | 🧹 | Code quality, conventions, and maintainability reviewer | opencode | bash, filesystem, time, self, help, knowledge, mcp |
 | `approver` | Approver | ✅ | Independent second-pass reviewer with minimal context bias | opencode | bash, filesystem, time, self, help, knowledge, mcp |
 | `planner` | Planner | 📋 | Analyzes requests, creates execution plans, tracks progress | opencode | bash, filesystem, time, self, help, knowledge, mcp |
@@ -368,7 +368,6 @@ Agents focused on code work:
 |-------|-------|
 | `developer` | bash, filesystem, time, self, help, knowledge, mcp |
 | `reviewer` | bash, filesystem, time, self, help, knowledge, mcp |
-| `tester` | bash, filesystem, time, self, help, knowledge, mcp |
 | `tidier` | bash, filesystem, time, self, help, knowledge, mcp |
 | `approver` | bash, filesystem, time, self, help, knowledge, mcp |
 | `planner` | bash, filesystem, time, self, help, knowledge, mcp |
@@ -381,6 +380,7 @@ Agents for orchestration:
 | Agent | Tools |
 |-------|-------|
 | `leader` | time, instance, self, project, help, knowledge, mcp, critical_notes, project_history |
+| `tester` | instance, bash, proc, filesystem, time, self, help, image, knowledge, mcp, context, shared_context, db |
 | `jober` | job, help, self, time, project, knowledge, mcp |
 
 #### Knowledge Tools
@@ -413,7 +413,7 @@ Innate skills are **shared prompt modules** stored in `agents/_prompt_system/inn
 
 | Skill | Agents Using | Description |
 |-------|--------------|-------------|
-| `opencode` | developer, planner, reviewer, tester, tidier, approver | Controls opencode sessions for code operations |
+| `opencode` | developer, planner, reviewer, tidier, approver | Controls opencode sessions for code operations |
 | `coordination` | leader | Coordinates work across specialized agents |
 | `job-orchestration` | jober | Creates, watches, and reacts to jobs |
 | `test-pack` | tester | Creates self-contained test scripts with subprocess timeout |

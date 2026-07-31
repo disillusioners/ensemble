@@ -84,20 +84,11 @@ Task: Inspect git diff to derive the change set
 3. The worker loads the named skill automatically (if provided) and executes the task.
 4. **After `send_message`, END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a new message. Holding your turn open blocks report delivery and deadlocks the run. Collect each worker's report as it arrives and aggregate once all expected reports are in.
 
-### Skill Selection Guide
+> This is the ONLY place the END TURN contract is stated in full. `rule.md` Cardinal #2 carries the invariant; this paragraph carries the *why*. It is not duplicated elsewhere in this directory.
 
-| Task Type | Skill to Load | `load_skill` |
-|-----------|---------------|--------------|
-| Unit testing | unit-test | `load_skill="unit-test"` |
-| Mock testing | mock-test | `load_skill="mock-test"` |
-| Pack execution | test-pack-execution | `load_skill="test-pack-execution"` |
-| Integration testing | integration-test | `load_skill="integration-test"` |
-| E2E testing | e2e-test | `load_skill="e2e-test"` |
-| Validation | ensure-validation | `load_skill="ensure-validation"` |
-| Flaky test mgmt | flaky-test-management | `load_skill="flaky-test-management"` |
-| Quick fix | quick-fix | `load_skill="quick-fix"` |
+### Skill Selection (canonical reference)
 
-**`load_skill` parameter:** pass `load_skill="<skill_name>"` as a separate keyword argument on the `send_message(...)` call. The parameter tells the worker to load the named skill before processing the task. Omit it for infrastructure-only tasks.
+The worker skill-selection table (task type → `load_skill` value → why) and the dispatch rules live canonically in the auto-loaded **`test-strategy.md` → "Worker Skill Selection (Dispatcher Contract)"**. I do not maintain a parallel copy here — refer there for the single source of truth. The "When to Load a Skill" matrix below covers the orthogonal WITH-vs-WITHOUT choice.
 
 ### When to Load a Skill (worker-only)
 
@@ -118,6 +109,21 @@ Task: Inspect git diff to derive the change set
 - Need to run mock tests with skill attribution? → Spawn worker with `load_skill="mock-test"`
 - Need skill-specific test execution for evolution data? → Always use worker dispatch with `load_skill`. Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary in rule.md) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
 - Need to inspect git / analyze source / discover tests / create a script? → Spawn worker WITHOUT `load_skill`.
+
+---
+
+## Fan-In Escape Valve (stalled / missing worker)
+
+A single crashed or hung worker must not dead-end the whole run — and must not make me silently incomplete. When a dispatched pack's node is not `done`, apply this ladder before aggregating:
+
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (Cardinal #2). For a single-pack run there is no fan-in; I simply wait.
+2. **One re-dispatch.** If the worker reports `error`/`crashed` (or the caller signals it is gone), spawn ONE replacement worker with the same `load_skill` and a fresh strict single-pack message noting "previous attempt failed/stalled — re-verify before trusting its output." Flip the `todo_graph` node back to `in_progress`.
+3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), stop waiting: mark the node `[incomplete: worker <id> failed twice]`, deliver the partial report, and add a `### Gaps` section naming every incomplete node, what it was supposed to cover, and the failure reason.
+4. **Max re-dispatch = 1.** Never spawn a third attempt. Two failures is a signal to escalate (notify the user/leader), not to retry.
+
+**Batching:** for parallel fan-out within one wave (2–3 independent packs), I may spawn them in one batch and END TURN once after the batch — per-dispatch END TURN is NOT required within a single wave. The escape valve above runs per-node as reports arrive.
+
+I never silently aggregate over a gap — every incomplete node surfaces in the final report (`rule.md` Cardinal #3).
 
 ---
 
