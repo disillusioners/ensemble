@@ -48,6 +48,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +69,7 @@ CONTEXT_SUFFIX = "]\n\n"
 # responses without an explicit encoder.
 CONTEXT_KIND_PROJECT = "project"
 CONTEXT_KIND_SHARED_CONTEXT = "shared_context"
+CONTEXT_KIND_AUTO_LOAD_SKILLS = "auto_load_skills"
 CONTEXT_KIND_SKILLS = "skills"
 
 
@@ -594,6 +597,263 @@ def build_shared_context_message(
     )
 
 
+# ─── Auto-load skills builder ─────────────────────────────────────────────────
+
+
+def build_auto_load_skills_message(
+    body: str,
+    skill_ids: list[str] | None = None,
+    instance_id: str | None = None,
+    agent_id: str | None = None,
+) -> HumanMessage | None:
+    """Build the ``[SYSTEM CONTEXT: Auto-Load Skills]`` message.
+
+    Wraps the always-on ``auto_load=True`` skills section as a
+    persistent ``[SYSTEM CONTEXT: ...]`` HumanMessage. Unlike
+    :func:`build_skills_message` (the BM25-search result), the
+    auto-load block is **not** driven by message relevance — it is
+    the foundational skill set the agent must see on every task.
+
+    Ordered BEFORE the BM25 skills block so the canonical layout is
+    ``project → shared_context → auto_load_skills → skills``. The
+    foundational block lands first because an agent (e.g.
+    ``developer`` / ``dev-strategy``) reads its always-on planning
+    guidance before any relevance-matched skill.
+
+    Stable identity (once-per-instance contract): when ``instance_id``
+    and ``agent_id`` are both provided the message id is derived as
+    ``"auto_load:{instance_id}:{agent_id}"`` so LangGraph's
+    ``add_messages`` reducer REPLACES the slot on every rebuild
+    instead of appending a duplicate. A fresh ``uuid4`` is used as a
+    fallback for callers that don't pass both ids (keeps backward-
+    compatible shape with the other builders at the cost of re-
+    accumulation in that path — the orchestrator always passes them).
+
+    Args:
+        body: The concatenated skill markdown (each skill's
+            ``content`` joined by the caller). Empty ``""`` →
+            ``None`` (no message to emit).
+        skill_ids: The auto-load skill IDs materialized for this
+            instance + project. Stored on
+            ``additional_kwargs["auto_load_skill_ids"]`` so the
+            messaging path can dedup-merge them into the instance's
+            ``last_injected_skill_ids`` metadata at checkpoint time
+            (keeping the orchestrator itself free of DB writes — see
+            :func:`assemble_context_messages`). The same stable id
+            also lets a ``<meta>`` REPLACE sweep drop the stale block
+            via :class:`RemoveMessage`.
+        instance_id: Instance id for the stable message id.
+        agent_id: Agent id for the stable message id.
+
+    Returns:
+        Tagged :class:`HumanMessage` carrying the auto-load block,
+        or ``None`` when ``body`` is empty / ``None``.
+    """
+    body = (body or "").strip()
+    if not body:
+        return None
+
+    if instance_id and agent_id:
+        msg_id = f"auto_load:{instance_id}:{agent_id}"
+    else:
+        msg_id = str(uuid.uuid4())
+
+    kwargs: dict[str, Any] = {
+        "injected_message": True,
+        "context_kind": CONTEXT_KIND_AUTO_LOAD_SKILLS,
+    }
+    if skill_ids:
+        kwargs["auto_load_skill_ids"] = list(skill_ids)
+
+    return HumanMessage(
+        content=f"{CONTEXT_PREFIX}Auto-Load Skills{CONTEXT_SUFFIX}{body}\n",
+        id=msg_id,
+        additional_kwargs=kwargs,
+    )
+
+
+def auto_load_skills_message_id(instance_id: str, agent_id: str) -> str:
+    """Return the stable message id for an instance+agent auto-load block.
+
+    Centralizes the id derivation so the builder (:func:`build_auto_load_skills_message`)
+    and the ``<meta>`` REPLACE sweep (:class:`RemoveMessage` emission in
+    :mod:`daemon.services.instance_messaging`) reference exactly the same
+    slot — the sweep can only drop the block it built.
+    """
+    return f"auto_load:{instance_id}:{agent_id}"
+
+
+async def _fetch_auto_load_skills(
+    agent_id: str,
+    project_id: str | None,
+    instance_id: str,
+    manager: Any,
+    instance_repository: Any,
+) -> tuple[list[Any], list[str]]:
+    """Fetch ``auto_load=True`` skills agent-scoped for the agent + project.
+
+    Returns ONLY the skills belonging to ``agent_id`` (not the
+    project-wide union), so a child agent (e.g. ``coder``) never
+    inherits a parent's (e.g. ``developer``) foundational skill —
+    preserving the one-skill-per-worker / per-agent auto_load contract.
+
+    Mirror-then-narrow of the legacy
+    :func:`daemon.services.instance_lifecycle.append_auto_load_skills`
+    pipeline (the legacy path is dormant in ``human_messages`` mode —
+    this is the live implementation):
+
+    1. Clone-on-miss via ``SkillCloneService.ensure_auto_load_skills_sync``,
+       which returns THIS agent's materialized skills (cloned from
+       ``skill_bank.get_auto_load_by_agent(agent_id)``). The return
+       value is used directly — no second ``get_auto_load_skills``
+       query, which also closes the cross-agent union gap (the project
+       table has no ``agent_id`` column).
+    2. Filter out skills explicitly REPLACED via ``<meta>`` tag
+       (``explicitly_replaced_ids`` in instance metadata) so REPLACE
+       semantics survive the move to HumanMessages (C3 invariant).
+
+    All side-effecting calls (clone, metadata read) are wrapped
+    in ``asyncio.to_thread`` (ADR-12) and guarded by ``try/except``
+    so a missing skill-evolution stack or transient DB error degrades
+    to ``(skills=[], trackable_ids=[])`` — the prompt is assembled
+    without an auto-load block rather than crashing a message turn.
+
+    Args:
+        agent_id: The resolved base agent id (e.g. ``"developer"``).
+        project_id: Project scope. ``None`` / empty → ``([], [])``
+            (auto-load is project-scoped).
+        instance_id: Instance id for the metadata read.
+        instance_repository: Repository exposing ``get(instance_id)``
+            with ``instance_metadata`` dict (duck-typed). ``None``
+            skips the REPLACE filter.
+
+    Returns:
+        ``(skills, trackable_ids)``:
+
+        * ``skills`` — this agent's :class:`Skill` rows to render
+          (REPLACE'd ones already excluded).
+        * ``trackable_ids`` — stringified skill IDs of ``skills`` for
+          the dedup-merge metadata write on the messaging path.
+    """
+    if not project_id:
+        return ([], [])
+
+    clone_service = getattr(manager, "_skill_clone_service", None)
+    if clone_service is None:
+        # No skill-evolution stack → cannot materialize per-agent
+        # auto_load skills. Degrade to "no block".
+        return ([], [])
+
+    # Clone-on-miss + return: this agent's cloned skills only.
+    try:
+        skills_list = await asyncio.to_thread(
+            clone_service.ensure_auto_load_skills_sync,
+            agent_id=agent_id,
+            project_id=project_id,
+        )
+    except Exception as e:
+        logger.warning(
+            f"[ContextMessages] Clone-on-miss for auto_load skills "
+            f"failed (agent={agent_id}, project={project_id[:8]}...): {e}"
+        )
+        return ([], [])
+
+    if not skills_list:
+        return ([], [])
+
+    # Issue 2 / C3: skip skills explicitly REPLACED via ``<meta>`` tag.
+    replaced_ids: set[str] = set()
+    if instance_repository is not None:
+        try:
+            inst = await asyncio.to_thread(
+                instance_repository.get, instance_id
+            )
+        except Exception as exc:
+            logger.debug(
+                f"[ContextMessages] instance_repository.get for REPLACE "
+                f"filter failed ({instance_id[:8]}...): {exc}"
+            )
+            inst = None
+        if inst is not None:
+            meta = getattr(inst, "instance_metadata", None) or {}
+            raw_replaced = meta.get(REPLACED_SKILLS_METADATA_KEY) or []
+            if isinstance(raw_replaced, list):
+                replaced_ids = {str(x) for x in raw_replaced if x}
+
+    filtered: list[Any] = []
+    trackable: list[str] = []
+    for skill in skills_list:
+        sid = getattr(skill, "id", None)
+        if sid is not None and str(sid) in replaced_ids:
+            continue
+        filtered.append(skill)
+        if sid is not None:
+            trackable.append(str(sid))
+
+    return (filtered, trackable)
+
+
+async def _build_auto_load_block(
+    agent_meta: Any,
+    instance_id: str,
+    project_id: str | None,
+    manager: Any,
+    instance_repository: Any,
+) -> HumanMessage | None:
+    """Fetch + render the auto-load skills block for this instance + agent.
+
+    Shared by the first-turn path (``not project_already_injected``) and
+    the REPLACE-invalidation path (``auto_load_invalidated``) so the
+    build instruction is defined exactly once. Returns the stable-id
+    ``[SYSTEM CONTEXT: Auto-Load Skills]`` HumanMessage (filtered by
+    ``explicitly_replaced_ids`` inside :func:`_fetch_auto_load_skills`),
+    or ``None`` when the agent has no auto-load skills / skill stack /
+    non-empty content.
+
+    Args:
+        agent_meta: Agent metadata (``id`` drives the agent-scoped fetch).
+        instance_id: Instance id (stable block id component).
+        project_id: Project scope (``None``/empty → no block).
+        manager: :class:`InstanceManager` exposing
+            ``_skill_clone_service``.
+        instance_repository: Repository for the REPLACE-filter read.
+
+    Returns:
+        The auto-load HumanMessage, or ``None``.
+    """
+    al_agent_id = getattr(agent_meta, "id", None)
+    if not al_agent_id:
+        return None
+    al_skills, al_trackable_ids = await _fetch_auto_load_skills(
+        agent_id=al_agent_id,
+        project_id=project_id,
+        instance_id=instance_id,
+        manager=manager,
+        instance_repository=instance_repository,
+    )
+    al_sections: list[str] = []
+    for _skill in al_skills:
+        _content = (getattr(_skill, "content", "") or "").strip()
+        if _content:
+            al_sections.append(_content)
+    if not al_sections:
+        return None
+    al_body = "\n\n---\n\n".join(al_sections)
+    msg = build_auto_load_skills_message(
+        body=al_body,
+        skill_ids=al_trackable_ids,
+        instance_id=instance_id,
+        agent_id=al_agent_id,
+    )
+    if msg is not None:
+        logger.info(
+            f"[ContextMessages] Built auto-load skills block "
+            f"({len(al_skills)} skill(s)) for "
+            f"{instance_id[:8]}... (agent={al_agent_id})"
+        )
+    return msg
+
+
 # ─── Skills builder ──────────────────────────────────────────────────────────
 
 
@@ -861,6 +1121,7 @@ async def assemble_context_messages(
     skill_injection_result: tuple[str | None, list[str]] | None = None,
     message_id: str | None = None,
     project_already_injected: bool = False,
+    auto_load_invalidated: bool = False,
 ) -> tuple[list[HumanMessage], list[HumanMessage]]:
     """Async orchestrator returning ``(persistent_msgs, ephemeral_msgs)``.
 
@@ -1009,9 +1270,29 @@ async def assemble_context_messages(
     # skill block keeps growing turn-over-turn and is visible in
     # message history for debugging.
     if project_already_injected:
+        # On turn 2+ the project + shared-context + auto-load blocks
+        # are already checkpointed — only the per-turn BM25 skill search
+        # rebuilds. Exception: a ``<meta>`` REPLACE recorded this turn
+        # (``auto_load_invalidated``) may have changed the auto-load set
+        # (``explicitly_replaced_ids``), so re-materialize the FILTERED
+        # block under its stable id so ``add_messages`` supersedes the
+        # stale one instead of leaving the replaced skill in context
+        # (or, with the messaging path's RemoveMessage backstop,
+        # dropping all auto-load skills for the session).
+        persistent_after_inject: list[HumanMessage] = []
+        if auto_load_invalidated:
+            al_msg = await _build_auto_load_block(
+                agent_meta=agent_meta,
+                instance_id=instance_id,
+                project_id=project_id,
+                manager=manager,
+                instance_repository=instance_repository,
+            )
+            if al_msg is not None:
+                persistent_after_inject.append(al_msg)
         skills_enabled_only = bool(getattr(agent_meta, "skill_injection", False))
         if not skills_enabled_only:
-            return ([], [])
+            return (persistent_after_inject, [])
         if skill_injection_result is not None:
             injection_text, _skill_ids = skill_injection_result
         else:
@@ -1024,14 +1305,15 @@ async def assemble_context_messages(
             )
         skills_msg = build_skills_message(injection_text)
         if skills_msg is None:
-            return ([], [])
+            return (persistent_after_inject, [])
         # Skills are now PERSISTENT (checkpointed). The pre-refactor
         # ephemeral path returned ``([], [skills_msg])`` — kept as a
         # comment here for traceability:
         #   return ([], [skills_msg])
         # Future versions may re-enable ephemeral injection with
         # explicit skill lifecycles.
-        return ([skills_msg], [])
+        persistent_after_inject.append(skills_msg)
+        return (persistent_after_inject, [])
 
     persistent_msgs: list[HumanMessage] = []
     ephemeral_msgs: list[HumanMessage] = []
@@ -1088,7 +1370,48 @@ async def assemble_context_messages(
         if shared_msg is not None:
             persistent_msgs.append(shared_msg)
 
-    # ── 3. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
+    # ── 3. Auto-load skills message — PERSISTENT (once-per-instance + REPLACE-rebuild) ─
+    # Always-on ``auto_load=True`` skills (e.g. ``developer`` /
+    # ``dev-strategy``). Unlike the BM25 skills block below, this is NOT
+    # driven by message relevance — it is the foundational skill set the
+    # agent must see on every task. Independent of the ``skill_injection``
+    # boolean so an agent without per-turn search still gets its
+    # always-on planning/strategy skill.
+    #
+    # Build + checkpoint contract: built on the first turn (when
+    # ``project_already_injected`` is False) AND rebuilt — filtered by
+    # ``explicitly_replaced_ids`` — on a ``<meta>``-REPLACE turn where
+    # the messaging path sets ``auto_load_invalidated`` (see the
+    # ``project_already_injected`` early-return above). The resulting
+    # HumanMessage is prepended to ``graph_input`` by the messaging path
+    # and lives in ``state['messages']`` from then on via LangGraph's
+    # ``add_messages`` reducer — subsequent turns read it from the
+    # checkpoint for free. The stable id (``auto_load:{iid}:{aid}``)
+    # means a filtered rebuild SUPERSEDES the stale block instead of
+    # appending (and lets the messaging path safely ``RemoveMessage``
+    # the old one when the filtered result is empty).
+    #
+    # The orchestrator itself performs NO metadata writes (the
+    # ``last_injected_skill_ids`` dedup-merge is deferred to the
+    # messaging path via the ``auto_load_skill_ids`` additional_kwargs),
+    # so the ``GET /messages`` read path that also calls this function
+    # is structurally read-only.
+    if not project_already_injected:
+        # First turn: build + checkpoint the auto-load block. (On turn 2+
+        # the gate above short-circuits; a REPLACE-invalidation rebuild is
+        # handled in the ``project_already_injected`` branch via
+        # ``auto_load_invalidated``.)
+        al_msg = await _build_auto_load_block(
+            agent_meta=agent_meta,
+            instance_id=instance_id,
+            project_id=project_id,
+            manager=manager,
+            instance_repository=instance_repository,
+        )
+        if al_msg is not None:
+            persistent_msgs.append(al_msg)
+
+    # ── 4. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
     # Ephemeral skill injection is currently disabled. Skills are
     # persistent (checkpointed) for debugging and improvement. The
     # skill ``HumanMessage`` produced here is prepended to
@@ -1143,11 +1466,14 @@ __all__ = [
     "CONTEXT_SUFFIX",
     "CONTEXT_KIND_PROJECT",
     "CONTEXT_KIND_SHARED_CONTEXT",
+    "CONTEXT_KIND_AUTO_LOAD_SKILLS",
     "CONTEXT_KIND_SKILLS",
     "ContextInjectionMode",
     # Pure builder functions
     "build_project_context_message",
     "build_shared_context_message",
+    "build_auto_load_skills_message",
+    "auto_load_skills_message_id",
     "build_skills_message",
     # Shared helpers
     "escape_for_context_block",

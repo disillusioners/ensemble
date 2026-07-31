@@ -63,6 +63,7 @@ from langchain_core.messages import HumanMessage
 from daemon.services.instance_messaging import (
     InstanceMessagingService,
     _build_graph_input,
+    _dedup_merge_skill_ids,
 )
 
 
@@ -264,6 +265,65 @@ async def _invoke_hook(
 # ============================================================
 # _build_graph_input — module-level helper (direct unit tests)
 # ============================================================
+
+
+class TestDedupMergeSkillIdsHelper:
+    """Direct tests for :func:`_dedup_merge_skill_ids`.
+
+    Centralizes the read-merge-write of ``last_injected_skill_ids`` so
+    the BM25 persist and the auto-load persist share one implementation.
+    These verify the dedup-merge contract directly, independent of the
+    full messaging-path wiring.
+    """
+
+    @staticmethod
+    def _repo(existing: list[str] | None = None) -> MagicMock:
+        repo = MagicMock()
+        inst = MagicMock()
+        inst.instance_metadata = (
+            {"last_injected_skill_ids": list(existing)} if existing else {}
+        )
+        repo.get.return_value = inst
+        return repo
+
+    def test_appends_new_ids_after_existing_preserving_order(self) -> None:
+        repo = self._repo(existing=["a", "b"])
+        _dedup_merge_skill_ids(repo, "inst-1", ["b", "c"])
+        repo.set_metadata.assert_called_once_with(
+            "inst-1", "last_injected_skill_ids", ["a", "b", "c"]
+        )
+
+    def test_dedups_repeats_within_new_ids(self) -> None:
+        repo = self._repo(existing=[])
+        _dedup_merge_skill_ids(repo, "inst-1", ["x", "x", "y"])
+        repo.set_metadata.assert_called_once_with(
+            "inst-1", "last_injected_skill_ids", ["x", "y"]
+        )
+
+    def test_drops_falsy_ids(self) -> None:
+        repo = self._repo(existing=[])
+        _dedup_merge_skill_ids(repo, "inst-1", ["", "k", None])  # type: ignore[list-item]
+        repo.set_metadata.assert_called_once_with(
+            "inst-1", "last_injected_skill_ids", ["k"]
+        )
+
+    def test_missing_instance_row_is_treated_as_empty(self) -> None:
+        repo = MagicMock()
+        repo.get.return_value = None
+        _dedup_merge_skill_ids(repo, "inst-1", ["n"])
+        repo.set_metadata.assert_called_once_with(
+            "inst-1", "last_injected_skill_ids", ["n"]
+        )
+
+    def test_corrupted_metadata_value_is_tolerated(self) -> None:
+        repo = MagicMock()
+        inst = MagicMock()
+        inst.instance_metadata = {"last_injected_skill_ids": "not-a-list"}
+        repo.get.return_value = inst
+        _dedup_merge_skill_ids(repo, "inst-1", ["m"])
+        repo.set_metadata.assert_called_once_with(
+            "inst-1", "last_injected_skill_ids", ["m"]
+        )
 
 
 class TestBuildGraphInputHelper:

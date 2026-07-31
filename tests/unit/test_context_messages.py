@@ -52,7 +52,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, RemoveMessage
 
 from daemon.registry import ContextInjectionConfig
 from daemon.services.context_messages import (
@@ -1018,6 +1018,7 @@ class TestAssembleContextMessagesModeGate:
         *,
         project: Any = None,
         skill_text: tuple[str | None, list[str]] | None = None,
+        auto_load_skills: list[Any] | None = None,
     ) -> tuple[Any, Any]:
         """Build a manager + repo pair with a stub project + skills service."""
         project_repo = MagicMock()
@@ -1039,8 +1040,27 @@ class TestAssembleContextMessagesModeGate:
         manager._shared_context_metadata_repo = kv_repo
         manager._skill_injection_service = skill_service
 
+        # Auto-load skills stack (skill evolution): clone service is the
+        # single source — `_fetch_auto_load_skills` uses the return value of
+        # ``ensure_auto_load_skills_sync`` (this agent's cloned skills) rather
+        # than re-querying ``get_auto_load_skills`` (project-wide union).
+        if auto_load_skills is not None:
+            clone_service = MagicMock()
+            clone_service.ensure_auto_load_skills_sync.return_value = auto_load_skills
+            manager._skill_clone_service = clone_service
+            # Caller-gated; no separate query path anymore — no-op stub.
+            manager._skill_repo = MagicMock()
+        else:
+            # No skill stack → auto-load path returns ([], []) cleanly.
+            manager._skill_repo = None
+            manager._skill_clone_service = None
+
         instance_repository = MagicMock()
         instance_repository.get_tree_root_id.return_value = "root-id"
+        # Default: instance has no REPLACE metadata.
+        _inst = MagicMock()
+        _inst.instance_metadata = {}
+        instance_repository.get.return_value = _inst
 
         return manager, instance_repository
 
@@ -1230,6 +1250,407 @@ class TestAssembleContextMessagesModeGate:
         assert "skills" not in kinds
         # No skill search should have run.
         assert manager._skill_injection_service.inject_skills.await_count == 0
+
+
+# ─── Auto-load skills HumanMessage path ──────────────────────────────────────
+
+
+class TestAssembleAutoLoadSkills:
+    """Tests for the ``[SYSTEM CONTEXT: Auto-Load Skills]`` block.
+
+    Covers the bug where ``auto_load=True`` skills (e.g. ``developer`` /
+    ``dev-strategy``) were silently dropped for spawned instances because
+    the legacy ``append_auto_load_skills`` short-circuits in
+    ``human_messages`` mode (the only mode now in use). The fix surfaces
+    them as a persistent HumanMessage built once per instance inside
+    :func:`assemble_context_messages`, independent of the
+    ``skill_injection`` opt-in flag.
+    """
+
+    @staticmethod
+    def _make_skill(
+        skill_id: str = "skill-1",
+        content: str = "# Dev Strategy\nplan + dispatch guidance",
+    ) -> Any:
+        s = MagicMock()
+        s.id = skill_id
+        s.content = content
+        s.name = skill_id
+        return s
+
+    @staticmethod
+    def _run(coro: Any) -> Any:
+        return asyncio.run(coro)
+
+    def test_auto_load_table_injected_on_first_turn_independent_of_skill_injection(
+        self,
+    ) -> None:
+        """``skill_injection=False`` but ``auto_load`` skill exists → block emitted.
+
+        Reproduces the original bug: ``developer`` / ``dev-strategy`` is
+        ``auto_load: true`` but the agent's ``skill_injection`` opt-in is
+        irrelevant — the always-on foundational skill must land in the
+        persistent context block on turn 1.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        dev_skill = self._make_skill(skill_id="dev-strat-id")
+        manager, instance_repo = (
+            TestAssembleContextMessagesModeGate._make_minimal_manager(
+                project=project, auto_load_skills=[dev_skill],
+            )
+        )
+        # ``id="developer"`` drives the clone-on-miss lookup.
+        agent_meta = MagicMock(spec=["id", "skill_injection", "context_injection_mode"])
+        agent_meta.id = "developer"
+        agent_meta.skill_injection = False
+        agent_meta.context_injection_mode = "human_messages"
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
+
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=None,
+        ):
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1",
+                    user_query="hi",
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "auto_load_skills" in kinds, (
+            f"auto_load_skills block missing from {kinds}"
+        )
+        al_msg = next(
+            m for m in result
+            if m.additional_kwargs["context_kind"] == "auto_load_skills"
+        )
+        # Foundational skill content is carried verbatim.
+        assert "Dev Strategy" in al_msg.content
+        # Skill IDs ride on additional_kwargs for the messaging-path persist.
+        assert al_msg.additional_kwargs.get("auto_load_skill_ids") == ["dev-strat-id"]
+        # Stable id (instance+agent) — add_messages REPLACES instead of
+        # appending on rebuild (duplicate-accumulation fix).
+        assert al_msg.id == "auto_load:inst-1:developer"
+        # Clone-on-miss ran for the agent + project.
+        manager._skill_clone_service.ensure_auto_load_skills_sync.assert_called_once()
+        # auto_load is independent of the BM25 opt-in flag.
+        assert "skills" not in kinds
+
+    def test_auto_load_clone_return_is_agent_scoped_no_project_wide_query(
+        self,
+    ) -> None:
+        """Skills come from the clone-service return, NOT a project-wide query.
+
+        Guards the cross-agent contamination fix: a child agent (coder)
+        must NOT inherit the parent agent's (developer) auto_load skills.
+        The agent-scoped result is whatever ``ensure_auto_load_skills_sync``
+        returns for THAT agent — the legacy project-wide
+        ``get_auto_load_skills(project_id)`` (agent-agnostic) is never
+        consulted.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        # Coder's own auto_load skill only.
+        coder_skill = self._make_skill(skill_id="wp-id", content="# Work Partition")
+        manager, instance_repo = (
+            TestAssembleContextMessagesModeGate._make_minimal_manager(
+                project=project, auto_load_skills=[coder_skill],
+            )
+        )
+        # Coder \"sees\" only its own clone return — the developer's
+        # dev-strategy is NOT in the clone result even though it would
+        # be in the shared project scope under the old query.
+        agent_meta = MagicMock(spec=["id", "skill_injection", "context_injection_mode"])
+        agent_meta.id = "coder"
+        agent_meta.skill_injection = False
+        agent_meta.context_injection_mode = "human_messages"
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
+
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=None,
+        ):
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-coder",
+                    user_query="build feature",
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+
+        al_msg = next(
+            (m for m in result
+             if m.additional_kwargs.get("context_kind") == "auto_load_skills"),
+            None,
+        )
+        assert al_msg is not None
+        assert "Work Partition" in al_msg.content
+        assert "Dev Strategy" not in al_msg.content
+        # Only coder's id tracked — no developer leakage.
+        assert al_msg.additional_kwargs.get("auto_load_skill_ids") == ["wp-id"]
+        # The agent-agnostic project query is never called.
+        assert manager._skill_repo.get_auto_load_skills.call_count == 0
+
+    def test_auto_load_skipped_when_project_already_injected(
+        self,
+    ) -> None:
+        """Turn 2+ (``project_already_injected=True``) skips the auto-load build.
+
+        The once-per-instance contract: the block was checkpointed on
+        turn 1, so the orchestrator must not rebuild it (and must not
+        re-run clone-on-miss) on subsequent turns.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        dev_skill = self._make_skill(skill_id="dev-strat-id")
+        manager, instance_repo = (
+            TestAssembleContextMessagesModeGate._make_minimal_manager(
+                project=project, auto_load_skills=[dev_skill],
+            )
+        )
+        agent_meta = MagicMock(spec=["id", "skill_injection", "context_injection_mode"])
+        agent_meta.id = "developer"
+        agent_meta.skill_injection = True
+        agent_meta.context_injection_mode = "human_messages"
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
+
+        manager._skill_injection_service.inject_skills = AsyncMock(
+            return_value=(None, []),
+        )
+
+        result = _flatten_context_result(self._run(
+            assemble_context_messages(
+                instance_id="inst-1",
+                user_query="hi",
+                project_id="proj-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+                project_already_injected=True,
+            )
+        ))
+
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "auto_load_skills" not in kinds
+        # Rebuild avoided.
+        assert manager._skill_clone_service.ensure_auto_load_skills_sync.call_count == 0
+
+    def test_auto_load_respects_explicitly_replaced_ids(
+        self,
+    ) -> None:
+        """A ``<meta>``-REPLACED auto_load skill is filtered out of the block.
+
+        C3 invariant: the REPLACE side (``<meta skill="…">``) wins over
+        the additive auto_load. An auto_load skill whose id is in the
+        instance's ``explicitly_replaced_ids`` set must NOT be
+        re-introduced by the HumanMessage body.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        # Two auto_load skills, one is REPLACE'd.
+        kept = self._make_skill(skill_id="kept-id", content="# Kept skill")
+        replaced = self._make_skill(skill_id="repl-id", content="# Replaced")
+        manager, instance_repo = (
+            TestAssembleContextMessagesModeGate._make_minimal_manager(
+                project=project, auto_load_skills=[kept, replaced],
+            )
+        )
+        # Mark ``repl-id`` as explicitly replaced in instance metadata.
+        inst_row = MagicMock()
+        inst_row.instance_metadata = {"explicitly_replaced_ids": ["repl-id"]}
+        instance_repository_get_mock = MagicMock(return_value=inst_row)
+        instance_repo.get = instance_repository_get_mock
+
+        agent_meta = MagicMock(spec=["id", "skill_injection", "context_injection_mode"])
+        agent_meta.id = "developer"
+        agent_meta.skill_injection = False
+        agent_meta.context_injection_mode = "human_messages"
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
+
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=None,
+        ):
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1",
+                    user_query="hi",
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+
+        al_msg = next(
+            (m for m in result
+             if m.additional_kwargs.get("context_kind") == "auto_load_skills"),
+            None,
+        )
+        assert al_msg is not None
+        # Replaced skill body dropped, kept body present.
+        assert "Kept skill" in al_msg.content
+        assert "Replaced" not in al_msg.content
+        # Only the kept id is tracked.
+        assert al_msg.additional_kwargs.get("auto_load_skill_ids") == ["kept-id"]
+
+    def test_auto_load_no_skill_repo_returns_no_block(
+        self,
+    ) -> None:
+        """Manager without ``_skill_repo`` (skill evolution disabled) → no block.
+
+        A deployment / test fixture without the skill-evolution stack
+        must not crash — auto_load degrades to (no block) cleanly.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        manager, instance_repo = (
+            TestAssembleContextMessagesModeGate._make_minimal_manager(
+                project=project, auto_load_skills=None,
+            )
+        )
+        agent_meta = MagicMock(spec=["id", "skill_injection", "context_injection_mode"])
+        agent_meta.id = "developer"
+        agent_meta.skill_injection = False
+        agent_meta.context_injection_mode = "human_messages"
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
+
+        result = _flatten_context_result(self._run(
+            assemble_context_messages(
+                instance_id="inst-1",
+                user_query="hi",
+                project_id="proj-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        ))
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "auto_load_skills" not in kinds
+
+    def test_auto_load_filtered_rebuild_when_replaced(
+        self,
+    ) -> None:
+        """REPLACE on turn 2+ triggers a FILTERED rebuild, not bare removal.
+
+        With ``auto_load_invalidated=True`` the orchestrator rebuilds the
+        auto-load block (excluding ``explicitly_replaced_ids``) even on turn
+        2+ — so only the replaced skill is dropped, not all of them. The
+        rebuilt block carries the same stable id so ``add_messages``
+        supersedes the stale one.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+        kept = self._make_skill(skill_id="kept-id", content="# Kept skill")
+        replaced = self._make_skill(skill_id="repl-id", content="# Replaced")
+        manager, instance_repo = (
+            TestAssembleContextMessagesModeGate._make_minimal_manager(
+                project=project, auto_load_skills=[kept, replaced],
+            )
+        )
+        # ``explicitly_replaced_ids`` already in instance metadata (REPLACE
+        # recorded on this turn).
+        inst_row = MagicMock()
+        inst_row.instance_metadata = {"explicitly_replaced_ids": ["repl-id"]}
+        instance_repo.get.return_value = inst_row
+
+        agent_meta = MagicMock(spec=["id", "skill_injection", "context_injection_mode"])
+        agent_meta.id = "developer"
+        agent_meta.skill_injection = False
+        agent_meta.context_injection_mode = "human_messages"
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=True,
+        )
+
+        result = _flatten_context_result(self._run(
+            assemble_context_messages(
+                instance_id="inst-1",
+                user_query="hi",
+                project_id="proj-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+                # Turn 2+: project_already_injected=True would normally
+                # short-circuit, BUT the REPLACE flag forces the rebuild.
+                project_already_injected=True,
+                auto_load_invalidated=True,
+            )
+        ))
+
+        kinds = [m.additional_kwargs["context_kind"] for m in result]
+        assert "auto_load_skills" in kinds
+        al_msg = next(
+            m for m in result
+            if m.additional_kwargs["context_kind"] == "auto_load_skills"
+        )
+        # Replaced content filtered out; kept content present.
+        assert "Kept skill" in al_msg.content
+        assert "Replaced" not in al_msg.content
+        assert al_msg.additional_kwargs.get("auto_load_skill_ids") == ["kept-id"]
+        # Stable id so add_messages supersedes the stale turn-1 block.
+        assert al_msg.id == "auto_load:inst-1:developer"
+
+    def test_message_id_helper_matches_builder_stable_id(self) -> None:
+        """``auto_load_skills_message_id`` returns the exact builder slot id.
+
+        The ``<meta>`` REPLACE sweep (``RemoveMessage``) and the
+        builder MUST reference the same id — otherwise the sweep can't
+        target the block it needs to drop (REPLACE leak fix).
+        """
+        from daemon.services.context_messages import (
+            auto_load_skills_message_id,
+            build_auto_load_skills_message,
+        )
+
+        msg = build_auto_load_skills_message(
+            body="body", skill_ids=["s1"],
+            instance_id="inst-9", agent_id="developer",
+        )
+        assert msg is not None
+        assert msg.id == auto_load_skills_message_id("inst-9", "developer")
+        # Builder falls back to a uuid (re-accumulation path) when ids
+        # aren't provided — documented divergence for backward-compat.
+        fallback = build_auto_load_skills_message(body="body")
+        assert fallback is not None
+        assert fallback.id != auto_load_skills_message_id("inst-9", "developer")
+
+    def test_remove_message_on_absent_id_raises_in_langgraph(self) -> None:
+        """Regression guard: langgraph raises on RemoveMessage(absent id).
+
+        Documents WHY the messaging-path REPLACE sweep gates on
+        ``auto_load_block_active`` — a bare ``RemoveMessage`` for an
+        auto-load block that was never checkpointed crashes the message
+        turn with ``ValueError``. If langgraph ever stops raising, the
+        gate becomes redundant (still safe) and this test can be relaxed.
+        Skipped in environments that stub ``langgraph`` (unit-test
+        conftest) — the assertion matters only against the real reducer.
+        """
+        try:
+            from langgraph.graph.message import add_messages
+        except Exception:
+            pytest.skip("langgraph.graph.message unavailable in this env")
+        left = [HumanMessage(content="h1", id="A")]
+        with pytest.raises(ValueError, match="doesn't exist"):
+            add_messages(left, [RemoveMessage(id="auto_load:inst:dev")])
 
 
 # ─── _fetch_project_payload debug log ────────────────────────────────────────

@@ -638,7 +638,13 @@ def _messages_have_context_block(messages: list[Any]) -> bool:
         unexpected branch.
     """
     # Mirrors ``context_messages.CONTEXT_KIND_*`` — keep in sync.
-    _CONTEXT_KINDS = frozenset({"project", "shared_context", "skills"})
+    # ``auto_load_skills`` is included so the read path serves the
+    # checkpointed auto-load block directly instead of rebuilding +
+    # re-running clone-on-miss on every ``GET /messages`` poll once the
+    # block has been checkpointed on turn 1.
+    _CONTEXT_KINDS = frozenset({
+        "project", "shared_context", "auto_load_skills", "skills",
+    })
 
     for msg in messages:
         try:

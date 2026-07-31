@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
 from sqlmodel import Session
 
 from ..cancellation import CancellationToken
@@ -29,7 +29,11 @@ from .main_loop_bridge import MainLoopBridge
 from .messaging_types import AsyncMessageResult
 from .project_normalizer import normalize_project_id
 from .skill_meta_parser import extract_load_skill, parse_meta_tag
-from .skill_metrics_service import INJECTED_SKILLS_METADATA_KEY
+from .skill_metrics_service import (
+    AUTO_LOAD_BLOCK_ACTIVE_KEY,
+    INJECTED_SKILLS_METADATA_KEY,
+    REPLACED_SKILLS_METADATA_KEY,
+)
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -79,6 +83,44 @@ def _stringify_tool_message_content(m) -> tuple[str, str]:
     raw_content = getattr(m, "content", "") or ""
     content_str = raw_content if isinstance(raw_content, str) else str(raw_content)
     return tc_id, content_str
+
+
+def _dedup_merge_skill_ids(
+    instance_repository: Any,
+    instance_id: str,
+    new_ids: list[str],
+) -> None:
+    """Read-merge-write ``last_injected_skill_ids`` (DEDUP-MERGE) for one instance.
+
+    Centralizes the read-modify-write of :data:`INJECTED_SKILLS_METADATA_KEY`
+    so the BM25-skill persist and the auto-load-skill persist share one
+    implementation. Order-preserving union via ``dict.fromkeys``: existing
+    (explicit) IDs first, then ``new_ids`` appended, duplicates dropped.
+
+    No filtering is applied here — REPLACE/REPLACED filtering is the
+    caller's responsibility (auto-load: :func:`_fetch_auto_load_skills`;
+    BM25: ``SkillInjectionService``). Keeping the merge filter-free means
+    a future exclusion rule has exactly one site to update per producer.
+
+    Args:
+        instance_repository: Repository exposing ``get`` (returning an
+            instance row whose ``instance_metadata`` is a dict) and
+            ``set_metadata``.
+        instance_id: Target instance.
+        new_ids: Skill IDs to merge into the existing set.
+    """
+    inst = instance_repository.get(instance_id)
+    existing: list[str] = []
+    if inst is not None and inst.instance_metadata:
+        raw = inst.instance_metadata.get(INJECTED_SKILLS_METADATA_KEY) or []
+        if isinstance(raw, list):
+            existing = [str(x) for x in raw if x]
+    merged = list(dict.fromkeys(existing + [str(x) for x in new_ids if x]))
+    instance_repository.set_metadata(
+        instance_id,
+        INJECTED_SKILLS_METADATA_KEY,
+        merged,
+    )
 
 
 def _build_graph_input(
@@ -2102,6 +2144,13 @@ class InstanceMessagingService:
         # orchestrator short-circuits, so the extra read is the cost
         # of correctness).
         project_already_injected = False
+        # Whether a ``[SYSTEM CONTEXT: Auto-Load Skills]`` block is
+        # currently checkpointed for this instance — gating the
+        # ``<meta>`` REPLACE sweep (RemoveMessage) so it only targets an
+        # id that actually exists (langgraph raises on an absent-id
+        # RemoveMessage). Captured from the SAME instance-row read as
+        # ``project_already_injected`` — no extra DB round-trip.
+        auto_load_block_active = False
         try:
             _flag_row = await asyncio.to_thread(
                 self._manager._instance_repository.get, instance_id
@@ -2110,12 +2159,16 @@ class InstanceMessagingService:
                 project_already_injected = bool(
                     _flag_row.instance_metadata.get("project_injected")
                 )
+                auto_load_block_active = bool(
+                    _flag_row.instance_metadata.get(AUTO_LOAD_BLOCK_ACTIVE_KEY)
+                )
         except Exception as _flag_exc:  # pragma: no cover - defensive
             logger.debug(
                 f"[Messaging] project_injected capture failed for "
                 f"{instance_id[:8]}...: {_flag_exc}"
             )
             project_already_injected = False
+            auto_load_block_active = False
 
         # Project context injection for first message only
         if not is_retry:
@@ -2527,26 +2580,12 @@ class InstanceMessagingService:
                                     # read them at task-completion time.
                                     if injected_skill_ids:
                                         try:
-                                            def _persist_injected(
-                                                _iid: str = instance_id,
-                                                _ids: list[str] = injected_skill_ids,
-                                            ) -> None:
-                                                inst = self._manager._instance_repository.get(_iid)
-                                                existing: list[str] = []
-                                                if inst is not None and inst.instance_metadata:
-                                                    raw = inst.instance_metadata.get(
-                                                        INJECTED_SKILLS_METADATA_KEY
-                                                    ) or []
-                                                    if isinstance(raw, list):
-                                                        existing = [str(x) for x in raw if x]
-                                                merged = list(dict.fromkeys(existing + list(_ids)))
-                                                self._manager._instance_repository.set_metadata(
-                                                    _iid,
-                                                    INJECTED_SKILLS_METADATA_KEY,
-                                                    merged,
-                                                )
-
-                                            await asyncio.to_thread(_persist_injected)
+                                            await asyncio.to_thread(
+                                                _dedup_merge_skill_ids,
+                                                self._manager._instance_repository,
+                                                instance_id,
+                                                injected_skill_ids,
+                                            )
                                         except Exception as e:
                                             logger.warning(
                                                 f"Failed to persist "
@@ -2588,6 +2627,11 @@ class InstanceMessagingService:
         # previously-injected skills that are NOT in the new set get a
         # ``SUPERSEDED`` usage record via ``finalize_superseded_skills``
         # so they stop skewing the completion-rate aggregation.
+        # Declared here (before the meta block) so the REPLACE closure
+        # can write via ``nonlocal`` and the persistent-context section
+        # below can read it unconditionally — most messages have no
+        # ``<meta>`` tag, so the variable must always be bound.
+        _auto_load_sweep_agent_id: str | None = None
         if _meta_skill is not None:
             if is_completion_report or is_retry:
                 logger.debug(
@@ -2624,6 +2668,9 @@ class InstanceMessagingService:
                     # fixtures).
                     _meta_skill_ids: list[str] = []
                     _meta_injection_text: str | None = None
+                    # ``_auto_load_sweep_agent_id`` is declared above the
+                    # meta block; the REPLACE closure sets it (nonlocal)
+                    # when dropped skills invalidate the auto-load block.
                     if injection_service is not None:
                         (
                             _meta_injection_text,
@@ -2694,6 +2741,7 @@ class InstanceMessagingService:
                             _pid: str | None = _meta_project_id,
                             _aid: str = _meta_agent_id,
                         ) -> None:
+                            nonlocal _auto_load_sweep_agent_id
                             inst = self._manager._instance_repository.get(_iid)
                             existing: list[str] = []
                             if inst is not None and inst.instance_metadata:
@@ -2724,9 +2772,19 @@ class InstanceMessagingService:
                             if dropped:
                                 self._manager._instance_repository.set_metadata(
                                     _iid,
-                                    "explicitly_replaced_ids",
+                                    REPLACED_SKILLS_METADATA_KEY,
                                     dropped,
                                 )
+                                # Flag the auto-load REMOVE sweep: the
+                                # turn-1 checkpointed
+                                # ``[SYSTEM CONTEXT: Auto-Load Skills]``
+                                # block may carry a now-replaced skill. The
+                                # once-per-instance gate suppresses a rebuild,
+                                # so emit a ``RemoveMessage`` (graph_input)
+                                # to drop the stale block this turn. A fresh
+                                # filtered block re-materializes on the next
+                                # first turn of a new instance.
+                                _auto_load_sweep_agent_id = _aid or None
                             # ── Fix 4: SUPERSEDED LAST ─────────────────────
                             # Only after metadata is consistent do we stamp
                             # SUPERSEDED usage rows for the dropped IDs.
@@ -2873,6 +2931,14 @@ class InstanceMessagingService:
                         parent_id=_persistent_parent_id,
                         skill_injection_result=_cached_skill,
                         project_already_injected=project_already_injected,
+                        # A ``<meta>`` REPLACE recorded dropped skills →
+                        # the checkpointed auto-load block may carry a
+                        # now-replaced skill. Force a filtered rebuild
+                        # (under the stable id) so only the surviving
+                        # auto-load skills remain, instead of dropping
+                        # them all (bare RemoveMessage) or leaking the
+                        # replaced content.
+                        auto_load_invalidated=bool(_auto_load_sweep_agent_id),
                     )
                     # 2026-07-29 refactor: ``_ephemeral_msgs`` is now
                     # always ``[]`` in ``human_messages`` mode (skills
@@ -2893,6 +2959,125 @@ class InstanceMessagingService:
                             f"since 2026-07-29 refactor) to graph_input for "
                             f"{instance_id[:8]}... (project_injected={project_already_injected})"
                         )
+
+                    # ── Auto-load REPLACE sweep (C3 leak fix) ────────────────
+                    # A ``<meta>`` REPLACE that dropped skills may have
+                    # invalidated the turn-1 checkpointed
+                    # ``[SYSTEM CONTEXT: Auto-Load Skills]`` block (the
+                    # once-per-instance gate suppresses a filtered rebuild).
+                    # Emit a ``RemoveMessage`` sentinel targeting the
+                    # stable block id so LangGraph's ``add_messages``
+                    # reducer drops the stale block from
+                    # ``state['messages']`` this turn — paired with the
+                    # filtered rebuild (``auto_load_invalidated``) so a
+                    # surviving set re-materializes under the same id.
+                    #
+                    # GATED on ``auto_load_block_active``: langgraph's
+                    # ``add_messages`` raises ``ValueError`` when a
+                    # ``RemoveMessage`` targets an id ABSENT from the
+                    # checkpoint. Agents without auto_load skills / no
+                    # project / no skill stack never build a block, so a
+                    # REPLACE of their BM25 skills there must NOT emit
+                    # the sweep (it would crash the message turn). On the
+                    # rebuild path a fresh same-id HumanMessage
+                    # supersedes the stale one regardless.
+                    _sweep_emitted = bool(
+                        _auto_load_sweep_agent_id and auto_load_block_active
+                    )
+                    if _sweep_emitted:
+                        from .context_messages import auto_load_skills_message_id
+                        persistent_context_msgs.insert(
+                            0,
+                            RemoveMessage(
+                                id=auto_load_skills_message_id(
+                                    instance_id, _auto_load_sweep_agent_id
+                                )
+                            ),
+                        )
+                        logger.info(
+                            f"[Hybrid] Auto-load REPLACE sweep queued for "
+                            f"{instance_id[:8]}... (agent="
+                            f"{_auto_load_sweep_agent_id})"
+                        )
+
+                    # ── Auto-load skills metadata tracking (dedup-merge) ───
+                    # Extract the auto-load skill IDs carried by the
+                    # ``[SYSTEM CONTEXT: Auto-Load Skills]`` HumanMessage
+                    # and dedup-merge them into ``last_injected_skill_ids``
+                    # via the shared ``_dedup_merge_skill_ids`` helper
+                    # (same path the BM25 block uses). This keeps the
+                    # orchestrator itself free of DB writes (read-path
+                    # safe) while still letting ``SkillMetricsService``
+                    # attribute usage records at task completion.
+                    #
+                    # Only on the first turn — the once-per-instance
+                    # contract means auto-load is already checkpointed
+                    # on subsequent turns, so this block is naturally
+                    # gated by ``not project_already_injected`` via the
+                    # outer ``if not is_retry`` boundary plus the
+                    # fact that ``_persistent_msgs`` only carries the
+                    # auto-load message on the first turn.
+                    _al_ids: list[str] = []
+                    _has_auto_load_block = False
+                    for _pm in persistent_context_msgs:
+                        _ak = getattr(_pm, "additional_kwargs", None) or {}
+                        if _ak.get("context_kind") != "auto_load_skills":
+                            continue
+                        _has_auto_load_block = True
+                        # ``auto_load_skill_ids`` is always a list by
+                        # construction (build_auto_load_skills_message),
+                        # so no ``isinstance`` guard needed here.
+                        _al_ids.extend(
+                            str(x) for x in (_ak.get("auto_load_skill_ids") or [])
+                            if x
+                        )
+                    if _al_ids:
+                        try:
+                            await asyncio.to_thread(
+                                _dedup_merge_skill_ids,
+                                self._manager._instance_repository,
+                                instance_id,
+                                _al_ids,
+                            )
+                        except Exception as _al_exc:
+                            logger.warning(
+                                f"[Hybrid] Failed to persist auto-load "
+                                f"skill IDs for {instance_id[:8]}...: "
+                                f"{_al_exc}"
+                            )
+                    # Maintain the ``auto_load_block_active`` flag so the
+                    # sweep on a future REPLACE turn knows whether a block
+                    # is checkpointed (gates the safe-to-emit RemoveMessage).
+                    # The flag mirrors ``state['messages']`` presence, NOT
+                    # ``persistent_context_msgs`` (which on a steady turn-2+
+                    # carry nothing because the block already lives in the
+                    # checkpoint). So only TRANSITION when this turn actually
+                    # changed block state:
+                    #   * fresh block built this turn → True (supersedes
+                    #     any swept stale one via the stable id).
+                    #   * sweep emitted with NO fresh rebuild (all skills
+                    #     replaced → empty) →False (stale removed, nothing
+                    #     replaces it).
+                    #   * neither → leave the flag untouched.
+                    if _has_auto_load_block:
+                        _new_active = True
+                    elif _sweep_emitted:
+                        _new_active = False
+                    else:
+                        _new_active = auto_load_block_active  # unchanged
+                    if _new_active != auto_load_block_active:
+                        try:
+                            await asyncio.to_thread(
+                                self._manager._instance_repository.set_metadata,
+                                instance_id,
+                                AUTO_LOAD_BLOCK_ACTIVE_KEY,
+                                _new_active,
+                            )
+                        except Exception as _flag_set_exc:
+                            logger.debug(
+                                f"[Hybrid] Failed to update {AUTO_LOAD_BLOCK_ACTIVE_KEY} "
+                                f"for {instance_id[:8]}...: {_flag_set_exc}"
+                            )
             except Exception as _persist_exc:  # pragma: no cover - defensive
                 logger.warning(
                     f"[Hybrid] Persistent context assembly failed for "

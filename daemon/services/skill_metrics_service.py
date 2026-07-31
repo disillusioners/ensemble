@@ -99,6 +99,28 @@ logger = logging.getLogger(__name__)
 # recording so the next task starts clean.
 INJECTED_SKILLS_METADATA_KEY: str = "last_injected_skill_ids"
 
+# Key on ``instance_metadata`` storing skill IDs explicitly REPLACED
+# via a ``<meta skill="…">`` tag (REPLACE semantics). The auto-load
+# fetch (:func:`daemon.services.context_messages._fetch_auto_load_skills`)
+# skips these so a replaced auto-load skill does not re-enter the
+# prompt. Written by ``_finalize_and_replace`` in
+# :mod:`daemon.services.instance_messaging`. Centralized as a constant
+# (mirroring ``INJECTED_SKILLS_METADATA_KEY``) so a rename can't desync
+# the producer↔consumer pair.
+REPLACED_SKILLS_METADATA_KEY: str = "explicitly_replaced_ids"
+
+# Bool flag on ``instance_metadata`` recording whether a
+# ``[SYSTEM CONTEXT: Auto-Load Skills]`` HumanMessage is currently
+# checkpointed in ``state['messages']`` for this instance. The
+# ``<meta>`` REPLACE sweep (:class:`RemoveMessage` emission) reads it
+# BEFORE emitting a removal — langgraph's ``add_messages`` reducer
+# RAISES ``ValueError`` when a ``RemoveMessage`` targets an id absent
+# from the checkpoint, so the sweep must only fire when a block is
+# known to exist (agents without auto_load skills / no project / no
+# skill-evolution stack never build a block; a REPLACE of BM25 skills
+# there would otherwise crash the message turn).
+AUTO_LOAD_BLOCK_ACTIVE_KEY: str = "auto_load_block_active"
+
 
 def _now_iso() -> str:
     """Return current UTC time as ISO-8601 string.
@@ -442,7 +464,7 @@ class SkillMetricsService:
             await asyncio.to_thread(
                 self.instance_repo.delete_metadata,
                 instance_id,
-                "explicitly_replaced_ids",
+                REPLACED_SKILLS_METADATA_KEY,
             )
         except Exception as exc:
             logger.warning(
