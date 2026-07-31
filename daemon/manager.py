@@ -1790,6 +1790,7 @@ class InstanceManager:
             config=self.config.persistence,
             checkpointer=self._checkpointer,
             instance_repo=self._instance_repository,
+            ui_prefs_repo=self._instance_ui_prefs_repo,
             on_instance_deleted=self._release_cached_instance,
         )
         self._maintenance_service.register(

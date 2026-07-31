@@ -41,8 +41,11 @@ from daemon.constants import (
     CHECKPOINT_TTL_HOURS,
     MAX_INSTANCE_HISTORY,
 )
-from daemon.services.job_queue_service import TERMINAL_STATUSES
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.instance_ui_prefs.repository import (
+    InstanceUiPrefsRepository,
+)
+from daemon.services.job_queue_service import TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +367,7 @@ class CheckpointCleanupJob:
         checkpointer: CheckpointerAdapter,
         instance_repo: SQLModelInstanceRepository,
         on_instance_deleted: Callable[[str], None] | None = None,
+        ui_prefs_repo: InstanceUiPrefsRepository | None = None,
     ):
         """Initialize the checkpoint cleanup job.
 
@@ -378,11 +382,22 @@ class CheckpointCleanupJob:
                 Used to release in-memory state (graph, tasks, request registry)
                 in InstanceManager without creating a circular dependency.
                 Signature: takes instance_id, returns None.
+            ui_prefs_repo: Optional UI-prefs repository. When provided, the
+                cleanup job excludes any terminal instance whose tree root
+                (or any descendant of it) is currently pinned from TTL-based
+                and history-cap cleanup (Operations B and C). The set of
+                protected IDs is the union of every pinned instance's tree
+                root's full subtree — a pinned child resolves up to its root
+                and the entire sibling + descendant tree becomes protected.
+                ``None`` (the default) disables protection so the job runs in
+                backward-compatible mode for callers that have not wired the
+                UI-prefs repo. New code should pass this as a keyword argument.
         """
         self._config = config
         self._checkpointer = checkpointer
         self._instance_repo = instance_repo
         self._on_instance_deleted = on_instance_deleted
+        self._ui_prefs_repo = ui_prefs_repo
 
     async def execute(self) -> None:
         """Run all 4 checkpoint cleanup operations.
@@ -454,11 +469,18 @@ class CheckpointCleanupJob:
         where updated_at is older than checkpoint_ttl_hours, and performs full
         cleanup via _cleanup_instance (checkpoint data, DB record, in-memory state).
 
+        Instances that belong to a pinned subtree (see
+        :meth:`_get_protected_instance_ids`) are excluded from the candidate
+        set so user-pinned work is preserved indefinitely.
+
         Deletion method: _cleanup_instance() → adelete_thread() + instance_repo.delete() + callback.
         """
         try:
             ttl_hours = self._config.checkpoint_ttl_hours
             ttl_hours = ttl_hours if ttl_hours > 0 else CHECKPOINT_TTL_HOURS
+
+            # Compute the set of IDs to NEVER delete (pinned subtrees).
+            protected = self._get_protected_instance_ids()
 
             # Find terminal instances older than TTL
             cutoff = utcnow() - timedelta(hours=ttl_hours)
@@ -468,12 +490,31 @@ class CheckpointCleanupJob:
                 logger.debug(f"No expired terminal instances found")
                 return
 
-            logger.info(f"Found {len(expired_instances)} expired terminal instances")
+            # Exclude protected IDs before doing any work.
+            excluded = [iid for iid in expired_instances if iid in protected]
+            candidates = [iid for iid in expired_instances if iid not in protected]
+            if excluded:
+                logger.info(
+                    f"Excluded {len(excluded)} terminal instances from TTL "
+                    f"cleanup (pinned)"
+                )
+
+            if not candidates:
+                logger.info(
+                    f"Found {len(expired_instances)} expired terminal instances, "
+                    f"all pinned — skipping TTL cleanup"
+                )
+                return
+
+            logger.info(
+                f"Found {len(expired_instances)} expired terminal instances, "
+                f"{len(candidates)} after pin exclusion"
+            )
 
             # Full cleanup for each expired instance (checkpoint + record + in-memory)
             # Per-instance try/except ensures one failure doesn't abort the batch
             deleted = 0
-            for instance_id in expired_instances:
+            for instance_id in candidates:
                 try:
                     await self._cleanup_instance(instance_id)
                     deleted += 1
@@ -496,31 +537,59 @@ class CheckpointCleanupJob:
         Each pruned instance is fully cleaned up via _cleanup_instance
         (checkpoint data, DB record, in-memory state).
 
+        Instances that belong to a pinned subtree (see
+        :meth:`_get_protected_instance_ids`) do NOT count toward the cap and
+        are never pruned — the cap is computed on the protected-excluded set
+        so user-pinned work never pushes non-pinned history off the back of
+        the queue.
+
         Deletion method: _cleanup_instance() → adelete_thread() + instance_repo.delete() + callback.
         """
         try:
             max_history = self._config.max_instance_history
             max_history = max_history if max_history > 0 else MAX_INSTANCE_HISTORY
 
+            # Compute the set of IDs to NEVER delete (pinned subtrees).
+            protected = self._get_protected_instance_ids()
+
             # Get terminal instances ordered by updated_at (oldest first)
             terminal_instances = self._get_terminal_instances_ordered_by_age()
-            total_count = len(terminal_instances)
+
+            # Exclude protected IDs before counting and before pruning.
+            # Pinned subtrees do not count toward the history cap.
+            candidates = [iid for iid in terminal_instances if iid not in protected]
+            excluded_count = len(terminal_instances) - len(candidates)
+            total_count = len(candidates)
 
             if total_count <= max_history:
-                logger.debug(
-                    f"Terminal instance history within cap: {total_count}/{max_history}"
-                )
+                if excluded_count:
+                    logger.debug(
+                        f"Terminal instance history within cap: "
+                        f"{total_count}/{max_history} "
+                        f"({excluded_count} pinned, excluded)"
+                    )
+                else:
+                    logger.debug(
+                        f"Terminal instance history within cap: {total_count}/{max_history}"
+                    )
                 return
 
             excess = total_count - max_history
-            logger.info(
-                f"Terminal instance history exceeds cap: {total_count} > {max_history}, "
-                f"pruning {excess} oldest"
-            )
+            if excluded_count:
+                logger.info(
+                    f"Terminal instance history exceeds cap: {total_count} > "
+                    f"{max_history} (after excluding {excluded_count} pinned), "
+                    f"pruning {excess} oldest"
+                )
+            else:
+                logger.info(
+                    f"Terminal instance history exceeds cap: {total_count} > {max_history}, "
+                    f"pruning {excess} oldest"
+                )
 
             # Prune the oldest instances (first 'excess' items in the list)
             # Per-instance try/except ensures one failure doesn't abort the batch
-            to_delete = terminal_instances[:excess]
+            to_delete = candidates[:excess]
             deleted = 0
             for instance_id in to_delete:
                 try:
@@ -681,6 +750,86 @@ class CheckpointCleanupJob:
                 break
 
         return instance_ids
+
+    def _get_protected_instance_ids(self) -> set[str]:
+        """Return the set of instance IDs that must NEVER be deleted by cleanup.
+
+        The protected set is the union of every pinned instance's tree
+        root's full subtree: a pinned instance always resolves up to
+        its tree root via :meth:`SQLModelInstanceRepository.get_tree_root_id`,
+        and the entire subtree under that root (the root itself plus
+        every descendant) is collected via
+        :meth:`SQLModelInstanceRepository.get_tree_ids`. This means a
+        pinned child protects all of its siblings + cousins + their
+        descendants under the same root.
+
+        Returns an empty ``set`` when ``self._ui_prefs_repo is None``
+        (the UI-prefs repo has not been wired) — that is the
+        backward-compatible mode the existing tests rely on.
+
+        Fail-safe contract: a ``get_pinned_instance_ids()`` failure is
+        NOT swallowed into an empty set. Pinned instances are
+        user-visible protection with a guarantee that they (and their
+        subtree) are never deletable; degrading to "no protection" on a
+        transient prefs-DB error would silently violate that guarantee.
+        The exception propagates so the per-operation ``try/except`` in
+        the callers (``_cleanup_expired_terminal``, ``_enforce_history_cap``)
+        skips the entire cleanup cycle and the next cycle retries.
+
+        Returns:
+            ``set`` of protected ``instance_id`` strings. Empty when
+            no instances are pinned OR when ``ui_prefs_repo`` was
+            not provided. Raises whatever ``get_pinned_instance_ids``
+            raises when the lookup fails.
+        """
+        if self._ui_prefs_repo is None:
+            # UI-prefs repo not wired — backward-compatible mode the
+            # existing tests rely on. No protection is possible without
+            # the repo, so an empty set is the only safe answer here.
+            return set()
+
+        # NOTE: this call may raise (e.g. DB connectivity failure). We
+        # intentionally do NOT catch it — a pinned instance is a
+        # user-visible guarantee that the instance (and its tree) is
+        # NEVER deletable. If we cannot determine the protected set, the
+        # safe answer is to skip this cleanup cycle and let the next
+        # cycle retry. The two callers (``_cleanup_expired_terminal`` Op
+        # B and ``_enforce_history_cap`` Op C) each wrap their full
+        # operation body in ``try/except Exception``, so the propagated
+        # exception lands there, logs as
+        # "Expired terminal cleanup failed" / "History cap enforcement
+        # failed", and the cycle is skipped without any deletions.
+        pinned_ids = self._ui_prefs_repo.get_pinned_instance_ids()
+
+        if not pinned_ids:
+            return set()
+
+        # Resolve each pinned ID up to its tree root, dedupe, then collect
+        # each root's full subtree. This bounds the round-trip count to
+        # O(unique_roots + total_pinned) — typically small.
+        protected: set[str] = set()
+        roots: set[str] = set()
+        for pinned_id in pinned_ids:
+            root_id = self._instance_repo.get_tree_root_id(pinned_id)
+            if root_id is None:
+                # A missing ancestor or traversal depth cap can leave a live
+                # pinned instance unreachable. Fail-protect its subtree.
+                existing = self._instance_repo.get(pinned_id)
+                if existing is not None:
+                    logger.warning(
+                        "Pinned instance %s has a broken parent chain or depth limit "
+                        "was reached; protecting it as its own root",
+                        pinned_id,
+                    )
+                    protected.update(self._instance_repo.get_tree_ids(pinned_id))
+                continue
+            roots.add(root_id)
+
+        for root_id in roots:
+            subtree = self._instance_repo.get_tree_ids(root_id)
+            protected.update(subtree)
+
+        return protected
 
     def _find_expired_terminal_instances(self, cutoff: datetime) -> list[str]:
         """Find terminal instances older than the cutoff time.

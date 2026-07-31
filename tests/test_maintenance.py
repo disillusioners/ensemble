@@ -13,6 +13,10 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 
+from sqlalchemy import create_engine, event
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel
+
 from daemon.services.maintenance import (
     MaintenanceService,
     CheckpointCleanupJob,
@@ -26,6 +30,8 @@ from daemon.constants import (
     MAX_INSTANCE_HISTORY,
 )
 from daemon.services.job_queue_service import TERMINAL_STATUSES
+from daemon.repositories.instance.models import Instance, InstanceHierarchy
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
 
 
 # ==================== MaintenanceService Tests ====================
@@ -1211,3 +1217,1221 @@ class TestUtcNow:
         # Datetime should be within 1 second of actual time
         now_ts = now.timestamp()
         assert abs(now_ts - (before + after) / 2) < 1
+
+
+# ==================== Pinned Protection Tests ====================
+
+
+class TestCheckpointCleanupJobPinnedProtection:
+    """Tests for pinned-subtree exclusion in CheckpointCleanupJob.
+
+    Pinned instances (and the full subtree under their tree root) must
+    be excluded from TTL-based cleanup (Operation B) and history-cap
+    pruning (Operation C). The job receives the optional
+    ``ui_prefs_repo`` keyword argument and uses
+    :meth:`CheckpointCleanupJob._get_protected_instance_ids` to compute
+    the protected set per cycle.
+
+    The mock layout used here:
+
+    * ``ui_prefs_repo.get_pinned_instance_ids`` returns the set of
+      pinned ``instance_id`` strings.
+    * ``instance_repo.get_tree_root_id(pinned_id)`` returns the root
+      for each pinned instance (a root resolves to itself).
+    * ``instance_repo.get_tree_ids(root_id)`` returns the full subtree
+      (root + descendants) for each root.
+    * ``instance_repo.list`` returns terminal instances as usual for
+      the expiration / cap enumeration.
+    """
+
+    @staticmethod
+    def _make_job(
+        config,
+        checkpointer,
+        instance_repo,
+        ui_prefs_repo,
+        on_instance_deleted=None,
+    ):
+        """Build a CheckpointCleanupJob with ui_prefs_repo wired in."""
+        return CheckpointCleanupJob(
+            config,
+            checkpointer,
+            instance_repo,
+            on_instance_deleted=on_instance_deleted,
+            ui_prefs_repo=ui_prefs_repo,
+        )
+
+    @staticmethod
+    def _attach_terminal_listing(instance_repo, terminal_id):
+        """Configure ``instance_repo.list`` to return one expired terminal row.
+
+        Every terminal status gets the same single instance id — keeps
+        the test focus on the protection filter rather than the
+        pagination across statuses.
+        """
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [MagicMock(instance_id=terminal_id, updated_at=old_time)],
+                    1,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+
+    @pytest.mark.asyncio
+    async def test_get_protected_returns_empty_set_when_repo_is_none(self):
+        """Backward-compat: with no ui_prefs_repo wired, the protected set is empty."""
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+
+        # Construct WITHOUT ui_prefs_repo — the existing pattern.
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+
+        assert job._ui_prefs_repo is None
+        assert job._get_protected_instance_ids() == set()
+
+    @pytest.mark.asyncio
+    async def test_get_protected_returns_empty_set_when_no_pinned(self):
+        """When the prefs repo reports no pinned rows, the protected set is empty."""
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(return_value=set())
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        assert job._get_protected_instance_ids() == set()
+        # No tree lookups should have happened — pure prefs query is the
+        # fast path when the result is empty.
+        instance_repo.get_tree_root_id.assert_not_called()
+        instance_repo.get_tree_ids.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_protected_resolves_pinned_to_subtree(self):
+        """A pinned root's whole subtree becomes protected.
+
+        Tree shape:
+
+            root-A
+              ├─ child-A1  (pinned)
+              └─ child-A2
+                   └─ grandchild-A2a
+
+        Pinning ``child-A1`` resolves up to ``root-A``; the entire
+        ``{root-A, child-A1, child-A2, grandchild-A2a}`` subtree
+        (collected via ``get_tree_ids``) is the protected set.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        # Only ``child-A1`` is pinned.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"child-A1"}
+        )
+        # ``child-A1`` walks up to ``root-A``.
+        instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
+        # ``root-A`` subtree contains 4 nodes.
+        instance_repo.get_tree_ids = MagicMock(
+            return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
+        )
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        protected = job._get_protected_instance_ids()
+
+        assert protected == {
+            "root-A",
+            "child-A1",
+            "child-A2",
+            "grandchild-A2a",
+        }
+
+    @pytest.mark.asyncio
+    async def test_get_protected_skips_orphan_pinned_row(self):
+        """When a pinned row's instance no longer exists, it's silently skipped.
+
+        ``get_tree_root_id`` returns ``None`` (instance was hard-deleted
+        out from under the prefs row) — the protection set simply
+        ignores that pinned id and proceeds.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"orphan-id", "root-A"}
+        )
+        # ``orphan-id`` has been deleted → ``get_tree_root_id`` returns None.
+        # ``root-A`` is a real root → returns itself.
+        instance_repo.get_tree_root_id = MagicMock(
+            side_effect=lambda iid: None if iid == "orphan-id" else iid
+        )
+        instance_repo.get_tree_ids = MagicMock(return_value=["root-A", "child-A1"])
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        protected = job._get_protected_instance_ids()
+        assert protected == {"root-A", "child-A1"}
+
+    @pytest.mark.asyncio
+    async def test_ttl_excludes_pinned_terminal(self):
+        """Operation B: a pinned expired terminal instance is NOT deleted.
+
+        Two expired terminal instances exist — only one is pinned.
+        The non-pinned one is deleted; the pinned one is preserved.
+        Verifies scenario 1 + 4 (pinned NOT cleaned, non-pinned IS).
+        """
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        # Two expired terminal instances; ``pinned-A`` is pinned,
+        # ``unpinned-B`` is not.
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [
+                        MagicMock(instance_id="pinned-A", updated_at=old_time),
+                        MagicMock(instance_id="unpinned-B", updated_at=old_time),
+                    ],
+                    2,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        # TOCTOU guard: instance still terminal.
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        # Tree: pinned-A is itself the root (no descendants).
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-A"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
+        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._cleanup_expired_terminal()
+
+        # Only ``unpinned-B`` was deleted. ``pinned-A`` is preserved.
+        deleted_ids = [
+            call.args[0] for call in instance_repo.delete.call_args_list
+        ]
+        await_args = checkpointer.adelete_thread.await_args_list
+        adelete_ids = [call.args[0] for call in await_args]
+        callback_ids = [call.args[0] for call in on_instance_deleted.call_args_list]
+
+        # Each terminal status re-runs the candidate list (the listing
+        # loop visits every terminal status), so the counts are
+        # multiplied by len(TERMINAL_STATUSES) for non-pinned ids.
+        assert "unpinned-B" in deleted_ids
+        assert "pinned-A" not in deleted_ids
+        assert "unpinned-B" in adelete_ids
+        assert "pinned-A" not in adelete_ids
+        assert "unpinned-B" in callback_ids
+        assert "pinned-A" not in callback_ids
+        # Pinned-A must NEVER have been deleted across any status.
+        assert "pinned-A" not in deleted_ids
+
+    @pytest.mark.asyncio
+    async def test_history_cap_spares_pinned_oldest(self):
+        """Operation C: cap exceeded; pinned oldest instance is spared.
+
+        Scenario 2: even when the pinned instance is the OLDEST in the
+        terminal list, it must not be pruned. Non-pinned newer
+        instances over the cap are pruned normally.
+        """
+        config = PersistenceConfig(max_instance_history=3)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_1 = (utcnow() - timedelta(days=10)).isoformat()
+        old_2 = (utcnow() - timedelta(days=9)).isoformat()
+        old_3 = (utcnow() - timedelta(days=8)).isoformat()
+        old_4 = (utcnow() - timedelta(days=7)).isoformat()
+        old_5 = (utcnow() - timedelta(days=6)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status == "terminated":
+                return (
+                    [
+                        # Pinned instance is the oldest of all.
+                        MagicMock(instance_id="pinned-oldest", updated_at=old_1),
+                        MagicMock(instance_id="inst-2", updated_at=old_2),
+                        MagicMock(instance_id="inst-3", updated_at=old_3),
+                        MagicMock(instance_id="inst-4", updated_at=old_4),
+                        MagicMock(instance_id="inst-5", updated_at=old_5),
+                    ],
+                    5,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        # pinned-oldest is its own root with no descendants.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-oldest"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(return_value="pinned-oldest")
+        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-oldest"])
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._enforce_history_cap()
+
+        # Cap is 3. 5 instances total, 1 pinned → 4 candidates → excess=1.
+        # Only the OLDEST non-pinned candidate (``inst-2``) is pruned.
+        deleted_ids = [
+            call.args[0] for call in instance_repo.delete.call_args_list
+        ]
+        adelete_ids = [
+            call.args[0] for call in checkpointer.adelete_thread.await_args_list
+        ]
+        callback_ids = [
+            call.args[0] for call in on_instance_deleted.call_args_list
+        ]
+
+        assert "pinned-oldest" not in deleted_ids
+        assert "pinned-oldest" not in adelete_ids
+        assert "pinned-oldest" not in callback_ids
+        # Pruned exactly one non-pinned instance.
+        assert len(deleted_ids) == 1
+        assert deleted_ids[0] == "inst-2"
+        assert adelete_ids == ["inst-2"]
+        assert callback_ids == ["inst-2"]
+
+    @pytest.mark.asyncio
+    async def test_ttl_protects_descendants_of_pinned_root(self):
+        """Operation B: a pinned root's descendants are also spared.
+
+        Scenario 3: pin ``root-A``; ``child-A1`` is expired and
+        terminal but must NOT be cleaned (it's in root-A's subtree).
+        """
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [
+                        # Both expired, terminal. child-A1 is in the
+                        # pinned subtree; inst-X is independent.
+                        MagicMock(instance_id="child-A1", updated_at=old_time),
+                        MagicMock(instance_id="inst-X", updated_at=old_time),
+                    ],
+                    2,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"root-A"}
+        )
+        # root-A is a root → returns itself.
+        instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
+        # root-A's subtree includes the child we're trying to delete.
+        instance_repo.get_tree_ids = MagicMock(
+            return_value=["root-A", "child-A1", "child-A2"]
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._cleanup_expired_terminal()
+
+        deleted_ids = [
+            call.args[0] for call in instance_repo.delete.call_args_list
+        ]
+        adelete_ids = [
+            call.args[0] for call in checkpointer.adelete_thread.await_args_list
+        ]
+
+        # child-A1 (descendant of pinned root) is spared.
+        assert "child-A1" not in deleted_ids
+        assert "child-A1" not in adelete_ids
+        # inst-X (independent) is cleaned up.
+        assert "inst-X" in adelete_ids
+
+    @pytest.mark.asyncio
+    async def test_pinned_child_protects_entire_sibling_subtree(self):
+        """Operation B: pinning a CHILD protects the whole root's subtree.
+
+        Scenario 5: only ``child-A1`` is pinned, but resolving up to
+        ``root-A`` and back down must shield every sibling + cousin
+        (root-A, child-A1, child-A2, grandchild-A2a). An unrelated
+        ``inst-Y`` is still cleaned.
+        """
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [
+                        MagicMock(instance_id="child-A1", updated_at=old_time),
+                        MagicMock(instance_id="child-A2", updated_at=old_time),
+                        MagicMock(instance_id="grandchild-A2a", updated_at=old_time),
+                        MagicMock(instance_id="root-A", updated_at=old_time),
+                        MagicMock(instance_id="inst-Y", updated_at=old_time),
+                    ],
+                    5,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+
+        # Only ``child-A1`` is pinned, but it resolves up to ``root-A``.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"child-A1"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
+        instance_repo.get_tree_ids = MagicMock(
+            return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._cleanup_expired_terminal()
+
+        deleted_ids = [
+            call.args[0] for call in instance_repo.delete.call_args_list
+        ]
+        adelete_ids = [
+            call.args[0] for call in checkpointer.adelete_thread.await_args_list
+        ]
+
+        # Whole subtree under root-A is protected.
+        for protected_id in ("root-A", "child-A1", "child-A2", "grandchild-A2a"):
+            assert protected_id not in deleted_ids
+            assert protected_id not in adelete_ids
+        # Unrelated inst-Y still gets cleaned.
+        assert "inst-Y" in adelete_ids
+
+    @pytest.mark.asyncio
+    async def test_ttl_logs_when_pinning_excludes_instances(self, caplog):
+        """Operation B logs at INFO when the pin filter actually drops candidates."""
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [MagicMock(instance_id="pinned-A", updated_at=old_time)],
+                    1,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-A"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
+        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        caplog.set_level("INFO", logger="daemon.services.maintenance")
+        await job._cleanup_expired_terminal()
+
+        # The exclusion log line must be present.
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "pinned" in msg.lower() and "ttl" in msg.lower()
+            for msg in messages
+        ), f"Expected pinned-TTL log, got: {messages}"
+
+    @pytest.mark.asyncio
+    async def test_history_cap_logs_when_pinning_excludes_instances(self, caplog):
+        """Operation C logs at INFO when the pin filter drops candidates from the cap."""
+        config = PersistenceConfig(max_instance_history=2)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_1 = (utcnow() - timedelta(days=10)).isoformat()
+        old_2 = (utcnow() - timedelta(days=9)).isoformat()
+        old_3 = (utcnow() - timedelta(days=8)).isoformat()
+        old_4 = (utcnow() - timedelta(days=7)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status == "terminated":
+                return (
+                    [
+                        MagicMock(instance_id="pinned-A", updated_at=old_1),
+                        MagicMock(instance_id="inst-2", updated_at=old_2),
+                        MagicMock(instance_id="inst-3", updated_at=old_3),
+                        MagicMock(instance_id="inst-4", updated_at=old_4),
+                    ],
+                    4,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-A"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
+        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        caplog.set_level("INFO", logger="daemon.services.maintenance")
+        await job._enforce_history_cap()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "pinned" in msg.lower() and "exceeds" in msg.lower()
+            for msg in messages
+        ), f"Expected pinned-exceeds-cap log, got: {messages}"
+
+    @pytest.mark.asyncio
+    async def test_history_cap_pinned_does_not_count_against_cap(self):
+        """Pinned instances don't push the cap — the cap is computed on the candidates set.
+
+        Without pin protection, 5 terminals with cap=3 → prune 2.
+        With pin protection and 1 pinned, only 4 candidates → prune 1.
+        This is the contract: pinned doesn't count toward the cap and
+        isn't pruned.
+        """
+        config = PersistenceConfig(max_instance_history=3)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_1 = (utcnow() - timedelta(days=10)).isoformat()
+        old_2 = (utcnow() - timedelta(days=9)).isoformat()
+        old_3 = (utcnow() - timedelta(days=8)).isoformat()
+        old_4 = (utcnow() - timedelta(days=7)).isoformat()
+        old_5 = (utcnow() - timedelta(days=6)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status == "terminated":
+                return (
+                    [
+                        MagicMock(instance_id="pinned-old", updated_at=old_1),
+                        MagicMock(instance_id="inst-2", updated_at=old_2),
+                        MagicMock(instance_id="inst-3", updated_at=old_3),
+                        MagicMock(instance_id="inst-4", updated_at=old_4),
+                        MagicMock(instance_id="inst-5", updated_at=old_5),
+                    ],
+                    5,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-old"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(return_value="pinned-old")
+        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-old"])
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._enforce_history_cap()
+
+        # 5 total − 1 pinned = 4 candidates. Cap=3 → excess=1.
+        # Only the oldest non-pinned (``inst-2``) is pruned.
+        deleted_ids = [
+            call.args[0] for call in instance_repo.delete.call_args_list
+        ]
+        assert len(deleted_ids) == 1
+        assert deleted_ids[0] == "inst-2"
+        assert "pinned-old" not in deleted_ids
+
+    @pytest.mark.asyncio
+    async def test_get_protected_propagates_prefs_lookup_error(self):
+        """Unit-level: prefs lookup error is NOT swallowed into an empty set.
+
+        Pinned instances are a user-visible guarantee — degrading to
+        ``set()`` on a transient prefs-DB failure would silently violate
+        it. The exception must propagate so the operation-level
+        try/except in the callers can skip the cycle.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            side_effect=RuntimeError("db down")
+        )
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        with pytest.raises(RuntimeError, match="db down"):
+            job._get_protected_instance_ids()
+        # No compensating tree lookups should have run.
+        instance_repo.get_tree_root_id.assert_not_called()
+        instance_repo.get_tree_ids.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ttl_skips_cycle_when_prefs_lookup_fails(self):
+        """Op B fail-safe: prefs-lookup error aborts the whole TTL cycle.
+
+        An expired terminal instance exists and would normally be deleted
+        by Op B, but ``ui_prefs_repo.get_pinned_instance_ids`` raises.
+        Because the protected set cannot be determined, the operation
+        must skip the cycle entirely — no checkpoint or record deletes.
+        """
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        # One expired terminal candidate that WOULD be deleted if
+        # protection could be evaluated.
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [MagicMock(instance_id="would-delete", updated_at=old_time)],
+                    1,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        # Prefs lookup blows up — we cannot compute the protected set.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            side_effect=RuntimeError("prefs db unreachable")
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        # Must not raise — the per-operation try/except swallows it.
+        await job._cleanup_expired_terminal()
+
+        # Fail-safe assertion: NOTHING was deleted this cycle. If the
+        # bug regressed, the protected set would silently be empty and
+        # ``would-delete`` would be cleaned up.
+        checkpointer.adelete_thread.assert_not_called()
+        instance_repo.delete.assert_not_called()
+        on_instance_deleted.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_history_cap_skips_cycle_when_prefs_lookup_fails(self):
+        """Op C fail-safe: prefs-lookup error aborts the whole cap-enforcement cycle.
+
+        History cap is exceeded by 2, so without the prefs lookup the
+        operation would prune two non-pinned instances. With the prefs
+        lookup failing, the cap must be left untouched and no
+        deletions may occur — the next cycle will retry once the
+        prefs DB recovers.
+        """
+        config = PersistenceConfig(max_instance_history=2)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        # 4 terminal instances, cap=2 → normally prune 2 oldest.
+        old_1 = (utcnow() - timedelta(days=10)).isoformat()
+        old_2 = (utcnow() - timedelta(days=9)).isoformat()
+        old_3 = (utcnow() - timedelta(days=8)).isoformat()
+        old_4 = (utcnow() - timedelta(days=7)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status == "terminated":
+                return (
+                    [
+                        MagicMock(instance_id="inst-1", updated_at=old_1),
+                        MagicMock(instance_id="inst-2", updated_at=old_2),
+                        MagicMock(instance_id="inst-3", updated_at=old_3),
+                        MagicMock(instance_id="inst-4", updated_at=old_4),
+                    ],
+                    4,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+        # Prefs lookup blows up.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            side_effect=RuntimeError("prefs db unreachable")
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        # Must not raise — the per-operation try/except swallows it.
+        await job._enforce_history_cap()
+
+        # Fail-safe: nothing deleted. If the bug regressed, two
+        # non-pinned instances would be pruned.
+        checkpointer.adelete_thread.assert_not_called()
+        instance_repo.delete.assert_not_called()
+        on_instance_deleted.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ttl_logs_failure_when_prefs_lookup_fails(self, caplog):
+        """Op B logs the per-operation failure message on prefs lookup error.
+
+        The propagated exception must land in the existing
+        ``except Exception`` block at the bottom of
+        ``_cleanup_expired_terminal`` and be logged as
+        ``Expired terminal cleanup failed: ...``. This keeps operators
+        aware that a cleanup cycle was skipped and lets them correlate
+        the skip with a prefs-DB outage.
+        """
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            side_effect=RuntimeError("prefs db unreachable")
+        )
+        # No expired terminals — listing is never reached because
+        # protection lookup fails first.
+        instance_repo.list = MagicMock(return_value=([], 0))
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        caplog.set_level("ERROR", logger="daemon.services.maintenance")
+        await job._cleanup_expired_terminal()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "expired terminal cleanup failed" in msg.lower() for msg in messages
+        ), f"Expected per-op failure log, got: {messages}"
+
+    @pytest.mark.asyncio
+    async def test_history_cap_logs_failure_when_prefs_lookup_fails(self, caplog):
+        """Op C logs the per-operation failure message on prefs lookup error.
+
+        The propagated exception lands in the existing
+        ``except Exception`` block at the bottom of
+        ``_enforce_history_cap`` and is logged as
+        ``History cap enforcement failed: ...``.
+        """
+        config = PersistenceConfig(max_instance_history=2)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        ui_prefs_repo = MagicMock()
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            side_effect=RuntimeError("prefs db unreachable")
+        )
+        # Listing is never reached — protection lookup fails first.
+        instance_repo.list = MagicMock(return_value=([], 0))
+
+        job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
+
+        caplog.set_level("ERROR", logger="daemon.services.maintenance")
+        await job._enforce_history_cap()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "history cap enforcement failed" in msg.lower() for msg in messages
+        ), f"Expected per-op failure log, got: {messages}"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # W3 — Edge-case tests: every candidate is protected
+    # ─────────────────────────────────────────────────────────────────────
+    #
+    # When the protected set covers EVERY terminal candidate, the
+    # corresponding operation must do nothing. The two tests below
+    # verify the "all protected → zero deletions" contract for both
+    # Operation B (TTL) and Operation C (history cap). They use the
+    # same mock-based pattern as the other PinnedProtection tests; the
+    # difference is that no deletions should be issued at all.
+
+    @pytest.mark.asyncio
+    async def test_history_cap_all_protected_prunes_nothing(self):
+        """W3: when ALL terminal candidates are protected, history cap prunes zero.
+
+        5 terminal instances exist, all 5 are pinned. Even with
+        ``max_instance_history=3`` (5 > 3 → normally 2 prunes), zero
+        should be pruned because every candidate is in the protected
+        set. The cap is computed on the protected-excluded candidate
+        set — pinning protects against exceeding the cap, not just
+        against being picked.
+        """
+        config = PersistenceConfig(max_instance_history=3)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_1 = (utcnow() - timedelta(days=10)).isoformat()
+        old_2 = (utcnow() - timedelta(days=9)).isoformat()
+        old_3 = (utcnow() - timedelta(days=8)).isoformat()
+        old_4 = (utcnow() - timedelta(days=7)).isoformat()
+        old_5 = (utcnow() - timedelta(days=6)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status == "terminated":
+                return (
+                    [
+                        MagicMock(instance_id="pinned-1", updated_at=old_1),
+                        MagicMock(instance_id="pinned-2", updated_at=old_2),
+                        MagicMock(instance_id="pinned-3", updated_at=old_3),
+                        MagicMock(instance_id="pinned-4", updated_at=old_4),
+                        MagicMock(instance_id="pinned-5", updated_at=old_5),
+                    ],
+                    5,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+
+        # All 5 are pinned. Each resolves to itself as its own root
+        # with no descendants — every candidate is protected.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={
+                "pinned-1",
+                "pinned-2",
+                "pinned-3",
+                "pinned-4",
+                "pinned-5",
+            }
+        )
+        instance_repo.get_tree_root_id = MagicMock(
+            side_effect=lambda iid: iid
+        )
+        instance_repo.get_tree_ids = MagicMock(
+            side_effect=lambda root_id: [root_id]
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._enforce_history_cap()
+
+        # 5 - 5 protected = 0 candidates. 0 <= cap=3 → no pruning.
+        checkpointer.adelete_thread.assert_not_called()
+        instance_repo.delete.assert_not_called()
+        on_instance_deleted.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ttl_all_pinned_skips_cycle(self):
+        """W3: when ALL expired instances are pinned, TTL cleanup is a no-op.
+
+        Every expired terminal instance is in the protected set, so
+        Operation B's candidate list is empty. The operation should
+        log the skip and return without issuing any deletes or
+        callbacks.
+        """
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [
+                        MagicMock(instance_id="pinned-A", updated_at=old_time),
+                        MagicMock(instance_id="pinned-B", updated_at=old_time),
+                        MagicMock(instance_id="pinned-C", updated_at=old_time),
+                    ],
+                    3,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-A", "pinned-B", "pinned-C"}
+        )
+        instance_repo.get_tree_root_id = MagicMock(
+            side_effect=lambda iid: iid
+        )
+        instance_repo.get_tree_ids = MagicMock(
+            side_effect=lambda root_id: [root_id]
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job._cleanup_expired_terminal()
+
+        # No expired terminal survives the filter; nothing is cleaned.
+        checkpointer.adelete_thread.assert_not_called()
+        instance_repo.delete.assert_not_called()
+        on_instance_deleted.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# W2 — Integration tests with REAL tree traversal
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The mock-based tests above exercise the production logic in
+# ``_get_protected_instance_ids`` against a fully-mocked instance
+# repository. They prove the algorithm's control flow but skip the
+# real tree-traversal code. These two integration tests use the real
+# ``SQLModelInstanceRepository`` against an in-memory SQLite engine
+# so that ``get_tree_root_id`` and ``get_tree_ids`` walk actual DB
+# rows. They verify:
+#
+# * W2 — pinning a grandchild correctly resolves up the parent
+#   chain and back down to the full subtree.
+# * W1 — fail-protect: when ``get_tree_root_id`` returns None on a
+#   live pinned instance (broken ancestor chain), the job still
+#   protects the instance and logs a WARNING.
+#
+# Fixture pattern is copied verbatim from
+# ``tests/test_instance_hard_delete.py::engine`` — the canonical
+# "real in-memory SQLite with FK enforcement" recipe for this repo.
+
+
+class TestCheckpointCleanupJobPinnedProtectionIntegration:
+    """Integration tests for pinned-subtree exclusion with REAL tree traversal.
+
+    Unlike the mock-based tests in
+    :class:`TestCheckpointCleanupJobPinnedProtection`, these use the
+    real :class:`SQLModelInstanceRepository` against an in-memory
+    SQLite engine so :meth:`get_tree_root_id` and
+    :meth:`get_tree_ids` walk actual rows. This proves the
+    production code's tree-walking logic (BFS up the parent chain,
+    BFS down the hierarchy table) is consistent with the cleanup
+    job's algorithm.
+
+    W2: pin a grandchild and verify the entire root → child →
+    grandchild subtree becomes protected.
+
+    W1: pin a child whose parent chain is broken (its
+    ``parent_id`` points to a ghost row that was never inserted)
+    and verify the job treats the live pinned instance as its own
+    root and emits the WARNING log.
+    """
+
+    @pytest.fixture
+    def engine(self):
+        """Real in-memory SQLite engine with FK enforcement enabled.
+
+        Mirrors ``tests/test_instance_hard_delete.py::engine``:
+        ``StaticPool`` keeps a single connection alive so reads after
+        writes see the latest data even when the writer ran on a
+        different asyncio.to_thread worker. ``PRAGMA foreign_keys=ON``
+        is the canonical cascade-test setup for this project.
+        """
+        eng = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+
+        @event.listens_for(eng, "connect")
+        def _enable_fk(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        SQLModel.metadata.create_all(eng)
+        try:
+            yield eng
+        finally:
+            eng.dispose()
+
+    def _seed_instance(self, session, instance_id, parent_id, now):
+        """Insert one ``Instance`` row + the matching ``InstanceHierarchy`` row.
+
+        Helper used by both W2 tests. Returns nothing; commit is the
+        caller's responsibility (so multiple instances can be added
+        in a single session, mirroring
+        ``test_instance_hard_delete.py::seed_tree``).
+        """
+        session.add(
+            Instance(
+                instance_id=instance_id,
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
+                agent_name="developer",
+                parent_id=parent_id,
+                status="terminated",
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        if parent_id is not None:
+            session.add(
+                InstanceHierarchy(
+                    parent_id=parent_id,
+                    child_id=instance_id,
+                    created_at=now,
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_integration_real_tree_pin_grandchild(self, engine):
+        """W2: pinning a grandchild protects the entire 3-level subtree.
+
+        Tree shape::
+
+            root-A
+              └─ child-A1
+                   └─ grandchild-A1a
+
+        Pinning ``grandchild-A1a`` walks the real parent chain up
+        (grandchild → child → root) via
+        :meth:`SQLModelInstanceRepository.get_tree_root_id`, then
+        walks the hierarchy table back down (BFS) via
+        :meth:`SQLModelInstanceRepository.get_tree_ids`. The full
+        subtree is the protected set.
+
+        Uses a ``MagicMock`` ``ui_prefs_repo`` because W2 is about
+        exercising real tree traversal, not the real prefs query —
+        the mocked prefs return pins ``{grandchild_id}`` and the
+        repository methods do the rest.
+        """
+        root_id = "root-A"
+        child_id = "child-A1"
+        grandchild_id = "grandchild-A1a"
+
+        now = datetime.now(timezone.utc).isoformat()
+        with Session(engine) as s:
+            # Build the 3-level tree.
+            self._seed_instance(s, root_id, parent_id=None, now=now)
+            self._seed_instance(s, child_id, parent_id=root_id, now=now)
+            self._seed_instance(
+                s, grandchild_id, parent_id=child_id, now=now
+            )
+            s.commit()
+
+        # Real repository, mocked prefs.
+        real_instance_repo = SQLModelInstanceRepository(engine)
+        ui_prefs_repo = MagicMock()
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={grandchild_id}
+        )
+
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        job = CheckpointCleanupJob(
+            config,
+            checkpointer,
+            real_instance_repo,
+            ui_prefs_repo=ui_prefs_repo,
+        )
+
+        protected = job._get_protected_instance_ids()
+
+        # The full root-A subtree is protected, not just the pinned
+        # grandchild — exercising real get_tree_root_id (up) and
+        # get_tree_ids (down).
+        assert protected == {root_id, child_id, grandchild_id}
+
+    @pytest.mark.asyncio
+    async def test_integration_broken_ancestor_chain_protects_child(
+        self, engine, caplog
+    ):
+        """W1: a live pinned instance with a broken parent chain is fail-protected.
+
+        Setup approach (ghost-parent): the pinned instance
+        ``broken-child`` is inserted with ``parent_id="ghost-middle"``
+        where ``"ghost-middle"`` is NEVER inserted as an ``Instance``
+        row. No ``InstanceHierarchy`` row for ``broken-child`` is
+        created either (it has no parent in the DB). This produces the
+        exact broken-chain state the production code's W1 path is
+        designed to handle:
+
+        * ``db_session.get(Instance, "broken-child")`` → returns the
+          row (it exists).
+        * ``broken-child.parent_id == "ghost-middle"`` is set.
+        * ``get_tree_root_id("broken-child")`` walks:
+          iteration 1 → get("broken-child") → exists, parent_id
+          is "ghost-middle" → next.
+          iteration 2 → get("ghost-middle") → returns None → returns
+          None.
+        * The job then re-checks ``get("broken-child")`` → exists →
+          logs the broken-chain WARNING → treats it as its own root →
+          calls ``get_tree_ids("broken-child")`` → returns
+          ``["broken-child"]``.
+
+        The ghost-parent approach is the cleanest option here: there
+        are no FK constraints on ``Instance.parent_id`` (it's just an
+        indexed ``str`` column) or on ``InstanceHierarchy``, so we can
+        freely reference a non-existent parent id without triggering
+        an ``IntegrityError``. We also keep the intact root →
+        middle → child tree in the same DB so the test verifies the
+        broken-chain handling is per-instance, not table-wide.
+        """
+        # Intact 3-level tree (control: real rows, real hierarchy).
+        root_id = "root-A"
+        middle_id = "middle-A1"
+        child_id = "child-A2"
+        # Ghost parent id: never inserted as an Instance row.
+        ghost_id = "ghost-middle"
+        # The pinned instance — its parent_id points to the ghost,
+        # so get_tree_root_id("broken-child") returns None.
+        broken_child_id = "broken-child"
+
+        now = datetime.now(timezone.utc).isoformat()
+        with Session(engine) as s:
+            # Intact root → middle → child tree.
+            self._seed_instance(s, root_id, parent_id=None, now=now)
+            self._seed_instance(s, middle_id, parent_id=root_id, now=now)
+            self._seed_instance(s, child_id, parent_id=middle_id, now=now)
+            # The pinned instance: parent_id → ghost (no row), no
+            # InstanceHierarchy row. NOTE: _seed_instance adds an
+            # InstanceHierarchy row only when parent_id is not None;
+            # we deliberately let that insert happen with the ghost
+            # id (InstanceHierarchy has no FK), but to keep the
+            # broken-child genuinely orphan-of-rows we add a separate
+            # plain Instance row below instead.
+            s.commit()
+
+        # The helper above would also have created an
+        # ``InstanceHierarchy(ghost_id, broken_child)`` row. Since
+        # we want broken-child to have NO hierarchy row at all (and
+        # the ghost has no Instance row), delete the
+        # auto-created hierarchy row before continuing.
+        with Session(engine) as s:
+            from sqlmodel import select as _select  # local import to avoid top-level churn
+            stale = s.exec(
+                _select(InstanceHierarchy).where(
+                    InstanceHierarchy.child_id == broken_child_id
+                )
+            ).all()
+            for row in stale:
+                s.delete(row)
+            # Also ensure no broken_child row leaked in (the
+            # _seed_instance call above should not have added one
+            # because we passed parent_id=ghost_id, which is not
+            # None — so an Instance row WAS added with parent_id
+            # pointing to the ghost). Confirm/insert intentionally
+            # so the test is self-documenting.
+            existing = s.get(Instance, broken_child_id)
+            if existing is None:
+                s.add(
+                    Instance(
+                        instance_id=broken_child_id,
+                        agent_id="developer",
+                        agent_dir="/tmp/agents/developer",
+                        agent_name="developer",
+                        parent_id=ghost_id,
+                        status="terminated",
+                        version=1,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            s.commit()
+
+        real_instance_repo = SQLModelInstanceRepository(engine)
+        ui_prefs_repo = MagicMock()
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={broken_child_id}
+        )
+
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        job = CheckpointCleanupJob(
+            config,
+            checkpointer,
+            real_instance_repo,
+            ui_prefs_repo=ui_prefs_repo,
+        )
+
+        caplog.set_level("WARNING", logger="daemon.services.maintenance")
+        protected = job._get_protected_instance_ids()
+
+        # W1 fail-protected: broken-child is treated as its own
+        # root and ends up in the protected set.
+        assert broken_child_id in protected
+
+        # The broken-chain WARNING must have been emitted. The
+        # production code logs:
+        #   "Pinned instance %s has a broken parent chain or depth
+        #    limit was reached; protecting it as its own root"
+        warning_messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING"
+        ]
+        assert any(
+            "broken parent chain" in msg for msg in warning_messages
+        ), f"Expected broken-chain WARNING, got: {warning_messages}"
+        assert any(
+            broken_child_id in msg for msg in warning_messages
+        ), f"Expected broken-child id in WARNING, got: {warning_messages}"

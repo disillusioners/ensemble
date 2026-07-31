@@ -349,6 +349,60 @@ class TestGetAll:
 
 
 # =============================================================================
+# get_pinned_instance_ids — bulk lookup used by CheckpointCleanupJob
+# =============================================================================
+
+
+class TestGetPinnedInstanceIds:
+    """``get_pinned_instance_ids`` returns the set of pinned instance IDs.
+
+    Used by :class:`CheckpointCleanupJob` to compute the set of
+    protected instances that must be excluded from TTL-based and
+    history-cap cleanup. The result is always a ``set`` so the cleanup
+    job can do O(1) ``in protected`` checks during batch filtering.
+    """
+
+    def test_returns_set(self, repo):
+        """Empty DB → empty set (not list, not None)."""
+        result = repo.get_pinned_instance_ids()
+        assert isinstance(result, set)
+        assert result == set()
+
+    def test_only_pinned_rows_returned(self, repo, engine):
+        """Rows where ``pinned=False`` (the default) are excluded."""
+        # Pin inst-1, leave inst-2 unpinned, inst-3 unpinned.
+        repo.upsert("inst-1", pinned=True)
+        repo.upsert("inst-2")  # not pinned
+        repo.upsert("inst-3", color_tag="red")  # not pinned
+
+        result = repo.get_pinned_instance_ids()
+
+        assert isinstance(result, set)
+        assert result == {"inst-1"}
+
+    def test_excludes_unpinned_after_pin_then_unpin(self, repo, engine):
+        """An instance that was pinned then unpinned is NOT in the result."""
+        repo.upsert("inst-1", pinned=True)
+        repo.upsert("inst-2", pinned=True)
+        repo.upsert("inst-1", pinned=False)  # unpin
+
+        result = repo.get_pinned_instance_ids()
+
+        assert result == {"inst-2"}
+
+    def test_multiple_pinned_all_returned(self, repo, engine):
+        """All pinned rows appear in the set."""
+        for i in range(5):
+            repo.upsert(f"inst-{i}", pinned=True)
+        # Add one unpinned row to verify it doesn't leak.
+        repo.upsert("inst-extra", color_tag="blue")
+
+        result = repo.get_pinned_instance_ids()
+
+        assert result == {f"inst-{i}" for i in range(5)}
+
+
+# =============================================================================
 # delete — row removal
 # =============================================================================
 

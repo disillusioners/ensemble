@@ -128,6 +128,28 @@ class InstanceUiPrefsRepository:
             ).all()
         return {row.instance_id: row for row in rows}
 
+    def get_pinned_instance_ids(self) -> set[str]:
+        """Return the set of ``instance_id`` values whose row is currently pinned.
+
+        Used by :class:`CheckpointCleanupJob` to compute the set of
+        pinned roots + their descendants that must be excluded from
+        TTL-based and history-cap cleanup. Instances that have no
+        prefs row at all are not represented in this set (the table
+        is created lazily on first ``upsert``).
+
+        Returns:
+            ``set`` of pinned ``instance_id`` strings. Empty when no
+            rows have ``pinned=True`` — the cleanup job treats that
+            as "no protection configured" and proceeds normally.
+        """
+        with Session(self.engine) as session:
+            rows = session.exec(
+                select(InstanceUiPrefs.instance_id).where(
+                    col(InstanceUiPrefs.pinned) == True  # noqa: E712
+                )
+            ).all()
+        return set(rows)
+
     # --------------------------------------------------------
     # WRITE
     # --------------------------------------------------------
