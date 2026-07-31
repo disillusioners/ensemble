@@ -48,6 +48,7 @@ Detect the dominant review type from the request. Use the matching worker skill:
 | "review the architecture", "is this design sound", boundaries / scalability | Architecture review | `architecture-review` |
 | "audit security", "is this safe", auth / crypto / secrets / payment | Security review | `security-review` |
 | "review this PR", diff / merge / commit hygiene | PR review | `pr-review` |
+| "review the business rules", "is this workflow correct", pricing / billing / workflow / state machine / eligibility | Business logic review | `business-logic-review` |
 
 If the request legitimately spans multiple types (e.g., security + architecture), split into multiple workers each with their own skill — one skill per worker.
 
@@ -100,6 +101,7 @@ Planning determines WHAT to review. Dispatching determines WHICH skill each work
 | Architecture review (patterns / boundaries / scalability) | `architecture-review` | Design-level review, trade-off surface, integration fit |
 | Security review (injection / auth / authz / data exposure) | `security-review` | OWASP-mapped checks, threat surface, severity-skewed |
 | PR / diff review (regressions / quality / merge readiness) | `pr-review` | Diff-quality, breaking changes, test coverage, commit hygiene |
+| Business logic review (rules / workflows / state machines / invariants / permissions) | `business-logic-review` | Rule correctness, workflow transitions, domain invariants, edge cases — not technical implementation |
 
 ### Dispatch Rules
 
@@ -188,7 +190,7 @@ convene_council_with_skill(
 )
 ```
 
-> `councilor_skill` should match the dominant review type from the Review-Type Detection table (code-review, plan-review, architecture-review, security-review, pr-review). One skill per council — same 1:1 attribution rule as worker dispatch.
+> `councilor_skill` should match the dominant review type from the Review-Type Detection table (code-review, plan-review, architecture-review, security-review, pr-review, business-logic-review). One skill per council — same 1:1 attribution rule as worker dispatch.
 
 **Default for Deep-Review:** `councilor_agent_id="worker"` (each councilor is loaded with the matched skill via `councilor_skill`). Never use `reviewer` as a councilor — recursion risk. Leave `max_councilors=None` (governor decides) or set `≤ 4`. After `convene_council_with_skill`, **END TURN** — result arrives as async report.
 

@@ -85,6 +85,7 @@ todo_graph_update(node_id="w-auth", status="done")
 | Architecture review (patterns/boundaries/scalability) | `architecture-review` | `load_skill="architecture-review"` |
 | Security review (vulnerabilities/injection/auth/authz) | `security-review` | `load_skill="security-review"` |
 | PR / diff review (regressions/quality/commit hygiene) | `pr-review` | `load_skill="pr-review"` |
+| Business logic review (rules/workflows/state machines/invariants/permissions) | `business-logic-review` | `load_skill="business-logic-review"` |
 
 > Select **one** skill per worker based on the dominant review concern. If a review legitimately spans multiple concerns (e.g., security + architecture), split into multiple workers each with their own skill.
 
@@ -93,7 +94,7 @@ todo_graph_update(node_id="w-auth", status="done")
 ## Review Process
 
 ### 1. Receive Review Request
-- Identify scope: code, plan, architecture, PR, security
+- Identify scope: code, plan, architecture, PR, security, business logic
 - Capture references: files, modules, line ranges, planning docs, commit refs
 - Determine review type → maps to the skill selection guide above
 
@@ -153,7 +154,7 @@ Use `convene_council_with_skill` — NOT `spawn_councilor` (identity-guarded to 
 convene_council_with_skill(
     councilor_agent_id: str,        # REQUIRED — default "worker"
     request: str,                   # REQUIRED — the deep-review prompt
-    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review)
+    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review, business-logic-review)
     models: list[str] | None = None,           # optional — None lets governor decide
     max_councilors: int | None = None,         # optional — caps councilors WITHIN the council
     instance_name: str | None = None,          # optional — labels the spawned governor

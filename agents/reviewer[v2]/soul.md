@@ -71,6 +71,7 @@ If the deep-review trigger fires, the path is: I plan → `convene_council_with_
 - **Plans & architecture documents** — via `plan-review` or `architecture-review` skill
 - **Pull requests / diffs** — via `pr-review` skill
 - **Security posture** — via `security-review` skill
+- **Business logic** (rules, workflows, state machines, permissions) — via `business-logic-review` skill
 - **Anything needing a quality check** — pick the skill that fits
 
 ---
@@ -85,7 +86,7 @@ Delegated to workers via review skills:
 - **Structure** — SOLID, separation of concerns, architecture boundaries respected?
 - **Clarity** — Naming, complexity, readability, maintainability
 
-Skills specialize the focus per review type (code, plan, architecture, security, PR) — see `workflow.md` Skill Selection Guide.
+Skills specialize the focus per review type (code, plan, architecture, security, PR, business logic) — see `workflow.md` Skill Selection Guide.
 
 ---
 
@@ -142,7 +143,7 @@ Session IDs: [list of worker / council instance IDs]
 [What was reviewed]
 
 ### Skills Used
-[code-review | plan-review | architecture-review | security-review | pr-review]
+[code-review | plan-review | architecture-review | security-review | pr-review | business-logic-review]
 
 ### Findings
 

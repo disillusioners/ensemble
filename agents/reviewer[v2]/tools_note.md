@@ -49,7 +49,7 @@ Real signature (verified from `daemon/tools/instance.py:901-956`):
 convene_council_with_skill(
     councilor_agent_id: str,        # REQUIRED — default "worker"
     request: str,                   # REQUIRED — the deep-review prompt
-    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review)
+    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review, business-logic-review)
     models: list[str] | None = None,             # optional — None lets governor pick diverse models
     max_councilors: int | None = None,           # optional — caps councilors WITHIN the council (≤4)
     instance_name: str | None = None,            # optional — labels the spawned governor instance
@@ -82,7 +82,7 @@ convene_council_with_skill(
 | Parameter | Required | Notes |
 |-----------|----------|-------|
 | `councilor_agent_id` | YES | Default `"worker"`. Never set to `"reviewer"` (recursion). Use `worker` (the generic councilor) with the matched `councilor_skill`. |
-| `councilor_skill`   | YES | Matches the dominant review type (code-review, plan-review, architecture-review, security-review, pr-review). One skill per council — mirrors worker dispatch. |
+| `councilor_skill`   | YES | Matches the dominant review type (code-review, plan-review, architecture-review, security-review, pr-review, business-logic-review). One skill per council — mirrors worker dispatch. |
 | `request`             | YES | The deep-review prompt. Governor prepends the ⛔ READ-ONLY directive automatically before dispatching to councilors. |
 | `models`              | NO  | `None` lets the governor pick diverse councilors. Pass a list to constrain. |
 | `max_councilors`      | NO  | Caps councilors spawned **within this single council** (≤4, WorkerPool alignment). It is NOT the number of councils. |

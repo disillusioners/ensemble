@@ -30,3 +30,8 @@ skills:
     auto_load: false
     category: execution
     description: "PR diff analysis, merge readiness, regression risk"
+  - name: business-logic-review
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Business rules, workflows, state machines, domain invariants, permissions logic — not technical implementation"
