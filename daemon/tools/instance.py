@@ -359,6 +359,126 @@ def _check_team_membership(
     return _impl(caller_agent_id, requested_agent_id, version_tag)
 
 
+async def _register_child_completion_watcher(
+    manager: "InstanceManager",
+    parent_instance_id: str,
+    child_instance_id: str,
+    message_id: str,
+) -> str | None:
+    """Register a DependencyBus watcher so a parent is revived when its child completes.
+
+    This is the parent→child completion-correlation step that
+    :func:`send_message` performs inline. Async spawn conveniences
+    (``convene_council``, ``convene_council_with_skill``) that combine
+    ``spawn_instance`` + ``enqueue_message`` MUST call this after
+    enqueuing, otherwise the parent ends its turn and races to
+    ``COMPLETED`` before the spawned child finishes — the parent never
+    reaches ``waiting_children`` and the child's completion report is
+    never delivered as a resume message.
+
+    The watcher is keyed on the child's first ``process_message`` task
+    id (resolved from ``message_id``) and fires a ``FollowUp``
+    ``kind="child_complete"`` on terminal via ``bus.emit_terminal``
+    (called from ``child_reports`` / ``error_reporting``).
+
+    Args:
+        manager: The :class:`InstanceManager`.
+        parent_instance_id: The spawning instance (the parent).
+        child_instance_id: The spawned instance (the child).
+        message_id: The message id enqueued to the child (used to
+            resolve the child task id the watcher keys on).
+
+    Returns:
+        ``None`` on success, or an ``"ERROR: ..."`` string when the bus
+        watcher could not be registered (caller surfaces it). Returns
+        ``None`` (no-op) when the target is NOT a child of the parent —
+        this keeps the helper safe for non-hierarchical sends.
+    """
+    # Resolve the child task id — the bus keys watchers on task id, not
+    # message_id.
+    child_task = None
+    _task_repo = getattr(manager, "_task_repo", None)
+    if _task_repo is not None:
+        child_task = await asyncio.to_thread(
+            _task_repo.get_by_message, message_id
+        )
+    else:
+        logger.warning(
+            "manager._task_repo is missing — cannot resolve child task id"
+        )
+        return ("ERROR: manager._task_repo is missing; cannot register "
+                "dependency_bus watcher. Parent-child coordination unavailable.")
+
+    from ..repositories.instance.models import Instance
+    from ..write_pause_guard import WriteGuardSession
+    with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
+        target_instance = session.get(Instance, child_instance_id)
+        if not target_instance or target_instance.parent_id != parent_instance_id:
+            # Not a parent→child send — no watcher to register.
+            return None
+
+        if child_task is None:
+            # Child instance exists and is ours, but the task row is gone
+            # (e.g. already completed/cleaned before we could watch).
+            # No watcher possible; the parent may not receive an auto-resume.
+            logger.warning(
+                f"child task not found for message {message_id} — "
+                f"cannot register bus watcher (parent="
+                f"{parent_instance_id[:8]}, child={child_instance_id[:8]})"
+            )
+            return None
+
+        from daemon.services.dependency_bus import (
+            FollowUp,
+            get_dependency_bus,
+        )
+        _bus = get_dependency_bus()
+        if _bus is None:
+            logger.warning(
+                "Bus singleton is None — bus wiring failure (no fallback)"
+            )
+            return None
+        try:
+            _follow_up = FollowUp(
+                target_instance_id=parent_instance_id,
+                message=(
+                    f"[dependency_bus] child {child_instance_id} "
+                    f"completed for message {message_id}"
+                ),
+                source=f"internal_agent:{parent_instance_id}",
+                metadata={
+                    "kind": "child_complete",
+                    "child_id": child_instance_id,
+                    "parent_id": parent_instance_id,
+                    "message_id": message_id,
+                },
+            )
+            await _bus.watch(
+                source_task_id=str(child_task.id),
+                follow_up=_follow_up,
+            )
+            logger.debug(
+                f"bus.watch registered: child_task="
+                f"{str(child_task.id)[:8]}..., "
+                f"parent={parent_instance_id[:8]}..., "
+                f"child={child_instance_id[:8]}..., "
+                f"message={message_id[:8]}...",
+                extra={"completion_delivery_path": "bus"},
+            )
+        except Exception as hook_err:
+            logger.warning(
+                f"bus hook: watch failed "
+                f"(parent={parent_instance_id[:8]}, "
+                f"child={child_instance_id[:8]}, "
+                f"task={str(child_task.id)[:8]}): {hook_err}"
+            )
+            return (
+                f"ERROR: Failed to register message "
+                f"correlation (dependency_bus): {hook_err}"
+            )
+    return None
+
+
 def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | None:
     """Get the default workdir from the instance's project main_directory.
     
@@ -1156,11 +1276,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             f"{max_councilors if max_councilors is not None else 'governor decides'}"
         )
 
-        await manager.enqueue_message(
+        convene_result = await manager.enqueue_message(
             instance_id=gov_instance_id,
             message=message_text,
             source=f"internal_agent:{current_instance_id}",
         )
+
+        # Register a DependencyBus watcher so the caller (parent) is
+        # revived — put into ``waiting_children`` then reactivated with
+        # the governor's completion report — when the spawned governor
+        # finishes. Without this the parent races to COMPLETED before the
+        # governor even starts. Mirrors ``send_message`` 's
+        # parent→child watcher; see ``_register_child_completion_watcher``.
+        watcher_error = await _register_child_completion_watcher(
+            manager, current_instance_id, gov_instance_id, convene_result.message_id
+        )
+        if watcher_error is not None:
+            return watcher_error
 
         return {
             "status": "convened",
@@ -1301,11 +1433,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             f"{max_councilors if max_councilors is not None else 'governor decides'}"
         )
 
-        await manager.enqueue_message(
+        convene_result = await manager.enqueue_message(
             instance_id=gov_instance_id,
             message=message_text,
             source=f"internal_agent:{current_instance_id}",
         )
+
+        # Register a DependencyBus watcher so the caller (parent) is
+        # revived — put into ``waiting_children`` then reactivated with
+        # the governor's completion report — when the spawned governor
+        # finishes. Without this the parent races to COMPLETED before the
+        # governor even starts. Mirrors ``send_message`` 's
+        # parent→child watcher; see ``_register_child_completion_watcher``.
+        watcher_error = await _register_child_completion_watcher(
+            manager, current_instance_id, gov_instance_id, convene_result.message_id
+        )
+        if watcher_error is not None:
+            return watcher_error
 
         return {
             "status": "convened",
@@ -1402,100 +1546,17 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         )
         message_id = result.message_id
 
-        # Resolve the freshly-created child task id. The DependencyBus
-        # keys watchers on the child task id, so we look up the task
-        # the ``enqueue_message`` call just wrote.
-        child_task = None
-        _task_repo = getattr(manager, "_task_repo", None)
-        if _task_repo is not None:
-            child_task = await asyncio.to_thread(
-                _task_repo.get_by_message, message_id
-            )
-        else:
-            logger.warning(
-                "manager._task_repo is missing — cannot resolve child task id"
-            )
-            return ("ERROR: manager._task_repo is missing; cannot register "
-                    "dependency_bus watcher. Parent-child coordination unavailable.")
-
-        # Register watcher when sender is the parent of the target instance.
-        from sqlmodel import Session
-        from ..repositories.instance.models import Instance
-        from ..write_pause_guard import WriteGuardSession
-        with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
-            target_instance = session.get(Instance, instance_id)
-            if target_instance and target_instance.parent_id == current_instance_id:
-                # ─── Bus is the SOLE completion authority ───
-                # The DependencyBus is the sole parent→child correlation
-                # authority. The legacy SQL increment + parent-revive
-                # UPDATE were removed with the
-                # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3, and
-                # ``CorrelationManager`` (the prior sole authority) was
-                # removed in Phase 5 — there is no alternative path to
-                # fall back on.
-                #
-                # The bus path is the unconditional behavior of
-                # ``send_message``: call ``bus.watch(...)`` to register a
-                # ``FollowUp`` keyed on the child task id. The bus stores
-                # a PENDING row in ``dependency_watchers`` and fires the
-                # follow-up on terminal event via ``emit_terminal`` (called
-                # from ``child_reports`` / ``error_reporting``).
-                if child_task is not None:
-                    # ─── Bus path: register a PENDING watcher ────────────
-                    from daemon.services.dependency_bus import (
-                        FollowUp,
-                        get_dependency_bus,
-                    )
-                    _bus = get_dependency_bus()
-                    if _bus is None:
-                        # Bus singleton missing is a wiring failure
-                        # (the bus is mandatory).
-                        logger.warning(
-                            "Bus singleton is None — bus wiring "
-                            "failure (no fallback)"
-                        )
-                    else:
-                        try:
-                            _follow_up = FollowUp(
-                                target_instance_id=current_instance_id,
-                                message=(
-                                    f"[dependency_bus] child {instance_id} "
-                                    f"completed for message {message_id}"
-                                ),
-                                source=f"internal_agent:{current_instance_id}",
-                                metadata={
-                                    "kind": "child_complete",
-                                    "child_id": instance_id,
-                                    "parent_id": current_instance_id,
-                                    "message_id": message_id,
-                                },
-                            )
-                            await _bus.watch(
-                                source_task_id=str(child_task.id),
-                                follow_up=_follow_up,
-                            )
-                            logger.debug(
-                                f"bus.watch registered: child_task="
-                                f"{str(child_task.id)[:8]}..., "
-                                f"parent={current_instance_id[:8]}..., "
-                                f"child={instance_id[:8]}..., "
-                                f"message={message_id[:8]}...",
-                                extra={"completion_delivery_path": "bus"},
-                            )
-                        except Exception as hook_err:
-                            logger.warning(
-                                f"bus hook: watch failed "
-                                f"(parent={current_instance_id[:8]}, "
-                                f"child={instance_id[:8]}, "
-                                f"task={str(child_task.id)[:8]}): {hook_err}"
-                            )
-                            # Surface the failure so the agent sees an
-                            # ERROR string and the caller can decide
-                            # whether to retry.
-                            return (
-                                f"ERROR: Failed to register message "
-                                f"correlation (dependency_bus): {hook_err}"
-                            )
+        # Register a DependencyBus watcher so the parent is revived when
+        # the child completes. Shared with ``convene_council`` /
+        # ``convene_council_with_skill`` (any async spawn+enqueue that
+        # should keep the parent in ``waiting_children`` until the child
+        # reports back). The helper is a no-op when the target is NOT a
+        # child of the sender.
+        watcher_error = await _register_child_completion_watcher(
+            manager, current_instance_id, instance_id, message_id
+        )
+        if watcher_error is not None:
+            return watcher_error
 
         return (
             f"Message queued and sent to {instance_id}. The completion report "
