@@ -39,7 +39,7 @@ from daemon.repositories.dependency_bus import (
     DependencyWatcherState,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import JobItem, AdmissionState
+from daemon.repositories.job_queue.models import JobItem, AdmissionState, JobLock
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import (
@@ -57,6 +57,7 @@ from daemon.services.dependency_bus import (
 # seeds that derive ``admission_state`` from a ``status`` value.
 def status_to_admission(status):  # noqa: ANN001,ANN201
     return {
+        # JobStatus source values (legacy vocabulary)
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -64,6 +65,18 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through),
+        # so callers passing ``AdmissionState.X.value`` resolve to
+        # themselves instead of the ``"queued"`` fallback. Without
+        # this, seeding ``status=AdmissionState.ACTIVE.value`` would
+        # silently store ``admission_state="queued"`` and the
+        # cross-system guard's orphan-exclusion (FIFO concurrency
+        # fix, 2026-07-26) would release the JobItem — defeating
+        # ``test_pg_process_message_blocked_by_cross_system_guard``.
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
 
 
@@ -156,8 +169,19 @@ def _seed_job(
     uses ``j.metadata->>'message_id'`` (TEXT extraction from JSONB) to
     match against ``task.message_id`` — exercising the PG-specific JSON
     extraction path is one of the test goals.
+
+    PG-specific: the ``trg_job_queue_items_active_lock_guard`` DEFERRABLE
+    trigger (see ``tests/postgres/test_jq_proxy_phase2_constraints.py``)
+    enforces the ``admission_state='active' ⇔ JobLock row exists``
+    invariant. When the resolved ``admission_state`` is ``active``, this
+    helper seeds a matching ``JobLock`` row inside the same transaction
+    so the INSERT does not raise
+    ``admission_state=active requires a job_locks row``. The
+    ``admission_state='queued'`` path does not need a lock (a queued
+    JobItem is awaiting dispatch and holds no slot).
     """
     jid = job_id or f"job-pg-{uuid.uuid4().hex[:8]}"
+    admission_state = status_to_admission(status)
     with Session(pg_engine) as s:
         s.add(JobItem(
             job_id=jid,
@@ -166,11 +190,25 @@ def _seed_job(
             message="pg test",
             source="api",
             job_type="message",
-
-            admission_state=status_to_admission(status),
+            admission_state=admission_state,
             instance_id=instance_id,
             job_metadata=job_metadata if job_metadata is not None else {},
         ))
+        if admission_state == AdmissionState.ACTIVE.value:
+            # Mirror the production path: an active JobItem holds a
+            # queue lock. PG's DEFERRED trigger checks the invariant
+            # at COMMIT; seed a (project_id, queue_id, slot, job_id)
+            # lock row so the trigger is satisfied. project_id is
+            # taken from the JobItem default ("default"); queue_id is
+            # the default message queue name; lock_slot=0 is the
+            # first available slot under concurrency_limit.
+            s.add(JobLock(
+                project_id="default",
+                queue_id="system_fifo_queue",
+                job_id=jid,
+                instance_id=instance_id,
+                lock_slot=0,
+            ))
         s.commit()
     return jid
 
