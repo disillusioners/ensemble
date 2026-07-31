@@ -118,11 +118,33 @@ install: pyinstaller
 		echo "$(GREEN)No existing binary to backup.$(NC)"; \
 	fi
 	
-	# Backup existing data directory if present
+	# Backup only what is needed from the existing data directory.
+	# PostgreSQL holds the real state (instances + checkpoints) when
+	# ensemble.json selects "postgres"; the on-disk SQLite DBs there are
+	# stale, so copying them (especially checkpoints.db, often many GB)
+	# is wasteful. We always back up ensemble.json (backend selector +
+	# runtime config) and opencode_sessions.db (always a local SQLite
+	# file, never migrated to postgres). In sqlite mode we additionally
+	# back up instances.db and checkpoints.db with their WAL/SHM sidecars.
 	@if [ -d "$(INSTALL_DIR)/data" ] && [ "$$(ls -A $(INSTALL_DIR)/data 2>/dev/null)" ]; then \
-		echo "$(YELLOW)Backing up existing data directory...$(NC)"; \
+		echo "$(YELLOW)Backing up existing data directory (selective)...$(NC)"; \
 		mkdir -p $(INSTALL_DIR)/$(DATA_BACKUP_DIR); \
-		cp -r $(INSTALL_DIR)/data/* $(INSTALL_DIR)/$(DATA_BACKUP_DIR)/; \
+		if command -v python3 >/dev/null 2>&1 && [ -f "$(INSTALL_DIR)/data/ensemble.json" ]; then \
+			BACKEND=$$(python3 -c "import json,sys; print(json.load(open('$(INSTALL_DIR)/data/ensemble.json')).get('database','sqlite'))" 2>/dev/null || echo sqlite); \
+		else \
+			BACKEND=sqlite; \
+		fi; \
+		echo "  detected backend: $$BACKEND"; \
+		FILES="ensemble.json opencode_sessions.db opencode_sessions.db-wal opencode_sessions.db-shm"; \
+		if [ "$$BACKEND" = "sqlite" ]; then \
+			FILES="$$FILES instances.db instances.db-wal instances.db-shm checkpoints.db checkpoints.db-wal checkpoints.db-shm"; \
+		fi; \
+		for f in $$FILES; do \
+			if [ -f "$(INSTALL_DIR)/data/$$f" ]; then \
+				cp -p $(INSTALL_DIR)/data/$$f $(INSTALL_DIR)/$(DATA_BACKUP_DIR)/; \
+				echo "  backed up $$f"; \
+			fi; \
+		done; \
 		echo "$(GREEN)Backed up to $(DATA_BACKUP_DIR)$(NC)"; \
 	else \
 		echo "$(GREEN)No existing data to backup.$(NC)"; \
