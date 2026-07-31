@@ -1151,14 +1151,10 @@ class InstanceMessagingService:
         is_idle_to_running = False
         instance_agent_id: str | None = None
         previous_status: str | None = None
-        # Task row is always created in the same transaction as the
-        # MessageQueue row. ``task_id`` is its primary key (int | None) —
-        # None only if the task insert failed for an unrecoverable reason
-        # (callers treat None as "no resolvable work_id available"). The
-        # HTTP route discards ``job_id``; the ``job_continue`` tool uses it
-        # as ``new_job_id`` (resolution goes through
-        # ``work_resolver.resolve_work`` against ``task`` and
-        # ``job_queue_items`` — see ``enqueue_message``).
+        # A deferred-pause race guard may intentionally omit the Task while
+        # preserving the MessageQueue audit row. ``task_id`` is otherwise the
+        # Task primary key (int | None); callers already treat None as "no
+        # resolvable task id available".
         task_id: int | None = None
         # Virtual Job Management Surface (Phase 1, Batch 3,
         # 2026-06-27): capture ``Task.work_id`` alongside ``task.id``.
@@ -1198,44 +1194,94 @@ class InstanceMessagingService:
             )
             session.add(db_message)
 
+            # C2 TORN-STATE / DEFERRED-PAUSE RACE GUARD (Phase 2).
+            # Pausing inside the active graph task can self-cancel the cascade
+            # mid-transaction, so set_deferred_question_pause first records the
+            # in-memory marker and lets question_pause_node reach graph END.
+            # _pause_cascade_db_sync commits status=PAUSED only afterward, leaving
+            # a narrow window where the marker is set while the DB still says RUNNING.
+            # Creating PROCESS_MESSAGE in that window lets WorkerPool claim a
+            # spurious graph turn before the pause commit, reproducing the C2 race.
+            # This guard is intentionally MARKER-ONLY, not marker-or-DB-status.
+            # READY MessageQueue rows have no resume drain: cleanup excludes READY,
+            # so skipping on DB=PAUSED would orphan an otherwise deliverable message.
+            # With marker empty and DB=PAUSED we still create the PENDING Task and
+            # rely on claim_pending_task's SQL pause gate to hold it until resume.
+            # The verified root-resume path bypasses enqueue_message and passes the
+            # answer as a fresh message parameter at manager.py:5155; child resume
+            # calls enqueue_message with a fresh UUID. Neither consumes this READY row.
+            # Thus an in-window skipped row is retained only as a stale audit record;
+            # the narrow-window message may be lost, which is a known limitation.
+            # The durable follow-up is to materialize this marker in the DB as
+            # instances.pause_pending so Task creation and SQL claiming can coexist.
+            # Compare Phase 1 in child_reports.py:_process_child_completion_db_sync:
+            # that guard deliberately checks marker OR DB=PAUSED because its
+            # ReportInjection fallback is drained on every LLM call. Phase 2 is
+            # explicitly asymmetric because MessageQueue has no equivalent drain.
+            instance_for_pause_guard = session.get(Instance, instance_id)
+            deferred_pause_marker_set = (
+                instance_id in self._manager._deferred_question_pause
+            )
+            task: Task | None = None
+
             # 2. Insert the Task row in the same transaction as the
-            #    MessageQueue row. The structural D13 fix that eliminates
-            #    the dual-record coupling — messages no longer create a
-            #    JobItem at all; the Task row IS the dispatch primitive.
+            #    MessageQueue row unless the in-window marker guard fires.
+            #    The structural D13 fix makes Task the dispatch primitive;
+            #    preserving MessageQueue while skipping Task prevents the
+            #    about-to-be-paused instance from being claimed.
             #
             #    ``is_deferred`` (Phase 3 Part B1, 2026-06-27) is
             #    stamped at creation time so the defer-queue idle gate
             #    can recognise the row without a follow-up UPDATE.
             #    Default False matches every pre-existing caller; the
             #    orchestrator opts in via ``enqueue_message``.
-            task = Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id=instance_id,
-                message_id=message_id,
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
-                is_deferred=is_deferred,
-                is_background=is_background,
-                # ``work_id`` is the linkage handle for the
-                # JobItem/Task pair (POC path) or a fresh UUID minted
-                # earlier in this method (legacy path). Always non-None
-                # at this point — see the early auto-generation
-                # immediately above this block. Passing it explicitly
-                # ensures ``task.work_id`` matches the value the caller
-                # intended (``enqueue_message_job``'s shared UUID); if
-                # we relied on ``default_factory`` alone the Task row
-                # would mint an unrelated UUID and the linkage contract
-                # (JobItem.job_id == Task.work_id) would be silently
-                # broken.
-                work_id=work_id,
-            )
-            session.add(task)
+            if deferred_pause_marker_set:
+                logger.warning(
+                    f"instance_messaging: SKIPPING PROCESS_MESSAGE Task creation "
+                    f"for instance {instance_id[:8]}... — reason=marker "
+                    f"(in-window race); MessageQueue row preserved as audit/record; "
+                    f"KNOWN LIMITATION: message in narrow race window may not be "
+                    f"delivered on resume. Follow-up: materialize "
+                    f"_deferred_question_pause to DB (instances.pause_pending)."
+                )
+            else:
+                task = Task(
+                    task_type=TaskType.PROCESS_MESSAGE.value,
+                    instance_id=instance_id,
+                    message_id=message_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=datetime.now(timezone.utc),
+                    is_deferred=is_deferred,
+                    is_background=is_background,
+                    # ``work_id`` is the linkage handle for the
+                    # JobItem/Task pair (POC path) or a fresh UUID minted
+                    # earlier in this method (legacy path). Always non-None
+                    # at this point — see the early auto-generation
+                    # immediately above this block. Passing it explicitly
+                    # ensures ``task.work_id`` matches the value the caller
+                    # intended (``enqueue_message_job``'s shared UUID); if
+                    # we relied on ``default_factory`` alone the Task row
+                    # would mint an unrelated UUID and the linkage contract
+                    # (JobItem.job_id == Task.work_id) would be silently
+                    # broken.
+                    work_id=work_id,
+                )
+                session.add(task)
+                if (
+                    instance_for_pause_guard is not None
+                    and instance_for_pause_guard.status
+                    == InstanceStatus.PAUSED.value
+                ):
+                    logger.info(
+                        f"instance_messaging: PROCESS_MESSAGE Task created for "
+                        f"instance {instance_id[:8]}... with DB=PAUSED; relying "
+                        f"on claim_pending_task SQL gate to defer until resume"
+                    )
             # ``task.work_id`` was either inherited from the caller
             # (``enqueue_message_job``'s shared UUID, satisfying the
-            # linkage contract with JobItem.job_id) or minted above by
-            # ``default_factory`` (legacy ``enqueue_message`` path).
-            # No re-capture needed — the local ``work_id`` variable
-            # already holds the correct value either way.
+            # linkage contract with JobItem.job_id) or minted above.
+            # No re-capture is needed; the local ``work_id`` already holds
+            # the correct value even when the marker intentionally skips Task.
 
             # 3. Update instance status to RUNNING for any state that is
             #    NOT already RUNNING and NOT PAUSED. A terminal instance
@@ -1301,21 +1347,22 @@ class InstanceMessagingService:
 
             session.commit()
             # Capture the Task PK after commit + refresh so the caller
-            # can surface it as ``AsyncMessageResult.job_id``.
-            # ``task.id`` is populated by the autoincrement; refresh()
-            # re-reads the row from the DB to pick it up.
-            try:
-                session.refresh(task)
-                task_id = task.id
-            except Exception as e:
-                # Should not happen — the insert succeeded (we're past
-                # commit). Log and continue with None so callers degrade
-                # gracefully (HTTP route doesn't read job_id; job_continue
-                # would get None and surface a clear error).
-                logger.warning(
-                    f"Failed to refresh Task row for message {message_id}: {e}"
-                )
-                task_id = None
+            # can surface it as ``AsyncMessageResult.job_id``. The marker
+            # branch intentionally has no Task and leaves task_id=None.
+            if task is not None:
+                # ``task.id`` is populated by the autoincrement; refresh()
+                # re-reads the row from the DB to pick it up.
+                try:
+                    session.refresh(task)
+                    task_id = task.id
+                except Exception as e:
+                    # Should not happen — the insert succeeded (we're past
+                    # commit). Log and continue with None so callers degrade
+                    # gracefully (HTTP route doesn't read task_id).
+                    logger.warning(
+                        f"Failed to refresh Task row for message {message_id}: {e}"
+                    )
+                    task_id = None
 
         return _PreparedEnqueueContext(
             message_id=message_id,
