@@ -1,5 +1,5 @@
 ---
-version: 1.2.0
+version: 1.3.0
 category: planning
 auto_load: true
 ---
@@ -91,25 +91,38 @@ Before dispatching any worker or coder:
 3. **Select skill** — if worker tier, pick exactly one `load_skill` from the Skill Selection Guide.
 4. **Materialize the Dev Plan** as the first response (use the **Mandatory Output Format** below).
 5. **Set up `todo_graph`** if 2+ instances will run in parallel (fan-in tracking, W3).
-6. **Plan verification** — separate instance for complex coder work; git diff or review worker for quick worker work.
+6. **Plan verification** — minimal & scoped (Cardinal #6): one targeted test or smoke for the touched code (≤2-min cap), or a `code-review` diff pass. Full/regression testing is DEFERRED to the tester agent — note it in the plan's Verification line.
 
 ---
 
 ## Verification Strategy
 
-I do NOT fully trust coder or worker output. Independent verification is required.
+**Principle: minimal and scoped.** The dedicated **tester** agent owns full/regression/integration testing in the bigger workflow. My verification only proves the *dispatched change* didn't obviously break — it does **not** re-run the project's test suite. *(Cardinal #6 – Minimal verification; Verification Scope #20–#24.)*
 
-| Change type | Verification |
-|---|---|
-| Complex coder work (LARGE/HUGE scope) | Spawn a SEPARATE instance (coder or worker with `code-review` skill) to verify |
-| Quick worker work (SMALL/MEDIUM scope) | Check `git diff` directly, OR spawn a review worker with `code-review` skill |
-| Commit only (no code change) | `git log -p -1` to inspect the resulting commit |
+### Step 1 — Derive the change set (before verifying)
+From `git diff --stat` (read-only, #14) and the worker/coder report, name the exact files/functions touched. Verification scopes to **that set** — nothing wider. Never "discover and run" tests beyond the change set.
 
-**Iteration rules:**
+### Step 2 — Pick the smallest check that covers the change (one, in order)
 
-- If verification finds a real issue (failed test, regression, spec violation) → spawn a fix worker (with `code-fix` skill) for small issues, or a coder for larger issues.
-- If verification fails because the original instance misunderstood the spec → spawn a NEW coder or worker with a clearer dispatch message; do not iterate on the same instance.
-- Report verification results explicitly in the final Dev Report — what was checked, who checked it, what was found.
+| Change type | Verification | Cap |
+|---|---|---|
+| Complex coder work (LARGE/HUGE) | Spawn a SEPARATE instance to **review the diff** (`code-review` skill) + the one targeted test below | review + 1 targeted test |
+| Quick worker work (SMALL/MEDIUM) | `git diff` directly, OR spawn a review worker with `code-review` | diff / review |
+| Commit only (no code change) | `git log -p -1` to inspect the resulting commit | — |
+
+The "one targeted test" = a single test for the changed unit, e.g. `pytest path/to/test_changed.py::test_name -q`. **Bounded.** Fallbacks when no targeted test fits: a fast smoke (`python -c "import …"`, `tsc --noEmit`, `ruff check <file>`) or a `code-review` pass with **no execution**.
+
+### Step 3 — Timeout cap every run
+Unit ≤2 min; smoke ≤1 min. A verify worker never "discovers and run" extra tests. If the targeted test won't finish in cap → it's the wrong (too big) check: narrow further, or record `DEFERRED → tester` (the caller escalates — I do not spawn it; `tester` is not in my `team_members`).
+
+### Forbidden here (tester's job)
+- `pytest tests/`, `pytest tests/ -x`, `go test ./...`, whole-suite / regression / "run all tests" — **never** run or dispatch, by me or a coder/worker.
+- If the smallest check is green but I'm tempted to "run the whole suite to be safe" → STOP. That's the tester's signal. Record `Regression/full testing: DEFERRED → tester` in the Dev Report `### Remaining` and finish.
+
+### Iteration rules
+- If verification finds a real issue (failed targeted test, regression in the touched code, spec violation) → spawn a fix worker (`code-fix`) for small issues, or a coder for larger. Cap at **3 iterations** (#17); beyond that report `Partial`, name the failing test/issue.
+- If verification fails because the original instance misunderstood the spec → spawn a NEW coder/worker with a clearer dispatch message; do not iterate on the same instance.
+- **Report the scope decision** in the Dev Report `### Verification`: the change set, the single check run (+ cap), and the explicit `DEFERRED → tester` line for full/regression coverage.
 
 ---
 
@@ -158,7 +171,7 @@ Before every `send_message`, in addition to the skill's own Pre-Execution Self-C
 - [ ] **`dev-strategy` NOT embedded** in the worker message (developer-only planning skill)
 - [ ] **One skill per worker** — no bundling multiple skills into one dispatch
 - [ ] **Worker message includes target, constraints, expected output** — no vague "do the thing" prompts
-- [ ] **Independent verification planned** — separate instance or git diff review, scheduled
+- [ ] **Verification planned & scoped** — one targeted test/smoke (≤2-min cap) or `code-review` diff pass over the touched code; full/regression testing noted as DEFERRED → tester (Cardinal #6)
 - [ ] **`todo_graph` node updated** to `in_progress` before the dispatch lands (for multi-instance dispatches)
 
 ---
@@ -207,7 +220,7 @@ My first response MUST be a Dev Plan. Use this exact template:
 | dev-worker-<task> | worker | <skill> | <file> | P1 |
 
 ### Verification
-[How results will be verified — separate instance for complex work, git diff or review worker for quick work]
+[How results will be verified — minimal & scoped: one targeted test/smoke (≤2-min cap) or code-review of the diff for the touched code. Full/regression testing DEFERRED to tester]
 
 ### Approach
 [How coder/worker will run; fan-in tracking via todo_graph if 2+ instances]

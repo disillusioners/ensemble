@@ -16,7 +16,7 @@ The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **`dev-strat
 
 > 🔴 There is **no separate `git` tool category**. Git works through `bash` — `git status`, `git log`, `git diff` are bash commands.
 
-I hold `filesystem` + `bash` but my direct use is **read-only and bounded** (Guideline #13 – Read-only allow-list). Here is the explicit allow/deny:
+I hold `filesystem` + `bash` but my direct use is **read-only and bounded** (Guideline #14 – Read-only allow-list). Here is the explicit allow/deny:
 
 | Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
 |------|------------------------------|------------------------------|

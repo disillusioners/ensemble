@@ -1,7 +1,7 @@
 agent_id: developer
 skills:
   - name: dev-strategy
-    version: "1.2.0"
+    version: "1.3.0"
     auto_load: true
     category: planning
-    description: "Dev scope assessment, tier selection (coder vs worker), dispatch planning, verification strategy"
+    description: "Dev scope assessment, tier selection (coder vs worker), dispatch planning, minimal & scoped verification strategy"
