@@ -513,69 +513,6 @@ class TestGetInstanceMessages:
         assert messages[1]["content"] == "Hello world"
 
     @pytest.mark.asyncio
-    async def test_get_instance_messages_does_not_track_auto_load_skills(self):
-        """Reconstruction includes auto-load skills without metadata writes."""
-        from types import SimpleNamespace
-        from langchain_core.messages import HumanMessage
-
-        mock_checkpointer = AsyncMock()
-        mock_checkpointer.aget = AsyncMock(return_value={
-            "channel_values": {"messages": [HumanMessage(content="Hello world")]}
-        })
-        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
-
-        agent_dir = Path(__file__).resolve().parent.parent / "agents" / "developer"
-        instance_meta = SimpleNamespace(
-            agent_id="developer",
-            agent_dir=str(agent_dir),
-            agent_tag=None,
-            instance_metadata={},
-            parent_id=None,
-            project_id="project-123",
-            created_at="2026-07-28T00:00:00+00:00",
-        )
-        instance_repo = MagicMock()
-        instance_repo.get.return_value = instance_meta
-
-        manager = SimpleNamespace(
-            _instance_repository=instance_repo,
-            prompt_cache=MagicMock(),
-            _project_repository=None,
-            shared_context_metadata_repo=MagicMock(),
-            _skill_repo=MagicMock(),
-            _skill_clone_service=None,
-            config=SimpleNamespace(llm=SimpleNamespace(allowed_models=[])),
-        )
-        manager._skill_repo.get_auto_load_skills.return_value = [
-            SimpleNamespace(id="skill-1", content="Always verify the result.")
-        ]
-
-        base_prompt = "You are a developer agent."
-        with patch(
-            "daemon.manager.load_and_cache_prompt",
-            return_value=(base_prompt, len(base_prompt)),
-        ), patch(
-            "daemon.registry.get_registry",
-            return_value=MagicMock(
-                # Opt into ``legacy`` mode (Phase 6 default flip means
-                # ``None`` now resolves to ``human_messages``, which skips
-                # the legacy auto_load appender — but this test exercises
-                # the legacy auto_load pipeline and expects the skill to
-                # appear in the reconstructed system prompt).
-                get_resolved=MagicMock(
-                    return_value=SimpleNamespace(context_injection_mode="legacy")
-                ),
-                get_version=MagicMock(return_value=None),
-            ),
-        ):
-            messages = await get_instance_messages(
-                mock_checkpointer, "inst-123", manager=manager
-            )
-
-        assert "Always verify the result." in messages[0]["content"]
-        instance_repo.set_metadata.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_get_instance_messages_no_synthetic_without_manager(self):
         """Backward compatibility: when ``manager`` is None (or omitted),
         no synthetic system message is injected — only persisted messages
@@ -666,9 +603,6 @@ class TestGetInstanceMessagesHumanMessagesContext:
     3. Insert them between the synthetic system message (when present)
        and the most recent user message.
     4. NEVER write to the database (read endpoint, ADR-2).
-
-    When the mode is ``"legacy"`` (legacy), the context rebuild
-    must be a strict no-op so the existing byte layout is preserved.
     """
 
     @pytest.mark.asyncio
@@ -795,67 +729,6 @@ class TestGetInstanceMessagesHumanMessagesContext:
         assert "is_synthetic" not in messages[0]
         assert "is_synthetic" not in messages[1]
         assert "is_synthetic" not in messages[4]
-
-    @pytest.mark.asyncio
-    async def test_system_prompt_mode_does_not_call_assemble_context_messages(self):
-        """system_prompt mode is the legacy default. Context is baked
-        into the system prompt by ``_apply_post_cache_appends``; the
-        GET /messages response must NOT rebuild it via
-        ``assemble_context_messages`` — that would double-token-cost
-        and risk confusing the LLM by sending the same data twice.
-        """
-        from langchain_core.messages import HumanMessage
-
-        persisted = [HumanMessage(content="Hello world")]
-        mock_checkpointer = AsyncMock()
-        mock_checkpointer.aget = AsyncMock(return_value={
-            "channel_values": {"messages": persisted}
-        })
-        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
-
-        instance_meta = MagicMock()
-        instance_meta.agent_id = "developer"
-        instance_meta.agent_tag = None
-        instance_meta.instance_metadata = {}
-        instance_meta.parent_id = None
-        instance_meta.project_id = None
-        instance_meta.created_at = "2026-07-28T00:00:00+00:00"
-        instance_repo = MagicMock()
-        instance_repo.get = MagicMock(return_value=instance_meta)
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": None,
-            "mode": "legacy",  # legacy default
-        }
-
-        # Track whether the context builder is invoked — must NOT be.
-        with patch(
-            "daemon.persistence._resolve_instance_message_context",
-            return_value=ctx,
-        ), patch(
-            "daemon.persistence._build_context_dicts_for_response",
-            new=AsyncMock(return_value=["should-not-appear"]),
-        ) as mock_build, patch(
-            "daemon.persistence._reconstruct_full_system_prompt",
-            return_value=None,
-        ):
-            manager = MagicMock()
-            manager._instance_repository = instance_repo
-
-            messages = await get_instance_messages(
-                mock_checkpointer, "inst-123", manager=manager
-            )
-
-        # The context builder was NEVER awaited in legacy mode.
-        mock_build.assert_not_awaited()
-
-        # Only the persisted message is returned — no synthetic entries.
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert messages[0]["content"] == "Hello world"
-        # No ``context_kind`` leaks into legacy responses.
-        assert all("context_kind" not in m for m in messages)
 
     @pytest.mark.asyncio
     async def test_serialize_message_emits_context_kind_only_for_context(self):

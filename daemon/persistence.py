@@ -484,7 +484,7 @@ async def get_instance_messages(
     #
     # Strictly read-only: no DB writes, no skill tracking. Errors are
     # swallowed so a flaky context build never breaks the GET endpoint.
-    if ctx is not None and ctx["mode"] == "human_messages":
+    if ctx is not None:
         if _messages_have_context_block(messages):
             # Two-path conflict: checkpoint already carries context
             # messages from Path A. The normal serialization loop above
@@ -498,11 +498,11 @@ async def get_instance_messages(
                 f"skipping synthetic rebuild to avoid duplicates"
             )
         else:
-            # Legacy / fallback path: rebuild context messages for the
-            # *current* turn using the same helper ``agent_node`` uses
-            # every turn. The rebuilt entries are stamped with
-            # ``is_synthetic=True`` and a stable ``synthetic-context-<kind>-…``
-            # ``message_id`` so the frontend can identify them.
+            # Rebuild context messages for the *current* turn using the
+            # same helper ``agent_node`` uses every turn. The rebuilt
+            # entries are stamped with ``is_synthetic=True`` and a
+            # stable ``synthetic-context-<kind>-…`` ``message_id`` so
+            # the frontend can identify them.
             try:
                 context_dicts = await _build_context_dicts_for_response(
                     instance_id=instance_id,
@@ -512,9 +512,9 @@ async def get_instance_messages(
                 )
                 if context_dicts:
                     # Insert AFTER the synthetic system message (if any) but
-                    # BEFORE the most recent user message. ``human_messages``
-                    # mode rebuilds context for the *current* turn, so only
-                    # the last user turn is preceded by context — historical
+                    # BEFORE the most recent user message. The orchestrator
+                    # rebuilds context for the *current* turn, so only the
+                    # last user turn is preceded by context — historical
                     # turns remain bare in the API response, matching what
                     # the LLM actually received on those earlier turns.
                     insert_at = _locate_context_insertion_index(result)
@@ -536,7 +536,7 @@ def _resolve_instance_message_context(
 ) -> dict[str, Any] | None:
     """Resolve the metadata ``get_instance_messages`` needs to inject.
 
-    Returns a dict with three keys:
+    Returns a dict with two keys:
 
     * ``instance_meta`` — the ``Instance`` row from the manager's
       ``_instance_repository``. ``None`` if the instance is gone or
@@ -544,10 +544,6 @@ def _resolve_instance_message_context(
     * ``agent_meta`` — best-effort resolved ``AgentMetadata`` for
       the agent (versioned first, then base). ``None`` when the
       registry is unreachable.
-    * ``mode`` — the result of ``_resolve_injection_mode(agent_meta)``,
-      i.e. ``"human_messages"`` (default) or ``"legacy"``. Defaults to
-      ``"human_messages"`` when ``agent_meta`` is ``None``, matching
-      the new default contract.
 
     ``None`` is returned when no instance repository is attached or
     the instance row cannot be loaded — callers treat that as
@@ -586,16 +582,9 @@ def _resolve_instance_message_context(
     except Exception:
         agent_meta = None
 
-    # Lazy import here — same pattern used by the spawn/restore call sites
-    # in instance_lifecycle.py so test patches at ``daemon.manager.*``
-    # take effect.
-    from daemon.services.instance_lifecycle import _resolve_injection_mode
-    mode = _resolve_injection_mode(agent_meta)
-
     return {
         "instance_meta": instance_meta,
         "agent_meta": agent_meta,
-        "mode": mode,
     }
 
 
@@ -816,7 +805,6 @@ def _reconstruct_full_system_prompt(
     if ctx is not None:
         instance_meta = ctx["instance_meta"]
         agent_meta = ctx["agent_meta"]
-        resolved_mode = ctx["mode"]
         if instance_meta is None:
             return None
     else:
@@ -845,9 +833,6 @@ def _reconstruct_full_system_prompt(
                 )
         except Exception:
             agent_meta = None
-
-        from daemon.services.instance_lifecycle import _resolve_injection_mode
-        resolved_mode = _resolve_injection_mode(agent_meta)
 
     agent_id = getattr(instance_meta, "agent_id", None)
     agent_dir_raw = getattr(instance_meta, "agent_dir", None)
@@ -881,8 +866,8 @@ def _reconstruct_full_system_prompt(
         return None
 
     # Apply the post-cache append chain — same call sites as the spawn
-    # path at daemon/services/instance_lifecycle.py:1250-1261 and the
-    # restore path at lines 2623-2634. We mirror those signature exactly.
+    # path at daemon/services/instance_lifecycle.py and the restore
+    # path. We mirror those signatures exactly.
     from daemon.services.instance_lifecycle import _apply_post_cache_appends
 
     instance_repo = getattr(manager, "_instance_repository", None)
@@ -901,6 +886,5 @@ def _reconstruct_full_system_prompt(
         manager=manager,
         agent_meta=agent_meta,
         disable_auto_load_tracking=True,
-        mode=resolved_mode,
     )
     return system_prompt, getattr(instance_meta, "created_at", None)

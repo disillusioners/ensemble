@@ -576,17 +576,12 @@ class TestHumanMessagesModeForChild:
         tmp_path,
         monkeypatch,
     ) -> None:
-        """Legacy mode (regardless of ``context_injection`` boolean) returns ``[]``.
-
-        After the 2026-07-28 mode-gate fix, ``assemble_context_messages``
-        short-circuits on ``context_injection_mode="legacy"`` — the 3
-        CONTEXT appenders inside ``_apply_post_cache_appends`` own
-        the legacy system-prompt path. The legacy
-        ``context_injection: false`` boolean alone no longer gates
-        the orchestrator: in ``human_messages`` mode (the default),
-        agents with ``context_injection: false`` still receive
-        context messages (see
-        ``TestAssembleContextMessagesModeGate::test_human_messages_mode_without_context_injection_flag_returns_messages``).
+        """In ``human_messages`` mode (the only mode), the legacy
+        ``context_injection: false`` boolean does NOT short-circuit the
+        orchestrator. The booleans only gate the legacy system-prompt
+        path; in human_messages mode the runtime rebuilds context
+        messages regardless of the boolean — see
+        ``TestAssembleContextMessagesModeGate::test_human_messages_mode_without_context_injection_flag_returns_messages``.
         """
         engine = _build_engine()
         bundle = _build_manager_stub(engine)
@@ -598,14 +593,13 @@ class TestHumanMessagesModeForChild:
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
-        # KV written under root's context_key; in legacy mode the
-        # orchestrator must skip it entirely.
+        # KV written under root's context_key — child reads via inherited context_key.
         bundle.shared_repo.set_many(root_id, {"some_key": "some_value"})
 
         agent_meta = SimpleNamespace(
             context_injection=False,
             skill_injection=False,
-            context_injection_mode="legacy",
+            context_injection_mode="human_messages",
         )
 
         assemble = _import_assemble_context_messages()
@@ -620,8 +614,13 @@ class TestHumanMessagesModeForChild:
             parent_id=root_id,
         ))
 
-        # Legacy mode → [] regardless of the legacy ``context_injection`` boolean.
-        assert result == [], (
-            f"Expected [] in legacy mode, got "
-            f"{[m.additional_kwargs.get('context_kind') for m in result]}"
+        # In human_messages mode, context_injection=False does NOT short-circuit.
+        # The orchestrator still returns context messages (the legacy
+        # ``context_injection: false`` gate is honored only on the legacy
+        # system-prompt path, which is no longer reachable).
+        kinds = [m.additional_kwargs.get("context_kind") for m in result]
+        assert kinds, (
+            f"human_messages mode should assemble context messages even when "
+            f"context_injection=False (the boolean is a legacy-mode gate only). "
+            f"Got kinds: {kinds}"
         )

@@ -1011,10 +1011,8 @@ async def get_messages(
 
     2. **Synthetic context messages** (optional, ``is_synthetic=True``)
 
-       When the agent opts into ``context_injection_mode:
-       "human_messages"``, zero or more per-turn context messages are
-       inserted immediately BEFORE the most recent user message. Each
-       entry carries:
+       Per-turn context messages are inserted immediately BEFORE the
+       most recent user message. Each entry carries:
 
        * ``is_synthetic=True``
        * ``context_kind`` — one of ``"project"``, ``"shared_context"``,
@@ -1026,7 +1024,10 @@ async def get_messages(
        :func:`daemon.services.context_messages.assemble_context_messages`
        — they are not persisted in the LangGraph checkpoint and are
        never written back. The endpoint therefore stays strictly
-       read-only.
+       read-only. When the checkpoint already contains the context
+       block (i.e. it was checkpointed on the first turn and survives
+       via LangGraph's ``add_messages`` reducer), the synthetic rebuild
+       is skipped to avoid duplicating every ``[SYSTEM CONTEXT]`` entry.
 
     3. **Persisted checkpoint messages** (always)
 

@@ -266,47 +266,20 @@ class TestContextApiLatency:
         )
 
     @pytest.mark.asyncio
-    async def test_human_messages_vs_legacy_overhead(self):
-        """Context rebuild adds bounded overhead vs the legacy mode.
+    async def test_human_messages_overhead(self):
+        """Context rebuild stays under the pure-Python smoke ceiling.
 
-        The test runs the same payload through both injection modes and
-        compares medians. The ``human_messages`` median must stay within
-        a generous multiple of the ``legacy`` median — proving
-        the rebuild is real work but not catastrophic.
-
-        Renamed from ``test_human_messages_vs_system_prompt_overhead``
-        after ``system_prompt`` mode was renamed to ``legacy`` in
-        Phase 6 of the Context Injection Restructure.
+        The test runs the same payload through the ``human_messages``
+        injection mode and asserts the median latency stays within the
+        pure-Python baseline (mocked DB). Originally this test paired
+        the human_messages path against a legacy-mode comparison arm
+        to bound the rebuild overhead; the legacy comparison was
+        removed when ``system_prompt`` mode was retired (Phase 6 of
+        the Context Injection Restructure).
         """
         instance_id = "inst-perf-2"
         messages = _make_persisted_messages()
 
-        # ── legacy mode (renamed from system_prompt) ───────────────────
-        legacy_checkpointer = _make_mock_checkpointer(messages)
-        legacy_manager, legacy_ctx = _make_mock_manager(instance_id, mode="legacy")
-        with patch(
-            "daemon.persistence._resolve_instance_message_context",
-            return_value=legacy_ctx,
-        ), patch(
-            "daemon.persistence._build_context_dicts_for_response",
-            new=AsyncMock(return_value=[]),
-        ), patch(
-            "daemon.persistence._reconstruct_full_system_prompt",
-            return_value=None,
-        ):
-            await get_instance_messages(
-                legacy_checkpointer, instance_id, manager=legacy_manager
-            )
-
-            legacy_samples: list[float] = []
-            for _ in range(ITERATIONS):
-                t0 = time.perf_counter()
-                await get_instance_messages(
-                    legacy_checkpointer, instance_id, manager=legacy_manager
-                )
-                legacy_samples.append(time.perf_counter() - t0)
-
-        # ── human_messages mode ───────────────────────────────────────
         hm_checkpointer = _make_mock_checkpointer(messages)
         hm_manager, hm_ctx = _make_mock_manager(instance_id, mode="human_messages")
 
@@ -332,28 +305,10 @@ class TestContextApiLatency:
                 )
                 hm_samples.append(time.perf_counter() - t0)
 
-        legacy_median = sorted(legacy_samples)[len(legacy_samples) // 2]
         hm_median = sorted(hm_samples)[len(hm_samples) // 2]
 
-        # human_messages rebuild must remain a bounded multiplier of the
-        # legacy path. 10x is generous; tighten after a baseline capture.
-        # Note: because both modes do the same checkpoint iteration /
-        # serializer work, the rebuild overhead is the DIFFERENCE
-        # (``hm_median - legacy_median``) plus the insertion cost.
-
-        overhead_ms = (hm_median - legacy_median) * 1000.0
-        assert overhead_ms < PURE_PYTHON_LATENCY_BUDGET_SECONDS * 1000.0, (
-            f"human_messages rebuild adds {overhead_ms:.2f}ms over "
-            f"legacy (legacy_median={legacy_median*1000:.2f}ms, "
-            f"hm_median={hm_median*1000:.2f}ms) — exceeds pure-Python "
-            f"smoke ceiling {PURE_PYTHON_LATENCY_BUDGET_SECONDS*1000:.2f}ms"
-        )
-
-        # And both modes must independently stay under the smoke ceiling.
-        assert legacy_median < PURE_PYTHON_LATENCY_BUDGET_SECONDS, (
-            f"legacy median {legacy_median*1000:.2f}ms exceeds smoke "
-            f"ceiling — pure-Python baseline regressed"
-        )
+        # The human_messages rebuild must stay under the pure-Python
+        # smoke ceiling.
         assert hm_median < PURE_PYTHON_LATENCY_BUDGET_SECONDS, (
             f"human_messages median {hm_median*1000:.2f}ms exceeds smoke "
             f"ceiling — pure-Python baseline regressed"

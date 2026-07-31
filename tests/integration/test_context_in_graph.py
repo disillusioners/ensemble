@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Sequence, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -57,21 +57,6 @@ from daemon.services.instance_messaging import _build_graph_input
 
 
 @pytest.fixture
-def legacy_agent_meta() -> SimpleNamespace:
-    """AgentMeta stub in opt-in ``legacy`` mode.
-
-    Previously named ``system_prompt_agent_meta`` when ``system_prompt``
-    was the default. After the Phase 6 default flip, ``legacy`` mode is
-    only reachable by explicitly setting ``context_injection_mode``.
-    """
-    return SimpleNamespace(
-        context_injection_mode="legacy",
-        context_injection=False,
-        skill_injection=False,
-    )
-
-
-@pytest.fixture
 def human_messages_agent_meta() -> SimpleNamespace:
     """AgentMeta stub in ``human_messages`` mode (the new default)."""
     return SimpleNamespace(
@@ -96,49 +81,7 @@ def stub_manager() -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
-# 1. ContextSlot.assemble() returns [] in system_prompt mode
-# ---------------------------------------------------------------------------
-
-
-class TestContextSlotAssembleLegacyMode:
-    """Legacy mode is opt-in via ``context_injection_mode: "legacy"`` — the
-    slot must be a no-op (context lives in the system prompt)."""
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_list_in_legacy_mode(
-        self,
-        legacy_agent_meta: SimpleNamespace,
-        stub_manager: SimpleNamespace,
-    ) -> None:
-        """Legacy mode must return ``([], [])`` and never call assemble_context_messages.
-
-        Hybrid Context Injection (2026-07-29): the slot now returns a
-        tuple. In legacy mode both halves are empty — the caller's
-        flat-empty contract is preserved at the tuple-shape level.
-        """
-        slot = ContextSlot(
-            manager=stub_manager,
-            agent_meta=legacy_agent_meta,
-        )
-
-        with patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(return_value=([], [])),
-        ) as mock_assemble:
-            result = await slot.assemble(
-                instance_id="inst-1",
-                user_query="hello",
-                project_id="proj-1",
-            )
-
-        assert result == ([], [])
-        # Must NOT have invoked the orchestrator at all — the slot
-        # is a hard no-op in legacy mode.
-        mock_assemble.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# 2. ContextSlot.assemble() calls assemble_context_messages in human_messages mode
+# 1. ContextSlot.assemble() calls assemble_context_messages in human_messages mode
 # ---------------------------------------------------------------------------
 
 
@@ -192,7 +135,7 @@ class TestContextSlotAssembleHumanMessagesMode:
 
 
 # ---------------------------------------------------------------------------
-# 3. Manager set_context_skill_result / get_context_skill_result round-trip
+# 2. Manager set_context_skill_result / get_context_skill_result round-trip
 # ---------------------------------------------------------------------------
 
 
@@ -250,105 +193,70 @@ class TestContextSkillResultRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# 4 & 5. _build_graph_input mode gating
+# 3 & 4. _build_graph_input mode gating
 # ---------------------------------------------------------------------------
 
 
-class TestBuildGraphInputModeGating:
-    """Phase 3 / Task 12: mode-aware prepend behavior."""
+class TestBuildGraphInputHelper:
+    """Direct tests for :func:`_build_graph_input`.
 
-    def test_human_messages_mode_returns_only_user_message(
-        self,
-        human_messages_agent_meta: SimpleNamespace,
-    ) -> None:
-        """In human_messages mode, the skill message must NOT be prepended
-        — context is rebuilt inside ``agent_node`` instead, and prepending
-        here would double-inject."""
-        skill_msg = HumanMessage(content="<skill>instructions</skill>", id="skill-1")
+    The helper is the consumer side of the persistent-context-message
+    pipeline: the per-turn persistent block (project + shared-context +
+    skills) is built by the messaging path, then prepended to the
+    graph input so LangGraph's ``add_messages`` reducer checkpoints
+    it before the user message.
+    """
 
-        result = _build_graph_input(
-            content="hello",
-            message_id="msg-hm",
-            skill_injection_msg=skill_msg,
-            agent_meta=human_messages_agent_meta,
-        )
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        # The single message is the user message, NOT the skill message.
-        assert messages[0] is not skill_msg
-        assert messages[0].content == "hello"
-        assert messages[0].id == "msg-hm"
-
-    def test_legacy_mode_prepends_skill_message(
-        self,
-        legacy_agent_meta: SimpleNamespace,
-    ) -> None:
-        """Legacy mode preserves the pre-Phase-3 layout:
-        the skill message is prepended BEFORE the user message."""
-        skill_msg = HumanMessage(content="<skill>instructions</skill>", id="skill-1")
-
-        result = _build_graph_input(
-            content="hello",
-            message_id="msg-legacy",
-            skill_injection_msg=skill_msg,
-            agent_meta=legacy_agent_meta,
-        )
-
-        messages = result["messages"]
-        assert len(messages) == 2
-        # Skill message first, user message second.
-        assert messages[0] is skill_msg
-        assert messages[0].content == "<skill>instructions</skill>"
-        assert messages[0].id == "skill-1"
-        assert messages[1].content == "hello"
-        assert messages[1].id == "msg-legacy"
-
-    def test_legacy_mode_without_skill_returns_single_message(
-        self,
-        legacy_agent_meta: SimpleNamespace,
-    ) -> None:
-        """Legacy mode without a skill message emits only the user message."""
-        result = _build_graph_input(
-            content="hello",
-            message_id="msg-legacy-empty",
-            skill_injection_msg=None,
-            agent_meta=legacy_agent_meta,
-        )
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[0].content == "hello"
-        assert messages[0].id == "msg-legacy-empty"
-
-    def test_default_agent_meta_treated_as_human_messages(self) -> None:
-        """No agent_meta (None) must default to human_messages mode (the new default).
-
-        Previously this test asserted the default was ``system_prompt`` mode;
-        after the Phase 6 default flip the bare ``agent_meta=None`` case
-        lands in ``human_messages`` mode and emits only the user message
-        (no skill prepend, because context is rebuilt inside ``agent_node``
-        via ``ContextSlot.assemble()``).
+    def test_no_persistent_context_returns_user_message_only(self) -> None:
+        """No persistent-context messages → single-element list, user
+        ``HumanMessage`` carries the caller's ``message_id`` so
+        ``add_messages`` can dedupe across retries.
         """
-        skill_msg = HumanMessage(content="<skill>legacy</skill>", id="skill-default")
+        result = _build_graph_input("hello", "msg-1", None)
+
+        assert "messages" in result
+        assert len(result["messages"]) == 1
+        user_msg = result["messages"][0]
+        assert isinstance(user_msg, HumanMessage)
+        assert user_msg.id == "msg-1"
+        assert user_msg.content == "hello"
+
+    def test_persistent_context_msgs_prepended_in_order(self) -> None:
+        """The persistent-context block is prepended so the agent
+        reads context before the user prompt (mirrors the
+        system-context-then-user-input layout the rest of the
+        codebase uses).
+
+        LangGraph's ``add_messages`` reducer checkpoints the
+        persistent block once on the first turn — subsequent turns
+        read it from ``state['messages']`` without a per-turn rebuild.
+        """
+        ctx_msg_1 = HumanMessage(
+            content="[SYSTEM CONTEXT: Project]\nproject body",
+            id="ctx-1",
+        )
+        ctx_msg_2 = HumanMessage(
+            content="[SYSTEM CONTEXT: Skills]\nskill body",
+            id="ctx-2",
+        )
 
         result = _build_graph_input(
-            content="hello",
-            message_id="msg-def",
-            skill_injection_msg=skill_msg,
-            agent_meta=None,
+            "hello",
+            "msg-1",
+            [ctx_msg_1, ctx_msg_2],
         )
 
         messages = result["messages"]
-        # human_messages mode (the new default) emits only the user message —
-        # the skill block is rebuilt inside agent_node, not prepended here.
-        assert len(messages) == 1
-        assert messages[0] is not skill_msg
-        assert messages[0].content == "hello"
+        assert len(messages) == 3
+        # Persistent msgs first, user message last.
+        assert messages[0] is ctx_msg_1
+        assert messages[1] is ctx_msg_2
+        assert messages[2].id == "msg-1"
+        assert messages[2].content == "hello"
 
 
 # ---------------------------------------------------------------------------
-# 6. _extract_last_user_text
+# 5. _extract_last_user_text
 # ---------------------------------------------------------------------------
 
 
@@ -539,3 +447,195 @@ class TestContextSlotPassesStoredSkillResult:
         kwargs = mock_assemble.await_args.kwargs  # type: ignore[union-attr]  # safe after assert_awaited_once
         # Missing getter ⇒ skill_injection_result falls back to None.
         assert kwargs["skill_injection_result"] is None
+
+
+# ---------------------------------------------------------------------------
+# 9. ContextSlot reads ``project_injected`` flag fresh from instance metadata
+# ---------------------------------------------------------------------------
+
+
+class TestContextSlotReadsProjectInjectedFlag:
+    """W3 — pin the read path for the ``project_injected`` flag.
+
+    :class:`daemon.graph.ContextSlot` reads the once-per-instance
+    ``project_injected`` flag from instance metadata on every
+    ``assemble()`` call (via
+    :meth:`daemon.graph.ContextSlot._is_project_already_injected`).
+    The result is forwarded as the ``project_already_injected`` kwarg
+    to :func:`daemon.services.context_messages.assemble_context_messages`,
+    which short-circuits the persistent-block rebuild when the flag
+    is truthy. Without this read the orchestrator would rebuild the
+    project + shared-context + auto-load blocks on every turn,
+    defeating the once-per-instance contract that keeps the LLM
+    prefix-cache stable.
+
+    Earlier revisions dropped these assertions when cleaning up
+    legacy tests. This test class pins the contract at three levels
+    so a future refactor cannot silently break the read path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_project_injected_true_propagates_to_orchestrator(
+        self,
+        human_messages_agent_meta: SimpleNamespace,
+    ) -> None:
+        """When ``project_injected=True`` is set in metadata the slot
+        must forward ``project_already_injected=True`` to the orchestrator.
+
+        This is the load-bearing half of the once-per-instance
+        contract — the slot reads the flag on every call so a
+        checkpoint restore / cross-process handoff is honoured. The
+        exact ``bool(metadata.get("project_injected"))`` check lives
+        in :meth:`ContextSlot._is_project_already_injected`.
+        """
+        instance_row = SimpleNamespace(
+            instance_id="inst-onward",
+            instance_metadata={"project_injected": True},
+        )
+        instance_repository = MagicMock()
+        instance_repository.get = MagicMock(return_value=instance_row)
+
+        manager = SimpleNamespace(
+            get_context_skill_result=lambda instance_id: None,
+        )
+
+        slot = ContextSlot(
+            manager=manager,
+            agent_meta=human_messages_agent_meta,
+            instance_repository=instance_repository,
+        )
+
+        with patch(
+            "daemon.services.context_messages.assemble_context_messages",
+            new=AsyncMock(return_value=([], [])),
+        ) as mock_assemble:
+            await slot.assemble(
+                instance_id="inst-onward",
+                user_query="anything",
+                project_id="proj-1",
+            )
+
+        mock_assemble.assert_awaited_once()
+        kwargs = mock_assemble.await_args.kwargs  # type: ignore[union-attr]
+        # The critical contract: a True flag in metadata propagates
+        # verbatim to the orchestrator's project_already_injected kwarg.
+        assert kwargs["project_already_injected"] is True
+
+    @pytest.mark.asyncio
+    async def test_project_injected_absent_propagates_false(
+        self,
+        human_messages_agent_meta: SimpleNamespace,
+    ) -> None:
+        """When the flag is absent, the slot defaults to ``False`` so the
+        orchestrator builds the full persistent triple on the first turn.
+
+        The default behaviour (no key in metadata → False) is what
+        allows a fresh instance to receive its project + shared-context
+        + auto-load blocks. If a refactor accidentally treated an
+        absent key as truthy, every instance would skip its first-turn
+        context injection.
+        """
+        instance_row = SimpleNamespace(
+            instance_id="inst-fresh",
+            # ``project_id`` is present (a normal first-turn row) but
+            # ``project_injected`` is absent — first-turn state.
+            instance_metadata={"project_id": "proj-1"},
+        )
+        instance_repository = MagicMock()
+        instance_repository.get = MagicMock(return_value=instance_row)
+
+        manager = SimpleNamespace(
+            get_context_skill_result=lambda instance_id: None,
+        )
+
+        slot = ContextSlot(
+            manager=manager,
+            agent_meta=human_messages_agent_meta,
+            instance_repository=instance_repository,
+        )
+
+        with patch(
+            "daemon.services.context_messages.assemble_context_messages",
+            new=AsyncMock(return_value=([], [])),
+        ) as mock_assemble:
+            await slot.assemble(
+                instance_id="inst-fresh",
+                user_query="anything",
+                project_id="proj-1",
+            )
+
+        kwargs = mock_assemble.await_args.kwargs  # type: ignore[union-attr]
+        assert kwargs["project_already_injected"] is False
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_skips_persistent_rebuild_when_flag_true(self) -> None:
+        """End-to-end: when ``project_already_injected=True`` the
+        orchestrator must NOT call the project-fetch or KV-metadata
+        helpers — proving the persistent rebuild is skipped on
+        subsequent turns.
+
+        This pins the orchestrator-side honour of the flag. The
+        orchestrator early-returns at the ``if
+        project_already_injected:`` branch in
+        :func:`daemon.services.context_messages.assemble_context_messages`
+        (around line 1187) before any of the persistent-block
+        builders run — so ``_fetch_project_payload`` and
+        ``_fetch_kv_metadata`` are NEVER invoked, meaning
+        ``project_repo.get`` and
+        ``shared_context_metadata_repo.get_all_as_dict`` are NEVER
+        called. If either call fires, the once-per-instance
+        contract regressed and every turn pays the full DB /
+        RAG cost.
+        """
+        from daemon.services.context_messages import assemble_context_messages
+
+        # Manager whose project / shared-context fetchers track invocations.
+        # Skill injection disabled (matches the agent_meta below) so the
+        # orchestrator returns ([], []) on the skip path — no other side
+        # effects to reason about.
+        project_repo = MagicMock()
+        project_repo.get = MagicMock(
+            return_value=SimpleNamespace(project_id="proj-1", name="Test Project")
+        )
+        shared_repo = MagicMock()
+        shared_repo.get_all_as_dict = MagicMock(return_value={"k": "v"})
+
+        manager = SimpleNamespace(
+            _project_repository=project_repo,
+            _shared_context_metadata_repo=shared_repo,
+            _skill_injection_service=None,
+        )
+
+        # Minimal agent_meta — NO skill injection, NO heuristic shared-context
+        # RAG so the orchestrator's early-return path is the only code that
+        # runs. ``auto_load_invalidated`` defaults to ``False`` (the keyword
+        # arg), so the auto-load rebuild branch is also skipped.
+        agent_meta = SimpleNamespace(
+            skill_injection=False,
+            context_injection=ContextInjectionConfig(
+                heuristic_match_shared_md_files=False
+            ),
+        )
+
+        instance_repository = MagicMock()
+
+        # Call the orchestrator directly with project_already_injected=True.
+        persistent, ephemeral = await assemble_context_messages(
+            instance_id="inst-onward",
+            user_query="second turn",
+            project_id="proj-1",
+            agent_meta=agent_meta,
+            manager=manager,
+            instance_repository=instance_repository,
+            project_already_injected=True,
+        )
+
+        # The persistent block was NOT rebuilt — the project-repo
+        # and shared-context KV fetcher were NEVER called.
+        project_repo.get.assert_not_called()
+        project_repo.list_critical_notes.assert_not_called()
+        project_repo.get_recent_history.assert_not_called()
+        shared_repo.get_all_as_dict.assert_not_called()
+        # No persistent HumanMessages of any kind — clean skip.
+        assert persistent == []
+        assert ephemeral == []

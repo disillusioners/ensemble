@@ -328,10 +328,11 @@ class ContextSlot:
             ``_instance_repository``). Duck-typed via ``getattr`` so
             tests can pass a stub without wiring the full manager.
         agent_meta: The :class:`AgentMetadata` providing the
-            ``context_injection_mode`` and feature-flag fields
-            (``context_injection``, ``skill_injection``). ``None``
-            is treated as the default ``human_messages`` mode by
-            :func:`daemon.services.instance_lifecycle._resolve_injection_mode`.
+            feature-flag fields (``context_injection``,
+            ``skill_injection``). ``None`` falls through to the
+            orchestrator's own ``None`` handling (it is a best-effort
+            dependency — the orchestrator returns the empty tuple
+            ``([], [])`` when ``agent_meta`` cannot be resolved).
         instance_repository: The instance repository (duck-typed)
             used by :func:`assemble_context_messages` to resolve
             the tree-root id via ``get_tree_root_id``. ``None``
@@ -345,12 +346,12 @@ class ContextSlot:
             canonical ``parent_id`` resolution path.
 
     Note:
-        ``context_slot.assemble()`` returns ``[]`` (no-op) when the
-        resolved mode is anything other than
-        ``ContextInjectionMode.HUMAN_MESSAGES``. This is the
-        single gate that keeps the ``"legacy"`` mode
-        byte-identical to its pre-restructure behavior — no context
-        messages are emitted, no skill search is run by the slot.
+        ``context_slot.assemble()`` always runs the full
+        :func:`assemble_context_messages` orchestrator (legacy /
+        ``system_prompt`` injection mode was removed). When the
+        instance has no project, no skills, and no shared-context
+        metadata, the orchestrator returns ``([], [])`` so the
+        messaging path prepends nothing to ``graph_input``.
     """
 
     def __init__(
@@ -403,9 +404,10 @@ class ContextSlot:
 
         Calls :func:`assemble_context_messages` with the slot's
         captured dependencies plus the per-call inputs (instance_id,
-        user_query, project_id). Returns ``([], [])`` when the agent's
-        injection mode is not ``human_messages`` (legacy
-        ``"legacy"`` mode is untouched).
+        user_query, project_id). The slot returns the
+        ``(persistent, ephemeral)`` tuple directly to ``agent_node``,
+        which discards the return value (the persistent half is
+        consumed by the messaging path via ``persistent_context_msgs``).
 
         Per-turn freshness guarantee (ADR-2):
 
@@ -435,30 +437,22 @@ class ContextSlot:
         Returns:
             ``(persistent_msgs, ephemeral_msgs)`` tuple. After
             the 2026-07-29 refactor the ephemeral list is always
-            ``[]`` in ``human_messages`` mode (skills have been
-            moved to the persistent half). The persistent list
-            carries zero-to-three ``[SYSTEM CONTEXT: ...]``
+            ``[]`` in the single ``human_messages`` mode (skills
+            have been moved to the persistent half). The persistent
+            list carries zero-to-three ``[SYSTEM CONTEXT: ...]``
             HumanMessages (``[project?, shared_context?,
-            skills?]``). ``([], [])`` when the agent is in
-            ``legacy`` mode.
+            skills?]``). ``([], [])`` when the orchestrator has no
+            project, shared context, or skills to emit.
         """
         # Lazy imports — see top-of-file note about the graph ↔
-        # services cycle. ``_resolve_injection_mode`` and
-        # ``assemble_context_messages`` both live in the services
-        # tree that depends back on ``graph`` via ``compaction``
-        # (``clean_llm_config``). Hoisting would re-trigger the
-        # circular import the test collection just hit; keeping the
-        # imports local avoids the cycle entirely. The cost is one
-        # import per LLM call — negligible against the cost of the
-        # RAG / skill-search work that follows.
+        # services cycle. ``assemble_context_messages`` lives in the
+        # services tree that depends back on ``graph`` via
+        # ``compaction`` (``clean_llm_config``). Hoisting would
+        # re-trigger the circular import the test collection just
+        # hit; keeping the import local avoids the cycle entirely.
+        # The cost is one import per LLM call — negligible against
+        # the cost of the RAG / skill-search work that follows.
         from .services.context_messages import assemble_context_messages
-        from .services.instance_lifecycle import _resolve_injection_mode
-        mode = _resolve_injection_mode(self._agent_meta)
-        if mode != "human_messages":
-            # Legacy mode — context is baked into the system prompt
-            # by the existing appenders. The slot is a no-op so the
-            # pre-Phase-3 byte layout is preserved.
-            return ([], [])
 
         # B2 fix: read pre-computed skill result from MANAGER (not
         # from ``self``). The messaging path stores the result of

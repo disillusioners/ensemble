@@ -12,8 +12,8 @@ context injection restructure:
 * :func:`~daemon.persistence.get_instance_messages` — Phase 4
   synthetic system + context message surfacing on GET /messages.
 * :func:`~daemon.services.instance_lifecycle.append_context_injection_defense`
-  — Phase 2 PERSONA-level prompt-injection defense (only added in
-  ``human_messages`` mode; legacy mode is byte-identical).
+  — Phase 2 PERSONA-level prompt-injection defense (added in
+  ``human_messages`` mode).
 * Compaction re-append — Phase 3 / Task 8 preserves context
   messages that live only in the agent_node closure when reactive
   compaction rewrites ``full_messages`` / ``compact_messages``.
@@ -60,7 +60,6 @@ from daemon.services.context_messages import (
     CONTEXT_KIND_PROJECT,
     CONTEXT_KIND_SHARED_CONTEXT,
     CONTEXT_KIND_SKILLS,
-    ContextInjectionMode,
     assemble_context_messages,
 )
 from daemon.services.instance_lifecycle import (
@@ -82,24 +81,7 @@ def _human_messages_agent_meta() -> SimpleNamespace:
     so the integration test families share a canonical meta shape.
     """
     return SimpleNamespace(
-        context_injection_mode=ContextInjectionMode.HUMAN_MESSAGES,
-        context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
-        skill_injection=True,
-        allowed_models=None,
-    )
-
-
-def _legacy_agent_meta() -> SimpleNamespace:
-    """AgentMeta stub in opt-in ``legacy`` mode.
-
-    ``context_injection`` is True so the legacy mode actually emits
-    context — that's the mode we want to verify is byte-identical to
-    the pre-restructure ``system_prompt`` pipeline. Renamed from
-    ``_system_prompt_agent_meta`` to match the canonical
-    ``ContextInjectionMode.LEGACY`` constant.
-    """
-    return SimpleNamespace(
-        context_injection_mode=ContextInjectionMode.LEGACY,
+        context_injection_mode="human_messages",
         context_injection=ContextInjectionConfig(heuristic_match_shared_md_files=True),
         skill_injection=True,
         allowed_models=None,
@@ -499,54 +481,6 @@ class TestContextMessagesPersistence:
         assert user_msg_index > llm_input.index(context_msg_shared)
         assert user_msg_index > llm_input.index(context_msg_skills)
 
-    def test_context_slot_assembly_failure_falls_back_legacy(self) -> None:
-        """If ``assemble()`` raises, the agent_node must not crash.
-
-        Defensive contract: a flaky context build must not block the
-        LLM call. The agent_node logs and proceeds with the legacy
-        ``[SystemMessage, *state.messages]`` layout.
-        """
-        from daemon.graph import create_agent_node
-
-        context_slot = MagicMock(spec=ContextSlot)
-        context_slot.assemble = AsyncMock(side_effect=RuntimeError("rag down"))
-        context_slot.resolve_project_id = MagicMock(return_value=None)
-
-        llm = MagicMock()
-        llm.invoke = MagicMock(return_value=AIMessage(content="ok", id="ai-2"))
-        llm_standard = MagicMock()
-        llm_standard.invoke = llm.invoke
-
-        agent_node = create_agent_node(
-            llm_with_tools=llm,
-            system_prompt="persona",
-            retry_config={"transient_attempts": 1, "timeout_attempts": 1},
-            injection_slot=None,
-            report_injection_slot=None,
-            live_hub=None,
-            throttle_slot=None,
-            loop_breaker_slot=None,
-            loop_repairer=None,
-            loop_breaker_config=None,
-            context_slot=context_slot,
-        )
-
-        result = _run(
-            agent_node(
-                {"messages": [HumanMessage(content="hi", id="u-1")]},
-                {"configurable": {"thread_id": "inst-fail"}},
-            )
-        )
-
-        # LLM was called and the response persisted normally.
-        assert llm.invoke.call_count == 1
-        assert len(result["messages"]) == 1
-        # No context messages leaked into the state.
-        assert all(
-            getattr(m, "additional_kwargs", {}).get("context_kind") is None
-            for m in result["messages"]
-        )
-
 
 # ─── 3. Skills Survive Retry (B3 fix) ──────────────────────────────────────────
 
@@ -870,105 +804,17 @@ class TestGetMessagesHumanMessagesMode:
                 }
 
 
-# ─── 5. Legacy Mode (system_prompt) Unchanged — No Separate Context API Messages
-
-
-class TestGetMessagesSystemPromptMode:
-    """Legacy ``system_prompt`` mode GET /messages is the pre-Phase-4 surface.
-
-    In legacy mode the context is baked into the persisted system
-    prompt via the 3 CONTEXT appenders inside
-    ``_apply_post_cache_appends``. The synthetic context-message block
-    in :func:`get_instance_messages` must NOT fire — the API consumer
-    sees the synthetic system message (with the persona + the baked
-    context) and no separate ``[SYSTEM CONTEXT: ...]`` ``is_synthetic``
-    payloads.
-    """
-
-    def test_no_separate_context_messages_for_legacy_mode(self) -> None:
-        """No ``synthetic-context-...`` message_ids in legacy mode."""
-        user_msg = HumanMessage(content="user text", id="user-1")
-        ai_msg = AIMessage(content="ai-reply", id="ai-1")
-        channel_values = {"messages": [user_msg, ai_msg]}
-
-        class _Saver:
-            async def aget(self, _config: dict[str, Any]) -> dict[str, Any]:
-                return {
-                    "channel_values": channel_values,
-                    "ts": "2026-07-28T00:00:00Z",
-                }
-
-            def alist(self, _config: dict[str, Any], limit: int = 1000):
-                async def _agen() -> Any:
-                    if False:
-                        yield None
-                return _agen()
-
-        instance = SimpleNamespace(
-            instance_id="inst-legacy",
-            agent_id="agent-test",
-            agent_tag=None,
-            agent_dir=None,
-            project_id=None,
-            parent_id=None,
-            instance_metadata={},
-            created_at=None,
-        )
-        instance_repo = MagicMock(get=MagicMock(return_value=instance))
-        manager = MagicMock()
-        manager._instance_repository = instance_repo
-        manager._project_repository = MagicMock(get=MagicMock(return_value=None))
-        # Disable the prompt-cache path so the synthetic system message
-        # can render without a real persona file.
-        manager.prompt_cache = None
-        manager._shared_context_metadata_repo = None
-        manager._skill_injection_service = None
-
-        with patch(
-            "daemon.registry.get_registry",
-            return_value=MagicMock(
-                get_resolved=MagicMock(return_value=_legacy_agent_meta()),
-                get_version=MagicMock(return_value=None),
-            ),
-        ):
-            result = _run(
-                get_instance_messages(
-                    checkpointer=_Saver(),
-                    instance_id="inst-legacy",
-                    manager=manager,
-                )
-            )
-
-        # No ``synthetic-context-...`` messages at all.
-        synthetic_context_msgs = [
-            m
-            for m in result
-            if m.get("message_id", "").startswith("synthetic-context-")
-        ]
-        assert synthetic_context_msgs == []
-
-        # No synthetic message carries a ``context_kind`` flag (the
-        # legacy mode skips the rebuild entirely).
-        context_kinds = [
-            m.get("context_kind")
-            for m in result
-            if m.get("context_kind")
-        ]
-        assert context_kinds == []
-
-
-# ─── 6. Prompt-Injection Defense Instruction Present in human_messages Mode ────
+# ─── 5. Prompt-Injection Defense Instruction Present in human_messages Mode ────
 
 
 class TestPromptInjectionDefense:
-    """Defense instruction is mode-gated.
+    """Defense instruction is part of the canonical ``human_messages`` flow.
 
     ``append_context_injection_defense`` adds a ``## System Context
     Messages`` PERSONA-level rule telling the agent to treat
     ``[SYSTEM CONTEXT: ...]`` messages as observational reference data.
-    It is wired into ``_apply_post_cache_appends`` ONLY when the
-    resolved mode is ``human_messages`` — the legacy path is
-    byte-identical to its pre-Phase-2 shape (per Phase 2 ADR-7).
+    It is wired into ``_apply_post_cache_appends`` for the
+    ``human_messages`` mode (the only mode).
     """
 
     def test_defense_helper_adds_canonical_block(self) -> None:
@@ -989,15 +835,15 @@ class TestPromptInjectionDefense:
         assert prompt in result
 
     def test_defense_present_only_in_human_messages_mode(self) -> None:
-        """``_apply_post_cache_appends`` adds defense iff mode==human_messages.
+        """``_apply_post_cache_appends`` adds the defense instruction in
+        ``human_messages`` mode (the only mode).
 
         This is the wiring test that pins the Phase 2 ADR-7 promise:
-        legacy mode is byte-identical to its pre-Phase-2 shape, so
-        the defense instruction must NOT appear there.
+        the defense instruction is always appended in the canonical
+        ``human_messages`` flow.
         """
         persona = "base persona\n"
 
-        # ── human_messages mode: defense IS appended ─────────────────────
         hm_result, _ = _apply_post_cache_appends(
             system_prompt=persona,
             instance_id="inst-hm",
@@ -1009,28 +855,11 @@ class TestPromptInjectionDefense:
             project_repository=MagicMock(),
             manager=MagicMock(),
             agent_meta=_human_messages_agent_meta(),
-            mode=ContextInjectionMode.HUMAN_MESSAGES,
         )
         assert "## System Context Messages" in hm_result
         assert "Messages prefixed with [SYSTEM CONTEXT:" in hm_result
-
-        # ── legacy mode (renamed from system_prompt): defense is NOT appended ─
-        legacy_result, _ = _apply_post_cache_appends(
-            system_prompt=persona,
-            instance_id="inst-legacy",
-            instance_repository=MagicMock(),
-            shared_context_metadata_repo=None,
-            parent_id=None,
-            agent_id="agent-x",
-            project_id=None,
-            project_repository=MagicMock(),
-            manager=MagicMock(),
-            agent_meta=_legacy_agent_meta(),
-            mode=ContextInjectionMode.LEGACY,
-        )
-        assert "## System Context Messages" not in legacy_result
         # The persona itself is still there.
-        assert "base persona" in legacy_result
+        assert "base persona" in hm_result
 
     def test_defense_helper_idempotent_on_falsy_input(self) -> None:
         """An empty prompt still gets the defense — the helper is additive.
@@ -1042,7 +871,7 @@ class TestPromptInjectionDefense:
         assert "## System Context Messages" in out
 
 
-# ─── 7. Compaction Retry Re-appends Context Messages ───────────────────────────
+# ─── 6. Compaction Retry Re-appends Context Messages ───────────────────────────
 
 
 class TestCompactionReappendContextMessages:

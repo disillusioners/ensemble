@@ -156,26 +156,6 @@ class AgentMetadata(BaseModel):
             "heuristic_match_shared_md_files=False."
         ),
     )
-    # ADR-8: per-agent context-injection mode flag. Two values only —
-    # "human_messages" (default — context as [SYSTEM CONTEXT: ...]
-    # HumanMessages) or "legacy" (opt-in — original system-prompt
-    # injection behavior, used to reproduce the pre-restructure byte
-    # layout). Agents that previously relied on the legacy boolean
-    # ``context_injection: true`` flag now default to ``human_messages``
-    # unless they explicitly set ``context_injection_mode: "legacy"`` in
-    # meta.json. Validation lives in
-    # :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
-    # — unknown values are silently coerced to the default
-    # (``"human_messages"``) rather than rejected, so a typo in
-    # meta.json cannot break instance execution.
-    context_injection_mode: str = Field(
-        default="human_messages",
-        description=(
-            "Context injection mode — one of 'human_messages' (default, "
-            "context as [SYSTEM CONTEXT: ...] HumanMessages) or 'legacy' "
-            "(original system-prompt injection). See ADR-8."
-        ),
-    )
     inject_allowed_models: bool = Field(
         default=False,
         description="When true, inject the allowed-models list into this agent's system prompt at spawn time.",
@@ -405,9 +385,6 @@ class AgentRegistry:
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
                     context_injection=context_injection_arg,
-                    context_injection_mode=meta.get(
-                        "context_injection_mode", "human_messages"
-                    ),
                     inject_allowed_models=meta.get("inject_allowed_models", False),
                     version_tag=version_tag,
                     caller_model_overrides=(

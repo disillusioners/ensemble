@@ -399,11 +399,9 @@ def _format_critical_note(note: dict) -> str | None:
     """Format a single critical-note dict for the MCP RAG hint.
 
     Returns ``None`` when the dict is missing the required ``summary`` field
-    so the caller can skip it silently. Mirrors the visual style used in
-    :func:`daemon.manager.format_project_context` (priority icon + bracketed
-    category + summary, with an optional reference suffix) so an external
-    agent sees the same shape in the hint as it would in a full project
-    context block.
+    so the caller can skip it silently. The rendered entry uses a
+    priority icon + bracketed category + summary, with an optional
+    reference suffix.
     """
     summary = note.get("summary")
     if not summary or not isinstance(summary, str):

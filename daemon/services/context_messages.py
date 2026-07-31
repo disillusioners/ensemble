@@ -73,60 +73,6 @@ CONTEXT_KIND_AUTO_LOAD_SKILLS = "auto_load_skills"
 CONTEXT_KIND_SKILLS = "skills"
 
 
-# Context injection mode enum values — see ADR-8. Plain string
-# constants (NOT ``enum.StrEnum``) so the value round-trips through
-# meta.json JSON serialization and the ``AgentMetadata.context_injection_mode``
-# field without an explicit encoder. Two values only:
-#
-# * ``LEGACY`` (opt-in) — legacy system-prompt-injection behavior. The
-#   3 CONTEXT appenders (``append_shared_context_metadata``,
-#   ``append_context_injection``, ``append_auto_load_skills``) run
-#   inside ``_apply_post_cache_appends`` and bake context into the
-#   system prompt. Use only when an agent must reproduce the
-#   pre-restructure byte layout.
-# * ``HUMAN_MESSAGES`` (default) — the 3 CONTEXT appenders early-return
-#   so the system prompt carries persona content only; context is
-#   rebuilt per-turn inside ``agent_node`` as
-#   ``[SYSTEM CONTEXT: ...]`` HumanMessages by
-#   :func:`assemble_context_messages`. The system prompt gains a
-#   prompt-injection defense instruction so the LLM treats context
-#   messages as reference data, not instructions.
-#
-# ``BOTH`` mode is intentionally omitted (per reviewer W1) — it
-# would double token cost and risks confusing the LLM by sending
-# the same data twice (once in the system prompt, once as a
-# HumanMessage). Legacy ``context_injection: true`` no longer
-# controls the mode — agents that previously relied on it now
-# default to ``HUMAN_MESSAGES`` unless they explicitly set
-# ``context_injection_mode: "legacy"`` in meta.json.
-class ContextInjectionMode:
-    """Mode flag controlling where context is injected.
-
-    Stored as plain string class attributes rather than an
-    ``enum.StrEnum`` so the value can be compared against the raw
-    string stored in ``meta.json`` and against the
-    ``AgentMetadata.context_injection_mode`` field without an
-    explicit decoder. Callers should use these constants when
-    setting the mode on ``AgentMetadata`` and the literal strings
-    ``"legacy"`` / ``"human_messages"`` when reading from
-    meta.json / the ``_resolve_injection_mode`` helper.
-    """
-
-    LEGACY = "legacy"
-    HUMAN_MESSAGES = "human_messages"
-
-
-    # Tuples of valid mode values for
-    # :func:`daemon.services.instance_lifecycle._resolve_injection_mode`
-    # validation. Built from the enum constants so a future addition
-    # to :class:`ContextInjectionMode` automatically widens the
-    # validator without a separate hardcoded list.
-VALID_INJECTION_MODES = (
-    ContextInjectionMode.LEGACY,
-    ContextInjectionMode.HUMAN_MESSAGES,
-)
-
-
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 
@@ -162,12 +108,10 @@ def _make_context_message(kind: str, title: str, content: str) -> HumanMessage:
 def escape_for_context_block(content: str) -> str:
     """Escape characters that could close an inner data fence.
 
-    Ports the escaping strategy of the existing
-    ``_format_shared_context_kv_block`` helper in
-    :mod:`daemon.services.instance_lifecycle` so the prompt-injection
-    defense survives the move to ``[SYSTEM CONTEXT: ...]`` messages.
-
-    The replacement is intentionally narrow:
+    Moved out of :func:`daemon.services.instance_lifecycle._format_shared_context_kv_block`
+    (now removed) so the prompt-injection defense survives the move
+    to ``[SYSTEM CONTEXT: ...]`` messages. The replacement is
+    intentionally narrow:
 
     * ``&`` → ``\\u0026``
     * ``<`` → ``\\u003c``
@@ -275,10 +219,7 @@ def _format_relative_time_standalone(created_at: Any) -> str:
 def _format_critical_notes_section(critical_notes: list[dict]) -> str:
     """Render the critical-notes subsection used by the project builder.
 
-    Mirrors the formatting in
-    :func:`daemon.manager.format_project_context` so the new
-    HumanMessage output matches the existing layout (priority icon +
-    bracketed category + optional reference).
+    Layout: priority icon + bracketed category + optional reference.
 
     Args:
         critical_notes: List of dicts with ``priority``, ``category``,
@@ -316,9 +257,8 @@ def _format_critical_notes_section(critical_notes: list[dict]) -> str:
 def _format_history_section(history_entries: list[dict]) -> str:
     """Render the recent-history subsection used by the project builder.
 
-    Mirrors the formatting in
-    :func:`daemon.manager.format_project_context` — entry-type icon
-    + bracketed type + summary + relative-time suffix.
+    Layout: entry-type icon + bracketed type + summary +
+    relative-time suffix.
 
     Args:
         history_entries: List of history dicts with ``entry_type``,
@@ -362,9 +302,9 @@ def _format_kv_metadata_section(kv_metadata: dict[str, Any] | None) -> str:
     """Render the ``shared context metadata KV`` subsection.
 
     Reuses the exact same serialization + escaping + 32k size-cap
-    logic that
-    :func:`daemon.services.instance_lifecycle._format_shared_context_kv_block`
-    applies, so a runaway KV set cannot break the context block.
+    logic that the (now removed) ``_format_shared_context_kv_block``
+    helper in :mod:`daemon.services.instance_lifecycle` applied, so
+    a runaway KV set cannot break the context block.
 
     Args:
         kv_metadata: ``context_key → {meta_key: meta_value}`` dict,
@@ -388,8 +328,8 @@ def _format_kv_metadata_section(kv_metadata: dict[str, Any] | None) -> str:
         return ""
 
     # Same character escaping as
-    # ``_format_shared_context_kv_block`` — defense-in-depth so an
-    # attacker-controlled KV value cannot escape the block. The
+    # ``escape_for_context_block`` (defense-in-depth so an
+    # attacker-controlled KV value cannot escape the block). The
     # HumanMessages mode does not use an XML fence, but keeping the
     # escaping preserves the security posture.
     escaped = escape_for_context_block(metadata_json)
@@ -414,9 +354,9 @@ def _format_kv_metadata_section(kv_metadata: dict[str, Any] | None) -> str:
 def _format_project_json_section(project: Any, critical_notes: list[dict]) -> str:
     """Render the ``## Related Project`` JSON block for the builder.
 
-    Mirrors :func:`daemon.manager.format_project_context` — pretty-
-    printed JSON inside a ``json`` fence with the ``critical_notes``
-    key removed (it's rendered as its own formatted subsection below).
+    Pretty-prints the project dict inside a ``json`` fence with
+    the ``critical_notes`` key removed (it's rendered as its own
+    formatted subsection below).
 
     Args:
         project: Object exposing ``to_dict()`` (e.g. a
@@ -697,10 +637,10 @@ async def _fetch_auto_load_skills(
     inherits a parent's (e.g. ``developer``) foundational skill —
     preserving the one-skill-per-worker / per-agent auto_load contract.
 
-    Mirror-then-narrow of the legacy
-    :func:`daemon.services.instance_lifecycle.append_auto_load_skills`
-    pipeline (the legacy path is dormant in ``human_messages`` mode —
-    this is the live implementation):
+    Live implementation: the per-turn orchestrator (HumanMessages
+    mode) is responsible for auto-load delivery; this helper only
+    fetches the agent-scoped auto_load skills, it does not inject
+    them into the system prompt:
 
     1. Clone-on-miss via ``SkillCloneService.ensure_auto_load_skills_sync``,
        which returns THIS agent's materialized skills (cloned from
@@ -917,9 +857,7 @@ def _resolve_tree_root_id(
 ) -> str:
     """Resolve the tree-root ``context_key`` for a context lookup.
 
-    Mirrors :func:`append_shared_context_metadata` /
-    :func:`append_context_injection` from
-    :mod:`daemon.services.instance_lifecycle`:
+    Logic:
 
     * Root instance (``parent_id is None``) → context key is its
       own ``instance_id``.
@@ -1136,8 +1074,8 @@ async def assemble_context_messages(
 
     The split is still returned as a ``(persistent, ephemeral)``
     tuple so callers can route each part to its own delivery
-    surface — but the **ephemeral** half is now a documented
-    no-op (always ``[]`` outside of legacy mode). The pre-refactor
+    surface — but the **ephemeral** half is a documented
+    no-op (currently always ``[]``). The pre-refactor
     per-turn ephemeral architecture is kept in place for future use
     (e.g. when explicit per-turn skill lifecycles are introduced).
 
@@ -1154,10 +1092,6 @@ async def assemble_context_messages(
     shared-context / RAG I/O) and only emits skills — preserving the
     per-turn freshness contract for skills while avoiding wasted DB
     work on every turn after the first.
-
-    The legacy (``"legacy"``) mode gate still returns ``([], [])`` —
-    the 3 CONTEXT appenders inside ``_apply_post_cache_appends`` own
-    context delivery in that mode.
 
     Skill injection takes two paths (B3 fix, risk register):
 
@@ -1232,31 +1166,12 @@ async def assemble_context_messages(
         ``(persistent_msgs, ephemeral_msgs)`` tuple.
         ``persistent_msgs`` carries zero-to-three tagged
         :class:`HumanMessage` instances (``[project?, shared_context?,
-        skills?]``). ``ephemeral_msgs`` is **always** an empty list
-        in ``human_messages`` mode (architectural code retained for
-        future use); both halves are empty in ``legacy`` mode (the 3
-        CONTEXT appenders own the legacy system-prompt path).
+        skills?]``). ``ephemeral_msgs`` is always an empty list
+        (architectural code retained for future use).
     """
     # Lazy imports to keep DB-touching imports out of unit-test
     # import paths where the test mocks the repos directly.
     from .context_injection import get_shared_context
-    from .instance_lifecycle import _resolve_injection_mode
-
-    # Gate the whole builder on the resolved injection mode rather
-    # than the legacy ``context_injection`` boolean flag. As of
-    # 2026-07-28 the default ``context_injection_mode`` was flipped
-    # to ``human_messages`` so most agents (which never had
-    # ``context_injection: true`` set in meta.json) need
-    # ``assemble_context_messages`` to actually run and emit
-    # ``[SYSTEM CONTEXT: ...]`` HumanMessages every turn.
-    mode = _resolve_injection_mode(agent_meta)
-
-    # In legacy mode the 3 CONTEXT appenders inside
-    # ``_apply_post_cache_appends`` own the context-delivery surface,
-    # so this orchestrator must stay out of the way and return
-    # ``([], [])``.
-    if mode == ContextInjectionMode.LEGACY:
-        return ([], [])
 
     # Hybrid split — when persistent context was already injected on
     # a previous turn, skip the project + shared_context builders
@@ -1341,7 +1256,7 @@ async def assemble_context_messages(
     # Gate the entire RAG path on ``context_injection.heuristic_match_shared_md_files``
     # so the filesystem read + message build only runs when the agent
     # explicitly opts in. Project + metadata messages above are
-    # always built (mode-gated only by ``context_injection_mode``).
+    # always built.
     ci = getattr(agent_meta, "context_injection", None)
     heuristic_enabled = bool(
         ci and getattr(ci, "heuristic_match_shared_md_files", False)
@@ -1421,9 +1336,9 @@ async def assemble_context_messages(
     # the skill from the checkpoint via ``list(messages)``, no
     # per-turn rebuild required.
     #
-    # Skill injection remains opt-in via the legacy ``skill_injection``
-    # boolean — independent of the resolved injection mode so an agent
-    # in legacy mode can still opt-in to per-turn skills if it wants.
+    # Skill injection remains opt-in via the ``skill_injection``
+    # boolean — there is no mode gate, so this flag is the sole
+    # switch controlling per-turn skill injection.
     #
     # Per-turn freshness is preserved by re-running the BM25 / embedding
     # search on every orchestrator call (not by re-injecting into the
@@ -1468,7 +1383,6 @@ __all__ = [
     "CONTEXT_KIND_SHARED_CONTEXT",
     "CONTEXT_KIND_AUTO_LOAD_SKILLS",
     "CONTEXT_KIND_SKILLS",
-    "ContextInjectionMode",
     # Pure builder functions
     "build_project_context_message",
     "build_shared_context_message",

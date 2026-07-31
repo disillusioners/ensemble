@@ -40,10 +40,10 @@ without touching call sites. For now it is unused by design.
 Async / sync surface
 --------------------
 
-* **Sync methods** — used by the synchronous prompt loader
-  (Phase 5's ``append_auto_load_skills`` hook) and by ad-hoc
-  CLI / migration scripts. Operate directly on the
-  (synchronous) repositories.
+* **Sync methods** — used by the synchronous prompt-loader path
+  (auto-load delivery via ``_build_auto_load_block`` inside
+  ``assemble_context_messages``) and by ad-hoc CLI / migration
+  scripts. Operate directly on the (synchronous) repositories.
 * **Async methods** — thin ``asyncio.to_thread`` wrappers around
   their ``_sync`` counterparts. Used by the async injection
   pipeline (``instance_messaging.py``) so a blocking DB round

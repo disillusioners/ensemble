@@ -354,82 +354,6 @@ class TestBuildGraphInputHelper:
         assert user_msg.id == "msg-1"
         assert user_msg.content == "hello"
 
-    def test_with_skill_msg_prepends_in_order(self) -> None:
-        """Skill message comes first so the agent reads skill
-        context before the user prompt (mirrors the
-        system-context-then-user-input layout the rest of the
-        codebase uses).
-        """
-        skill_msg = HumanMessage(content="[System Inject] skill", id="skill-id-1")
-        result = _build_graph_input(
-            "hello",
-            "msg-1",
-            skill_msg,
-            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
-        )
-
-        assert len(result["messages"]) == 2
-        assert result["messages"][0] is skill_msg
-        assert result["messages"][1].id == "msg-1"
-        assert result["messages"][1].content == "hello"
-
-    def test_skill_msg_id_is_uuid_string(self) -> None:
-        """Production sets ``id=str(uuid.uuid4())`` on the skill
-        ``HumanMessage`` (line 1802). Verify the helper accepts
-        that and the id round-trips through ``uuid.UUID()``.
-        """
-        skill_msg = HumanMessage(content="[System Inject] skill", id=str(uuid.uuid4()))
-        result = _build_graph_input(
-            "hello",
-            "msg-1",
-            skill_msg,
-            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
-        )
-
-        extracted_id = result["messages"][0].id
-        # Round-trip — any non-UUID garbage raises ``ValueError``.
-        parsed = uuid.UUID(extracted_id)
-        assert str(parsed) == extracted_id
-
-    def test_skill_msg_id_distinct_from_message_id(self) -> None:
-        """The skill message id MUST NOT match the user message
-        id. LangGraph's ``add_messages`` reducer uses the id as
-        the dedup key; a collision would cause one of the two
-        messages to silently vanish from the conversation.
-        """
-        skill_id = str(uuid.uuid4())
-        skill_msg = HumanMessage(content="[System Inject]", id=skill_id)
-        result = _build_graph_input(
-            "hello",
-            "msg-1",
-            skill_msg,
-            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
-        )
-
-        msgs = result["messages"]
-        skill_actual_id = msgs[0].id
-        user_msg_id = msgs[1].id
-        assert skill_actual_id != user_msg_id
-        assert skill_actual_id == skill_id
-        assert user_msg_id == "msg-1"
-
-    def test_skill_msg_id_is_uuid4(self) -> None:
-        """Production uses ``uuid.uuid4()`` (line 1802). Verify
-        the id parses as version 4 — a future regression to
-        ``uuid1`` or ``uuid3`` would change the variant/version
-        bits and break the contract.
-        """
-        skill_msg = HumanMessage(content="skill", id=str(uuid.uuid4()))
-        result = _build_graph_input(
-            "hello",
-            "msg-1",
-            skill_msg,
-            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
-        )
-
-        parsed = uuid.UUID(result["messages"][0].id)
-        assert parsed.version == 4
-
     def test_multimodal_content_passes_through(self) -> None:
         """``_build_graph_input`` accepts content as a list of
         text + image blocks — verify the list form is preserved
@@ -628,56 +552,6 @@ class TestSkillInjectionGates:
         # The injection service was never awaited — its absence
         # is enough to skip the whole block.
         injection_service.inject_skills.assert_not_awaited()
-
-    # ── happy path: all gates pass → prepended skill message ──
-
-    async def test_all_gates_pass_prepends_skill_message(self) -> None:
-        """Happy path — first attempt, real user message,
-        opt-in agent, registered service. ``inject_skills`` is
-        awaited and the resulting ``HumanMessage`` appears at
-        index 0 of the graph input.
-        """
-        injection_text = "[System Inject] skill-A\nskill-B"
-        injection_service = _make_injection_service(
-            injection_text=injection_text,
-            skill_ids=["skill-A", "skill-B"],
-        )
-        captured_input, manager = await _invoke_hook(
-            is_retry=False,
-            message_source="telegram:user-42",
-            agent_meta=SimpleNamespace(
-                agent_id="leader",
-                skill_injection=True,
-                context_injection_mode="legacy",
-            ),
-            injection_service=injection_service,
-        )
-
-        assert captured_input is not None
-        msgs = captured_input["messages"]
-        assert len(msgs) == 2, "skill message must be prepended"
-
-        # Skill message first.
-        skill_msg = msgs[0]
-        assert isinstance(skill_msg, HumanMessage)
-        assert skill_msg.content == injection_text
-        # The skill id is a valid UUID AND not the user message_id.
-        parsed = uuid.UUID(skill_msg.id)
-        assert str(parsed) == skill_msg.id
-        assert parsed.version == 4
-        assert skill_msg.id != "msg-1"
-
-        # User message second.
-        assert msgs[1].id == "msg-1"
-        assert msgs[1].content == "hello"
-
-        # Phase 4 metrics attribution must be recorded.
-        manager._skill_injection_service.inject_skills.assert_awaited_once()
-        manager._skill_injection_service.track_injection.assert_called_once_with(
-            "inst-1",
-            "msg-1",
-            ["skill-A", "skill-B"],
-        )
 
     # ── graceful failure: inject_skills raises ───────────────
 

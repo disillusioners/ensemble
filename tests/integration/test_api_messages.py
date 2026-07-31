@@ -17,9 +17,6 @@ Spec — :file:`.agents/shared/planning/context-injection-restructure/phase4-pla
 * ``is_synthetic`` and ``context_kind`` are present on every synthetic
   context entry so the frontend can style them and the existing
   ``child_reports.py`` filter (lines 523 and 1007) keeps excluding them.
-* Legacy ``legacy`` mode (renamed from ``system_prompt``) is byte-for-byte
-  unchanged — no context entries, no ``context_kind`` field,
-  ``assemble_context_messages`` is not even called.
 
 Compared to the unit-level ``TestGetInstanceMessagesHumanMessagesContext``
 in :file:`tests/test_persistence.py`, these tests exercise the integration
@@ -484,114 +481,6 @@ class TestGetMessagesMakesNoDBWrites:
             "that this flag was False, causing append_auto_load_skills to "
             "call skill_repo.set_metadata on every poll."
         )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 3: legacy mode (renamed from system_prompt) is byte-for-byte unchanged
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestLegacyModeBackwardCompatibility:
-    """Legacy ``context_injection_mode=legacy`` (opt-in via meta.json)
-    MUST keep the existing byte layout that ``system_prompt`` mode
-    produced before the rename:
-
-    * No ``context_kind`` field anywhere in the response.
-    * No synthetic context messages.
-    * ``assemble_context_messages`` is NEVER called — calling it would
-      double-token-cost by sending the same data both via the system
-      prompt and via per-turn context messages.
-    * The synthetic system message may still appear (existing Phase 1
-      behavior — ``is_synthetic=True``, ``role=system`` at index 0).
-    """
-
-    @pytest.mark.asyncio
-    async def test_legacy_mode_response_is_unchanged(self):
-        from daemon.persistence import get_instance_messages
-
-        persisted = [HumanMessage(content="hello legacy turn", id="msg-leg")]
-        instance_meta = _make_instance_meta()
-        instance_repo = _make_instance_repo(instance_meta)
-        manager = _make_manager(instance_repo)
-        checkpointer = _make_mock_checkpointer(persisted)
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": None,  # legacy: agent_meta unknown
-            "mode": "legacy",  # opt-in legacy mode (was "system_prompt")
-        }
-
-        with patch(
-            "daemon.persistence._resolve_instance_message_context",
-            return_value=ctx,
-        ), patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(return_value=_context_human_messages()),
-        ) as mock_assemble, patch(
-            "daemon.persistence._reconstruct_full_system_prompt",
-            return_value=None,
-        ):
-            messages = await get_instance_messages(
-                checkpointer, "inst-api-1", manager=manager
-            )
-
-        # Context builder NEVER awaited in legacy mode — calling it would
-        # double the per-turn token cost.
-        mock_assemble.assert_not_awaited()
-
-        # No context entries in the response.
-        assert not any(m.get("is_synthetic") and m.get("context_kind") for m in messages), (
-            f"legacy mode leaked a context message: {messages!r}"
-        )
-        # No ``context_kind`` field anywhere.
-        assert all("context_kind" not in m for m in messages), (
-            f"context_kind leaked into legacy response: {messages!r}"
-        )
-        # Only the persisted message remains.
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert messages[0]["content"] == "hello legacy turn"
-
-    @pytest.mark.asyncio
-    async def test_legacy_mode_no_db_writes(self):
-        """Legacy mode is also read-only — the absence of writes must hold
-        even when system prompt reconstruction succeeds."""
-        from daemon.persistence import get_instance_messages
-
-        persisted = [HumanMessage(content="hi", id="m1")]
-        instance_meta = _make_instance_meta()
-        instance_repo = _make_instance_repo(instance_meta)
-        manager = _make_manager(instance_repo)
-        checkpointer = _make_mock_checkpointer(persisted)
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": None,
-            "mode": "legacy",
-        }
-
-        with patch(
-            "daemon.persistence._resolve_instance_message_context",
-            return_value=ctx,
-        ), patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(),
-        ) as mock_assemble, patch(
-            "daemon.persistence._reconstruct_full_system_prompt",
-            return_value=("PROMPT", "2026-07-28T00:00:00+00:00"),
-        ):
-            messages = await get_instance_messages(
-                checkpointer, "inst-api-1", manager=manager
-            )
-
-        # Legacy mode yielded a synthetic system + persisted message; no
-        # context entries, no writes.
-        assert messages[0]["role"] == "system"
-        assert messages[0]["is_synthetic"] is True
-        assert messages[1]["role"] == "user"
-        mock_assemble.assert_not_awaited()
-        instance_repo.set_metadata.assert_not_called()
-        manager._skill_repo.set_metadata.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

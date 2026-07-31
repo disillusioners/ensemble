@@ -1,17 +1,7 @@
-"""Hook-level tests for the message-body injection of
-``shared_context_metadata`` KV inside
-:meth:`InstanceMessagingService._process_message_with_tracking`.
+"""Hook-level tests for the persistent-context SSE emission path
+inside :meth:`InstanceMessagingService._process_message_with_tracking`.
 
-The system-prompt injection
-(:func:`daemon.services.instance_lifecycle.append_shared_context_metadata`)
-is already covered by ``test_shared_context_injection.py`` /
-``test_shared_context_prompt_injection.py``. This file fills the
-test gap for the **message-body** injection wired into the
-leader→child delivery path: the new
-``format_shared_context_for_message_body`` call + the
-``shared_context_injected`` once-per-instance flag.
-
-Also covers the **persistent-context SSE emission** path —
+The file covers the **persistent-context SSE emission** path —
 ``user_message`` events for the persistent block (project / shared-
 context / skills) injected on the first turn. Without those events,
 the frontend never sees a user bubble for the persistent context and
@@ -31,7 +21,7 @@ The skill-injection path (which runs in the same block of
 ``_process_message_with_tracking``) is patched out by setting
 ``manager._skill_injection_service = None`` and using an agent
 metadata object without ``skill_injection`` enabled — keeps the
-tests focused on the shared-context injection.
+tests focused on the persistent-context SSE emission.
 
 Each test follows the same shape:
 
@@ -41,7 +31,7 @@ Each test follows the same shape:
 * patch the graph's ``astream`` to capture ``graph_input`` and
   immediately end iteration
 * invoke ``_process_message_with_tracking`` and assert on the
-  captured text content of the user ``HumanMessage``
+  captured ``stream_message`` calls
 """
 
 from __future__ import annotations
@@ -198,908 +188,6 @@ def _captured_user_message_text(captured: dict) -> str:
                 return block["text"]
         return ""
     return content
-
-
-# ============================================================
-# Hook tests — _process_message_with_tracking
-# ============================================================
-
-
-class TestMessageBodySharedContextInjection:
-    """End-to-end exercises of the message-body injection gate.
-
-    Each test invokes ``_process_message_with_tracking`` once and
-    asserts on the captured ``graph_input`` text content plus the
-    ``set_metadata`` calls.
-    """
-
-    async def test_injects_shared_context_block_into_message_body(self):
-        """A populated KV set is prepended to the user message body.
-
-        Pins the core Option-C contract: the leader's request
-        arrives at the child with the ``# Shared Context`` /
-        ``## Metadata KV`` block (and the ``<shared_context_metadata>``
-        data fence) visibly prepended, NOT just sitting in the
-        system prompt.
-
-        Opts into ``legacy`` mode via the registry mock's
-        ``context_injection_mode`` so the message-body prepend
-        branch runs. In ``human_messages`` mode (the new default)
-        the KV is rebuilt per-turn inside ``agent_node`` by
-        :func:`daemon.services.context_messages.assemble_context_messages`
-        — prepending here would double-inject. The legacy path
-        keeps the message-body block as the only source of these
-        metadata KV entries (the system-prompt appenders do not
-        carry them in legacy mode).
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"scope": "LARGE", "priority": 1},
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            # ``get_version`` returns ``None`` so the production code's
-            # ``get_version() or get_resolved()`` fallback (S2/C1 fixes)
-            # exercises the base-agent path these tests model.
-            registry.get_version = MagicMock(return_value=None)
-            # ``get_resolved`` returns an AgentMeta stub in ``legacy``
-            # mode — opts into the pre-restructure pipeline where the
-            # message-body prepend is the only source of the KV
-            # block. In ``human_messages`` mode (the new default) the
-            # prepend branch is skipped and KV is rebuilt per-turn
-            # inside ``agent_node``.
-            registry.get_resolved = MagicMock(
-                return_value=SimpleNamespace(context_injection_mode="legacy")
-            )
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="Please implement feature X.",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        # The message body MUST contain the shared-context block.
-        user_text = _captured_user_message_text(captured)
-        assert "# Shared Context" in user_text
-        assert "## Metadata KV" in user_text
-        assert "<shared_context_metadata>" in user_text
-        assert "</shared_context_metadata>" in user_text
-        # The KV payload appears inside the fence.
-        assert '"scope"' in user_text
-        assert '"LARGE"' in user_text
-        assert '"priority"' in user_text
-        # The leader's actual message is preserved.
-        assert "Please implement feature X." in user_text
-
-    async def test_block_is_prepended_before_leader_message(self):
-        """The block precedes the leader's request — the documented layout.
-
-        Verifies the ``[shared context] / --- / [project context] /
-        --- / [leader's request]`` ordering required by the spec.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-            # now resolves to ``human_messages``, which skips the message-body
-            # prepend — the legacy path keeps it as the only source of KV).
-            registry.get_resolved = MagicMock(
-                return_value=SimpleNamespace(context_injection_mode="legacy")
-            )
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="leader request body",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        user_text = _captured_user_message_text(captured)
-
-        # Shared-context block comes BEFORE the leader's message.
-        sc_pos = user_text.find("# Shared Context")
-        msg_pos = user_text.find("leader request body")
-        assert sc_pos != -1, "shared-context block not found"
-        assert msg_pos != -1, "leader message not found"
-        assert sc_pos < msg_pos, (
-            "shared-context block must precede the leader's message"
-        )
-
-    async def test_shared_context_injected_flag_prevents_reinjection(self):
-        """The ``shared_context_injected`` flag short-circuits subsequent messages.
-
-        When the flag is already ``True`` in the instance metadata,
-        the second message must NOT re-inject the shared-context
-        block AND must NOT re-write the flag. Verifies the
-        once-per-instance contract mirrors ``project_injected``.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-            shared_context_injected=True,  # already injected
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="second message",
-                message_id="msg-2",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        user_text = _captured_user_message_text(captured)
-        # No shared-context block — flag prevented re-injection.
-        assert "# Shared Context" not in user_text
-        # Leader's message is delivered verbatim.
-        assert "second message" in user_text
-
-        # The flag must NOT be re-written (otherwise we'd see a
-        # redundant ``set_metadata(..., "shared_context_injected", True)``
-        # call). Filter to just the shared-context flag writes.
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "shared_context_injected flag must not be re-written "
-            f"when already True; saw {sc_flag_writes!r}"
-        )
-
-    async def test_sets_shared_context_injected_flag_on_first_message(self):
-        """First message flips the ``shared_context_injected`` flag to ``True``.
-
-        Pins the persistence side of the once-per-instance guard.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-            shared_context_injected=False,
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-            # now resolves to ``human_messages``, which skips the message-body
-            # prepend — the legacy path keeps it as the only source of KV).
-            registry.get_resolved = MagicMock(
-                return_value=SimpleNamespace(context_injection_mode="legacy")
-            )
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="hello",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        # Find the set_metadata call for shared_context_injected.
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert len(sc_flag_writes) == 1
-        # ``args[0]`` is instance_id, ``args[1]`` is the key,
-        # ``args[2]`` is the value.
-        assert sc_flag_writes[0].args[0] == "inst-1"
-        assert sc_flag_writes[0].args[2] is True
-
-    async def test_empty_metadata_does_not_set_flag(self):
-        """Empty KV set → no block injected, AND flag does NOT flip.
-
-        Mirrors the ``project_injected`` behavior: only flip the
-        once-per-instance flag when injection actually succeeded.
-        Without this, metadata written by the leader BETWEEN
-        message 1 (empty) and message 2 (populated) would be
-        permanently invisible in the message body — the
-        very gap Option C was meant to close.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={},  # empty
-            shared_context_injected=False,
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="hello",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        user_text = _captured_user_message_text(captured)
-        # No shared-context block — KV was empty.
-        assert "# Shared Context" not in user_text
-        # Leader's message still delivered.
-        assert "hello" in user_text
-
-        # Flag MUST NOT flip (so the next message retries and can
-        # pick up late-arriving metadata).
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "shared_context_injected flag must not flip on empty KV — "
-            "the next message would otherwise silently skip late-arriving metadata"
-        )
-
-    async def test_late_arriving_metadata_injected_on_second_message(self):
-        """Metadata written BETWEEN messages gets injected on the next one.
-
-        Pins the design intent of Option C: the message-body injection
-        must reflect the **latest** KV at delivery time, not the
-        stale snapshot from message 1. With the no-flip-on-empty
-        flag behavior above, message 1 (empty) does not poison the
-        flag, so message 2 (populated) still sees the block.
-        """
-        # --- Message 1: empty KV, flag stays False ---
-        captured1: dict = {}
-        graph1 = _make_capturing_graph(captured1)
-        manager1 = _make_manager(
-            shared_context_kvs={},
-            shared_context_injected=False,
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-            # now resolves to ``human_messages``, which skips the message-body
-            # prepend — the legacy path keeps it as the only source of KV).
-            registry.get_resolved = MagicMock(
-                return_value=SimpleNamespace(context_injection_mode="legacy")
-            )
-            mock_get_registry.return_value = registry
-
-            svc1 = _make_service(manager1)
-            manager1.get_instance.return_value = graph1
-
-            await svc1._process_message_with_tracking(
-                instance_id="inst-1",
-                message="first message",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        # Flag must NOT have flipped.
-        sc_flag_writes = [
-            call for call in manager1._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == []
-        # Message 1 carries no block.
-        assert "# Shared Context" not in _captured_user_message_text(captured1)
-
-        # --- Message 2: leader has since written metadata via the tool ---
-        captured2: dict = {}
-        graph2 = _make_capturing_graph(captured2)
-        # Fresh manager mock (each invocation is a separate call to
-        # ``_process_message_with_tracking``). The KV snapshot now
-        # reflects the late write; the flag is still False because
-        # message 1 didn't flip it.
-        manager2 = _make_manager(
-            shared_context_kvs={"late_meta": "value"},
-            shared_context_injected=False,
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-            # now resolves to ``human_messages``, which skips the message-body
-            # prepend — the legacy path keeps it as the only source of KV).
-            registry.get_resolved = MagicMock(
-                return_value=SimpleNamespace(context_injection_mode="legacy")
-            )
-            mock_get_registry.return_value = registry
-
-            svc2 = _make_service(manager2)
-            manager2.get_instance.return_value = graph2
-
-            await svc2._process_message_with_tracking(
-                instance_id="inst-1",
-                message="second message",
-                message_id="msg-2",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        # Message 2 carries the late metadata.
-        msg2_text = _captured_user_message_text(captured2)
-        assert "# Shared Context" in msg2_text
-        assert '"late_meta"' in msg2_text
-
-    async def test_repo_failure_does_not_break_message_delivery(self):
-        """A repo exception degrades to "no block" — the message still flows.
-
-        The graceful-degradation contract: a transient repo failure
-        on the shared-context lookup must NOT abort message
-        processing. The leader's request reaches the child with
-        no shared-context block.
-
-        Flag-flip on exception is NO-FLIP — mirrors ``project_injected``:
-        an exception today doesn't mean the next message will hit the
-        same error, so retrying the lookup preserves Option C's goal
-        of reflecting the latest metadata at delivery time. The
-        flag-flip behavior matches the empty-KV case (no block →
-        no flip).
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            raise_on_get_kvs=RuntimeError("simulated DB failure"),
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="hello",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        user_text = _captured_user_message_text(captured)
-        # No block — graceful degradation succeeded.
-        assert "# Shared Context" not in user_text
-        # Leader's message still delivered.
-        assert "hello" in user_text
-        # Flag MUST NOT flip on exception (mirrors the empty-KV case).
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "shared_context_injected flag must not flip on repo exception"
-        )
-
-    async def test_completion_report_skips_injection(self):
-        """Internal completion reports (``internal_report:*``) skip injection.
-
-        Mirrors the project-context gate: completion reports are
-        internal pings, not user-facing requests, so they must NOT
-        receive the shared-context block.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="completion report body",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="internal_report:child-finished",
-            )
-
-        user_text = _captured_user_message_text(captured)
-        assert "# Shared Context" not in user_text
-        assert "completion report body" in user_text
-
-        # Flag must NOT flip on a completion report — the completion
-        # report is the "first message" for routing purposes but the
-        # actual user-facing first message comes later. Leaving the
-        # flag unset means the real first message gets the block.
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "completion reports must not flip the shared_context_injected flag"
-        )
-
-    async def test_internal_error_report_skips_injection(self):
-        """Internal error reports (``internal_error_report:*``) skip injection.
-
-        Mirrors ``test_completion_report_skips_injection`` for the second
-        of the three ``is_completion_report`` prefixes in
-        ``_process_message_with_tracking``. Error reports are internal
-        pings, so the shared-context block must NOT be prepended AND
-        the ``shared_context_injected`` flag must NOT flip — otherwise
-        the real first user message would silently miss the metadata.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="error report body",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="internal_error_report:some-error",
-            )
-
-        user_text = _captured_user_message_text(captured)
-        assert "# Shared Context" not in user_text
-        assert "error report body" in user_text
-
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "internal_error_report must not flip the shared_context_injected flag"
-        )
-
-    async def test_internal_agent_job_event_skips_injection(self):
-        """Internal agent job events (``internal_agent:job_event:*``) skip injection.
-
-        Mirrors ``test_completion_report_skips_injection`` for the third
-        of the three ``is_completion_report`` prefixes in
-        ``_process_message_with_tracking``. Job events are internal pings
-        from the scheduler, not user-facing requests, so the shared-
-        context block must NOT be prepended AND the
-        ``shared_context_injected`` flag must NOT flip — leaving the
-        flag unset means the real first user message still gets the
-        block.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="job event body",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="internal_agent:job_event:some-event",
-            )
-
-        user_text = _captured_user_message_text(captured)
-        assert "# Shared Context" not in user_text
-        assert "job event body" in user_text
-
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "internal_agent:job_event must not flip the shared_context_injected flag"
-        )
-
-    async def test_32k_payload_does_not_set_flag_at_hook_level(self):
-        """Shared-context metadata exceeding 32k cap must not inject AND must not flip the flag.
-
-        Pins the no-flip-on-cap contract from the production code path: when
-        ``_format_shared_context_kv_block`` returns ``None`` (over 32k cap),
-        ``format_shared_context_for_message_body`` returns ``""``, so the
-        hook's ``if sc_block:`` block is skipped and the flag stays unset.
-        Without this, a one-time over-cap payload would silently poison the
-        flag and prevent all future messages from receiving the metadata
-        even after it shrinks below the cap.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        # 35k chars — well over the 32k cap after ``json.dumps`` with
-        # ``ensure_ascii=True``. Single key keeps the test deterministic.
-        large_payload = {"huge": "x" * 35_000}
-        manager = _make_manager(
-            shared_context_kvs=large_payload,
-            shared_context_injected=False,  # first-message state
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="leader request body",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        # Tightened: prove we actually reached the body.
-        assert captured.get("graph_input") is not None, (
-            "test must reach the body — if not, the assertions below are silent"
-        )
-        user_text = _captured_user_message_text(captured)
-        # No block injected.
-        assert "# Shared Context" not in user_text
-        # Leader's request still delivered.
-        assert "leader request body" in user_text
-
-        # Flag MUST NOT flip on over-cap (mirrors no-flip-on-empty /
-        # no-flip-on-exception). Otherwise a transient oversized payload
-        # would silently block all future metadata injection.
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            "shared_context_injected flag must not flip on 32k cap — "
-            "a transient oversized payload would otherwise block future metadata"
-        )
-
-    async def test_project_injected_shared_context_failed_retry(self):
-        """When project injection succeeds but shared-context fails, the two paths are independent.
-
-        Pins the independence contract: project context proceeds to inject
-        + flip its flag; shared-context degrades to no-op (no block, no
-        flag flip). The next message will re-attempt the shared-context
-        lookup, so a transient failure doesn't permanently lock out
-        metadata injection.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        # Shared-context side FAILS — repo raises. Project side SUCCEEDS —
-        # wires below.
-        manager = _make_manager(
-            raise_on_get_kvs=RuntimeError("simulated shared-context failure"),
-            shared_context_injected=False,
-            project_injected=False,
-        )
-
-        # Wire project-context injection to succeed.
-        matched_project = MagicMock()
-        matched_project.name = "test-project"
-        matched_project.project_id = "proj-matched"
-        manager._project_repository = MagicMock()
-        manager._project_repository.match_by_keywords = MagicMock(
-            return_value=matched_project
-        )
-
-        with patch(
-            "daemon.services.instance_messaging.extract_project_keywords",
-            return_value=["test", "project"],
-            create=True,
-        ):
-            fake_project_context = "## Related Project\ntest-project\n"
-
-            def _fake_format(*_args, **_kwargs):
-                return fake_project_context
-
-            with patch(
-                "daemon.manager.format_project_context",
-                _fake_format,
-                create=True,
-            ):
-                with patch("daemon.registry.get_registry") as mock_get_registry:
-                    registry = MagicMock()
-                    registry.get_version = MagicMock(return_value=None)
-                    # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-                    # now resolves to ``human_messages``, which skips the message-body
-                    # prepend — the legacy path keeps it as the only source of KV).
-                    registry.get_resolved = MagicMock(
-                        return_value=SimpleNamespace(context_injection_mode="legacy")
-                    )
-                    mock_get_registry.return_value = registry
-
-                    svc = _make_service(manager)
-                    manager.get_instance.return_value = graph
-
-                    await svc._process_message_with_tracking(
-                        instance_id="inst-1",
-                        message="leader request body",
-                        message_id="msg-1",
-                        is_retry=False,
-                        message_source="agent:leader",
-                    )
-
-        user_text = _captured_user_message_text(captured)
-        # Project block IS injected (project side succeeded).
-        assert "## Related Project" in user_text, (
-            f"project block missing; rendered was: {user_text!r}"
-        )
-        # Shared-context block is NOT injected (shared-context side failed).
-        assert "# Shared Context" not in user_text
-        # Leader's request still delivered.
-        assert "leader request body" in user_text
-
-        # project_injected flag DID flip.
-        project_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "project_injected"
-        ]
-        assert len(project_flag_writes) == 1, (
-            f"project_injected flag must flip exactly once when project side succeeds; saw {project_flag_writes!r}"
-        )
-        assert project_flag_writes[0].args[2] is True
-
-        # shared_context_injected flag did NOT flip (shared-context side failed).
-        sc_flag_writes = [
-            call for call in manager._instance_repository.set_metadata.call_args_list
-            if call.args[1] == "shared_context_injected"
-        ]
-        assert sc_flag_writes == [], (
-            f"shared_context_injected flag must not flip when shared-context side fails; saw {sc_flag_writes!r}"
-        )
-
-    async def test_retry_skips_injection(self):
-        """``is_retry=True`` short-circuits the injection gate.
-
-        On retry, LangGraph's ``add_messages`` reducer re-attaches
-        the original user message from the checkpoint — injecting
-        again would duplicate the shared-context block. Mirrors
-        the skill-injection gate at the same hook level.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            registry.get_resolved = MagicMock(return_value=None)
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="inst-1",
-                message="retry attempt",
-                message_id="msg-1",
-                is_retry=True,
-                message_source="agent:leader",
-            )
-
-        # Tightened: the retry path MUST capture graph_input (proves the
-        # test is actually exercising the body), and the captured user
-        # message MUST NOT carry the shared-context block.
-        assert captured.get("graph_input") is not None, (
-            "retry path must capture graph_input — if this fails, the "
-            "test is silently skipping the assertion below"
-        )
-        user_text = _captured_user_message_text(captured)
-        assert "# Shared Context" not in user_text, (
-            "is_retry=True must suppress shared-context injection — the "
-            "checkpoint already carries the original user message"
-        )
-
-    async def test_dual_injection_blocks_share_correct_order(self):
-        """When BOTH project AND shared-context inject, order is ``[sc][project][msg]``.
-
-        Pins the positional contract: shared-context runs LAST in the
-        hook, so its ``prepend`` lands it at the LEFT in the final
-        rendered message — producing the documented
-        ``[shared context] / --- / [project context] / --- / [leader's request]``
-        layout from the plan doc.
-
-        Every other test sets ``project_injected=True`` so this case
-        is otherwise untested. This is the one case where order
-        matters, so the assertion is non-negotiable.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        # Force BOTH blocks to inject: shared_context_kvs populated,
-        # shared_context_injected=False; project_injected=False.
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-            shared_context_injected=False,
-            project_injected=False,
-        )
-
-        # Project-context injection requires the keyword extraction /
-        # project-repo paths to succeed. Mock them so the project
-        # block actually prepends (the default ``MagicMock`` would
-        # produce a ``MagicMock`` content and break the assertion).
-        from daemon.repositories.project.models import Project as _Project  # noqa: F401
-
-        manager._project_repository = MagicMock()
-        # No stored project_id → the keyword-match branch runs.
-        # Provide a non-empty project so the injection prepends a
-        # deterministic string we can search for.
-        matched_project = MagicMock()
-        matched_project.name = "test-project"
-        matched_project.project_id = "proj-matched"
-        manager._project_repository.match_by_keywords = MagicMock(
-            return_value=matched_project
-        )
-        # ``extract_project_keywords`` is a pure function imported
-        # lazily — patch it to return non-empty so the project-context
-        # branch fires.
-        with patch(
-            "daemon.services.instance_messaging.extract_project_keywords",
-            return_value=["test", "project"],
-            create=True,
-        ):
-            # ``format_project_context`` is also lazy-imported. Patch
-            # both the import location AND the function call site to
-            # return a recognizable string.
-            fake_project_context = "## Related Project\ntest-project\n"
-
-            def _fake_format(*_args, **_kwargs):
-                return fake_project_context
-
-            with patch(
-                "daemon.manager.format_project_context",
-                _fake_format,
-                create=True,
-            ):
-                with patch("daemon.registry.get_registry") as mock_get_registry:
-                    registry = MagicMock()
-                    registry.get_version = MagicMock(return_value=None)
-                    # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-                    # now resolves to ``human_messages``, which skips the message-body
-                    # prepend — the legacy path keeps it as the only source of KV).
-                    registry.get_resolved = MagicMock(
-                        return_value=SimpleNamespace(context_injection_mode="legacy")
-                    )
-                    mock_get_registry.return_value = registry
-
-                    svc = _make_service(manager)
-                    manager.get_instance.return_value = graph
-
-                    await svc._process_message_with_tracking(
-                        instance_id="inst-1",
-                        message="leader request body",
-                        message_id="msg-1",
-                        is_retry=False,
-                        message_source="agent:leader",
-                    )
-
-        user_text = _captured_user_message_text(captured)
-
-        # Both blocks must appear in the rendered message.
-        assert "# Shared Context" in user_text
-        assert "## Related Project" in user_text
-        assert "leader request body" in user_text
-
-        # Order: shared-context block BEFORE project-context block,
-        # BOTH before the leader's request.
-        sc_pos = user_text.find("# Shared Context")
-        project_pos = user_text.find("## Related Project")
-        msg_pos = user_text.find("leader request body")
-        assert sc_pos != -1 and project_pos != -1 and msg_pos != -1, (
-            f"missing block(s): sc={sc_pos}, project={project_pos}, "
-            f"msg={msg_pos}; rendered was: {user_text!r}"
-        )
-        assert sc_pos < project_pos, (
-            "shared-context block must precede project-context block — "
-            f"got sc@{sc_pos} project@{project_pos}"
-        )
-        assert project_pos < msg_pos, (
-            "project-context block must precede the leader's request — "
-            f"got project@{project_pos} msg@{msg_pos}"
-        )
-
-    async def test_child_instance_uses_tree_root_for_context_key(self):
-        """A child instance's injection queries the root's KV via ``parent_id``.
-
-        Pin the context-key-resolution contract at the hook level
-        (separate from the unit-test contract in
-        ``test_shared_context_message_body_injection.py``).
-        When ``parent_id`` is set on the instance, the formatter
-        must call ``get_tree_root_id(parent_id)`` to resolve the
-        context key. The mock returns ``None`` so the formatter
-        falls back to ``parent_id`` itself — proving the
-        fallback path is wired through the hook.
-        """
-        captured: dict = {}
-        graph = _make_capturing_graph(captured)
-        manager = _make_manager(
-            shared_context_kvs={"k": "v"},
-            parent_id="parent-1",
-        )
-
-        with patch("daemon.registry.get_registry") as mock_get_registry:
-            registry = MagicMock()
-            registry.get_version = MagicMock(return_value=None)
-            # Opt into ``legacy`` mode (Phase 6 default flip means ``None``
-            # now resolves to ``human_messages``, which skips the message-body
-            # prepend — the legacy path keeps it as the only source of KV).
-            registry.get_resolved = MagicMock(
-                return_value=SimpleNamespace(context_injection_mode="legacy")
-            )
-            mock_get_registry.return_value = registry
-
-            svc = _make_service(manager)
-            manager.get_instance.return_value = graph
-
-            await svc._process_message_with_tracking(
-                instance_id="child-1",
-                message="hello",
-                message_id="msg-1",
-                is_retry=False,
-                message_source="agent:leader",
-            )
-
-        # The repository was queried — proves the wiring ran.
-        manager.shared_context_metadata_repo.get_all_as_dict.assert_called()
-
-        # ``get_tree_root_id`` was called with the child's parent_id,
-        # then the formatter fell back to ``parent_id`` itself when
-        # the mock returned None.
-        manager._instance_repository.get_tree_root_id.assert_called_with("parent-1")
 
 
 # ============================================================
@@ -1337,3 +425,148 @@ class TestPersistentContextSseEmission:
                     break
         assert "redo after retry" in str(text)
         assert "SYSTEM CONTEXT" not in str(text)
+
+
+# ============================================================
+# Regression tests — project_injected flag write path (W3, 2026-07-31)
+# ============================================================
+
+
+class TestProjectInjectedFlagWritePath:
+    """W3 — pin the once-per-instance ``project_injected`` flag write path.
+
+    The flag is stamped onto the instance metadata by
+    :meth:`InstanceMessagingService._process_message_with_tracking`
+    after a successful project match (parent-stamped
+    ``project_id`` or keyword match). Once written, the flag is read
+    fresh on every subsequent turn by
+    :meth:`daemon.graph.ContextSlot._is_project_already_injected` to
+    short-circuit the persistent-block rebuild.
+
+    Earlier revisions dropped the assertion when cleaning up legacy
+    tests. These two tests pin the contract end-to-end so a future
+    refactor cannot silently break the once-per-instance gate.
+    """
+
+    async def test_successful_project_match_writes_project_injected_flag(self):
+        """After a successful project match the flag is stamped onto metadata.
+
+        Regression for W3: pin the contract that on a successful
+        first-turn project injection, the instance metadata MUST
+        carry ``project_injected=True`` so subsequent turns can
+        short-circuit the persistent rebuild. The exact method,
+        key, and value matter — the slot's ``_is_project_already_injected``
+        checks for ``bool(metadata.get("project_injected"))`` via the
+        captured ``instance_repository`` on every ``assemble()`` call.
+        """
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        manager = _make_manager(
+            shared_context_kvs={},
+            shared_context_injected=False,
+            project_injected=False,  # first-turn state → flag will be written
+        )
+
+        # Wire the project_repository to return a successful match
+        # for the existing project_id ("proj-1") — exercises the
+        # ``if existing_project_id:`` branch (parent-stamped project_id).
+        manager._project_repository.get = MagicMock(
+            return_value=SimpleNamespace(
+                project_id="proj-1",
+                name="Matched Project",
+            )
+        )
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="human_messages")
+            )
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(return_value=([], [])),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="hello",
+                    message_id="msg-1",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        # Verify the flag was written exactly once with the
+        # documented contract: instance_id, "project_injected", True.
+        flag_writes = [
+            c for c in manager._instance_repository.set_metadata.call_args_list
+            if len(c.args) >= 3 and c.args[1] == "project_injected"
+        ]
+        assert len(flag_writes) == 1, (
+            f"expected exactly one set_metadata call writing 'project_injected', "
+            f"got {len(flag_writes)}: {flag_writes!r}"
+        )
+        # The exact args the slot's _is_project_already_injected reads back:
+        # instance_id, key, value.
+        assert flag_writes[0].args[0] == "inst-1"
+        assert flag_writes[0].args[1] == "project_injected"
+        assert flag_writes[0].args[2] is True
+
+    async def test_failed_project_match_does_not_write_project_injected_flag(self):
+        """W3 — when the project match fails the flag is NOT written.
+
+        Regression: a previous implementation accidentally wrote
+        the flag even on a failed match. The flag must only be
+        written when a project was actually matched so a subsequent
+        retry can attempt matching again. Without this guard, a
+        transient failure on turn 1 would permanently suppress
+        the project context for the lifetime of the instance.
+        """
+        captured: dict = {}
+        graph = _make_capturing_graph(captured)
+        manager = _make_manager(
+            shared_context_kvs={},
+            shared_context_injected=False,
+            project_injected=False,  # first-turn state → would write on success
+        )
+
+        # Wire project_repository.get to return None — the match failed.
+        # This is the "project_id exists in metadata but the project was
+        # deleted" case, or a DB lookup error swallowed upstream.
+        manager._project_repository.get = MagicMock(return_value=None)
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(context_injection_mode="human_messages")
+            )
+            mock_get_registry.return_value = registry
+
+            svc = _make_service(manager)
+            manager.get_instance.return_value = graph
+
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(return_value=([], [])),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="hello",
+                    message_id="msg-1",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        # The flag MUST NOT be written on a failed match.
+        flag_writes = [
+            c for c in manager._instance_repository.set_metadata.call_args_list
+            if len(c.args) >= 3 and c.args[1] == "project_injected"
+        ]
+        assert len(flag_writes) == 0, (
+            f"flag must NOT be written on a failed match — got: {flag_writes!r}"
+        )

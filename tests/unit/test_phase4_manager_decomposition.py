@@ -262,12 +262,6 @@ class TestModuleLevelFunctions:
 
         assert callable(extract_project_keywords)
 
-    def test_format_project_context_importable(self):
-        """format_project_context should be importable from daemon.manager."""
-        from daemon.manager import format_project_context
-
-        assert callable(format_project_context)
-
     def test_get_message_event_type_importable(self):
         """_get_message_event_type should be importable from daemon.manager."""
         from daemon.manager import _get_message_event_type

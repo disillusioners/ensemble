@@ -1008,29 +1008,6 @@ class TestBuildGraphInput:
         assert user_msg.id == "msg-1"
         assert user_msg.content == "hello"
 
-    def test_with_injection_msg_prepends(self):
-        # When an injection message is provided, it goes FIRST
-        # in the message list so the agent reads skill context
-        # before user input.
-        skill_msg = HumanMessage(content="skill text", id="skill-msg")
-        result = _build_graph_input(
-            "hello",
-            "msg-1",
-            skill_msg,
-            agent_meta=SimpleNamespace(context_injection_mode="legacy"),
-        )
-
-        assert "messages" in result
-        assert len(result["messages"]) == 2
-        # Skill message first.
-        assert result["messages"][0] is skill_msg
-        assert result["messages"][0].content == "skill text"
-        assert result["messages"][0].id == "skill-msg"
-        # User message second.
-        assert isinstance(result["messages"][1], HumanMessage)
-        assert result["messages"][1].content == "hello"
-        assert result["messages"][1].id == "msg-1"
-
     def test_user_message_has_correct_id(self):
         # The user message's ``id`` parameter must equal the
         # caller-provided ``message_id`` so LangGraph's
