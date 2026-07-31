@@ -12,5 +12,6 @@
   "context_injection": {
     "heuristic_match_shared_md_files": true
   },
-  "llm_model": "coding"
+  "llm_model": "coding",
+  "recursion_limit_multiplier": 5
 }

@@ -365,8 +365,14 @@ limits:
 | `limits.max_children_per_instance` | integer | `50` | Maximum child instances per parent instance |
 | `limits.instance_timeout_minutes` | integer | `60` | Auto-shutdown timeout for idle instances (minutes) |
 | `limits.message_rate_limit` | integer | `60` | Maximum messages per minute per instance |
-| `limits.graph_recursion_limit` | integer | `200` | Maximum recursion depth for LangGraph execution |
+| `limits.graph_recursion_limit` | integer | `200` | Maximum recursion depth for LangGraph execution (global default) |
 | `limits.llm_concurrency` | integer | `10` | Maximum concurrent LLM API requests |
+
+> **Per-agent override:** the global `graph_recursion_limit` is a *base* — individual
+> agents can exceed it via `recursion_limit_multiplier` (e.g. `5` = 5× the base) or an
+> absolute `recursion_limit`, set in the agent's `meta.json`. `worker` and `coder`
+> default to `5x` so long-running working agents get a larger step budget. See
+> [Agent System Guide – meta.json Fields](AGENTS.md#metajson-fields).
 
 #### Persistence Configuration
 

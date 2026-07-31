@@ -16,7 +16,7 @@ from sqlmodel import Session
 
 from ..cancellation import CancellationReason
 from ..compaction import ContextCompactor
-from ..registry import get_registry
+from ..registry import get_registry, resolve_recursion_limit
 from ..repositories.dependency_bus.models import (
     DependencyWatcher,
     DependencyWatcherState,
@@ -1615,10 +1615,15 @@ class InstanceLifecycleService:
             "timeout_attempts": self._config.queue.llm_retry_timeout_attempts,
         }
 
-        # Build graph config with thread_id for state management
+        # Build graph config with thread_id for state management.
+        # Apply the per-agent recursion-limit override / multiplier so
+        # long-running working agents (e.g. worker, coder) get a larger
+        # LangGraph step quota than the global default.
         config = {
             "configurable": {"thread_id": instance_id},
-            "recursion_limit": self._config.limits.graph_recursion_limit,
+            "recursion_limit": resolve_recursion_limit(
+                self._config.limits.graph_recursion_limit, metadata
+            ),
         }
 
         # Build graph with checkpointer
@@ -3170,10 +3175,15 @@ class InstanceLifecycleService:
             "timeout_attempts": self._config.queue.llm_retry_timeout_attempts,
         }
 
-        # Build graph config with thread_id for state management
+        # Build graph config with thread_id for state management.
+        # Apply the per-agent recursion-limit override / multiplier so
+        # long-running working agents (e.g. worker, coder) get a larger
+        # LangGraph step quota than the global default.
         config = {
             "configurable": {"thread_id": instance_id},
-            "recursion_limit": self._config.limits.graph_recursion_limit,
+            "recursion_limit": resolve_recursion_limit(
+                self._config.limits.graph_recursion_limit, agent_meta
+            ),
         }
 
         # Build graph with checkpointer (will restore state from checkpoints)

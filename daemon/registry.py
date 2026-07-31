@@ -195,6 +195,29 @@ class AgentMetadata(BaseModel):
             "Missing/empty map = no overrides, default llm_model always wins."
         ),
     )
+    recursion_limit_multiplier: float = Field(
+        default=1.0,
+        description=(
+            "Multiplier applied to the global "
+            "``limits.graph_recursion_limit`` for this agent. Useful "
+            "for long-running working agents (e.g. worker, coder) that "
+            "need more LangGraph steps than the global default. "
+            "Example: ``5`` yields 5x the base quota. Ignored when "
+            "``recursion_limit`` is set. Non-positive / invalid values "
+            "are treated as ``1.0`` (no change) at resolution time. "
+            "Default 1.0."
+        ),
+    )
+    recursion_limit: int | None = Field(
+        default=None,
+        description=(
+            "Absolute LangGraph recursion_limit override for this "
+            "agent. When set to a positive integer it takes priority "
+            "over ``recursion_limit_multiplier``. ``None`` (default) "
+            "means defer to the multiplier (and ultimately the global "
+            "``limits.graph_recursion_limit``)."
+        ),
+    )
 
     model_config = ConfigDict(
         extra="ignore",
@@ -225,6 +248,50 @@ class AgentMetadata(BaseModel):
         if isinstance(v, Path):
             return v
         return Path(v)
+
+
+def resolve_recursion_limit(base_limit: int, agent_meta: "AgentMetadata | None") -> int:
+    """Return the effective LangGraph ``recursion_limit`` for an agent.
+
+    Applies the per-agent override / multiplier declared in ``meta.json``
+    on top of the global ``limits.graph_recursion_limit`` base value so
+    long-running working agents (e.g. worker, coder) can be granted a
+    larger step quota without raising the global ceiling.
+
+    Precedence (first match wins):
+        1. ``agent_meta.recursion_limit`` — a positive absolute override.
+        2. ``base_limit * agent_meta.recursion_limit_multiplier`` — the
+           multiplier path (default multiplier is ``1.0``).
+        3. ``base_limit`` unchanged — when ``agent_meta`` is ``None`` or
+           every per-agent knob is unset / invalid.
+
+    Defensive against duck-typed / partial metadata objects and bad
+    config values: any non-positive multiplier, non-int absolute, or
+    missing attribute falls through to ``base_limit`` so a malformed
+    ``meta.json`` can never zero-out the recursion guard.
+
+    Args:
+        base_limit: The global ``limits.graph_recursion_limit`` value.
+        agent_meta: The agent's :class:`AgentMetadata` (or a duck-typed
+            object exposing the optional ``recursion_limit`` /
+            ``recursion_limit_multiplier`` attributes). ``None`` is
+            treated as "no per-agent override".
+
+    Returns:
+        The effective recursion limit as a positive ``int``.
+    """
+    if agent_meta is None:
+        return base_limit
+
+    absolute = getattr(agent_meta, "recursion_limit", None)
+    if isinstance(absolute, int) and not isinstance(absolute, bool) and absolute > 0:
+        return absolute
+
+    multiplier = getattr(agent_meta, "recursion_limit_multiplier", 1.0)
+    if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)) or multiplier <= 0:
+        return base_limit
+
+    return max(1, int(base_limit * multiplier))
 
 
 class AgentRegistry:
@@ -348,6 +415,8 @@ class AgentRegistry:
                         if isinstance(meta.get("caller_model_overrides"), dict)
                         else {}
                     ),
+                    recursion_limit_multiplier=meta.get("recursion_limit_multiplier", 1.0),
+                    recursion_limit=meta.get("recursion_limit"),
                 )
                 # Split storage: untagged → _agents, tagged → _versioned_agents.
                 # _agents keys are NEVER composite keys.

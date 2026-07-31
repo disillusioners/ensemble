@@ -125,6 +125,8 @@ agents/
 | `capabilities` | array | No | List of agent capabilities |
 | `tags` | array | No | Tags for categorization |
 | `tools` | object | No | Tool access configuration |
+| `recursion_limit_multiplier` | number | No | Multiplier on the global `limits.graph_recursion_limit` for this agent. Lets long-running working agents (e.g. `worker`, `coder`) get a larger LangGraph step budget **above** the global default. Example: `5` → 5× the base. Ignored when `recursion_limit` is set. Non-positive values are treated as `1` (no change). Default `1`. |
+| `recursion_limit` | integer | No | Absolute LangGraph recursion-limit override for this agent. When set to a positive integer it takes priority over `recursion_limit_multiplier` and the global limit. |
 
 #### Tools Configuration
 

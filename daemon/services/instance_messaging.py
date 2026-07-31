@@ -463,6 +463,93 @@ class InstanceMessagingService:
         adapter = self._manager._checkpointer
         return adapter.raw_saver if adapter is not None else None
 
+    def _resolve_agent_meta_from_row(self, instance_row: Any) -> Any | None:
+        """Resolve the agent metadata for an instance row (best-effort).
+
+        The canonical versioned-resolution path (``get_version`` →
+        ``get_resolved`` fallback) shared by every messaging site that
+        needs the agent's metadata — both the per-instance recursion
+        limit (:meth:`_effective_recursion_limit`) and the streaming
+        path's ``_messaging_agent_meta`` (context injection) resolve
+        through here so the fallback logic lives in one place. Returns
+        ``None`` on any failure (missing row, unknown agent_id,
+        registry error) so callers fall back to safe defaults.
+
+        ``get_registry`` is imported locally so tests that patch
+        ``daemon.registry.get_registry`` (or the module-level binding)
+        remain effective.
+
+        Args:
+            instance_row: An instance ORM row exposing ``agent_id`` and
+                (optionally) ``agent_tag``. ``None`` → ``None``.
+
+        Returns:
+            The :class:`~daemon.registry.AgentMetadata`, or ``None``.
+        """
+        if instance_row is None:
+            return None
+        agent_id = getattr(instance_row, "agent_id", None)
+        if not agent_id:
+            return None
+        try:
+            from ..registry import get_registry
+            registry = get_registry()
+            return (
+                registry.get_version(
+                    agent_id, getattr(instance_row, "agent_tag", None)
+                )
+                or registry.get_resolved(agent_id)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                f"[Messaging] Failed to resolve agent_meta for "
+                f"agent_id={agent_id!r}: {exc}"
+            )
+            return None
+
+    def _resolve_recursion_limit_for_meta(self, agent_meta: Any | None) -> int:
+        """Compute the effective LangGraph ``recursion_limit`` from agent metadata.
+
+        Thin wrapper over :func:`daemon.registry.resolve_recursion_limit`
+        so the ``resolve_recursion_limit`` import lives in exactly one
+        messaging site (kept local for test-mockability parity with
+        :meth:`_resolve_agent_meta_from_row`). Applies the agent's
+        ``recursion_limit`` / ``recursion_limit_multiplier`` (declared in
+        ``meta.json``) on top of the global
+        ``limits.graph_recursion_limit`` so long-running working agents
+        (e.g. worker, coder) get a larger step quota.
+
+        Args:
+            agent_meta: Pre-resolved agent metadata (may be ``None``).
+
+        Returns:
+            The effective recursion limit as a positive ``int``.
+        """
+        from ..registry import resolve_recursion_limit
+        return resolve_recursion_limit(
+            self._config.limits.graph_recursion_limit, agent_meta
+        )
+
+    def _effective_recursion_limit(self, instance_row: Any) -> int:
+        """Compute the per-instance LangGraph ``recursion_limit``.
+
+        Convenience composition: resolve the agent metadata from the
+        instance row, then apply the per-agent override / multiplier.
+        Use :meth:`_resolve_recursion_limit_for_meta` directly when the
+        metadata is already resolved (e.g. the streaming path's
+        ``_messaging_agent_meta``) to avoid re-resolution.
+
+        Args:
+            instance_row: The instance ORM row used to resolve the
+                agent metadata (may be ``None``).
+
+        Returns:
+            The effective recursion limit as a positive ``int``.
+        """
+        return self._resolve_recursion_limit_for_meta(
+            self._resolve_agent_meta_from_row(instance_row)
+        )
+
     async def _get_system_prompt_tokens(self, instance_id: str) -> int:
         """Get the cached system prompt token count for an instance's agent.
 
@@ -841,10 +928,13 @@ class InstanceMessagingService:
             task_registered = True
             logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
 
-        # Invoke with message
+        # Invoke with message.
+        # Use the per-agent recursion-limit override / multiplier so
+        # long-running working agents (e.g. worker, coder) get a larger
+        # LangGraph step quota than the global default.
         config = {
             "configurable": {"thread_id": instance_id},
-            "recursion_limit": self._config.limits.graph_recursion_limit,
+            "recursion_limit": self._effective_recursion_limit(instance_meta),
         }
         
         try:
@@ -1859,6 +1949,8 @@ class InstanceMessagingService:
         config = {
             "configurable": {"thread_id": instance_id},
             "callbacks": callbacks,
+            # Base recursion limit; overridden below once the agent
+            # metadata is resolved so per-agent multipliers apply.
             "recursion_limit": self._config.limits.graph_recursion_limit,
         }
         
@@ -1958,39 +2050,34 @@ class InstanceMessagingService:
         # cache miss case hits disk. ``None`` is coerced to
         # ``human_messages`` by ``_resolve_injection_mode`` so a missing
         # agent_meta gets the new default behavior (not legacy).
+        #
+        # Resolution reuses :meth:`_resolve_agent_meta_from_row` so the
+        # versioned (``get_version`` → ``get_resolved``) fallback lives
+        # in one place (S2 fix preserved by the helper).
         _messaging_agent_meta: Any | None = None
         try:
             _instance_row_for_meta = await asyncio.to_thread(
                 self._manager._instance_repository.get, instance_id
             )
-            if _instance_row_for_meta is not None:
-                from ..registry import get_registry
-                _registry = get_registry()
-                # S2 fix: thread the instance's bound ``agent_tag``
-                # so versioned (e.g. v2) callers get the versioned
-                # agent's ``context_injection_mode`` instead of the
-                # base one. Same ``get_version() or
-                # get_resolved()`` fallback pattern used by the
-                # C1 fix in this file (skill-injection block
-                # below) and the W2 fix in
-                # ``SkillMetricsService._check_capture_eligibility``.
-                _messaging_agent_meta = (
-                    _registry.get_version(
-                        _instance_row_for_meta.agent_id,
-                        getattr(
-                            _instance_row_for_meta, "agent_tag", None
-                        ),
-                    )
-                    or _registry.get_resolved(
-                        _instance_row_for_meta.agent_id
-                    )
-                )
+            _messaging_agent_meta = self._resolve_agent_meta_from_row(
+                _instance_row_for_meta
+            )
         except Exception as _meta_exc:  # pragma: no cover - defensive
             logger.debug(
                 f"[Messaging] Failed to resolve agent_meta for "
                 f"{instance_id[:8]}...: {_meta_exc}"
             )
             _messaging_agent_meta = None
+
+        # Apply the per-agent recursion-limit override / multiplier now
+        # that the agent metadata is resolved. ``config`` is not
+        # consumed until the astream call below, so updating it here is
+        # safe and lets long-running working agents (e.g. worker, coder)
+        # exceed the global step quota. Reuses the already-resolved
+        # ``_messaging_agent_meta`` (no second registry lookup).
+        config["recursion_limit"] = self._resolve_recursion_limit_for_meta(
+            _messaging_agent_meta
+        )
 
         # ── Hybrid Context Injection (2026-07-29) ─────────────────────────
         # Capture the once-per-instance ``project_injected`` flag from

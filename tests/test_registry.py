@@ -1230,3 +1230,88 @@ class TestRegistryValidatePath:
         assert registry.get_version("definitely-not-an-agent", validate_path=True) is None
         assert registry.get_version("definitely-not-an-agent", validate_path=False) is None
         assert registry.get_version("definitely-not-an-agent", "v2", validate_path=True) is None
+
+
+class TestResolveRecursionLimit:
+    """Tests for :func:`daemon.registry.resolve_recursion_limit`."""
+
+    def _meta(self, **overrides) -> AgentMetadata:
+        """Build a minimal AgentMetadata with optional overrides."""
+        defaults = {"id": "x", "name": "X", "path": "/tmp/x"}
+        defaults.update(overrides)
+        return AgentMetadata(**defaults)
+
+    def test_none_agent_meta_returns_base(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(100, None) == 100
+
+    def test_default_multiplier_returns_base(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(100, self._meta()) == 100
+
+    def test_multiplier_applied(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(100, self._meta(recursion_limit_multiplier=5)) == 500
+
+    def test_fractional_multiplier_truncates(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        # 2.5 * 100 = 250.0 -> int truncates to 250
+        assert resolve_recursion_limit(100, self._meta(recursion_limit_multiplier=2.5)) == 250
+
+    def test_absolute_override_wins_over_multiplier(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        meta = self._meta(recursion_limit=300, recursion_limit_multiplier=5)
+        assert resolve_recursion_limit(100, meta) == 300
+
+    def test_invalid_multiplier_falls_back_to_base(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(100, self._meta(recursion_limit_multiplier=0)) == 100
+        assert resolve_recursion_limit(100, self._meta(recursion_limit_multiplier=-3)) == 100
+
+    def test_invalid_absolute_falls_back_to_multiplier(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        # 0 / negative absolute are ignored -> multiplier path (5x of 100)
+        meta = self._meta(recursion_limit=0, recursion_limit_multiplier=5)
+        assert resolve_recursion_limit(100, meta) == 500
+
+    def test_result_always_positive(self) -> None:
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(1, self._meta(recursion_limit_multiplier=5)) >= 1
+
+    def test_discovery_wires_meta_json_multiplier(self, temp_agents_dir: Path) -> None:
+        """meta.json recursion_limit_multiplier is parsed into AgentMetadata."""
+        create_agent_meta(temp_agents_dir, "worker", recursion_limit_multiplier=5)
+
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        worker = registry.get("worker")
+        assert worker is not None
+        assert worker.recursion_limit_multiplier == 5
+
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(100, worker) == 500
+
+    def test_discovery_wires_absolute_override(self, temp_agents_dir: Path) -> None:
+        """meta.json recursion_limit absolute override is parsed into AgentMetadata."""
+        create_agent_meta(temp_agents_dir, "coder", recursion_limit=432)
+
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        coder = registry.get("coder")
+        assert coder is not None
+        assert coder.recursion_limit == 432
+
+        from daemon.registry import resolve_recursion_limit
+
+        assert resolve_recursion_limit(100, coder) == 432
