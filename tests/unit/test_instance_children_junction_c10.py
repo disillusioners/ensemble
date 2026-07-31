@@ -305,3 +305,90 @@ class TestEndToEndSpawnThenComplete:
 
         # 5. list_child_ids no longer sees the child
         assert repo.list_child_ids("e2e-parent") == []
+
+
+# =============================================================================
+# Permanent-record child list (display / nesting): list_child_ids_permanent
+# =============================================================================
+
+
+class TestListChildIdsPermanent:
+    """``list_child_ids_permanent()`` reads ``instances.parent_id`` (the
+    permanent record) so that COMPLETED children — whose
+    ``instance_hierarchy`` working-set row has been deleted by the
+    completion path — still appear under their parent in the instance
+    list UI / ``get_instance_info`` ``children`` field.
+
+    This is the fix for council/governor children disappearing from the
+    reviewer's child list once the governor completed (while explore
+    children, which retained their junction row, stayed visible).
+    """
+
+    def test_permanent_includes_completed_child(self, repo, engine):
+        """After the junction row is deleted (child completed),
+        ``list_child_ids`` (working set) returns [] but
+        ``list_child_ids_permanent`` still returns [child]."""
+        repo.create(
+            instance_id="perm-parent",
+            agent_id="leader",
+            agent_dir="./agents/leader",
+        )
+        repo.create(
+            instance_id="perm-child",
+            agent_id="developer",
+            agent_dir="./agents/developer",
+            parent_id="perm-parent",
+        )
+
+        # Working set sees it pre-completion.
+        assert repo.list_child_ids("perm-parent") == ["perm-child"]
+        assert repo.list_child_ids_permanent("perm-parent") == ["perm-child"]
+
+        # Simulate completion: delete the working-set row.
+        with Session(engine) as session:
+            session.execute(
+                text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                {"child_id": "perm-child"},
+            )
+            session.commit()
+
+        # Working set: child gone. Permanent (parent_id): child retained.
+        assert repo.list_child_ids("perm-parent") == []
+        assert repo.list_child_ids_permanent("perm-parent") == ["perm-child"], (
+            "list_child_ids_permanent must retain completed children"
+        )
+
+    def test_permanent_returns_empty_when_no_children(self, repo, engine):
+        repo.create(
+            instance_id="perm-lonely",
+            agent_id="leader",
+            agent_dir="./agents/leader",
+        )
+        assert repo.list_child_ids_permanent("perm-lonely") == []
+
+    def test_permanent_keeps_siblings_when_one_completed(self, repo, engine):
+        repo.create(
+            instance_id="perm-parent-2",
+            agent_id="leader",
+            agent_dir="./agents/leader",
+        )
+        for cid in ("perm-sib-a", "perm-sib-b"):
+            repo.create(
+                instance_id=cid,
+                agent_id="developer",
+                agent_dir="./agents/developer",
+                parent_id="perm-parent-2",
+            )
+
+        # Complete sibling A only.
+        with Session(engine) as session:
+            session.execute(
+                text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                {"child_id": "perm-sib-a"},
+            )
+            session.commit()
+
+        permanent = sorted(repo.list_child_ids_permanent("perm-parent-2"))
+        assert permanent == ["perm-sib-a", "perm-sib-b"], (
+            f"permanent list must include the completed sibling; got {permanent}"
+        )

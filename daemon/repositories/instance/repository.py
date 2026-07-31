@@ -79,6 +79,29 @@ class SQLModelInstanceRepository:
         with SQLModelSession(self.engine) as db_session:
             return self._load_children(db_session, instance_id)
 
+    def list_child_ids_permanent(self, instance_id: str) -> list[str]:
+        """Return the child instance IDs of ``instance_id`` from the
+        permanent ``instances.parent_id`` record.
+
+        Unlike :meth:`list_child_ids` (which reads the
+        ``instance_hierarchy`` working set whose rows are deleted when a
+        child completes), this walks ``instances.parent_id`` and
+        therefore includes completed / terminated children. Use this for
+        any display / nesting concern (the instance list UI, the
+        ``children`` field of ``get_instance_info``) where dropping a
+        child once it completes would orphan it from its parent's tree.
+
+        ID-only variant of :meth:`get_children` (avoids hydrating full
+        ``Instance`` rows when the caller only needs ids).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                select(Instance.instance_id).where(
+                    Instance.parent_id == instance_id
+                )
+            ).all()
+            return list(rows)
+
     def _enrich_instance(self, db_session: SQLModelSession, instance: Instance | None) -> Instance | None:
         """Hook for subclasses/tests to enrich a freshly-read instance. Default returns unchanged."""
         return instance

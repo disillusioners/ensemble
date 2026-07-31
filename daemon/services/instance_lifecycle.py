@@ -3298,13 +3298,15 @@ class InstanceLifecycleService:
             search=search,
         )
         # Convert Instance objects to dicts for backward compatibility, then
-        # populate ``children`` from the canonical ``instance_hierarchy`` junction
-        # table (Phase 4 dropped the legacy denormalized ``Instance.children``
-        # column). See ``InstanceRepository.list_child_ids``.
+        # populate ``children`` from the permanent ``instances.parent_id``
+        # record (NOT the ``instance_hierarchy`` working set, whose rows are
+        # deleted when a child completes — that would orphan completed
+        # children from their parent's tree in the UI). See
+        # ``InstanceRepository.list_child_ids_permanent``.
         result = []
         for inst in instances:
             info = inst.to_dict()
-            info["children"] = instance_repository.list_child_ids(inst.instance_id)
+            info["children"] = instance_repository.list_child_ids_permanent(inst.instance_id)
             result.append(info)
         return result, total
 
@@ -3316,8 +3318,8 @@ class InstanceLifecycleService:
 
         Returns:
             Instance metadata dictionary from the database, enriched
-            with the working-set ``children`` list loaded from
-            ``instance_hierarchy``.
+            with the permanent ``children`` list loaded from
+            ``instances.parent_id`` (includes completed children).
 
         Raises:
             KeyError: If instance is not found.
@@ -3329,8 +3331,10 @@ class InstanceLifecycleService:
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
         info = meta.to_dict()
-        # children loaded from instance_hierarchy junction table
-        info["children"] = instance_repository.list_child_ids(instance_id)
+        # children from the permanent parent_id record (includes completed
+        # children) — NOT the instance_hierarchy working set, which deletes
+        # rows on completion and would orphan finished children.
+        info["children"] = instance_repository.list_child_ids_permanent(instance_id)
         return info
 
     def clear_all_instances(self) -> int:

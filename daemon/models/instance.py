@@ -54,10 +54,12 @@ class InstanceInfo(BaseModel):
     children: list[str] | None = Field(
         default=None,
         description=(
-            "API response field populated from the instance_hierarchy junction "
-            "table via list_child_ids() — NOT a DB column on the instances table. "
-            "Represents the working set of currently-active child instance IDs; "
-            "children are removed when they complete or error."
+            "API response field populated from the permanent parent_id record "
+            "via list_child_ids_permanent() — NOT a DB column on the instances "
+            "table. Includes completed / terminated children so they remain "
+            "nested under their parent in the instance tree UI (the "
+            "instance_hierarchy working set deletes rows on completion, which "
+            "would orphan finished children)."
         ),
     )
     mcp_tool_names: list[str] | None = Field(default=None, description="List of MCP tool names available to this instance")
