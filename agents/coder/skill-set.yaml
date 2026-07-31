@@ -1,0 +1,27 @@
+agent_id: coder
+skills:
+  - name: work-partition
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "When and how to offload clean bulk partitions to worker leaves — the offload gate, partition rules, one-shot fallback"
+  - name: code-implementation
+    version: "1.2.0"
+    auto_load: false
+    category: execution
+    description: "Feature implementation guidance: conventions, patterns, testing, structure"
+  - name: code-fix
+    version: "1.2.0"
+    auto_load: false
+    category: execution
+    description: "Bug diagnosis, root cause analysis, fix application, regression check"
+  - name: code-refactor
+    version: "1.2.0"
+    auto_load: false
+    category: execution
+    description: "Refactoring guidance: extract method, simplify, remove duplication, improve naming"
+  - name: git-commit
+    version: "1.2.0"
+    auto_load: false
+    category: execution
+    description: "Conventional commit creation: staging, message format, pre-commit checks"

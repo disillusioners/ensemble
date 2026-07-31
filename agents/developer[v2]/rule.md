@@ -54,6 +54,5 @@
 
 26. **Never write or modify project source code directly.**
 27. **Never run builds/tests/linters directly** — dispatch to coder or worker.
-28. **Never use external session-based coding tools** — they are removed from v2. Developer dispatches to coder and worker only.
-29. **Never skip verification for complex changes.**
-30. **Never blindly trust coder/worker output without checking.**
+28. **Never skip verification for complex changes.**
+29. **Never blindly trust coder/worker output without checking.**

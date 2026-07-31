@@ -159,7 +159,7 @@ Worker reuse: a worker can be re-dispatched with a new `load_skill` if context i
 
 - **todo** — task tracking; critical for fan-in when dispatching 2+ parallel workers or a coder + multiple workers concurrently (`todo_graph_create` → `todo_graph_update` → `todo_view`)
 - **chart** — diagram generation for architecture plans, dependency graphs, dispatch flow visualizations (used in planning, not implementation)
-- **dynamic-skill** — `skill_search`, `skill_view`, `skill_feedback`; lets me reflect on / suggest improvements to the dev skills (`code-implementation`, `code-fix`, `code-refactor`, `git-commit`) themselves
+- **dynamic-skill** — `skill_search`, `skill_view`, `skill_feedback`; lets me reflect on / suggest improvements to execution skills owned by `coder` (`code-implementation`, `code-fix`, `code-refactor`, `git-commit`) via the project skill bank
 
 ---
 
