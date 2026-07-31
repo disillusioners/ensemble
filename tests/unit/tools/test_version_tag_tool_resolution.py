@@ -21,7 +21,7 @@ and ``team_members`` differ between the versioned and base views.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1323,6 +1323,7 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
         manager.spawn_instance.assert_called_once_with(
             agent_id="governor",
             parent_id="parent-iid",
+            project_id=ANY,
             instance_name=None,
             version_tag="v2",
         )

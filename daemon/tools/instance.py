@@ -1149,11 +1149,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # _resolve_model_override on the raw value, which could disagree with
         # the validation already performed above under a mid-flight
         # allowed_models mutation.
+        # Inherit project_id from the caller (governor) so councilors are
+        # visible in the same project-scoped instance list.
+        councilor_project_id = _get_instance_project_id(manager, current_instance_id)
         new_instance_id, _returned_model = manager.spawn_instance(
             agent_id=resolved_agent_id,
             instance_id=None,
             parent_id=current_instance_id,
-            project_id=None,
+            project_id=councilor_project_id,
             instance_name=instance_name,
             model=canonical_model,
             version_tag=version_tag,
@@ -1261,9 +1264,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             raise ValueError(councilor_membership_error)
 
         # No W1 identity guard: any caller authorized by team_members may convene.
+        # Inherit project_id from the caller so the governor and its councilors
+        # are visible in the same project-scoped instance list (mirrors the
+        # spawn_instance tool's auto-inherit at the top of this file).
+        gov_project_id = _get_instance_project_id(manager, current_instance_id)
         gov_instance_id, _ = manager.spawn_instance(
             agent_id="governor",
             parent_id=current_instance_id,
+            project_id=gov_project_id,
             instance_name=instance_name,
             version_tag=gov_version_tag,
         )
@@ -1417,9 +1425,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             raise ValueError(councilor_membership_error)
 
         # No W1 identity guard: any caller authorized by team_members may convene.
+        # Inherit project_id from the caller so the governor and its councilors
+        # are visible in the same project-scoped instance list (mirrors the
+        # spawn_instance tool's auto-inherit at the top of this file).
+        gov_project_id = _get_instance_project_id(manager, current_instance_id)
         gov_instance_id, _ = manager.spawn_instance(
             agent_id="governor",
             parent_id=current_instance_id,
+            project_id=gov_project_id,
             instance_name=instance_name,
             version_tag=gov_version_tag,
         )

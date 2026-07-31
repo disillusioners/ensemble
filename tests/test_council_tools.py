@@ -28,7 +28,7 @@ Critical assertions (per Phase 2 plan):
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -215,6 +215,7 @@ class TestConveneCouncil:
         manager.spawn_instance.assert_called_once_with(
             agent_id="governor",
             parent_id="parent-instance-id",
+            project_id=ANY,
             instance_name=None,
             version_tag=None,
         )
@@ -685,6 +686,7 @@ class TestConveneCouncilWithSkill:
         manager.spawn_instance.assert_called_once_with(
             agent_id="governor",
             parent_id="parent-instance-id",
+            project_id=ANY,
             instance_name=None,
             version_tag=None,
         )
@@ -876,6 +878,7 @@ class TestConveneCouncilWithSkill:
         manager.spawn_instance.assert_called_once_with(
             agent_id="governor",
             parent_id="parent-instance-id",
+            project_id=ANY,
             instance_name="my-council",
             version_tag=None,
         )
