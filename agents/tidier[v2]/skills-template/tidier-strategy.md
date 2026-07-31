@@ -75,7 +75,7 @@ REQUIREMENTS:
   (see Aggregation Strategy below).
 
 RETURN:
-- Tidy Plan (first response, matches v1 first-output style).
+- Tidy Plan (first response).
 - Aggregated severity-grouped Tidier report (final response).
 - "Deferred to Reviewer" section for cross-scope observations.
 ```
@@ -141,7 +141,7 @@ report. This is **my** responsibility as dispatcher.
 2. **Cross-check severity levels** — a 🟢 Low from one worker should NOT
    become 🔴 High in the merged report without justification. Re-rank only
    with reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
-3. **Apply the Severity Guidelines** (migrated from v1 memory):
+3. **Apply the Severity Guidelines**:
 
    | Issue Type | Typical Severity |
    |---|---|
@@ -177,8 +177,7 @@ severity unless the impact is clearly justified:
 
 ## Tidy Plan Output Template (First Response)
 
-The first response of a Tidier review is the **Tidy Plan** — matches v1's
-first-output style.
+The first response of a Tidier review is the **Tidy Plan** — first-output style.
 
 ```
 ## Tidy Plan
@@ -195,7 +194,7 @@ Plan: <one-line description of what the worker(s) will inspect>
 
 ## Tidier Review Summary (Final Aggregated Output)
 
-Matches v1's severity-grouped format. See `soul.md` → Output Format for the
+Matches the severity-grouped format. See `soul.md` → Output Format for the
 full template.
 
 ```

@@ -12,7 +12,8 @@
     "heuristic_match_shared_md_files": true
   },
   "tools": {
-    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"],
+    "deny": ["edit_file", "write_file", "apply_patch"]
   },
   "team_members": ["coder", "worker"]
 }

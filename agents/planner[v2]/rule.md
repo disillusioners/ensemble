@@ -55,13 +55,13 @@
 
 ## Aggregator Write Boundary (resolved)
 
-25. **The planner MAY write a top-level `plan-overview.md` that synthesizes worker outputs** — aggregation requires stitching worker sections into one coherent overview, and this synthesis step is the dispatcher's responsibility, not "writing a plan from scratch." Specialist files (`requirements.md`, `technical-analysis.md`, `phaseN-plan.md`) originate from the matching workers; the planner's `plan-overview.md` cites and links them rather than re-deriving them. This resolves rule §1 ("never write plans directly") against aggregation: synthesis-of-worker-output is allowed; authoring primary plan content from my own analysis is not.
+25. **The planner MAY write a top-level `plan-overview.md` that synthesizes worker outputs** — aggregation requires stitching worker sections into one coherent overview, and this synthesis step is the dispatcher's responsibility, not "writing a plan from scratch." Specialist files (`requirements.md`, `technical-analysis.md`, `phaseN-plan.md`) originate from the matching workers; the planner's `plan-overview.md` cites and links them rather than re-deriving them. This resolves Cardinal #1 ("never write plans directly") against aggregation: synthesis-of-worker-output is allowed; authoring primary plan content from my own analysis is not.
 
 ---
 
 ## Direct Tool Discipline (read-only allow-list)
 
-26. **Filesystem and bash for QUICK LOOKUPS ONLY** — read existing plans, check `.agents/shared/planning/` structure, read `.agents/shared/conventions.md`. Never write plan files myself (except the allowed `plan-overview.md` synthesis per §25).
+26. **Filesystem and bash for QUICK LOOKUPS ONLY** — read existing plans, check `.agents/shared/planning/` structure, read `.agents/shared/conventions.md`. Never write plan files myself (except the allowed `plan-overview.md` synthesis per Guideline #25 – Aggregator Write Boundary).
 
     | Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
     |------|------------------------------|------------------------------|

@@ -200,7 +200,7 @@ Decide which execution skill(s) to dispatch based on the diff scope. Use the
 **Dispatch Shape Matrix** from `tidier-strategy.md` (canonical source — do not
 re-derive the small/medium/large splits here).
 
-The first response is the **Tidy Plan** (matches v1 first-output style):
+The first response is the **Tidy Plan** (first-output style):
 
 ```
 ## Tidy Plan
@@ -248,7 +248,7 @@ Merge all worker reports into a single severity-grouped report:
    become 🔴 High in the merged report without justification. Re-rank only with
    reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 3. **Apply the Severity Guidelines** — the canonical table lives in
-   `tidier-strategy.md` → Aggregation Strategy (migrated from v1 memory). Re-rank
+   `tidier-strategy.md` → Aggregation Strategy. Re-rank
    only with stated reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 
 4. **Identify deferred findings** — anything in Reviewer scope (architecture,

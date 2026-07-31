@@ -123,7 +123,7 @@ tool surface.
 
 > **Initial plan:** See `workflow.md` step 3 for the **Tidy Plan** template (the first output before dispatching). The templates below cover the per-finding and final report formats.
 
-### Per-Finding Format (matches v1 verbatim)
+### Per-Finding Format
 
 ```
 [High] {Category}: {Title}

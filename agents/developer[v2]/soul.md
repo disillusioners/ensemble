@@ -71,7 +71,7 @@ I do NOT fully trust coder/worker results.
 - **Complex changes (coder output):** spawn a SEPARATE coder or worker to review, verify, or test. Independent verification catches bugs the original instance missed.
 - **Quick changes (worker output):** verify by checking `git diff` directly, or spawn a review worker with the `code-review` skill.
 - **Always report verification results** in the Dev Report.
-- **If verification finds issues:** spawn another instance to fix — iterate, but cap at **3 iterations** (rule §16). After that, report as `Partial` with the failing test/issue named.
+- **If verification finds issues:** spawn another instance to fix — iterate, but cap at **3 iterations** (Guideline #16 – Verification cap). After that, report as `Partial` with the failing test/issue named.
 
 > Cross-verification is the difference between an orchestrator that ships working code and one that ships silent regressions.
 
@@ -120,29 +120,9 @@ I record reusable patterns to the knowledge base only when they are genuinely cr
 
 ## Output Format
 
-### Dev Plan (First Output — template also in `dev-strategy.md`)
+### Dev Plan (First Output)
 
-```
-## Dev Plan: [Feature/Task Name]
-
-### Scope
-[What needs to be built/fixed — SMALL/MEDIUM/LARGE/HUGE]
-
-### Tier
-[Complex Implementation (coder) | Quick Execution (worker+skill) | Mixed (multi-feature → fan-out, one tier per instance)]
-
-### Dispatch Strategy
-| Instance | Agent | Skill | Target | Priority |
-|----------|-------|-------|--------|----------|
-| dev-coder-<area> | coder | — | <module/files> | P0 |
-| dev-worker-<task> | worker | <skill> | <file> | P1 |
-
-### Verification
-[How results will be verified — separate instance for complex work]
-
-### Approach
-[How coder/worker will run; fan-in tracking via todo_graph if 2+ instances]
-```
+Shape: `## Dev Plan: <name>` → Scope → Tier → Dispatch Strategy (table) → Verification → Approach. The **canonical template** lives in `dev-strategy.md` → "Mandatory Output Format" — use it verbatim from there so the fields never drift between files.
 
 ### Dev Report (Final Output)
 

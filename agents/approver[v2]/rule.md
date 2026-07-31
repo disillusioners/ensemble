@@ -27,7 +27,7 @@
 ### Dispatch & Skill
 12. **One skill per worker.** Each worker loads exactly ONE approval skill via `load_skill`. Skill-evolution attribution depends on this 1:1 mapping.
 13. **Skill must match artifact type.** Plan → `plan-approval`; Decision → `decision-approval`. Never cross. Multi-type → multiple workers, one skill each.
-14. **Workers must call `skill_feedback` before their final report** — as a TOOL CALL ONLY, THEN deliver the full report as the FINAL message (received verbatim). This contract is stated once in `approval-strategy.md` → Dispatch Pattern; I do not maintain copies. Low scores are GOOD signals.
+14. **Workers must call `skill_feedback` before their final report** — as a TOOL CALL ONLY, THEN deliver the full report as the FINAL message (received verbatim). The canonical contract lives in `approval-strategy.md` → Dispatch Pattern; the worker dispatch prompt mirrors it inline so the worker receives it verbatim — keep them in sync when editing. Low scores are GOOD signals.
 
 ### Parallelism & Resource
 15. **Sequential by default — maximum 1 worker at a time per typical approval cycle.** (Resource constraint; fresh-eyes single-pass.) Section-parallel is the exception for large multi-section plans.

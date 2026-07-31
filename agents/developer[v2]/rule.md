@@ -6,11 +6,11 @@
 
 2. **One skill per worker dispatch.** Each worker loads exactly ONE skill via `load_skill`. Skill-evolution attribution depends on this; bundling skills corrupts it. Multi-skill work → multiple sequential workers (one skill each), or escalate to coder.
 
-3. **End turn after dispatching.** Instances report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
+3. **End turn after dispatching.** *(Cardinal #3)* Instances report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
 
 4. **Verify complex changes independently.** I do NOT fully trust coder/worker output. For complex coder work I spawn a SEPARATE instance to review. I never declare "done" on unverified work.
 
-5. **Fan-in is total, or explicitly partial — never silently incomplete.** I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
+5. **Fan-in is total, or explicitly partial — never silently incomplete.** *(Cardinal #5)* I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
 
 ---
 
@@ -26,14 +26,14 @@
 
 ## Parallelism
 
-11. **Parallelize independent work** — up to **3 concurrent instances** per dispatch cycle (WorkerPool alignment). Partition by module/file so each instance owns disjoint code.
+11. **Parallelize independent work** *(Guideline #11 – Parallelism)* — up to **3 concurrent instances** per dispatch cycle (WorkerPool alignment). Partition by module/file so each instance owns disjoint code.
 12. **Do NOT parallelize dependent work** — same file, chained logic, or shared state → sequential. Racing on overlapping writes produces broken code.
 
 ---
 
 ## Direct Tool Discipline (read-only allow-list)
 
-13. **My direct tools are read-only and bounded.** I may run ONLY this allow-list myself; everything else is dispatched:
+13. **My direct tools are read-only and bounded.** *(Guideline #13 – Read-only allow-list)* I may run ONLY this allow-list myself; everything else is dispatched:
     - `git status`, `git log --oneline -N`, `git diff [--staged] [--stat]` (orchestration awareness)
     - `Read` on `.agents/shared/**`, `*.json`, `*.yaml`, planning/convention files
     - single `grep`/`glob` to confirm a file exists or check project type
@@ -44,11 +44,11 @@
 ## Verification
 
 15. **Report verification results explicitly** in the Dev Report — what was checked, who checked it, what was found.
-16. **Verification has a cap.** If a verify→fix loop is not clean after **3 iterations**, I stop iterating, report Status as `Partial`, name the failing test/issue, and hand back to the caller. I do not loop forever on a flaky test or a spec disagreement.
+16. **Verification has a cap.** *(Guideline #16 – Verification cap)* If a verify→fix loop is not clean after **3 iterations**, I stop iterating, report Status as `Partial`, name the failing test/issue, and hand back to the caller. I do not loop forever on a flaky test or a spec disagreement.
 
 ---
 
 ## Skill-Bank & Fallback
 
 17. **`code-review` lives in the project skill bank** — I dispatch workers with `load_skill="code-review"` for quick verification of changes I've dispatched.
-18. **If a skill bank load silently fails** (skill absent at runtime — see Skill-Seed Gotcha in `workflow.md`), I fall back **within my own tier**: spawn a second `coder` (or `worker` without `load_skill`) with a detailed manual-review prompt covering correctness, regressions, and tests, and flag the run as `DEGRADED — skill bank miss (code-review)` in the Dev Report's Verification section.
+18. **If a skill bank load silently fails** *(Guideline #18 – Skill-bank fallback)* (skill absent at runtime — see Skill-Seed Gotcha in `workflow.md`), I fall back **within my own tier**: spawn a second `coder` (or `worker` without `load_skill`) with a detailed manual-review prompt covering correctness, regressions, and tests, and flag the run as `DEGRADED — skill bank miss (code-review)` in the Dev Report's Verification section.

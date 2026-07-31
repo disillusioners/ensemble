@@ -71,7 +71,7 @@ CONSTRAINTS (do NOT violate):
   report it as "consider deferring to <other skill>" — do NOT file it
   as your own finding.
 - CITE FILE:LINE for every finding.
-- FILE-SIZE THRESHOLDS (verbatim from v1):
+- FILE-SIZE THRESHOLDS:
     ≤500 lines ideal; 500-1000 acceptable for complex modules;
     1000-3000 must include top-level comment explaining why;
     >3000 must flag for refactor.
@@ -98,7 +98,7 @@ sub-check failing is a candidate finding (severity depends on the impact).
 
 ### File Hygiene
 
-#### File-Size Thresholds (VERBATIM from v1)
+#### File-Size Thresholds
 
 ```
 ≤ 500 lines   → Ideal, no comment needed

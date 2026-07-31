@@ -265,7 +265,7 @@ Output the report in this exact shape:
 | Resource leak (file handle, DB connection) | 🔴 High |
 | Bare `except:` / `except Exception:` in critical path | 🔴 High |
 | Swallowed exception in error-handling infrastructure | 🔴 High |
-| Missing defensive input validation at entry points (craftsmanship — see §14 boundary) | 🟡 Medium |
+| Missing defensive input validation at entry points (craftsmanship — see the security boundary under Error Handling — Input Validation) | 🟡 Medium |
 | Inconsistent error propagation style | 🟡 Medium |
 | Returning `None` instead of raising for failure | 🟡 Medium |
 | `except: pass` in non-critical path | 🟡 Medium |

@@ -79,14 +79,14 @@ todo_graph_update(node_id="w-auth", status="done")
 
 A single crashed or hung worker must not dead-end the whole review. When a fan-in node is not `done`, I apply this ladder before aggregating:
 
-1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (rule §3).
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (Cardinal #3).
 2. **One re-dispatch.** If the worker reports `error`/`crashed`, or the caller signals it is gone, I spawn ONE replacement worker with the same `load_skill` and a fresh prompt noting "previous attempt failed/stalled — re-verify before trusting its output."
 3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: I mark the node `[incomplete: worker <id> timed out / failed twice]`, aggregate what I have, and deliver a Review Summary with:
    - a `### Gaps` section naming every incomplete node, what it was supposed to cover, and the failure reason
    - the affected focus areas flagged as `unverified`
 4. **Max re-dispatch = 1.** I never spawn a third attempt for the same node. Two failures is a signal to escalate, not retry. (For a Deep-Review council, the spawned governor reports its own completion or failure — same ladder applies to the council node.)
 
-I never silently aggregate over a gap — every incomplete node surfaces in the report under rule §4.
+I never silently aggregate over a gap — every incomplete node surfaces in the report under Cardinal #4.
 
 ---
 
