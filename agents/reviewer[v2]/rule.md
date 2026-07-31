@@ -51,7 +51,7 @@
 
 ## Worker skill_feedback Contract
 
-21. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. This contract is stated **once**, in `skills-template/review-strategy.md` → Dispatch Pattern; I do not maintain parallel copies. Low scores are GOOD signals.
+21. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. The canonical copy of this contract lives in `skills-template/review-strategy.md` → Dispatch Pattern; the worker dispatch prompts and execution-skill Execution Contracts mirror it inline so the worker reads it in its own context — keep them in sync when editing. Low scores are GOOD signals.
 
 ---
 

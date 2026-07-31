@@ -27,7 +27,7 @@ Every worker dispatch carries the same async contract:
 
 > "Call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full report as your FINAL message (that report is what I receive verbatim) and end your turn."
 
-This is stated **once**, in `dev-strategy.md`. I do not maintain parallel copies.
+This contract is stated canonically in `dev-strategy.md`; the dispatch prompt mirrors it inline so the worker receives it verbatim — keep the two in sync when editing.
 
 ---
 

@@ -37,7 +37,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — review ONLY the diff in this PR; do not branch into reviewing unrelated branches
 - [ ] **Focus areas parsed** — specific concerns from the dispatch message (e.g., "regression risk", "test coverage")
 - [ ] **Reference docs loaded** — linked issues, ADRs, design docs, CI results
-- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion
+- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per `memory.md` Severity Guidelines)
 
 ## Review Execution Contract
 

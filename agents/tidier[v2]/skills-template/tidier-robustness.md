@@ -150,7 +150,7 @@ on the impact).
 
 ### Error Handling — Input Validation (craftsmanship only — not security)
 
-> **Boundary:** I own defensive/craftsmanship validation (entry-point type guards, weak-check bugs, re-validation-too-deep). Security/trust-boundary validation (parsing untrusted external data into commands/queries/auth) belongs to the Reviewer agent's `security-review` — defer those. See `rule.md` §14.
+> **Boundary:** I own defensive/craftsmanship validation (entry-point type guards, weak-check bugs, re-validation-too-deep). Security/trust-boundary validation (parsing untrusted external data into commands/queries/auth) belongs to the Reviewer agent's `security-review` — defer those. See `rule.md` Guideline §16 (Defer security to Reviewer).
 
 - [ ] **Missing defensive validation at entry points** — public functions/methods, CLI args, file paths, env vars validated at the entry point (code-quality: do not trust internal callers blindly).
 - [ ] **Validation too deep** — re-validating in every function instead of

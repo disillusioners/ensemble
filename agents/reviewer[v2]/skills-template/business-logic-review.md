@@ -101,6 +101,9 @@ Business logic review covers six dimensions. Stay on the **business** side — d
 - Boundary between business units / tenants / customers (cross-bleed / leakage)
 
 ### Permissions & Authorization Logic
+
+> **Scope divider vs `security-review`:** this skill owns *business correctness of permission rules* — role-mapping/role-hierarchy design, ownership/tenancy *semantics*, default-deny *policy intent*, elevated-action authority. `security-review` owns *access-control vulnerabilities* — IDOR, privilege escalation, missing function-level access control, forced browsing. If the rule itself is wrong (a legitimate action granted to the wrong role) → here. If a check is missing so an attacker can act unauthorized → `security-review`.
+
 - Are permission rules correct (who can do what, role hierarchies)?
 - Is ownership / tenancy enforced for each business action?
 - Are elevated actions gated by the right authority (deletion, publishing, refunds)?

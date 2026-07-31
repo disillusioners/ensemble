@@ -315,7 +315,7 @@ with Recommendations closing section and Deferred to Reviewer note).
 
 A single crashed or hung worker must not dead-end the whole review. When a fan-in node is not `done`, I apply this ladder before aggregating:
 
-1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (rule.md §9).
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (Cardinal #3).
 2. **One re-dispatch.** If the worker reports `error`/`crashed`, or the caller signals it is gone, I spawn ONE replacement worker with the same `load_skill` and a clarifying message noting "previous attempt failed/stalled."
 3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: mark the node `[incomplete: worker <id> timed out / failed twice]`, aggregate what I have, and deliver a Tidier Review Summary with:
    - a `### Gaps` section naming the incomplete skill/node, the files it should have covered, and the failure reason
@@ -323,7 +323,7 @@ A single crashed or hung worker must not dead-end the whole review. When a fan-i
 4. **Max re-dispatch = 1.** I never spawn a third attempt for the same node. Two failures is a signal to escalate, not retry.
 5. **Empty report** is distinct from a missing worker: re-dispatch once with a clarifying message; if still empty, mark that category `no findings` (not `[incomplete]`).
 
-I never silently aggregate over a gap — every incomplete node surfaces in the report under rule.md §10.
+I never silently aggregate over a gap — every incomplete node surfaces in the report under Cardinal #4 / Guideline #19.
 
 ---
 

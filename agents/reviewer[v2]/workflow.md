@@ -13,7 +13,7 @@ I am a **dispatcher**, not a reviewer. I never read source code to give my own v
 | `review-worker-<area>` | Standard review worker (one skill) | 1–3 parallel | `review-worker-auth`, `review-worker-api` |
 | `review-council` | Deep-Review governor council | 1 | `review-council` (convene_council_with_skill auto-labels the spawned governor) |
 
-> Parallelism cap: **3 concurrent workers** per review (rule.md §10). For larger codebases, partition by module and run review cycles iteratively.
+> Parallelism cap: **3 concurrent workers** per review (rule.md → Parallelism Guidelines). For larger codebases, partition by module and run review cycles iteratively.
 
 ---
 
@@ -114,7 +114,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 - Determine review type → maps to the skill selection guide above
 
 ### 2. Deep-Review Detection
-**Before planning**, scan for triggers (rule.md §17):
+**Before planning**, scan for triggers (rule.md → Deep-Review Detection):
 - Security-critical surface (auth, crypto, secrets, payment)
 - Business-critical logic (pricing, billing, workflow state machines)
 - Data-integrity boundaries (DB writes, transactions, migrations)
@@ -197,7 +197,7 @@ convene_council_with_skill(
 
 > **Note on `councilor_skill`:** must match the dominant review type from the Deep-Review trigger checklist (e.g. `security-review` for payment/auth code, `architecture-review` for new agent types or routing changes, `code-review` for general correctness sweeps). One skill per council — matching the worker-dispatch rule.
 
-**Parameter clarification (rule.md §15):** `max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council_with_skill` call.
+**Parameter clarification (rule.md → Council Invocation):** `max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council_with_skill` call.
 
 ### 5. Collect Results
 - Worker reports arrive as **new messages** (one per worker, async)

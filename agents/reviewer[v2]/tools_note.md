@@ -98,7 +98,7 @@ convene_council_with_skill(
 
 ## Filesystem (read-only allow-list only)
 
-`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (rule.md §24). The grant in `meta.json` `tools.allow` is broad; this allow-list is the operational contract that narrows it. (Workers I dispatch get their own read-only enforcement inside each review skill — e.g. `code-review.md`, `security-review.md` Read-Only Enforcement block.)
+`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (rule.md → Read-Only Discipline). The grant in `meta.json` `tools.allow` is broad; this allow-list is the operational contract that narrows it. (Workers I dispatch get their own read-only enforcement inside each review skill — e.g. `code-review.md`, `security-review.md` Read-Only Enforcement block.)
 
 | Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
 |------|------------------------------|------------------------------|

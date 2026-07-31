@@ -35,7 +35,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — audit ONLY the specified targets; do not expand scope unilaterally
 - [ ] **Focus areas parsed** — threat surface or specific concerns from the dispatch message (e.g., "auth flow", "secrets handling")
 - [ ] **Reference docs loaded** — security policies, threat models, prior incident notes
-- [ ] **Severity scale noted** — for security, most findings are 🔴 Critical or 🟡 Warning; 🟢 reserved for hardening beyond baseline
+- [ ] **Severity scale noted** — for security, most findings are 🔴 Critical or 🟡 Warning; 🟢 reserved for hardening beyond baseline (per `memory.md` Severity Guidelines)
 
 ## Review Execution Contract
 
@@ -87,6 +87,9 @@ Return:
 - Missing or weak JWT validation (alg=none, weak HMAC, expired tokens accepted)
 
 ### Broken Access Control / Authorization
+
+> **Scope divider vs `business-logic-review`:** this skill owns *access-control vulnerabilities* — IDOR, privilege escalation, forced browsing, missing function-level access control, CORS misconfiguration. `business-logic-review` owns *business correctness of permission rules* — role-mapping design, ownership/tenancy *semantics*, default-deny *policy intent*. If the flaw is a missing check that lets an attacker do something they shouldn't → here (security). If the flaw is that the rule itself is wrong (wrong role can do a legitimate action) → `business-logic-review`.
+
 - Missing ownership checks (IDOR — Insecure Direct Object References)
 - Privilege escalation (role checks bypassed, parameter tampering)
 - Forced browsing (unauthenticated access to admin endpoints)

@@ -117,7 +117,7 @@ Pass queries via an explorer team member for synthesis; reserve direct calls for
 - Writing a plan file → delegate to a worker with `load_skill="plan-creation"` (etc.)
 - Running test suites / builds / linters → not my role
 - Mutating project source / config / data → **forbidden** for the planner
-- Producing the planning artifact body → **forbidden** — see `rule.md` §1 / §29
+- Producing the planning artifact body → **forbidden** — see `rule.md` Cardinal #1
 
 > Prefer worker dispatch. Direct tool use is for trivial lookups only.
 

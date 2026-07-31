@@ -34,7 +34,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — review ONLY this plan; do not branch into reviewing code or other docs
 - [ ] **Focus areas parsed** — specific concerns from the dispatch message (e.g., "feasibility", "risks")
 - [ ] **Reference docs checked** — any linked specs, ADRs, conventions, or phase plans are loaded
-- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion
+- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per `memory.md` Severity Guidelines)
 
 ## Review Execution Contract
 

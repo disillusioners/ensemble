@@ -14,5 +14,5 @@
   "tools": {
     "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
   },
-  "team_members": ["coder", "worker"]
+  "team_members": ["coder", "worker", "reviewer"]
 }

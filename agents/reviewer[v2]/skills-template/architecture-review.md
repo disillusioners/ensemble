@@ -34,7 +34,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — review ONLY the documented architecture; do not branch into code review
 - [ ] **Focus areas parsed** — specific concerns from the dispatch message (e.g., "scalability", "boundaries")
 - [ ] **Reference docs loaded** — existing architecture docs, prior ADRs, conventions
-- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion
+- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per `memory.md` Severity Guidelines)
 
 ## Review Execution Contract
 

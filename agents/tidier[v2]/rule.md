@@ -32,7 +32,7 @@ with `tidier-readable-code`, `tidier-static-hygiene`, or `tidier-robustness`.
 
 ### Skill ↔ Category Mapping
 9. **Skill must match category.** `tidier-readable-code` → Coding Style + Code Smells + Readability. `tidier-static-hygiene` → File Hygiene + Type Cleanliness. `tidier-robustness` → Error Handling. Do NOT bundle.
-10. **File-size thresholds (canonical in `tidier-strategy.md`).** ≤500 lines ideal; 500–1000 acceptable for complex modules; 1000–3000 must include a top-level comment explaining why; >3000 flag for refactor.
+10. **File-size thresholds (canonical in `tidier-static-hygiene.md` — File Hygiene owns them).** ≤500 lines ideal; 500–1000 acceptable for complex modules; 1000–3000 must include a top-level comment explaining why; >3000 flag for refactor. (The numbers live in `tidier-static-hygiene.md`, the skill that enforces File Hygiene; `tidier-strategy.md` is the canonical home for dispatch-shape/scale strategy, not file-size rows.)
 11. **Mark uncertain findings as 🟢 Low with "Consider:" framing.** A finding without `file:line` + a concrete fix is downgraded or omitted — speculative findings inflate noise.
 12. **Aggregation is a dispatcher responsibility.** Workers report findings; I merge, dedupe (`file:line:category`), re-rank only with stated reasoning, and produce the single severity-grouped report.
 

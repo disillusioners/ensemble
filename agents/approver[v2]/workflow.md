@@ -91,7 +91,7 @@ Apply the Aggregation Strategy from `approval-strategy.md` (filter Blocking vs N
 
 A hung worker must not dead-end an approval (the typical single-worker case has no `todo_node` to mark errored, so this ladder is what makes "reasonable delay" reachable without violating the no-poll rule):
 
-1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the report message — I never poll/sleep (rule.md §10).
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the report message — I never poll/sleep (Cardinal #3).
 2. **One re-dispatch.** If the worker reports `error`/`crashed` (or the caller signals it is gone), I spawn ONE replacement worker with the same `load_skill` and a fresh, independence-preserving prompt noting "previous attempt failed/stalled." For single-worker, this IS the todo node implicitly.
 3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: deliver a `REJECTED` verdict with a Note: `Worker verification incomplete — could not obtain a clean verdict for [section/area] after re-dispatch; escalated to Leader`. I do NOT fabricate an APPROVED on missing evidence — absence of a verified worker report is not "no blocking issues."
 4. **Max re-dispatch = 1.** I never spawn a third attempt. Two failures is a signal to escalate, not retry.
