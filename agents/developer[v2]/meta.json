@@ -13,7 +13,7 @@
   },
   "tools": {
     "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"],
-    "deny": ["edit_file", "write_file", "apply_patch"]
+    "deny": ["edit_file", "write_file"]
   },
   "team_members": ["coder", "worker"]
 }

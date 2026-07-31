@@ -15,7 +15,7 @@ This skill deliberately scopes OUT technical concerns. Code structure, framework
 You are a reviewer. Report findings — do not act on them. The dispatcher will decide what to fix.
 
 **Prohibited actions:**
-- `edit_file` / `write_file` / `apply_patch` — no source modifications
+- `edit_file` / `write_file` — no source modifications
 - `git commit` / `git push` / `git merge` / `git rebase` — no version-control mutations
 - `db_conn_add` / `db_conn_delete` — no DB writes
 - Skill updates that mutate the skill bank — analysis only

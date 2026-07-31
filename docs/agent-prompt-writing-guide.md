@@ -116,7 +116,7 @@ Agents hold tools and operate within boundaries. State the boundary operationall
 ### Allow-list vs deny-list: which to document where
 
 - Use an **allow-list table** in `rule.md` / `tools_note.md` for the operational boundary (what the agent does, row per tool).
-- Put a **machine-enforced `tools.deny`** in `meta.json` for safety-critical prohibitions (`edit_file`, `write_file`, `apply_patch`, `git_commit`, `db_*`) — so a worker whose skill fails to load still cannot mutate state. Prose in a skill file is bypassed the moment the skill bank misses; `meta.json` deny is not.
+- Put a **machine-enforced `tools.deny`** in `meta.json` for safety-critical prohibitions (`edit_file`, `write_file`, `git_commit`, `db_*`) — so a worker whose skill fails to load still cannot mutate state. Prose in a skill file is bypassed the moment the skill bank misses; `meta.json` deny is not.
 - Don't describe the meta.json deny mechanism in prose. The agent doesn't need to know it exists.
 
 ---

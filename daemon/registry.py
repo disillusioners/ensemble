@@ -756,18 +756,22 @@ class AgentRegistry:
         )
         from daemon.tools.instance import resolve_tool_filter
         
-        # Populate metadata if not already done
-        if not _tool_metadata:
-            from daemon.tools import (
-                bash,
-                list_directory, read_file, glob_files, write_file, grep_files, edit_file,
-                time,
-            )
-            scan_tools_for_full_docs([
-                bash,
-                list_directory, read_file, glob_files, write_file, grep_files, edit_file,
-                time,
-            ])
+        # Always scan the core first-party tools so validation knows their
+        # names. We cannot rely on an empty ``_tool_metadata`` as the trigger
+        # because some tools register themselves at import time via the
+        # ``@register_tool`` decorator (e.g. ``language_skip_check``), which
+        # leaves the registry partially populated before an instance is built.
+        # ``scan_tools_for_full_docs`` is idempotent, so this is safe to re-run.
+        from daemon.tools import (
+            bash,
+            list_directory, read_file, glob_files, write_file, grep_files, edit_file,
+            time,
+        )
+        scan_tools_for_full_docs([
+            bash,
+            list_directory, read_file, glob_files, write_file, grep_files, edit_file,
+            time,
+        ])
         
         # Get available categories and tools
         available_categories = list_tools_by_category()  # {category_name: [tool_names]}

@@ -57,7 +57,7 @@ send_message(
 
 > ⚠️ **One skill per worker.** Never bundle multiple `load_skill` values into a single dispatch. Skill evolution is 1:1 with the worker that applied it.
 
-> ⚠️ **Workers write the plan files, not me.** The planner never calls `write_file` / `apply_patch` against `.agents/shared/planning/`. The worker instance reads its prompt, applies the skill, and writes the deliverables.
+> ⚠️ **Workers write the plan files, not me.** The planner never calls `write_file` against `.agents/shared/planning/`. The worker instance reads its prompt, applies the skill, and writes the deliverables.
 
 See `workflow.md` → "Skill Selection Guide" for which `load_skill` value matches each planning task.
 

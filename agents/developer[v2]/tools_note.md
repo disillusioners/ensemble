@@ -21,7 +21,7 @@ I hold `filesystem` + `bash` but my direct use is **read-only and bounded** (Gui
 | Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
 |------|------------------------------|------------------------------|
 | `bash` | `git status`, `git log --oneline -N`, `git diff [--staged] [--stat]`, `wc` for scope | grep/ast-grep on source files, builds, tests, linters, `git add`, `git commit` |
-| `filesystem` | `Read` on `.agents/shared/**`, `*.json`, `*.yaml`, planning/convention files; single `grep`/`glob` to confirm a file exists | `edit_file`, `write_file`, `apply_patch`, any source mutation |
+| `filesystem` | `Read` on `.agents/shared/**`, `*.json`, `*.yaml`, planning/convention files; single `grep`/`glob` to confirm a file exists | `edit_file`, `write_file`, any source mutation |
 
 **Commands I run directly:**
 ```bash
