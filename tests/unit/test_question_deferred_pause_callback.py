@@ -65,13 +65,17 @@ def _make_manager_with_real_marker_state() -> MagicMock:
     manager._deferred_question_pause = set()
 
     # Bind the real production methods to the mock instance so the
-    # service's ``self._manager.set_deferred_question_pause(...)`` and
+    # service's ``self._manager.set_deferred_question_pause(...)``,
+    # ``self._manager.has_deferred_question_pause(...)`` and
     # ``self._manager.pop_deferred_question_pause(...)`` calls go through
     # the production code path against the real backing set.
     from daemon.manager import InstanceManager
 
     manager.set_deferred_question_pause = (
         InstanceManager.set_deferred_question_pause.__get__(manager)
+    )
+    manager.has_deferred_question_pause = (
+        InstanceManager.has_deferred_question_pause.__get__(manager)
     )
     manager.pop_deferred_question_pause = (
         InstanceManager.pop_deferred_question_pause.__get__(manager)

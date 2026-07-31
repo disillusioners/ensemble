@@ -2104,6 +2104,32 @@ class InstanceManager:
         """
         self._deferred_question_pause.add(instance_id)
 
+    def has_deferred_question_pause(self, instance_id: str) -> bool:
+        """Check whether ``instance_id`` has a pending deferred-pause marker.
+
+        Unlike :meth:`pop_deferred_question_pause`, this does NOT remove the
+        marker. Used by the cascade callers in
+        ``daemon.services.instance_messaging`` to keep the marker alive
+        across the ``pause_instance_cascade`` execution so source-side
+        Task guards (Phase 1 in ``child_reports._process_child_completion_db_sync``
+        and Phase 2 in ``instance_messaging._prepare_enqueued_message``)
+        see the marker during the cascade's DB-commit window. Closes C1
+        (marker-lifetime-doesn't-cover-cascade-execution-window).
+
+        Pairing contract: callers MUST follow ``has`` → ``await
+        pause_instance_cascade`` → ``pop_deferred_question_pause`` (in a
+        ``finally``) so the marker covers the full window. The pop is
+        idempotent (``set.discard``) so a redundant call is harmless.
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            ``True`` if a deferred-pause marker is currently set;
+            ``False`` otherwise.
+        """
+        return instance_id in self._deferred_question_pause
+
     def pop_deferred_question_pause(self, instance_id: str) -> bool:
         """Pop the deferred-pause marker for ``instance_id``.
 
@@ -2115,6 +2141,15 @@ class InstanceManager:
         consistent view (the marker is either present for the caller or
         absent — never re-fired by a later code path that lost the
         race).
+
+        .. note::
+           Since the C1 fix (C1 marker-lifetime race), this is paired with
+           :meth:`has_deferred_question_pause`: the post-graph callback
+           peeks with ``has`` BEFORE awaiting the cascade and pops with
+           this method AFTER the cascade's ``finally`` block, so the
+           marker covers the full cascade-execution window (in-memory
+           cancel + DB commit to PAUSED). The old "pop before cascade"
+           ordering is gone; the new contract is "peek → cascade → pop".
 
         Args:
             instance_id: Owning instance identifier.

@@ -1893,13 +1893,25 @@ Provide a concise summary:"""
             # C2 torn-state guard: the deferred-pause pattern exists because
             # a graph task cannot call the pause cascade itself (the cascade
             # would cancel the task while its transaction is still active).
-            # question_pause_node therefore sets _deferred_question_pause
-            # before the post-graph callback starts the cascade.  The DB
-            # commit in _pause_cascade_db_sync happens on a worker thread,
-            # leaving a short race window where the marker is set but the
-            # parent's status still reads RUNNING.  We need both checks:
-            # the marker catches that window, while the DB check catches the
-            # Path 4 user-click-stop cascade, which has no marker.
+            # ``question_pause_node`` therefore calls
+            # ``set_deferred_question_pause`` before the post-graph callback
+            # starts the cascade. The DB commit in ``_pause_cascade_db_sync``
+            # happens on a worker thread, leaving a short race window where
+            # the marker is set but the parent's status still reads RUNNING.
+            # We need both checks: the marker catches that window, while the
+            # DB check catches the Path 4 user-click-stop cascade, which has
+            # no marker.
+            #
+            # **Marker lifetime (C1 fix, 2026-07)**: the marker is set in
+            # ``question_pause_node``, **peeked** in the post-graph completion
+            # path via ``has_deferred_question_pause`` BEFORE awaiting
+            # ``pause_instance_cascade``, and **popped** in the inner
+            # ``finally`` block AFTER the cascade's DB commit completes. The
+            # old "pop before cascade" ordering left the marker empty during
+            # the cascade's DB-commit window — both this guard (Phase 1) and
+            # the ``_prepare_enqueued_message`` guard (Phase 2) would see
+            # ``marker=False, db=RUNNING`` and CREATE a spurious Task.
+            # Extending the marker lifetime past the cascade closes that race.
             #
             # MessageQueue and ReportInjection are intentionally created
             # regardless of this decision.  ReportInjection is the durable

@@ -941,6 +941,24 @@ class InstanceMessagingService:
             # message. ``pop_deferred_question_pause`` is idempotent
             # (``set.discard``), so it's safe to call unconditionally.
             #
+            # C1 FIX (marker lifetime): the marker is PEEKED with
+            # ``has_deferred_question_pause`` BEFORE the cascade and POPPED
+            # with ``pop_deferred_question_pause`` in the ``finally`` block
+            # AFTER the cascade's ``pause_instance_cascade`` completes. The
+            # old "pop-before-cascade" ordering left the marker empty during
+            # the cascade's DB-commit window (DB still RUNNING) so source-
+            # side Task guards saw ``marker=False, db=RUNNING`` and CREATED
+            # a spurious Task. Extending the marker lifetime past the
+            # cascade's DB commit closes that race. Safe because:
+            #   * the marker is in-memory only (no DB write) — moving the
+            #     pop cannot introduce a DB torn state;
+            #   * the cascade is wrapped in ``asyncio.shield`` so the DB
+            #     write completes regardless of outer cancellation;
+            #   * ``pause_instance_cascade`` does NOT touch
+            #     ``_deferred_question_pause`` (confirmed by grep — no
+            #     reference in ``instance_lifecycle.py``);
+            #   * ``pop_deferred_question_pause`` is idempotent.
+            #
             # SHIELDED against double-cancel: a second ``task.cancel()``
             # arriving during the ``await`` would raise ``CancelledError``
             # (a ``BaseException`` in 3.8+, NOT caught by ``except Exception``).
@@ -955,7 +973,7 @@ class InstanceMessagingService:
             # no-op (``pause_instance_cascade`` filters out PAUSED nodes
             # at line 1966), so a residual marker on top of an external
             # pause is harmless.
-            if self._manager.pop_deferred_question_pause(instance_id):
+            if self._manager.has_deferred_question_pause(instance_id):
                 try:
                     await asyncio.shield(
                         self._manager.pause_instance_cascade(instance_id)
@@ -966,6 +984,11 @@ class InstanceMessagingService:
                         f"failed for {instance_id[:8]}...: "
                         f"{type(pause_err).__name__}: {pause_err}"
                     )
+                finally:
+                    # Pop AFTER the cascade completes so the marker
+                    # covers the full cascade-execution window (DB
+                    # commit to PAUSED). Closes C1.
+                    self._manager.pop_deferred_question_pause(instance_id)
 
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
@@ -1088,14 +1111,41 @@ class InstanceMessagingService:
 
         - Reject messages during shutdown.
         - Resolve ``msg_type`` from the ``source`` prefix and mint a UUID.
-        - Insert the ``MessageQueue`` row.
-        - Insert the ``Task`` row in the same transaction (so the two
-          either both commit or both roll back together — this is the
-          D13 structural fix that eliminated the dual-record coupling).
+        - Insert the ``MessageQueue`` row **unconditionally** (always
+          preserved as a durable audit / record).
+        - Insert the ``Task`` row **conditionally** — gated by the
+          deferred-pause marker guard. When the marker is set (the
+          instance is mid-deferred-pause and the cascade's DB commit is
+          still in flight), the ``Task`` row is **skipped** to prevent
+          ``WorkerPool.claim_pending_task`` from claiming a spurious
+          graph turn during the cascade window. The ``MessageQueue``
+          row is intentionally preserved as a durable audit record in
+          that case (the marker branch always commits the message but
+          no Task — see Phase 2 below).
         - Auto-resume ``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` instances
           to ``RUNNING`` and bump ``last_activity_at`` / ``version``.
         - Append a ``MESSAGE_RECEIVED`` event for event-sourced features.
         - Commit the session.
+
+        **Phase 2 asymmetry** (C2 torn-state / deferred-pause race
+        guard, 2026-07): the ``MessageQueue`` row is always created;
+        the ``Task`` row is gated by the deferred-pause marker guard
+        (skipped when the marker is set). This is intentionally
+        asymmetric with the Phase 1 ``child_reports`` guard, which
+        checks marker OR ``DB=PAUSED`` — the Phase 2 guard is
+        marker-only because ``MessageQueue`` rows have no resume drain
+        (``cleanup`` excludes READY rows, so a DB=PAUSED skip would
+        orphan an otherwise deliverable message). When the marker
+        branch fires:
+
+          * ``ctx.task_id`` is set to ``None`` (callers detect this and
+            skip the downstream JobItem creation in
+            ``enqueue_message_job`` — see W7 fix).
+          * The message in the narrow race window may be lost
+            (a known limitation; the durable follow-up is to
+            materialize the marker in the DB as
+            ``instances.pause_pending`` so Task creation and SQL
+            claiming can coexist).
 
         Args:
             path_label: Optional identifier appended to the "Reactivating
@@ -1119,7 +1169,8 @@ class InstanceMessagingService:
         Returns:
             ``_PreparedEnqueueContext`` carrying the values callers need to
             proceed with dispatch (SSE emit, title generation, WorkerPool
-            notify).
+            notify). ``ctx.task_id`` is ``None`` when the marker branch
+            fired; ``ctx.message_id`` is always populated.
         """
         # Reject new messages during shutdown
         if self._cancellation_service.is_shutting_down:
@@ -1218,6 +1269,16 @@ class InstanceMessagingService:
             # that guard deliberately checks marker OR DB=PAUSED because its
             # ReportInjection fallback is drained on every LLM call. Phase 2 is
             # explicitly asymmetric because MessageQueue has no equivalent drain.
+            #
+            # **Marker lifetime (C1 fix, 2026-07)**: the marker is set in
+            # ``question_pause_node``, **peeked** in the post-graph completion
+            # path via ``has_deferred_question_pause`` BEFORE awaiting
+            # ``pause_instance_cascade``, and **popped** in the inner
+            # ``finally`` block AFTER the cascade's DB commit completes. This
+            # guard depends on that ordering: if the marker were popped
+            # BEFORE the cascade, the guard would see ``marker=False,
+            # db=RUNNING`` during the cascade's DB-commit window and CREATE a
+            # spurious PROCESS_MESSAGE Task.
             instance_for_pause_guard = session.get(Instance, instance_id)
             deferred_pause_marker_set = (
                 instance_id in self._manager._deferred_question_pause
@@ -1757,6 +1818,40 @@ class InstanceMessagingService:
         self._maybe_trigger_title_generation(
             instance_id, message, ctx.is_idle_to_running
         )
+
+        # --- W7 FIX (orphaned JobItem guard, 2026-07) ---
+        # When the Phase 2 marker guard in ``_prepare_enqueued_message``
+        # fires, the ``MessageQueue`` row is created (durable audit
+        # record) but the ``Task`` row is SKIPPED to prevent
+        # ``WorkerPool.claim_pending_task`` from claiming a spurious graph
+        # turn during the cascade's DB-commit window. ``ctx.task_id`` is
+        # ``None`` in that branch. Without this guard, the JobItem
+        # creation below would enqueue an item that has NO Task to
+        # claim — the JobProcessor would wake the dispatch bus, try to
+        # surface a Task that doesn't exist, and the work would be
+        # silently lost.
+        #
+        # We log a WARNING (the same level used elsewhere in this path
+        # for skip events) and skip both the JobItem creation and the
+        # downstream ``queued`` snapshot / message_id stamp. The
+        # ``MessageQueue`` row remains in READY state for later
+        # inspection; the narrow-window message may be lost (a known
+        # limitation tracked under the C2 follow-up).
+        if ctx.task_id is None:
+            logger.warning(
+                f"enqueue_message_job: SKIPPING JobItem creation for "
+                f"instance {instance_id[:8]}... — reason=marker_guard "
+                f"(Phase 2 deferred-pause race guard skipped the Task "
+                f"row in _prepare_enqueued_message; MessageQueue "
+                f"{ctx.message_id[:8]}... preserved as audit record)"
+            )
+            return AsyncMessageResult(
+                message_id=ctx.message_id,
+                instance_id=instance_id,
+                status="queued",
+                job_id=job_id,
+                queued=False,
+            )
 
         # --- Step 3: Enqueue the JobItem using the exact same UUID. ---
         # JobQueueService.enqueue emits the dispatch-bus notification only
@@ -3251,6 +3346,24 @@ class InstanceMessagingService:
             # message. ``pop_deferred_question_pause`` is idempotent
             # (``set.discard``), so it's safe to call unconditionally.
             #
+            # C1 FIX (marker lifetime): the marker is PEEKED with
+            # ``has_deferred_question_pause`` BEFORE the cascade and POPPED
+            # with ``pop_deferred_question_pause`` in the inner ``finally``
+            # block AFTER ``pause_instance_cascade`` completes. The old
+            # "pop-before-cascade" ordering left the marker empty during
+            # the cascade's DB-commit window (DB still RUNNING) so
+            # source-side Task guards saw ``marker=False, db=RUNNING`` and
+            # CREATED a spurious Task. Extending the marker lifetime past
+            # the cascade's DB commit closes that race. Safe because:
+            #   * the marker is in-memory only (no DB write) — moving the
+            #     pop cannot introduce a DB torn state;
+            #   * the cascade is wrapped in ``asyncio.shield`` so the DB
+            #     write completes regardless of outer cancellation;
+            #   * ``pause_instance_cascade`` does NOT touch
+            #     ``_deferred_question_pause`` (confirmed by grep — no
+            #     reference in ``instance_lifecycle.py``);
+            #   * ``pop_deferred_question_pause`` is idempotent.
+            #
             # SHIELDED against double-cancel: a second ``task.cancel()``
             # arriving during the ``await`` would raise ``CancelledError``
             # (a ``BaseException`` in 3.8+, NOT caught by ``except Exception``).
@@ -3258,7 +3371,7 @@ class InstanceMessagingService:
             # during the pause cascade does not corrupt instance state.
             #
             # This runs on every exit path (normal completion,
-            # CancelledError, exception) because the cascade pop is
+            # CancelledError, exception) because the cascade peek/pop is
             # unconditional — a no-op when no marker was set.
             #
             # Wrapped in try/except so a transient cascade failure does not
@@ -3269,7 +3382,7 @@ class InstanceMessagingService:
             # no-op (``pause_instance_cascade`` filters out PAUSED nodes
             # at line 1966), so a residual marker on top of an external
             # pause is harmless.
-            if self._manager.pop_deferred_question_pause(instance_id):
+            if self._manager.has_deferred_question_pause(instance_id):
                 try:
                     await asyncio.shield(
                         self._manager.pause_instance_cascade(instance_id)
@@ -3280,6 +3393,11 @@ class InstanceMessagingService:
                         f"failed for {instance_id[:8]}...: "
                         f"{type(pause_err).__name__}: {pause_err}"
                     )
+                finally:
+                    # Pop AFTER the cascade completes so the marker
+                    # covers the full cascade-execution window (DB
+                    # commit to PAUSED). Closes C1.
+                    self._manager.pop_deferred_question_pause(instance_id)
 
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
