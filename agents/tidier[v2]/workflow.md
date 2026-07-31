@@ -198,14 +198,8 @@ If `.agents/tidier/rules/` has project rules, those override global guidelines
 ### 3. Generate Plan (Tidy Plan Output)
 
 Decide which execution skill(s) to dispatch based on the diff scope. Use the
-**Dispatch Shape Matrix** from `tidier-strategy.md`:
-
-| Diff Size | Skill Dispatches | Parallel? |
-|---|---|---|
-| Small (< 5 files, < 200 lines) | `tidier-readable-code` only | Single worker |
-| Medium (5–20 files) | `tidier-readable-code` + `tidier-static-hygiene` | 2 parallel |
-| Large (> 20 files) | All three execution skills | 3 parallel |
-| Single-category focus | Only the matching skill | Single worker |
+**Dispatch Shape Matrix** from `tidier-strategy.md` (canonical source — do not
+re-derive the small/medium/large splits here).
 
 The first response is the **Tidy Plan** (matches v1 first-output style):
 
@@ -254,19 +248,9 @@ Merge all worker reports into a single severity-grouped report:
 2. **Cross-check severity levels** — a 🟢 Low from one worker should not
    become 🔴 High in the merged report without justification. Re-rank only with
    reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
-3. **Apply the Severity Guidelines** (from v1 memory, now in `tidier-strategy`):
-
-   | Issue Type | Typical Severity |
-   |---|---|
-   | Security vulnerability | 🔴 High |
-   | Data loss risk | 🔴 High |
-   | Breaking SRP / massive function | 🔴 High |
-   | Duplicate logic (3+ places) | 🔴 High |
-   | Dead code | 🟡 Medium |
-   | Suboptimal pattern | 🟡 Medium |
-   | Naming inconsistency | 🟡 Medium |
-   | Style preference | 🟢 Low |
-   | Refactor opportunity | 🟢 Low |
+3. **Apply the Severity Guidelines** — the canonical table lives in
+   `tidier-strategy.md` → Aggregation Strategy (migrated from v1 memory). Re-rank
+   only with stated reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 
 4. **Identify deferred findings** — anything in Reviewer scope (architecture,
    correctness, security) goes to the "Deferred to Reviewer" section, NOT to
@@ -321,16 +305,32 @@ with Recommendations closing section and Deferred to Reviewer note).
 - **Starting review work?** → Plan dispatch shape → dispatch worker(s) → END TURN
 - **Multi-worker review?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done
 - **Worker reports a Reviewer-scope finding?** → Note in "Deferred to Reviewer" section; do NOT include in main findings
-- **Worker timeout / no report?** → After reasonable delay, mark the `todo_graph` node as errored; aggregate partial findings; flag partial coverage in the report
-- **`active.md` shows `ESCALATED`?** → Return escalation summary; do NOT dispatch
+- **Worker never reports / reports `error`?** → Fan-In Escape Valve: one re-dispatch, then `[incomplete]` + partial coverage flag
+- **Caller signals the target was escalated?** → If the spawn message or `.agents/shared/active.md` (an external Leader/Approver tracking contract) shows `Status: ESCALATED`, return an escalation summary **without dispatching** — the target is already in a higher review lane and a craftsmanship pass would be redundant
 - **Need project context for scope decisions?** → Use `explore()` (via explorer team member), not direct DB
 
 ---
 
-## Error Handling
+## Fan-In Escape Valve (stalled / missing worker)
 
-- **Worker timeout** (no report after reasonable delay): mark the `todo_graph` node as errored; aggregate partial findings; flag un-reviewed files in the report rather than blocking indefinitely.
-- **Empty worker report**: re-dispatch once with a clarifying message; if still empty, mark category as "no findings" in the aggregated report.
+A single crashed or hung worker must not dead-end the whole review. When a fan-in node is not `done`, I apply this ladder before aggregating:
+
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (rule.md §9).
+2. **One re-dispatch.** If the worker reports `error`/`crashed`, or the caller signals it is gone, I spawn ONE replacement worker with the same `load_skill` and a clarifying message noting "previous attempt failed/stalled."
+3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: mark the node `[incomplete: worker <id> timed out / failed twice]`, aggregate what I have, and deliver a Tidier Review Summary with:
+   - a `### Gaps` section naming the incomplete skill/node, the files it should have covered, and the failure reason
+   - those files flagged as `unverified` in Scope
+4. **Max re-dispatch = 1.** I never spawn a third attempt for the same node. Two failures is a signal to escalate, not retry.
+5. **Empty report** is distinct from a missing worker: re-dispatch once with a clarifying message; if still empty, mark that category `no findings` (not `[incomplete]`).
+
+I never silently aggregate over a gap — every incomplete node surfaces in the report under rule.md §10.
+
+---
+
+## Error Handling (summary — see Fan-In Escape Valve above)
+
+- **Worker timeout / no report:** one re-dispatch, then `[incomplete]` + partial coverage flag (escape valve steps 1–3).
+- **Empty worker report:** re-dispatch once with clarification; if still empty, mark `no findings`.
 - **Cross-scope finding** (worker reports architecture / correctness / security): include in the "Deferred to Reviewer" section, NOT in the main Tidier findings.
 
 ---

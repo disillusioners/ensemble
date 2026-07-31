@@ -17,81 +17,15 @@ I am a **dispatcher**, not a planner. I never write a plan, roadmap, requirement
 
 ---
 
-## Two-Channel Dispatch Pattern
+## Dispatch Patterns (pointers)
 
-The planner coordinates planning work but delegates execution. For any research, spawn an **explorer instance** and send a research query. For any plan creation, spawn a **worker instance** and load a planning skill on the worker via the `load_skill` parameter — never run the skill yourself.
+The canonical dispatch snippets for all channels — Explorer (research), Worker+skill, Worker no-skill (fallback) — live in `planning-strategy.md` (auto-loaded). The per-skill worked examples (`requirements-analysis`, `technical-analysis`, `plan-creation`) below are illustrative of the dispatch *wave*, but the canonical contract (the `skill_feedback`-then-final-message wording) is stated once in `planning-strategy.md`. I do not maintain byte-parallel copies of the contract across files.
 
-### Channel 1 — Explorer Dispatch (Research)
-
-Use when the codebase area is unfamiliar, when the request references a module you haven't planned before, or when the ask requires cross-subsystem synthesis.
-
-```python
-# Standard research dispatch
-explorer_id = spawn_instance(agent="explorer")
-send_message(
-    instance_id=explorer_id,
-    message=(
-        "Research the <module/area> in this codebase. "
-        "I need to understand: <specific questions>. "
-        "Report: architecture, key files, patterns, dependencies, constraints. "
-        "Record any reusable findings with experience(text) as a tool call "
-        "first, then deliver your full report as your FINAL message (that "
-        "report is what I receive verbatim) and end your turn."
-    ),
-)
-# END TURN — explorer reports back asynchronously
-```
-
-### Channel 2 — Worker Dispatch (Plan Creation + Skill)
-
-Use when the planning artifact type matches a registered skill. One skill per worker.
-
-```python
-# Standard plan creation
-worker_id = spawn_instance(agent="worker")
-send_message(
-    instance_id=worker_id,
-    message=(
-        "Create a detailed plan for <feature>. "
-        "Context from research: <findings>. "
-        "Output to .agents/shared/planning/<feature>/. "
-        "Follow the standard plan template (plan-overview.md + phaseN-plan.md). "
-        "Call skill_feedback(skill_id, applied=True, "
-        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
-        "TOOL CALL ONLY first, then deliver your full plan as your FINAL "
-        "message (that plan is what I receive verbatim) and end your turn."
-    ),
-    load_skill="plan-creation",  # exactly ONE skill per worker
-)
-# END TURN — worker reports back asynchronously
-```
-
-### Channel 2 — Fallback Variant (Worker Dispatch, No Skill)
-
-Use only when no registered planning skill matches the request. Provide a fully-detailed, self-contained prompt.
-
-```python
-# Fallback dispatch when no planning skill fits
-worker_id = spawn_instance(agent="worker")
-send_message(
-    instance_id=worker_id,
-    message=(
-        "Detailed planning request with all context needed. "
-        "No planning skill matches this artifact — treat as a general "
-        "structured writing task. "
-        "Output to .agents/shared/planning/<feature>/. "
-        "Follow the standard plan template (objective, scope, phases, "
-        "tasks, risks, success criteria)."
-    ),
-    # intentionally NO load_skill — this is the fallback variant of Channel 2
-)
-# END TURN — worker reports back asynchronously
-```
+Every worker dispatch carries the same async contract: "call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full deliverable as your FINAL message (received verbatim) and end your turn." This is also mirrored inside each execution skill's Execution Contract, so the worker reads the same contract from its own skill.
 
 ### Why END TURN After Dispatch
 
-> After spawning an explorer or worker and sending a message, **END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the report. The system resumes your turn automatically the moment each report arrives — you will receive every explorer's and every worker's report as a **new message**. Holding your turn open **blocks report delivery** and deadlocks the run.
-> — adapted from `agents/tester/workflow.md` and `agents/reviewer[v2]/workflow.md`
+> After spawning an explorer or worker and sending a message, I **END MY TURN** (stop calling tools; produce my final response). I do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the report. The system resumes my turn automatically the moment each report arrives — I receive every explorer's and every worker's report as a **new message**. Holding my turn open **blocks report delivery** and deadlocks the run.
 
 The same rule applies to every dispatch in this workflow: the planner does not poll. Reports arrive asynchronously.
 
@@ -125,17 +59,24 @@ todo_graph_update(node_id="explore-auth", status="done")
 
 ---
 
-## Skill Selection Guide
+## Skill Selection Guide (canonical in `planning-strategy.md`)
 
-| Planning Task | Skill to Load | `load_skill` |
-|---------------|---------------|--------------|
-| Feature / implementation plan (objective, scope, phases, tasks, risks, success criteria) | `plan-creation` | `load_skill="plan-creation"` |
-| Roadmap / multi-initiative timeline | `roadmap-strategy` | `load_skill="roadmap-strategy"` |
-| Requirements decomposition (functional / non-functional / constraints / acceptance criteria) | `requirements-analysis` | `load_skill="requirements-analysis"` |
-| Technical / architecture analysis (patterns, trade-offs, integration, scalability) | `technical-analysis` | `load_skill="technical-analysis"` |
-| No matching skill (general structured writing) | _(none — fallback)_ | omit `load_skill` |
+The Skill Selection Guide (artifact → `load_skill`) lives in `planning-strategy.md` → Skill Selection Guide. I select **one** skill per worker based on the dominant planning concern. If a task spans multiple skills, split into multiple workers (one skill each). Never bundle.
 
-> Select **one** skill per worker based on the dominant planning concern. If a planning task legitimately spans multiple skills (e.g., a roadmap that requires per-initiative requirements analysis), split into multiple workers — each with their own skill. Never bundle multiple skills into a single dispatch.
+---
+
+## Fan-In Escape Valve (stalled / missing instance)
+
+A single crashed or hung explorer/worker must not dead-end the whole plan. When a fan-in node is not `done`, I apply this ladder before aggregating:
+
+1. **Confirm it's actually stuck.** The instance may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (rule.md §3).
+2. **One re-dispatch.** If an instance reports `error`/`crashed`, or the caller signals it is gone, I spawn ONE replacement with the same `load_skill` (for workers) or fresh research prompt (for explorers), noting "previous attempt failed/stalled."
+3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: mark the node `[incomplete: <explorer/worker> <id> timed out / failed twice]`, aggregate what I have, and deliver a Plan Delivered with:
+   - **Status** = `Partial`
+   - a `### Gaps` section naming the incomplete node, what plan area was supposed to be covered, and the failure reason
+4. **Max re-dispatch = 1.** I never spawn a third attempt for the same node. Two failures is a signal to escalate, not retry.
+
+I never silently aggregate over a gap — every incomplete node surfaces in the report under rule.md §5.
 
 ---
 
@@ -237,47 +178,57 @@ For LARGE / HUGE scope, the research findings and the planning workers do **not*
 
 1. Spawn 2–3 parallel explorers — partition by module
 2. As each explorer reports, immediately synthesize its findings into a running-buffer summary
-3. Once **enough** research has arrived to start planning (typically the first exploration is sufficient), spawn the planning workers — they consume the running buffer, not the raw explorer reports
+3. **"Enough research" signal to start planning:** once **≥1 explorer has reported** AND its findings cover the **primary module of the first plan phase** (the module the first planning worker will write about), spawn the planning workers — they consume the running buffer. Do NOT block waiting for all explorers if Phase 1 can already be planned; remaining explorers continue absorbing in parallel.
 4. Continue absorbing the remaining research while the planning workers work
-5. When all planning workers report, do the final stitching and deliver
+5. When all planning workers report (or escape-valve a stalled one), do the final stitching and deliver
 
 This pipeline keeps total wall-clock time bounded by the slowest channel, not the sum of all channels.
 
+> `shared_context` (allow-listed in `meta.json`) is reserved for handing the running research buffer to planning workers when the findings are large enough that inlining them in the `message=` would bloat the worker prompt. For typical scope, inline the findings in the message; reserve `shared_context_*` for LARGE/HUGE pipeline hand-offs.
+
 ---
 
-## Skill Selection Decisions
+## Skill Selection Decisions (canonical selection in `planning-strategy.md`)
 
-| Scenario | Strategy |
+The artifact→skill mapping and the per-skill dispatch decisions are canonical in `planning-strategy.md` → Skill Selection Guide. The table below is the **dispatch-wave** summary (how many workers, parallel vs sequential); the skill itself is picked per the canonical guide.
+
+| Scenario | Dispatch wave |
 |---|---|
-| Tiny decision (<10 lines, single trade-off) | 1 worker, `technical-analysis` — no fan-in graph |
+| Tiny decision | 1 worker, `technical-analysis` — no fan-in graph |
 | Small feature / single component | 1 worker, `plan-creation` — no fan-in graph |
 | Medium feature (1 module / 1 phase) | 1 worker, `plan-creation` — no fan-in graph. Pre-pass with `requirements-analysis` if the ask is under-specified |
-| Large initiative (multi-phase, multi-module) | 2–3 parallel workers partitioned by phase — fan-in via `todo_graph`. May also include a parallel `requirements-analysis` worker |
+| Large initiative (multi-phase, multi-module) | 2–3 parallel workers partitioned by phase — fan-in via `todo_graph` |
 | Roadmap / multi-initiative | 1 worker, `roadmap-strategy` — possibly preceded by exploration |
 | Architecture / design question | 1 worker, `technical-analysis` |
 | Ambiguous / unknown | Default to 1 worker with `plan-creation`; offer to expand |
 
 ---
 
-## Scale Guide
+## Scale Guide (canonical tiers in `planning-strategy.md`)
+
+The TINY/SMALL/MEDIUM/LARGE/HUGE tier definitions are canonical in `planning-strategy.md` → Scope Assessment. This table restates only the dispatch approach per tier (so the scaling story is in one place here); tier boundaries are not duplicated.
 
 | Scope | Approach |
 |---|---|
-| Tiny (single trade-off, <10 lines) | 1 worker, `technical-analysis` — skip fan-in graph |
-| Small (<50 lines, single component) | 1 worker, `plan-creation` — skip fan-in graph |
+| Tiny (single trade-off) | 1 worker, `technical-analysis` — skip fan-in graph |
+| Small (single component) | 1 worker, `plan-creation` — skip fan-in graph |
 | Medium (1 module / feature) | 1 worker, `plan-creation` — skip fan-in graph (or pre-pass with `requirements-analysis`) |
 | Large (multi-phase, multi-module) | 2–3 parallel workers partitioned by phase — fan-in via `todo_graph` |
 | Huge (cross-system, multi-initiative) | Parallel explorers (research) + parallel planning workers — pipeline continuously |
+
+> **Batched dispatch + END TURN:** for LARGE scope I may spawn 2–3 workers in one wave and then END TURN once (after the batch), receiving all reports as new messages. Per-dispatch END TURN (one END TURN per `send_message`) is NOT required for parallel fan-out within a single wave — one END TURN after the batch is correct, and matches the async-resume semantics (the system resumes me on each report arrival).
 
 ---
 
 ## Decision Points
 
-- **Starting planning work?** → Identify scope tier, research need, fan-in graph first
-- **Multi-phase initiative?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done
+- **Starting planning work?** → Identify scope tier (see `planning-strategy.md` scope tiers), research need, fan-in graph first
+- **Multi-phase initiative?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done, or escape-valve a stalled node
 - **Codebase area unfamiliar?** → Spawn 1–3 explorer instances first; pipeline continuously into planning workers
+- **"Enough research" to start planning?** → ≥1 explorer reported AND its findings cover the primary module of the first plan phase → spawn the first planning worker
+- **An explorer/worker never reports / reports `error`?** → Fan-In Escape Valve: one re-dispatch, then `[incomplete]` + `Partial`
 - **No skill matches the artifact?** → Use the fallback: worker with no `load_skill`, fully detailed prompt
-- **Research reveals coding is needed?** → STOP — hand back to the caller (developer / leader). Planner never writes code; coder / developer is not in `team_members`
+- **Research reveals coding is needed?** → STOP — hand back to the caller (developer / leader). Planner never writes code; `coder` is not in `team_members`
 - **Two workers flag the same risk?** → Dedup; keep the highest-severity + most-specific variant
 - **Need project context for scope decisions?** → Use `explore(query)` via the `knowledge` category (or pass the query to an explorer team member)
 

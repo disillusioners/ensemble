@@ -29,7 +29,7 @@ REVIEWER_V2_AGENT_DIR = (
 )
 REAL_AGENTS_DIR = REVIEWER_V2_AGENT_DIR.parent
 
-# The 6 skill templates shipped with reviewer[v2].
+# The 7 skill templates shipped with reviewer[v2].
 SKILL_TEMPLATE_NAMES = [
     "review-strategy",
     "code-review",
@@ -37,6 +37,7 @@ SKILL_TEMPLATE_NAMES = [
     "architecture-review",
     "security-review",
     "pr-review",
+    "business-logic-review",
 ]
 
 # Expected allowed tool categories for reviewer[v2] (D3 council, W2 no-db).
@@ -212,12 +213,12 @@ class TestReviewerV2SkillSet:
             f"Got: {data.get('agent_id')!r}"
         )
 
-    def test_skill_set_registers_exactly_six_skills(self) -> None:
+    def test_skill_set_registers_exactly_seven_skills(self) -> None:
         data = self._load_skill_set()
         skills = data.get("skills", [])
         assert isinstance(skills, list)
-        assert len(skills) == 6, (
-            f"skill-set.yaml must register exactly 6 skills. Got {len(skills)}: "
+        assert len(skills) == 7, (
+            f"skill-set.yaml must register exactly 7 skills. Got {len(skills)}: "
             f"{[s.get('name') for s in skills]}"
         )
 
@@ -230,13 +231,13 @@ class TestReviewerV2SkillSet:
             "review-strategy must have auto_load: true (D5)"
         )
 
-    def test_other_five_skills_are_auto_load_false(self) -> None:
-        """The 5 execution skills are dispatched to workers, not auto-loaded."""
+    def test_other_six_skills_are_auto_load_false(self) -> None:
+        """The 6 execution skills are dispatched to workers, not auto-loaded."""
         data = self._load_skill_set()
         skills = {s["name"]: s for s in data["skills"]}
         execution_skills = [
             "code-review", "plan-review", "architecture-review",
-            "security-review", "pr-review",
+            "security-review", "pr-review", "business-logic-review",
         ]
         for name in execution_skills:
             assert name in skills, f"skill '{name}' missing from skill-set.yaml"
@@ -251,7 +252,7 @@ class TestReviewerV2SkillSet:
 
 
 class TestReviewerV2SkillTemplates:
-    """Validate the 6 skills-template/*.md frontmatters."""
+    """Validate the 7 skills-template/*.md frontmatters."""
 
     @pytest.mark.parametrize("skill_name", SKILL_TEMPLATE_NAMES)
     def test_skill_template_file_exists(self, skill_name: str) -> None:
@@ -278,7 +279,7 @@ class TestReviewerV2SkillTemplates:
     @pytest.mark.parametrize(
         "skill_name",
         ["code-review", "plan-review", "architecture-review",
-         "security-review", "pr-review"],
+         "security-review", "pr-review", "business-logic-review"],
     )
     def test_execution_skill_frontmatter_auto_load_false(
         self, skill_name: str

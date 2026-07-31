@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.2.0
 category: execution
 auto_load: false
 ---
@@ -50,7 +50,7 @@ Requirements:
 - Define acceptance criteria for each functional requirement (Given/When/Then or equivalent)
 - List gaps and ambiguities (what is unclear, what needs caller clarification)
 - Produce the mandatory Requirements Format below
-Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
+Before your final message, call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Then deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward. (The plan you deliver is received verbatim by the planner, so a trailing summary would erase detail.)
 
 Return:
 - The Requirements Format (template below) for requirements.md

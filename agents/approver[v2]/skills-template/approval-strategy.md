@@ -1,10 +1,12 @@
 ---
-version: 1.0.0
+version: 1.1.0
 category: planning
 auto_load: true
 ---
 
 # Approval Strategy
+
+> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Scope matrix, Approval-Type detection, the Iteration/`active.md` status rules, the worker Dispatch Pattern, fan-in, the Aggregation Strategy, and the verdict rules. `soul.md`, `rule.md`, and `workflow.md` reference it rather than restating it — one edit, one propagation. `workflow.md` keeps the executable process steps and "Why END TURN".
 
 Decide WHAT to approve and HOW to scope it. The default is the smallest scope that covers the artifact.
 
@@ -188,37 +190,46 @@ After all worker reports are in (and `todo_view()` shows all nodes done for mult
 
 1. **Filter Blocking vs Notes** — workers report both. Only blocking issues affect the verdict; notes are observations.
 2. **Dedup rules** — parallel workers may flag the same issue. Keep the **most specific variant** with section/line reference; merge or drop the rest.
-3. **Determine verdict**:
+3. **Determine verdict:**
    - **APPROVED** if NO blocking issues from any worker
    - **REJECTED** if ANY worker raised a blocking issue
-4. **Do NOT add new blocking issues** the worker did not raise. The worker verdict is the input to your aggregation; you are a dispatcher, not an evaluator.
+4. **Aggregation judgment band** (resolving "dispatcher not evaluator" vs "dedup/merge"):
+   - I MAY **downgrade** a worker's Blocking to a Note, with a stated reason (e.g., it duplicates a section already covered, or it is actually a style preference). I record the reason in the verdict Notes.
+   - I MAY **merge** two workers' conflicting findings into the most specific variant.
+   - I MAY NOT **upgrade** a worker's Note into a Blocking issue, and I MAY NOT **introduce** a new blocking issue the workers did not raise. The worker verdict is the input to aggregation; I am a dispatcher, not an evaluator. If I believe the workers *missed* a blocking issue, that is itself a finding to surface explicitly as "Approver note: uncovered area X — recommend re-review," not a silent BLOCKING.
 5. **Final report** — use the **Approval Verdict** template from `soul.md` (Verdict, Iteration, Blocking Issues, Notes, Skills Used, Session IDs).
 6. **Skill feedback** — workers each call `skill_feedback` once they finish. The approver does not aggregate feedback; the skill system does.
-7. **Update tracking** — read tracking file ONLY after verdict; compare with previous rejections; append to `.agents/approver/{slug}-tracking.md`; update `active.md`.
+7. **Update tracking** — read tracking file ONLY after verdict; compare with previous rejections; append to `.agents/approver/{slug}-tracking.md`; update `active.md` per the status rules above.
 
 ---
 
 ## Iteration Management (Tracking Discipline)
 
+> **Canonical source of truth for `active.md` status handling.** `workflow.md` Decision Points reference this — there is no second copy.
+
 ### On Every Invocation
 
-1. Read `.agents/approver/active.md` for identity ONLY — extract plan name, slug, iteration number.
-2. If `active.md` is missing OR `Status: APPROVED` for this plan → treat as new plan → create `active.md` with `Iteration: 001`, `Status: IN_PROGRESS`.
-3. If `Status: ESCALATED` → return escalation summary; do NOT dispatch.
-4. Dispatch worker(s) with FRESH prompts (no tracking history).
-5. Collect worker verdicts; aggregate; reach verdict.
-6. Read tracking file (if exists); compare findings with previous rejections.
-7. Update tracking file:
+1. Read `.agents/approver/active.md` for identity — plan name, slug, status, iteration number.
+2. Branch on `Status`:
+   - **`active.md` missing** → new plan → create `active.md` with `Iteration: 001`, `Status: IN_PROGRESS`.
+   - **`Status: IN_PROGRESS`** → continue the existing iteration (use the stored iteration number).
+   - **`Status: ESCALATED`** → return an escalation summary; do NOT dispatch. The plan is already in a higher review lane.
+   - **`Status: APPROVED`** for THIS plan → it was already approved. This is a *re-approval* request: state "Plan already marked APPROVED (iteration N)" and ask the caller to confirm re-running fresh (reset to `Iteration: 001`, `Status: IN_PROGRESS`) or accept the prior approval. Do NOT silently treat an APPROVED plan as a brand-new iteration, and do NOT silently skip verification.
+3. Dispatch worker(s) with FRESH prompts (no tracking history — workers never see the iteration number).
+4. Collect worker verdicts; aggregate; reach verdict.
+5. Read tracking file (if exists) — ONLY now, after the verdict — to compare findings with previous rejections.
+6. Update tracking file:
    - **REJECTED** → append iteration; update `active.md` (`IN_PROGRESS`, iteration+1)
    - **APPROVED** → append final iteration; update `active.md` (`APPROVED`)
-   - **ESCALATED** (3rd rejection) → append final iteration with `ESCALATED`; update `active.md`; return `REJECTED — Max iterations reached`
+   - **3rd rejection** → mark `ESCALATED`; return `REJECTED` with a Note "Max iterations reached (3) — escalated to Leader" (ESCALATED is an `active.md` state, NOT a separate verdict string — the verdict stays binary APPROVED/REJECTED).
+
+> **Iteration counter is NOT inherited bias.** The iteration number is the approver's *own retry state*, not the planning journey that "fresh eyes" exists to avoid. It is permitted for the approver to read it (for the 3-iteration cap). What independence forbids is passing tracking/rejection history *into worker prompts* — workers always evaluate fresh.
 
 ### Max Iterations Reached (3)
 
-1. Write iteration 003 to tracking file with verdict: `ESCALATED`
-2. Return verdict: `REJECTED — Max iterations reached. Summary: [all unresolved issues]`
-3. Update `active.md`: set `Status: ESCALATED`
-4. Leader will present full tracking history to user
+1. Write iteration 003 to the tracking file; set `Status: ESCALATED` in `active.md`.
+2. Return verdict: `REJECTED` — and add a Note: `Max iterations reached (3); escalated to Leader. Unresolved: [all blocking issues]`.
+3. Leader presents the full tracking history to the user.
 
 ---
 

@@ -76,6 +76,21 @@ todo_graph_update(node_id="w-auth", status="done")
 
 ---
 
+## Fan-In Escape Valve (stalled / missing worker)
+
+A single crashed or hung worker must not dead-end the whole review. When a fan-in node is not `done`, I apply this ladder before aggregating:
+
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (rule §3).
+2. **One re-dispatch.** If the worker reports `error`/`crashed`, or the caller signals it is gone, I spawn ONE replacement worker with the same `load_skill` and a fresh prompt noting "previous attempt failed/stalled — re-verify before trusting its output."
+3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: I mark the node `[incomplete: worker <id> timed out / failed twice]`, aggregate what I have, and deliver a Review Summary with:
+   - a `### Gaps` section naming every incomplete node, what it was supposed to cover, and the failure reason
+   - the affected focus areas flagged as `unverified`
+4. **Max re-dispatch = 1.** I never spawn a third attempt for the same node. Two failures is a signal to escalate, not retry. (For a Deep-Review council, the spawned governor reports its own completion or failure — same ladder applies to the council node.)
+
+I never silently aggregate over a gap — every incomplete node surfaces in the report under rule §4.
+
+---
+
 ## Skill Selection Guide
 
 | Review Type | Skill to Load | `load_skill` |
@@ -282,6 +297,8 @@ docs: .agents/shared/planning/...
 
 - **Starting review work?** → Identify mode (Standard / Deep), skill, fan-in graph first
 - **Multi-module review?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done
+- **A worker never reports / reports `error`?** → Fan-In Escape Valve: one re-dispatch, then `[incomplete]` + `### Gaps` section
+- **Council result never arrives?** → Same escape ladder on the council node; never spawn a second council
 - **Deep-review trigger?** → Announce escalation → `convene_council_with_skill(councilor_agent_id="worker", councilor_skill="<dominant-review-type>", ...)` → END TURN
 - **Single reviewer wants to analyze code directly?** → STOP — dispatch a worker instead
 - **Two workers flag the same issue?** → Keep highest severity + most specific variant; dedup

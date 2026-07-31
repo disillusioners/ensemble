@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.2.0
 category: execution
 auto_load: false
 ---
@@ -148,10 +148,11 @@ on the impact).
 - [ ] **Catching in the wrong layer** — swallowing at the leaf instead of
       letting it bubble to the layer that knows how to handle it.
 
-### Error Handling — Input Validation
+### Error Handling — Input Validation (craftsmanship only — not security)
 
-- [ ] **Missing input validation at boundaries** — public APIs, CLI args,
-      file paths, env vars. Validate at the entry point.
+> **Boundary:** I own defensive/craftsmanship validation (entry-point type guards, weak-check bugs, re-validation-too-deep). Security/trust-boundary validation (parsing untrusted external data into commands/queries/auth) belongs to the Reviewer agent's `security-review` — defer those. See `rule.md` §14.
+
+- [ ] **Missing defensive validation at entry points** — public functions/methods, CLI args, file paths, env vars validated at the entry point (code-quality: do not trust internal callers blindly).
 - [ ] **Validation too deep** — re-validating in every function instead of
       trusting validated input.
 - [ ] **Weak validation** — `if not value` for a value that could be `0`,
@@ -264,12 +265,13 @@ Output the report in this exact shape:
 | Resource leak (file handle, DB connection) | 🔴 High |
 | Bare `except:` / `except Exception:` in critical path | 🔴 High |
 | Swallowed exception in error-handling infrastructure | 🔴 High |
-| Missing input validation at public API boundary | 🟡 Medium |
+| Missing defensive input validation at entry points (craftsmanship — see §14 boundary) | 🟡 Medium |
 | Inconsistent error propagation style | 🟡 Medium |
 | Returning `None` instead of raising for failure | 🟡 Medium |
 | `except: pass` in non-critical path | 🟡 Medium |
-| `cast()` / `# type: ignore` to silence type errors | 🟡 Medium |
 | Style preference on `raise from` vs `raise` | 🟢 Low |
 | Defensive validation deeper than necessary | 🟢 Low |
+
+> `cast()` / `# type: ignore` to silence type errors is a **Type Cleanliness** item owned by `tidier-static-hygiene`, not this skill — do not file it here.
 
 (See `tidier-strategy.md` for the full severity guidelines.)

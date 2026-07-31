@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.1.0
 category: planning
 auto_load: true
 ---
@@ -54,7 +54,7 @@ If the request legitimately spans multiple types (e.g., security + architecture)
 
 ## Deep-Review Trigger Checklist
 
-Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activate Deep-Review mode** (governor council via `convene_council_with_skill`) instead of standard worker dispatch. The full checklist lives in `agents/reviewer/memory.md`; the 5 categories are:
+Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activate Deep-Review mode** (governor council via `convene_council_with_skill`) instead of standard worker dispatch. The full checklist lives in `memory.md` (reviewer[v2]-local); the 5 categories are:
 
 1. **Data Integrity / Security** — auth, crypto, secrets, transactions, migrations, input validation, schema changes, bulk writes
 2. **Cross-Cutting Changes** — API contracts, event/message schemas, shared libraries, dependency upgrades, build/pipeline changes
@@ -62,7 +62,7 @@ Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activ
 4. **Business-Critical Logic** — payment / billing, permissions, data pipelines, notifications, rate limiting, compliance, workflow orchestration
 5. **Architecture / Workflow Changes** — new agent type, routing changes, persistence layer, infrastructure, core library upgrades
 
-Trigger decision (per `agents/reviewer/memory.md`):
+Trigger decision (per `memory.md`):
 - **1 trigger match** → Deep-Review
 - **Multiple trigger matches** → Deep-Review (note all triggered categories in plan)
 - **No trigger matches** → Standard Review

@@ -1,10 +1,12 @@
 ---
-version: 1.0.0
+version: 1.1.0
 category: planning
 auto_load: true
 ---
 
 # Planning Strategy
+
+> **Canonical home.** This skill (auto-loaded at runtime via `skill-set.yaml` `auto_load: true`) is the single source for the Scope tiers (TINY/SMALL/MEDIUM/LARGE/HUGE), the Research-Need matrix, the Skill Selection Guide, the Mandatory Output Format, fan-in, and the Output Structure. `soul.md`, `workflow.md`, and `tools_note.md` reference it rather than restating it — one edit, one propagation.
 
 You are the **Planner + Dispatcher**. Planning answers **WHAT to plan and HOW to research it**. Dispatching answers **WHO executes each piece** — you never analyze the codebase or write plans directly. Each worker instance receives exactly ONE skill via the `load_skill` parameter (e.g. `send_message(..., load_skill="<skill_name>")`) so attribution stays clean and per-skill guidance is loaded for the actual execution. Your own `planning-strategy` skill is for your planning only; never embed it in a worker dispatch.
 
@@ -20,6 +22,7 @@ Before picking a skill or dispatching workers, derive the planning scope. **Even
 
 | Scope | Signals | Action |
 |---|---|---|
+| **TINY** (<10 lines, single trade-off) | One small decision, no research | 1 worker, `technical-analysis` — no fan-in graph |
 | **SMALL** (<50 lines of plan, single artifact, no research needed) | Single file change, well-known pattern | **Reduce scope** to 1 worker with `plan-creation` (or fallback) — even if broader planning was requested |
 | **MEDIUM** (single module / feature, light research needed) | One module or one feature, some unknowns | 1 explorer + 1–2 workers, fan-in via `todo_graph` |
 | **LARGE** (multi-phase, multi-module, 2+ plan sections) | Multiple modules, several phases, dependencies between them | 2–3 explorers + 2–3 workers partitioned by section/phase, fan-in via `todo_graph` |

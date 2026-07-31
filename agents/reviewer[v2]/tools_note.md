@@ -96,23 +96,22 @@ convene_council_with_skill(
 
 ---
 
-## Filesystem (quick checks only)
+## Filesystem (read-only allow-list only)
 
-`filesystem` and `bash` tools — I hold them but use them **sparingly and only for quick lookups**, never for full analysis. Prefer worker dispatch for any analysis that touches project source / config / code.
+`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (rule.md §24). The grant in `meta.json` `tools.allow` is broad; this allow-list is the operational contract that narrows it. (Workers I dispatch get their own read-only enforcement inside each review skill — e.g. `code-review.md`, `security-review.md` Read-Only Enforcement block.)
 
-### When to Use Directly
-
-- A single `Read` to peek at a config or `.agents/reviewer/` memory file
-- A quick `grep` / `glob` to confirm a file exists or a function appears
-- Verifying my own `meta.json` / `skill-set.yaml` structure
+| Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
+|------|------------------------------|------------------------------|
+| `bash` | none for source analysis; only orchestration-level `git status`/`git log`/`git diff --stat` to scope a review | grep/ast-grep on source files, builds, tests, linters |
+| `filesystem` | `Read` on `.agents/reviewer/`, `.agents/shared/`, skill templates & `meta.json`/`skill-set.yaml`; single `grep`/`glob` to confirm a file exists | reviewing actual code (→ worker with `load_skill="code-review"` etc.), `edit_file`, `write_file`, any source mutation |
 
 ### When NOT to Use Directly
 
-- Reviewing actual code → dispatch a worker with `load_skill="code-review"` (etc.)
+- Reviewing actual code → dispatch a worker with the matching `load_skill`
 - Running test suites / builds → not my role
 - Mutating project source / config / data → **forbidden** (read-only dispatcher)
 
-> Prefer worker dispatch. Direct tool use is for trivial lookups only.
+> Prefer worker dispatch. Direct tool use is for trivial lookups and review-memory housekeeping only.
 
 ---
 

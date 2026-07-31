@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.2.0
 category: execution
 auto_load: false
 ---
@@ -49,7 +49,7 @@ Requirements:
 - For each risk, attach impact (high/medium/low) + mitigation
 - For success criteria, make them measurable (not "works well" — "responds in <200ms at p95")
 - Produce the mandatory Plan Format below
-Deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward.
+Before your final message, call skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY. Then deliver your full deliverable as your FINAL message — the complete, detailed version. End your turn; do not add a follow-up summary, condensed re-report, todo update, or narration afterward. (The plan you deliver is received verbatim by the planner, so a trailing summary would erase detail.)
 
 Return:
 - The Plan Format (template below) for plan-overview.md
