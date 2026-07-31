@@ -545,3 +545,42 @@ VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c
 | maintenance_unit_test | tests/test_maintenance.py | MaintenanceService + CheckpointCleanupJob full suite (registration, lifecycle, is_due/is_idle, orphan/terminal/per-thread cleanup, error isolation) + **20 pinned-protection tests** (18 mock-based in `TestCheckpointCleanupJobPinnedProtection` + 2 real-DB integration in `TestCheckpointCleanupJobPinnedProtectionIntegration`). | 2 min | 2026-07-31 | ✅ PASS (66/66 in 1.25s, 0 failures) |
 | instance_ui_prefs_unit_test | tests/repositories/test_instance_ui_prefs.py | InstanceUiPrefsRepository (lazy-create upsert, pinned_at side effects, partial-update, get/get_all, delete) + **4 `get_pinned_instance_ids` tests** (returns set, only-pinned, exclude-after-unpin, multiple). | 2 min | 2026-07-31 | ✅ PASS (26/26 in 1.24s, 0 failures) |
 | pinned_cleanup_protection_mock | tests/mocks/pinned_cleanup_protection_mock.py | **Independent mock verification** (NOT dev's tests): fresh standalone script exercising REAL `CheckpointCleanupJob` + REAL repos against in-memory SQLite. 9 scenarios incl. W1 broken-ancestor-chain, all-protected edge case, backward-compat, fail-safe. Self-timeout `signal.alarm(120)` + outer `timeout 130`. Pure in-process (no ports/network). | 5 min | 2026-07-31 | ✅ PASS (9/9 scenarios in 0.20s, 0 failures) |
+
+## Pause-Tool-Result Fix Verification Packs (2026-07-31)
+
+`Incomplete Pause` fix on branch `feature/pause-tool-result-fix` (HEAD `ee29377e` + test-infra fix `485e0cf1`). 3 commits: Phase 1 (`34e0d1ee` — child_reports dual-check guard), Phase 2 (`b43af9af` — instance_messaging marker-only guard), C1 fix (`ee29377e` — marker pop after cascade + JobItem orphan fix + test realism). 3 modified source files: `daemon/services/child_reports.py`, `daemon/services/instance_messaging.py`, `daemon/manager.py`. 13 new tests + 18 existing regression tests + broader regression + PostgreSQL dual-DB. All PASS. See `RESULTS/2026-07-31-pause-tool-result-fix.md`.
+
+### New Test Files (13 tests)
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| pause_tool_result_race_unit_test | tests/unit/test_pause_tool_result_race.py | Phase 1 core guards: marker skips PROCESS_REPORT Task but persists ReportInjection rows; DB==PAUSED skips Task; RUNNING parent creates Task normally. 3 tests. | 2 min | 2026-07-31 | ✅ PASS (3/3 in 0.91s, feature/pause-tool-result-fix @ ee29377e) |
+| pause_tool_result_race_enqueue_unit_test | tests/unit/test_pause_tool_result_race_enqueue.py | Phase 2 core guards: marker-set+running preserves READY message but skips Task; marker-empty+paused creates PENDING Task + logs SQL gate; marker-empty+running normal. 3 tests. | 2 min | 2026-07-31 | ✅ PASS (3/3, @ ee29377e) |
+| pause_race_window_held_integration_test | tests/integration/test_pause_race_window_held.py | C1 marker lifetime covers cascade window — PROCESS_REPORT Task skipped during cascade execution. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+| pause_race_resume_drain_integration_test | tests/integration/test_pause_race_resume_drain.py | Skipped report delivered on resume via drain slot. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+| pause_race_resume_flow_integration_test | tests/integration/test_pause_race_resume_flow.py | Resume after pause admits child completion. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+| pause_race_resume_reenqueue_integration_test | tests/integration/test_pause_race_resume_reenqueue.py | Paused enqueue claimed and delivered after resume. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+| pause_race_window_held_enqueue_integration_test | tests/integration/test_pause_race_window_held_enqueue.py | C1 marker lifetime covers cascade window — PROCESS_MESSAGE Task skipped. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+| pause_race_enqueue_resume_flow_integration_test | tests/integration/test_pause_race_enqueue_resume_flow.py | Normal enqueue before/after pause-resume drives graph turn. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+| pause_race_w7_jobitem_skip_integration_test | tests/integration/test_pause_race_w7_jobitem_skip.py | W7 marker guard skips JobItem creation during pause window. 1 test. | 5 min | 2026-07-31 | ✅ PASS (1/1, @ ee29377e) |
+
+### Broader Regression Packs Run (ad-hoc, not registered — grouped for this validation)
+
+| Pack (ad-hoc) | Files | Tests | Status |
+|---------------|-------|-------|--------|
+| existing_pause_cascade_regression | test_question_deferred_pause_callback + edge_cases + test_cascade_pause_resume | 18 passed | ✅ PASS |
+| broader_child_reports | test_child_reports + child_completion_pending_task_guard + resume_child_notification + question_pause_completion_guard | 25 passed | ✅ PASS |
+| broader_instance_messaging | compaction_guard + shared_context + queue_routing + skill_injection | 52 passed | ✅ PASS |
+| broader_pause_flows | pause_flow_redesign + resume_flow_redesign + tree_aware_pause_resume + pause_resume_root + pause_instance_cascade | 33 pass, 28 skip | ✅ PASS |
+| broader_lifecycle_cascade | instance_cascade + lifecycle_terminate + cascade_unified + cascade_integration + cascade_race3 | 16 pass, 25 skip | ✅ PASS |
+| broader_task_queue_question | question_dismiss + question_graph + resume_gate + task_lock_manager + graph_task_cancellation | 87 pass, 17 skip | ✅ PASS |
+| postgres_regression | wanderer_completion_pg_test.sh + tests/postgres/ -m postgres | 164 pass, 33 skip | ✅ PASS (2 quick fixes @ 485e0cf1) |
+
+### ensure.md Critical Validation
+
+| Requirement | Pack / Check | Status |
+|-------------|-------------|--------|
+| No regressions in changed packs | all 10 packs | ✅ PASS |
+| Deadlock / concurrency integrity | concurrency_atomic_unit_test | ✅ PASS (66 pass, 19 skip) |
+| No sync DB calls on asyncio loop | concurrency_atomic_unit_test (thread-identity tests) | ✅ PASS |
+| dev.sh --timeout-graceful-shutdown 10 | static check (dev.sh:74) | ✅ PASS |
