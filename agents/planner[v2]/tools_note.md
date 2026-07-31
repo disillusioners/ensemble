@@ -63,28 +63,25 @@ See `workflow.md` → "Skill Selection Guide" for which `load_skill` value match
 
 ---
 
-## Tool Category Validity (Validated Against `daemon/tools/_tool_registry.py`)
+## My Tools
 
-On instance startup, the daemon validates every entry in `meta.json` `tools.allow` against `daemon/tools/_tool_registry.py` categories. Anything that does not resolve to a registered category fails instance creation. The planner's allow list is therefore intentional and minimal.
+Primary dispatch surface: `instance` — `spawn_instance`, `send_message`, `get_instance_info`, `list_instances` for two-channel dispatch (explorer + worker).
 
-| Category | Tool(s) | Why It Is In The Allow List |
+| Category | Tool(s) | Why I hold it |
 |---|---|---|
-| `instance` | `spawn_instance`, `send_message`, `get_instance_info`, `list_instances` | PRIMARY — the two-channel dispatch surface (explorer + worker) |
-| `bash` | `bash` | Quick lookups: read a file, check project structure, run a one-liner against the workspace |
-| `proc` | `proc_run`, `proc_logs`, `proc_status`, `proc_stop` | Reserved for long-running helpers (rare for a planner; available for ops-style lookups) |
-| `filesystem` | `read_file`, `glob`, `grep`, `list_directory` | Quick reads of existing plans, conventions, project structure |
+| `bash` | `bash` | Quick lookups: read a file, check project structure, run a one-liner |
+| `proc` | `proc_run`, `proc_logs`, `proc_status`, `proc_stop` | Reserved for long-running helpers (rarely used) |
+| `filesystem` | `read_file`, `glob`, `grep`, `list_directory` | Quick reads of existing plans, conventions |
 | `time` | `time`, `time_math` | Stamp planning-plan and delivery timestamps |
 | `self` | `read_self_definition`, `read_active` | Read own identity for self-checks |
 | `help` | `tool_help` | Look up tool documentation when deciding which skill to load |
-| `image` | `image_*` | Read images attached to planning requests (architecture diagrams, ERDs) |
-| `knowledge` | `explore`, `experience` | RAG knowledge base for project context and prior planning artifacts |
+| `image` | `image_*` | Read images attached to planning requests (diagrams, ERDs) |
+| `knowledge` | `explore`, `experience` | RAG knowledge base for project context |
 | `mcp` | MCP-pass-through tools | Auxiliary MCP servers where configured |
 | `context` | `context_*` | Per-instance context inspection |
 | `shared_context` | `shared_context_*` | Cross-instance shared context (for piping research findings to planning workers) |
 
-### Registry Validation
-
-If a category above disappears from `daemon/tools/_tool_registry.py` (e.g., it is renamed or removed), instance creation will fail at startup. Re-add the category to `meta.json` `tools.allow` only after verifying it still resolves to a registered entry. Adding a non-existent category is a fail-fast — preferable to silently losing a tool.
+My allow list is intentional and minimal — only what a planning dispatcher actually needs.
 
 ---
 
@@ -109,7 +106,7 @@ Pass queries via an explorer team member for synthesis; reserve direct calls for
 
 - A single `read_file` to read an existing `.agents/shared/planning/<feature>/plan-overview.md` or a `.agents/shared/conventions.md`
 - A quick `grep` / `glob` to confirm a module exists or a planning artifact references the area
-- Verifying my own `meta.json` / `skill-set.yaml` structure
+- Verifying my own skill-set.yaml structure
 - Reading the worker's output file from `.agents/shared/planning/<feature>/` to confirm delivery
 
 ### When NOT to Use Directly
@@ -144,4 +141,4 @@ Worker reuse: a worker can be re-dispatched with a new `load_skill` if context i
 - **chart** — diagram generation for the planning workflow (sequence diagrams, dependency graphs, swimlane diagrams, Mermaid validation)
 - **dynamic-skill** — `skill_search`, `skill_view`, `skill_create`, `skill_feedback`; lets the planner reflect on / suggest improvements to the planning skills themselves
 
-The planner's own auto-loaded planning skill is `planning-strategy`, which auto-loads via `skill-set.yaml`'s `auto_load: true` (it is **not** listed in `meta.json` `innate_skills` — those are `todo`/`chart`/`dynamic-skill`; the two mechanisms are distinct). Execution skills (`plan-creation`, `roadmap-strategy`, `requirements-analysis`, `technical-analysis`) are pulled by workers via `load_skill="..."` — they are never auto-loaded into the planner. If `planning-strategy` is absent at runtime (skill-bank seeding gap), I run the tier/skill logic from memory — I do not block.
+My own auto-loaded planning skill is `planning-strategy` (auto-loaded at runtime; separate from my innate `todo`/`chart`/`dynamic-skill`). Execution skills (`plan-creation`, `roadmap-strategy`, `requirements-analysis`, `technical-analysis`) are pulled by workers via `load_skill="..."` — they are never auto-loaded for me. If `planning-strategy` is absent at runtime (skill-bank seeding gap), I run the tier/skill logic from memory — I do not block.

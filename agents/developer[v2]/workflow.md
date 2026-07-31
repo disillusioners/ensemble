@@ -120,9 +120,9 @@ I **END TURN** after dispatching.
 
 ### Complex Coder Work
 ```python
-reviewer_id = spawn_instance(agent="coder")  # or worker with code-review skill
+verifier_id = spawn_instance(agent="coder")  # or worker with code-review skill
 send_message(
-    instance_id=reviewer_id,
+    instance_id=verifier_id,
     message=(
         "Review the changes made by <original_coder_id> in <files>. "
         "Verify correctness, run tests, check for regressions. "
@@ -136,7 +136,7 @@ If verification finds issues, I iterate — spawn a fresh instance to fix — bu
 ### Quick Worker Work
 After a worker with `code-fix` / `code-refactor` / `code-implementation` reports:
 - Check `git diff` for the changed files (read-only allow-list, rule §13)
-- Optionally spawn a review worker with the `code-review` skill — **fallback**: if `load_skill="code-review"` fails (skill bank missing), spawn a `reviewer` agent instance instead (rule §18)
+- Optionally spawn a review worker with the `code-review` skill — **fallback**: if `load_skill="code-review"` fails (skill bank missing), spawn a second `coder` (or `worker` without `load_skill`) with a detailed manual-review prompt and flag the run as `DEGRADED — skill bank miss (code-review)` in the Dev Report (rule §18)
 - Report verification results in the Dev Report
 
 ---
@@ -154,9 +154,9 @@ After a worker with `code-fix` / `code-refactor` / `code-implementation` reports
 
 ## Skill-Seed Gotcha
 
-🟡 The skill bank keys skills by the literal directory name `developer[v2]`, but instances store `agent_id=developer` (without the `[v2]` suffix). This mismatch can cause **auto-loaded skills to be missed after seeding**.
+🟡 Auto-loaded skills can silently fail to load at runtime (skill bank seeding gaps, version mismatches, or the `[v2]` directory vs the stored agent id). The symptom: a skill I expect to auto-load is simply absent.
 
-**Mitigation:** after seeding or upgrading skills, I test that auto-loaded skills (e.g., `dev-strategy`) actually load when expected. If skills are silently absent, I check whether the skill bank key matches the directory name vs the stored `agent_id`, and align them. If a skill is missing at runtime, I apply the fallback in rule §18 rather than dispatch a worker that will run skill-less without my knowing.
+**Mitigation:** after seeding or upgrading skills I test that auto-loaded skills (e.g., `dev-strategy`) actually load when expected. If a skill is missing at runtime I apply the fallback in rule §18 (within-tier peer review with a `DEGRADED` flag) rather than dispatch a worker that runs skill-less without my knowing.
 
 ---
 
@@ -169,7 +169,7 @@ After a worker with `code-fix` / `code-refactor` / `code-implementation` reports
 - **Coder reported work?** → Spawn a separate instance to verify; report results; cap at 3 iterations
 - **Verify loop won't go clean (3 iterations)?** → Report `Partial`, name the failing test/issue, hand back to caller
 - **No matching skill for a quick task?** → Dispatch a worker **without** `load_skill` with a detailed request in the message
-- **`code-review` load fails?** → Spawn a `reviewer` agent instance (rule §18)
+- **`code-review` load fails?** → Spawn a second `coder`/`worker` with a manual-review prompt; flag `DEGRADED — skill bank miss (code-review)` in the Dev Report (rule §18)
 - **Need project context for scope decisions?** → Use the `knowledge` tool category directly (`explore`/`experience`); explorer is not a team member
 
 ---

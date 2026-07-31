@@ -100,7 +100,6 @@ send_message(
 > waiting for the worker. The system resumes your turn automatically the moment
 > a worker reports — you will receive the worker's report as a **new message**.
 > Holding your turn open **blocks report delivery** and deadlocks the run.
-> — adapted from `agents/approver[v2]/workflow.md`
 
 ---
 

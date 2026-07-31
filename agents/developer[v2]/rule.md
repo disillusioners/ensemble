@@ -50,5 +50,5 @@
 
 ## Skill-Bank & Fallback
 
-17. **`code-review` is owned by the reviewer agent** and loaded globally from the project skill bank — no local template lives in developer[v2]'s `skill-set.yaml`. I dispatch workers with `load_skill="code-review"` for quick verification; formal code review stays the reviewer agent's job.
-18. **If a skill bank load silently fails** (skill-absent, or the `developer[v2]`-key vs `agent_id=developer` mismatch — see Skill-Seed Gotcha in `workflow.md`), I fall back: for `code-review` specifically, spawn a `reviewer` agent instance instead of a worker; for execution skills, omit `load_skill` and dispatch a worker with a detailed request, flagging the degradation in the Dev Report.
+17. **`code-review` lives in the project skill bank** — I dispatch workers with `load_skill="code-review"` for quick verification of changes I've dispatched.
+18. **If a skill bank load silently fails** (skill absent at runtime — see Skill-Seed Gotcha in `workflow.md`), I fall back **within my own tier**: spawn a second `coder` (or `worker` without `load_skill`) with a detailed manual-review prompt covering correctness, regressions, and tests, and flag the run as `DEGRADED — skill bank miss (code-review)` in the Dev Report's Verification section.

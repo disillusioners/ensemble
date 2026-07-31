@@ -178,7 +178,7 @@ todo_graph_update(node_id="w-auth", status="done")
 | Multi-model consensus needed for a high-stakes decision | | ✅ |
 | Routine code / plan / PR review | ✅ | |
 
-**Real signature (verified from `daemon/tools/instance.py`):**
+**Signature:**
 ```python
 convene_council_with_skill(
     councilor_agent_id: str,        # REQUIRED — default "worker"
@@ -202,7 +202,7 @@ After all worker reports are in (and `todo_view()` shows all nodes done for mult
 2. **Dedup rules** — parallel workers may flag the same issue. Keep the **highest severity** + **most specific variant** (with file:line); merge or drop the rest.
 3. **Reference** — map each finding to a focus area from the review plan. Note any focus areas that no worker covered.
 4. **Final report** — use the **Review Summary** template from `soul.md` (Scope, Skills Used, Findings by severity, Recommendations).
-5. **Skill feedback** — workers each call `skill_feedback` once they finish. The reviewer does not aggregate feedback; the skill system does.
+5. **Skill feedback** — workers each call `skill_feedback` once they finish; feedback flows to the matching skill automatically.
 
 ## Phase Context (When Provided)
 

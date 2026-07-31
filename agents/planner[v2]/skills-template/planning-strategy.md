@@ -6,7 +6,7 @@ auto_load: true
 
 # Planning Strategy
 
-> **Canonical home.** This skill (auto-loaded at runtime via `skill-set.yaml` `auto_load: true`) is the single source for the Scope tiers (TINY/SMALL/MEDIUM/LARGE/HUGE), the Research-Need matrix, the Skill Selection Guide, the Mandatory Output Format, fan-in, and the Output Structure. `soul.md`, `workflow.md`, and `tools_note.md` reference it rather than restating it — one edit, one propagation.
+> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Scope tiers (TINY/SMALL/MEDIUM/LARGE/HUGE), the Research-Need matrix, the Skill Selection Guide, the Mandatory Output Format, fan-in, and the Output Structure. `soul.md`, `workflow.md`, and `tools_note.md` reference it rather than restating it — one edit, one propagation.
 
 You are the **Planner + Dispatcher**. Planning answers **WHAT to plan and HOW to research it**. Dispatching answers **WHO executes each piece** — you never analyze the codebase or write plans directly. Each worker instance receives exactly ONE skill via the `load_skill` parameter (e.g. `send_message(..., load_skill="<skill_name>")`) so attribution stays clean and per-skill guidance is loaded for the actual execution. Your own `planning-strategy` skill is for your planning only; never embed it in a worker dispatch.
 

@@ -139,8 +139,8 @@ sub-check failing is a candidate finding (severity depends on the impact).
 
 ## Language-Specific Traps
 
-These are migrated from `agents/tidier/memory.md` (v1) and apply to the
-matching language. Watch for these in addition to the general checks above.
+These language traps apply to the matching language. Watch for these in
+addition to the general checks above.
 
 ### Python
 

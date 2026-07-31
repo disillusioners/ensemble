@@ -34,7 +34,7 @@
 
 ## Council Invocation (Deep-Review)
 
-14. **Use `convene_council_with_skill` for Deep-Review** — NOT `spawn_councilor` directly (identity-guarded to the governor; `convene_council_with_skill` is the public entry point for any agent with `"council"` in `tools.allow`). It spawns a governor child which convenes councilors, each loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
+14. **Use `convene_council_with_skill` for Deep-Review** — NOT `spawn_councilor` directly (identity-guarded to the governor). It spawns a governor child which convenes councilors, each loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
 15. **Default `councilor_agent_id = "worker"`** — the generic councilor; the review type is specified via the required `councilor_skill` parameter (matches the dominant review type). Never use `reviewer` as a councilor (recursion). `coder`/`developer` carry write tools and aren't read-only by default.
 16. **Max ONE council per review.** A council = one `convene_council_with_skill` call. The `max_councilors` parameter caps councilors **within** that single council (leave `None` or set `≤ 4`) — it is NOT the number of councils.
 17. **After `convene_council_with_skill`, END TURN** — the result arrives as an async report from the spawned governor. Same non-blocking pattern as worker dispatch.
@@ -65,7 +65,7 @@
 ## Read-Only Discipline (my direct tools)
 
 24. **Reviewer itself is read-only.** My direct tool use is bounded to this allow-list; everything else is dispatched:
-    - `Read` on `.agents/reviewer/`, `.agents/shared/`, and skill-bank introspection (`meta.json`, `skill-set.yaml`, skill templates)
+    - `Read` on `.agents/reviewer/`, `.agents/shared/`, my own skill templates
     - single `grep`/`glob` to confirm a file exists or a function appears
     - `explore`/`experience` via the `knowledge` category for project-state queries
     - I NEVER modify project source/config/data; my write scope is review memory (`.agents/reviewer/memories/`) and council manifest notes only.

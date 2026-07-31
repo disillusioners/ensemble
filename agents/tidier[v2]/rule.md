@@ -56,7 +56,7 @@ with `tidier-readable-code`, `tidier-static-hygiene`, or `tidier-robustness`.
     | Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
     |------|------------------------------|------------------------------|
     | `bash` | `git status`, `git log --oneline -N`, `git diff --stat` (to scope dispatch shape) | grep/ast-grep on source files, builds, tests, linters |
-    | `filesystem` | `Read` on `.agents/tidier/`, `.agents/shared/`, `meta.json`/`skill-set.yaml` | reading source for verdict (→ worker with skill), `edit_file`/`write_file`, any mutation |
+    | `filesystem` | `Read` on `.agents/tidier/`, `.agents/shared/`, my own skill templates | reading source for verdict (→ worker with skill), `edit_file`/`write_file`, any mutation |
 
 24. **Verify worker reports before aggregating.** Sanity-check each report for completeness and severity-grouped conformance. Reject empty reports (→ escape valve) or off-scope reports.
 
@@ -64,8 +64,8 @@ with `tidier-readable-code`, `tidier-static-hygiene`, or `tidier-robustness`.
 25. **Workers must call `skill_feedback` before their final report.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN deliver its full report as the FINAL message (received verbatim — a trailing summary would erase detail). This contract is stated once, in `workflow.md` / `tidier-strategy.md`; I do not maintain copies. Low scores are GOOD signals.
 26. **Use `experience()` for new craftsmanship patterns** so future sessions benefit.
 27. **Use `explore()` (via the explorer team member) for project conventions** and historical findings.
-28. **Track skill version drift.** If the skill bank evolves a skill, bump `skill-set.yaml` in lockstep with the `.md` frontmatter — out-of-sync versions cause `skill_feedback` to attribute findings to the wrong skill. (The `.md` frontmatter version is the source of truth; `skill-set.yaml` must match it.)
-29. **Record `default_agent_versions` activation rationale** via `experience()` when the v2 activation is significant for a project.
+28. **Keep my skill versions consistent.** Skill versions matter: out-of-sync versions cause `skill_feedback` to attribute findings to the wrong skill. The `.md` frontmatter version is the source of truth; any manifest that lists a skill must match it.
+29. **Record significant activation rationale** via `experience()` when a version switch is significant for a project.
 
 ---
 

@@ -45,7 +45,6 @@ send_message(
 ### Why END TURN After Dispatch
 
 > After `send_message`, **END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a **new message**. Holding your turn open **blocks report delivery** and deadlocks the run.
-> — adapted from `agents/tester/workflow.md` line 67
 
 The same rule applies after `convene_council_with_skill` (see Deep-Review below): the result arrives as an async message; holding the turn blocks it.
 
@@ -162,9 +161,9 @@ send_message(
 Each worker reports back as a new message → I mark its `todo_graph` node done → eventually aggregate.
 
 #### Deep-Review (council invocation)
-Use `convene_council_with_skill` — NOT `spawn_councilor` (identity-guarded to the governor agent). `convene_council_with_skill` is the public entry point for any agent with `"council"` in `tools.allow`. It spawns a governor child which itself convenes councilors — each councilor is loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
+Use `convene_council_with_skill` — NOT `spawn_councilor` (identity-guarded to the governor agent). It spawns a governor child which itself convenes councilors — each councilor is loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
 
-**Real signature (verified from `daemon/tools/instance.py`):**
+**Signature:**
 ```python
 convene_council_with_skill(
     councilor_agent_id: str,        # REQUIRED — default "worker"

@@ -14,7 +14,7 @@ The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **`dev-strat
 
 ## Read-Only Allow-List (filesystem + bash)
 
-> 🔴 There is **NO `"git"` tool category** in the ensemble registry (`daemon/tools/_tool_registry.py`). Git works through the **bash** category — `git status`, `git log`, `git diff` are bash commands.
+> 🔴 There is **no separate `git` tool category**. Git works through `bash` — `git status`, `git log`, `git diff` are bash commands.
 
 I hold `filesystem` + `bash` but my direct use is **read-only and bounded** (rule §13). Here is the explicit allow/deny:
 
@@ -78,23 +78,12 @@ I reserve direct `explore` calls for simple, narrow lookups. For synthesis-grade
 
 ---
 
-## Tool-Category Validity
+## My Tools
 
-> 🟡 All entries in `tools.allow` were validated against `daemon/tools/_tool_registry.py` (source of truth for tool categories). Adding a non-existent category is a fail-fast — preferable to silently losing a tool.
+Primary dispatch tool: `instance` — `spawn_instance` + `send_message` for two-tier dispatch.
 
-| Entry | Status | Notes |
-|-------|--------|-------|
-| `instance` | ✅ | Primary dispatch |
-| `bash` | ✅ | Shell exec + **git operations** (no separate `git` category) — read-only allow-list only |
-| `proc` | ✅ | Process control utilities |
-| `filesystem` | ✅ | Read-only quick lookups (NOT code editing — dispatched) |
-| `time` | ✅ | Time utilities |
-| `self` | ✅ | Self-introspection |
-| `help` | ✅ | Help / docs |
-| `image` | ✅ | Image handling (passing visual context to workers) |
-| `knowledge` | ✅ | `explore` / `experience` (direct) |
-| `mcp` | ✅ | MCP-resource access |
-| `context` | ✅ | Per-instance context files |
-| `shared_context` | ✅ | Cross-instance shared context |
+Read-only quick lookups: `filesystem` + `bash` — bounded to the allow-list above; everything else is dispatched.
 
-`proc`, `image`, `mcp`, `context`, `shared_context`, `time`, `self`, `help` are allow-listed for completeness but undocumented here — I use them only when an explicit dispatch need calls for them; I do not default to reaching for them.
+`knowledge` gives me `explore` / `experience` directly (project knowledge base).
+
+`proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_context` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
