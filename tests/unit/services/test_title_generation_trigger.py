@@ -540,6 +540,133 @@ class TestTitleGenerationIdempotency:
             assert call_args[0][0] == "instance-123"  # instance_id
             assert "Test Title" in call_args[0][1]  # title
 
+    @pytest.mark.asyncio
+    async def test_title_service_dedups_concurrent_calls(self):
+        """Verify two concurrent calls for same instance deduplicate to ONE LLM call.
+
+        Covers the TOCTOU race between two fire-and-forget trigger paths
+        (enqueue + completion). Without the in-flight guard, both coroutines
+        would pass the DB idempotency check (title not yet written), both
+        invoke the LLM, and both call update_title — wasting tokens and
+        potentially overwriting each other.
+        """
+        from daemon.services.title_generation import TitleGenerationService
+
+        mock_manager = MagicMock()
+        mock_meta = MagicMock()
+        # No title yet — both calls pass the DB idempotency check.
+        mock_meta.instance_metadata = {}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_meta)
+        mock_manager._instance_repository.update_title = MagicMock()
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm.base_url = "https://api.openai.com/v1"
+        mock_manager.config.llm.api_key = "test-key"
+        mock_manager.config.llm.model = "gpt-4"
+        mock_manager.config.llm.model_title = "gpt-4"
+
+        service = TitleGenerationService(manager=mock_manager)
+
+        mock_response = MagicMock()
+        mock_response.content = "Test Title"
+        mock_llm = MagicMock()
+        mock_llm.invoke = MagicMock(return_value=mock_response)
+
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
+            # Two concurrent calls for the SAME instance — simulates the race
+            # between instance_messaging.enqueue and child_reports.completion.
+            await asyncio.gather(
+                service._generate_and_broadcast_title(
+                    "instance-123", "Some message content"
+                ),
+                service._generate_and_broadcast_title(
+                    "instance-123", "Some message content"
+                ),
+            )
+
+            # Only ONE LLM call should have happened.
+            mock_llm.invoke.assert_called_once()
+            # Only ONE update_title should have happened.
+            mock_manager._instance_repository.update_title.assert_called_once()
+            # In-flight set must be empty after both calls complete.
+            assert "instance-123" not in service._generating_instances
+            assert len(service._generating_instances) == 0
+
+    @pytest.mark.asyncio
+    async def test_title_service_clears_in_flight_set_on_success(self):
+        """Verify in-flight set is cleared after successful generation.
+
+        Without cleanup, a subsequent trigger (e.g., on second message) would
+        see the stale entry and skip generation — silently dropping titles.
+        """
+        from daemon.services.title_generation import TitleGenerationService
+
+        mock_manager = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.instance_metadata = {}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_meta)
+        mock_manager._instance_repository.update_title = MagicMock()
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm.base_url = "https://api.openai.com/v1"
+        mock_manager.config.llm.api_key = "test-key"
+        mock_manager.config.llm.model = "gpt-4"
+        mock_manager.config.llm.model_title = "gpt-4"
+
+        service = TitleGenerationService(manager=mock_manager)
+
+        mock_response = MagicMock()
+        mock_response.content = "Test Title"
+        mock_llm = MagicMock()
+        mock_llm.invoke = MagicMock(return_value=mock_response)
+
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
+            await service._generate_and_broadcast_title(
+                "instance-123", "Some message content"
+            )
+
+            # In-flight set must be empty so future triggers can run.
+            assert "instance-123" not in service._generating_instances
+            assert len(service._generating_instances) == 0
+
+    @pytest.mark.asyncio
+    async def test_title_service_clears_in_flight_set_on_llm_error(self):
+        """Verify in-flight set is cleared after LLM error so future triggers can retry.
+
+        The title generation contract is best-effort — failures must NOT leave
+        the instance permanently locked out of future title attempts. The
+        finally block ensures cleanup even when the inner try/except catches
+        the exception.
+        """
+        from daemon.services.title_generation import TitleGenerationService
+
+        mock_manager = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.instance_metadata = {}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_meta)
+        mock_manager._instance_repository.update_title = MagicMock()
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm.base_url = "https://api.openai.com/v1"
+        mock_manager.config.llm.api_key = "test-key"
+        mock_manager.config.llm.model = "gpt-4"
+        mock_manager.config.llm.model_title = "gpt-4"
+
+        service = TitleGenerationService(manager=mock_manager)
+
+        # LLM raises — inner try/except must catch, finally must still run.
+        mock_llm = MagicMock()
+        mock_llm.invoke = MagicMock(side_effect=RuntimeError("LLM API error"))
+
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
+            # Should NOT raise — error is caught and logged.
+            await service._generate_and_broadcast_title(
+                "instance-123", "Some message content"
+            )
+
+            # In-flight set must be empty so a future trigger can retry.
+            assert "instance-123" not in service._generating_instances
+            assert len(service._generating_instances) == 0
+            # update_title must NOT have been called.
+            mock_manager._instance_repository.update_title.assert_not_called()
+
 
 # ─── Test Group E: Fire-and-forget verification ─────────────────────────────────
 
