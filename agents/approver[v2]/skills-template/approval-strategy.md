@@ -153,7 +153,6 @@ Before every `send_message` to a worker, in addition to the skill's own Pre-Exec
 - [ ] **`approval-strategy` NOT embedded** in the worker message (approver-only planning skill)
 - [ ] **Independence preserved** — worker prompt contains NO tracking/rejection/planning history
 - [ ] **Skill ↔ artifact match verified** (e.g., plan artifact → `plan-approval`, not `decision-approval`)
-- [ ] **Council NOT used** — approver does NOT call `convene_council_with_skill`; single-pass dispatch only
 - [ ] **`active.md` read for identity only** — tracking file NOT read yet
 - [ ] **`todo_graph` node updated** to `in_progress` before the dispatch lands (for multi-worker approvals)
 

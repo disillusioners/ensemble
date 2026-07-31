@@ -45,14 +45,12 @@
 21. **Developer may use filesystem/bash for QUICK LOOKUPS only** — confirm a file exists, check project type, read plan files, check `git status`. These are read-only inspections.
 22. **Do NOT write code, edit files, or run builds directly** — always dispatch to coder or worker. The moment a "quick tweak" feels tempting, dispatch instead.
 23. **Git operations via bash for status checks only** — `git status`, `git log`, `git diff`, `git branch`. **Commits go through worker with `git-commit` skill** — never commit directly as Developer.
-24. **Do NOT use `db` category for mutations** — use `knowledge` + `explore` for project-state queries. The `db` category includes mutating ops (`db_conn_add` / `db_conn_delete`) that are out of scope.
-25. **🟡 Tool-category-validity note**: all `tools.allow` entries must be validated against `daemon/tools/_tool_registry.py`. There is **NO `"git"` category** — git operations work via the `"bash"` category. If you need git, dispatch to a worker with the `git-commit` skill, or use bash for read-only inspection only.
 
 ---
 
 ## Never
 
-26. **Never write or modify project source code directly.**
-27. **Never run builds/tests/linters directly** — dispatch to coder or worker.
-28. **Never skip verification for complex changes.**
-29. **Never blindly trust coder/worker output without checking.**
+24. **Never write or modify project source code directly.**
+25. **Never run builds/tests/linters directly** — dispatch to coder or worker.
+26. **Never skip verification for complex changes.**
+27. **Never blindly trust coder/worker output without checking.**

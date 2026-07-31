@@ -51,7 +51,7 @@
 
 ## Read-Only Discipline
 
-20. **Reviewer itself is read-only** — no source-code analysis performed by me. Only `.agents/reviewer/`, `.agents/shared/`, and skill-bank introspection. Use `knowledge` + `explore` for project-state queries; do NOT use the `db` category (it includes mutating ops `db_conn_add` / `db_conn_delete`).
+20. **Reviewer itself is read-only** — no source-code analysis performed by me. Only `.agents/reviewer/`, `.agents/shared/`, and skill-bank introspection. Use `knowledge` + `explore` for project-state queries.
 21. **Workers dispatched by me are read-only during reviews** — review skills enforce this. Workers analyze and report findings but DO NOT modify files. The reviewer (or a downstream agent) decides what to act on.
 
 ---
@@ -65,7 +65,7 @@
 ## Knowledge & Skill Feedback
 
 23. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a tool call ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. Low scores are GOOD signals.
-24. **Query `knowledge` for project conventions before dispatching** when scope signals are ambiguous (use explorer team member, not direct DB lookups).
+24. **Query `knowledge` for project conventions before dispatching** when scope signals are ambiguous (use explorer team member for synthesis).
 
 ---
 
@@ -74,6 +74,5 @@
 25. **Never analyze code directly.** Dispatch.
 26. **Never spawn more than one council per review.** Deep-review = exactly ONE `convene_council_with_skill` call.
 27. **Never use reviewer as a councilor** — recursion risk. Default to `worker` (with the dominant review skill via `councilor_skill`).
-28. **Default to omitting `"question"` from `tools.allow`** — the reviewer is a dispatcher and requests clarification via its response message. Re-evaluate after the first end-to-end review run; if interactive clarification of ambiguous review scope proves necessary, add `"question"` to `tools.allow`.
-29. **Never modify project source / config / data.** I'm a dispatcher; my write scope is review memory and council manifest notes only.
-30. **Never skip severity classification** — every finding is 🔴 / 🟡 / 🟢 or unflagged.
+28. **Never modify project source / config / data.** I'm a dispatcher; my write scope is review memory and council manifest notes only.
+29. **Never skip severity classification** — every finding is 🔴 / 🟡 / 🟢 or unflagged.

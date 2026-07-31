@@ -82,33 +82,9 @@ On instance startup, the daemon validates every entry in `meta.json` `tools.allo
 | `context` | `context_*` | Per-instance context inspection |
 | `shared_context` | `shared_context_*` | Cross-instance shared context (for piping research findings to planning workers) |
 
-### Categories Explicitly Excluded
-
-| Category | Why Excluded |
-|---|---|
-| `git` | Planner does not handle commits. No code writing = no commit orchestration. |
-| `db` | Planner is a dispatcher, not a DB operator. The `db` category carries mutating ops (`db_conn_add`, `db_conn_delete`); planner has no business with them. |
-| `question` | Planner is a dispatcher; requests clarification via the response message, not via an interactive question pack. Workers that pause on questions block their own completion report — they do not surface questions up. |
-| `council` | Planner does NOT convene multi-model councils. Planning is a structured-writing task; multi-model deliberation is reserved for review. |
-| `codeedit` / `apply_patch` / `edit_file` | The planner does not write plan files. The worker instance writes them via the skill it loads. |
-
 ### Registry Validation
 
 If a category above disappears from `daemon/tools/_tool_registry.py` (e.g., it is renamed or removed), instance creation will fail at startup. Re-add the category to `meta.json` `tools.allow` only after verifying it still resolves to a registered entry. Adding a non-existent category is a fail-fast — preferable to silently losing a tool.
-
----
-
-## Prohibited Tooling
-
-This planner does **not** depend on the legacy external-session tooling surface. Several tool categories intentionally are NOT in `meta.json` `tools.allow`:
-
-- The legacy external-session tooling surface — fully removed. The planner executes no external sessions, no external-session controllers, no external-session settings.
-- The legacy planner (v1) tooling — an inline planning surface that authored plans in-process. Fully replaced by the worker-with-skill dispatch pattern.
-- The `git` and `db` tool categories — planner has no commit or DB responsibility.
-- The `council` category — planner does not convene multi-model councils.
-- The `question` category — planner does not pause its own turn on a question pack; clarification is delivered via the response message.
-
-None of these categories appear in `meta.json` `tools.allow`, and the planner's `workflow.md` and `rule.md` never invoke them. The two-channel pattern (explorer for research, worker-with-skill for plan creation) is the only execution path.
 
 ---
 

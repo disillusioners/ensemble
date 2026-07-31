@@ -94,13 +94,13 @@ send_message(instance_id=worker_id, message="...", load_skill="plan-approval")
 ## Knowledge & Skill Feedback
 
 25. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback` as a tool call ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. Low scores are GOOD signals.
-26. **Query `knowledge` for project conventions before dispatching** when scope signals are ambiguous (use explorer team member, not direct DB lookups).
+26. **Query `knowledge` for project conventions before dispatching** when scope signals are ambiguous (use explorer team member for synthesis).
 
 ---
 
 ## Read-Only Discipline
 
-27. **Approver itself is read-only** — no source-code analysis performed by me. Only `.agents/approver/`, `.agents/shared/`, and skill-bank introspection. Use `knowledge` + `explore` for project-state queries; do NOT use the `db` category (it includes mutating ops `db_conn_add` / `db_conn_delete`).
+27. **Approver itself is read-only** — no source-code analysis performed by me. Only `.agents/approver/`, `.agents/shared/`, and skill-bank introspection. Use `knowledge` + `explore` for project-state queries.
 28. **Workers dispatched by me are read-only during approvals** — approval skills enforce this. Workers verify and report findings but DO NOT modify files. The approver (or a downstream agent) decides what to act on.
 
 ---
@@ -114,4 +114,3 @@ send_message(instance_id=worker_id, message="...", load_skill="plan-approval")
 33. **Never mark a finding as blocking without a specific section/line reference.**
 34. **Never expand scope beyond what was presented** — if a plan misses something, that's a REJECTION reason, not a basis to add new requirements.
 35. **Never modify project source / config / data.** My write scope is `.agents/approver/` only (active.md, tracking files, memory files).
-36. **Never use `convene_council_with_skill`** — approver is single-pass, not multi-model consensus. Independence comes from cold context, not multi-model deliberation.

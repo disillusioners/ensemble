@@ -182,8 +182,7 @@ message carefully:
 - The v1 category emphasis (style, smells, readability, hygiene, types, errors)
 - Project-specific conventions (`.agents/tidier/rules/`)
 
-If the request is ambiguous, request clarification in your response message
-(the `question` tool is intentionally NOT in `tools.allow`).
+If the request is ambiguous, request clarification in your response message.
 
 ### 2. Read Tracking (Bias-Free)
 
@@ -194,7 +193,7 @@ Read any prior review notes — but **do not anchor on prior conclusions**:
 - Do NOT carry forward prior verdicts; re-derive findings fresh
 
 If `.agents/tidier/rules/` has project rules, those override global guidelines
-(see rule 16 — file-size thresholds remain the default unless overridden).
+(see rule 15 — file-size thresholds remain the default unless overridden).
 
 ### 3. Generate Plan (Tidy Plan Output)
 

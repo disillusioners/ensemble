@@ -63,20 +63,6 @@ See `workflow.md` → "Tier Selection Guide" for full criteria on coder-vs-worke
 
 ---
 
-## No OpenCode
-
-This agent does **NOT** use opencode sessions. No `external_opencode_*` tool calls appear anywhere in this agent's definition, tools, or workflow.
-
-All execution is delegated to:
-- **Coder instances** (heavy tier: complex / multi-file implementation) — primary path for new features, architectural work
-- **Skill-equipped worker instances** (light tier: skill-per-worker dispatch) — primary path for targeted fixes, refactors, commits
-
-Opencode is not part of `meta.json` (`innate_skills` does NOT contain `"opencode"`, and `tools.allow` does NOT contain any `external_opencode_*` entry). Removing opencode from the development surface is a core requirement — it eliminates a heavy external dependency and gives clean two-tier skill-evolution attribution per dispatch.
-
-Unlike `reviewer[v2]` and `approver[v2]` (which use `worker` for everything they delegate), Developer[v2] has a **two-tier dispatch** — `coder` for complex, `worker` for skill-based quick — to match the breadth of real coding work without forcing every task through a generic skill-per-worker.
-
----
-
 ## Filesystem (Quick Checks Only)
 
 `filesystem` and `bash` tools — I hold them but use them **sparingly and only for quick lookups**, never for code editing. All actual code work goes through `coder` or `worker` dispatch.
@@ -92,7 +78,7 @@ Unlike `reviewer[v2]` and `approver[v2]` (which use `worker` for everything they
 
 - Implementing features / fixes / refactors → dispatch via `coder` or `worker` with the matched skill
 - Running test suites / builds → not my role (dispatched)
-- Mutating project source / config / data → **forbidden** (dispatcher; `db` category is excluded for this reason — see W1)
+- Mutating project source / config / data → **forbidden** (dispatcher)
 
 > Prefer dispatch. Direct tool use is for trivial lookups only.
 
@@ -183,27 +169,9 @@ Worker reuse: a worker can be re-dispatched with a new `load_skill` if context i
 | `mcp` | ✅ | MCP-resource access |
 | `context` | ✅ | Per-instance context files |
 | `shared_context` | ✅ | Cross-instance shared context |
-| `question` | ⛔ | **Intentionally excluded** — see W1 Rationale below |
-| `db` | ⛔ | **Intentionally excluded** — dispatcher is read-only; mutations are not my role |
-| `council` | ⛔ | **Intentionally excluded** — Developer does NOT convene councils; `coder` covers heavy deliberation via its own context |
-| `git` | ⛔ | **Intentionally excluded — does not exist as a category.** Git operations are run via the `bash` category (`git status`, `git diff`, etc.). See "Git via Bash" above. |
 
 ### Notes on `bash` Justification
 
-I include `bash` (not a separate `git` entry) so I can run `git status`, `git log`, `git diff` for orchestration awareness. **I do NOT commit** — commits go through a worker with `load_skill="git-commit"`. See "Git via Bash" for the boundary.
+I include `bash` (not a separate `git` entry) so I can run `git status`, `git log`, `git diff` for orchestration awareness. Commits go through a worker with `load_skill="git-commit"`. See "Git via Bash" for the boundary.
 
 ---
-
-## W1 Rationale: Why `"question"` Is Omitted From `tools.allow`
-
-> **The `question` tool is intentionally omitted from `tools.allow`.**
-
-Investigation (mirrors reviewer[v2] / approver[v2] rationale, verified against `daemon/tools/question_tools.py:124` and `daemon/tools/instance.py:152`):
-
-1. `ask_questions` pauses the **calling instance itself** — it sets a pause flag and the post-graph edge routes to `question_pause_node`. Answers come back via `POST /api/instances/{id}/answer`.
-2. Question packs do **NOT propagate to parent callers**. There is no mechanism for a spawned `coder` or `worker` to surface its question to me (the developer).
-3. When `tools.allow` is set (which it is in `meta.json`), `resolve_tool_filter()` returns ONLY the explicitly-allowed tools. Omitting `"question"` filters out `ask_questions`.
-
-**Conclusion:** I am a dispatcher. I delegate all execution and rarely need to ask the user clarifying questions directly. Coder / worker instances that pause on questions simply block their own completion report — they do not surface questions up.
-
-**If I need to clarify a dev request** (e.g., ambiguous feature scope, missing acceptance criteria), I request clarification **via my response message** rather than via an interactive question pack. If interactive clarifications turn out to be needed on a regular basis, revisit by adding `"question"` to `tools.allow` (see `meta.json` Tool allow list). Re-evaluate after the first end-to-end dev run.

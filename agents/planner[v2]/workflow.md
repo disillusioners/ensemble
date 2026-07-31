@@ -136,8 +136,6 @@ todo_graph_update(node_id="explore-auth", status="done")
 | No matching skill (general structured writing) | _(none — fallback)_ | omit `load_skill` |
 
 > Select **one** skill per worker based on the dominant planning concern. If a planning task legitimately spans multiple skills (e.g., a roadmap that requires per-initiative requirements analysis), split into multiple workers — each with their own skill. Never bundle multiple skills into a single dispatch.
->
-> **Planners never call `convene_council_with_skill`.** Planning is a structured-writing task; multi-model deliberation is reserved for review.
 
 ---
 

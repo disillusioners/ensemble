@@ -87,7 +87,7 @@ or decision as if encountering it cold. This means:
    - Approval type (`plan-approval` vs `decision-approval`)
    - Instruction to evaluate fresh, on the merits
 
-The approver's job is to **isolate verification from bias** — the approver dispatches independent worker instances that operate on cold context (no multi-model deliberation; approver is single-pass fresh-eyes — see `rule.md` §36).
+The approver's job is to **isolate verification from bias** — the approver dispatches independent worker instances that operate on cold context (single-pass fresh-eyes, not multi-model deliberation).
 
 ---
 

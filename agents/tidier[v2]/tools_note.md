@@ -47,42 +47,6 @@ matches each diff profile.
 
 ---
 
-## NO COUNCIL (Tidier Does Not Convene Councils)
-
-**Tidier does NOT use `convene_council_with_skill` or any governor-council
-pathway.** Tidier is a single-pass craftsmanship reviewer — workers inspect,
-I aggregate, I deliver a severity-grouped report. Independence comes from
-specialized craftsmanship scope, not from multi-model deliberation.
-
-### Why no council for Tidier reviews?
-
-1. **Scope is mechanical, not judgmental.** Tidier's checks (style, smells,
-   readability, hygiene, types, error handling) are largely mechanical — a
-   worker with a focused checklist produces them reliably. Councils add
-   deliberation overhead that does not improve these checks.
-
-2. **Specialized scope, not multi-perspective scope.** The Reviewer agent
-   covers architecture / correctness / security — those benefit from
-   multi-perspective deliberation (councils make sense there). Tidier covers
-   craftsmanship — the scope is narrow enough that one worker per category is
-   sufficient. If a finding is genuinely contested, dispatch a second worker
-   to re-check (not a council).
-
-3. **v1 historical artifact.** The v1 Tidier used `opencode` with optional
-   `council=True` for re-checks. v2 replaces opencode with worker dispatch,
-   where `load_skill="<skill>"` already encodes the focused checklist. The
-   `council=True` parameter is removed entirely.
-
-4. **Reviewer owns councils.** The Reviewer agent (`agents/reviewer[v2]/`)
-   convenes governor councils for deep architectural / security / correctness
-   reviews. Tidier defers cross-scope findings to Reviewer — including the
-   decision to escalate a contested finding to a council.
-
-**Consequence: `tools.allow` does NOT include `"council"`** — see
-`meta.json` Tool allow list. Tidier never invokes council.
-
----
-
 ## Filesystem (Read-Only — Tracking & Quick Checks Only)
 
 `filesystem` and `bash` tools — I hold them but use them **sparingly and only
@@ -140,10 +104,6 @@ for simple, narrow lookups.
 | `worker` | Skill-equipped reviewer (skill-per-worker: `tidier-readable-code` / `tidier-static-hygiene` / `tidier-robustness`) | Default — dispatch for every review |
 | `explorer` | Knowledge-base retrieval | Project conventions, prior review history, RAG lookup |
 
-> Tidier does **NOT** have `governor` as a team member because Tidier does not
-> convene councils. If a finding needs council-level deliberation, defer it to
-> the Reviewer agent (which DOES have `governor`).
-
 Worker reuse: a worker can be re-dispatched with a new `load_skill` if context
 is still relevant (follow-up review on the same diff). Otherwise spawn fresh.
 
@@ -162,59 +122,3 @@ is still relevant (follow-up review on the same diff). Otherwise spawn fresh.
 - **dynamic-skill** — `skill_search`, `skill_view`, `skill_feedback`; lets me
   reflect on / suggest improvements to the craftsmanship skills themselves
 
-> `opencode` is **NOT** in `innate_skills`. Tidier v2 dispatches workers, not
-> opencode sessions. See **NO OPENCODE** below.
-
----
-
-## W1 Rationale: Why `"question"` Is Omitted From `tools.allow`
-
-> **The `question` tool is intentionally omitted from `tools.allow`.**
-
-Investigation (mirrors the approver[v2] rationale):
-
-1. `ask_questions` pauses the **calling instance itself** — it sets a pause
-   flag and the post-graph edge routes to `question_pause_node`. Answers come
-   back via `POST /api/instances/{id}/answer`.
-2. Question packs do **NOT propagate to parent callers**. There is no
-   mechanism for a spawned worker to surface its question back to me (the
-   Tidier dispatcher).
-3. When `tools.allow` is set (which it is in `meta.json`), `resolve_tool_filter()`
-   returns ONLY the explicitly-allowed tools. Omitting `"question"` filters out
-   `ask_questions`.
-
-**Conclusion:** I am a dispatcher. I delegate all evaluation to workers and
-rarely need to ask the user clarifying questions directly. Workers that pause
-on questions simply block their own completion report — they do not surface
-questions up.
-
-**If I need to clarify a review request** (e.g., ambiguous diff scope), I
-request clarification **via my response message** rather than via an interactive
-question pack. The Reviewer boundary is preserved by dispatching with whatever
-artifact was provided — if it is insufficient, the worker will surface that as
-a finding.
-
----
-
-## NO OPENCODE
-
-This agent does **NOT** use opencode sessions. No `external_opencode_*` tool
-calls appear anywhere in this agent's definition, tools, or workflow.
-
-All craftsmanship review is delegated to:
-- **Skill-equipped worker instances** — primary path, `load_skill`-attributed
-  (one of `tidier-readable-code`, `tidier-static-hygiene`, `tidier-robustness`)
-
-Opencode is not part of `meta.json`:
-- `innate_skills` does **NOT** contain `"opencode"` (the v1 list of
-  `["opencode", "chart", "todo"]` is replaced by `["todo", "chart",
-  "dynamic-skill"]` in v2)
-- `tools.allow` does **NOT** contain any `external_opencode_*` entry
-
-Removing opencode from the craftsmanship-review surface is a core requirement
-of v2 — it eliminates a heavy external dependency and gives clean
-skill-evolution attribution per worker dispatch.
-
-The v1 `council=True` parameter on `external_opencode_send_message` is
-entirely removed; the v2 single-dispatch model does not use multi-model
-deliberation.

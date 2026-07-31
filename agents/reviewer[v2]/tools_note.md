@@ -110,7 +110,7 @@ convene_council_with_skill(
 
 - Reviewing actual code → dispatch a worker with `load_skill="code-review"` (etc.)
 - Running test suites / builds → not my role
-- Mutating project source / config / data → **forbidden** (read-only dispatcher; `db` category is excluded for this reason — see W2)
+- Mutating project source / config / data → **forbidden** (read-only dispatcher)
 
 > Prefer worker dispatch. Direct tool use is for trivial lookups only.
 
@@ -148,31 +148,3 @@ Worker reuse: a worker can be re-dispatched with a new `load_skill` if context i
 - **todo** — task tracking; critical for **W3 fan-in** (`todo_graph_create` → `todo_graph_update` → `todo_view`) when dispatching 2+ parallel workers
 - **chart** — diagram generation for architecture reviews (sequence diagrams, component boundaries, dependency graphs)
 - **dynamic-skill** — `skill_search`, `skill_view`, `skill_feedback`; lets me reflect on / suggest improvements to the review skills themselves
-
----
-
-## W1 Rationale: Why `"question"` Is Omitted From `tools.allow`
-
-> **The `question` tool is intentionally omitted from `tools.allow`.**
-
-Investigation (verified against `daemon/tools/question_tools.py:124` and `daemon/tools/instance.py:152`):
-
-1. `ask_questions` pauses the **calling instance itself** — it sets a pause flag and the post-graph edge routes to `question_pause_node`. Answers come back via `POST /api/instances/{id}/answer`.
-2. Question packs do **NOT propagate to parent callers**. There is no mechanism for a spawned governor or worker to surface its question to me (the reviewer).
-3. When `tools.allow` is set (which it is in `meta.json`), `resolve_tool_filter()` returns ONLY the explicitly-allowed tools. Omitting `"question"` filters out `ask_questions`.
-
-**Conclusion:** I am a dispatcher. I delegate all analysis and rarely need to ask the user clarifying questions directly. Workers / council members that pause on questions simply block their own completion report — they do not surface questions up.
-
-**If I need to clarify a review request** (e.g., ambiguous scope), I request clarification **via my response message** rather than via an interactive question pack. If interactive clarifications turn out to be needed on a regular basis, revisit by adding `"question"` to `tools.allow` (see `meta.json` Tool allow list). Re-evaluate after the first end-to-end review run.
-
----
-
-## NO OPENCODE
-
-This agent does **NOT** use opencode sessions. No `external_opencode_*` tool calls appear anywhere in this agent's definition, tools, or workflow.
-
-All analysis is delegated to:
-- **Skill-equipped worker instances** (standard reviews) — primary path, `load_skill`-attributed
-- **Governor council via `convene_council_with_skill`** (deep reviews)
-
-Opencode is not part of `meta.json` (`innate_skills` does not contain `"opencode"`, and `tools.allow` does not contain any `external_opencode_*` entry). Removing opencode from the review surface is a core requirement — it eliminates a heavy external dependency and gives clean skill-evolution attribution per worker dispatch.
