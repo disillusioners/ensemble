@@ -1169,36 +1169,43 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
     v2 governor as ``team_members=['reviewer']``, but the closure
     hard-codes the authorization target as ``"governor"`` (the agent
     it spawns). We therefore reconcile by setting
-    ``v2_meta.team_members=['governor']`` so the closure's actual gate
-    passes; this still faithfully exercises
-    ``get_version('governor', 'v2')`` (the central C1 contract) and
-    proves the v2 membership gate is consulted end-to-end. We also
-    do NOT patch ``_check_team_membership`` — the closure threads
-    ``caller_version_tag`` into the real helper.
+    ``v2_meta.team_members=['governor', 'developer']`` so the closure's
+    actual CALLER gate passes AND the councilor-vs-governor guard (which
+    checks ``'developer'`` against the governor's team) also passes.
+    This still faithfully exercises ``get_version('governor', 'v2')``
+    (the central C1 contract) and proves the v2 membership gate is
+    consulted end-to-end. We also do NOT patch ``_check_team_membership``
+    — the closure threads ``caller_version_tag`` into the real helper.
     """
 
     async def test_v2_governor_team_members_authorize_convene_council(self):
-        """v2 ``governor.team_members=['governor']``; base ``team_members=[]``.
+        """v2 ``governor.team_members=['governor','developer']``; base ``team_members=[]``.
 
         Closure path:
-          * ``convene_council(...)`` → authorization passes (v2 policy
-            includes 'governor'), ``manager.spawn_instance`` is called
-            with ``agent_id='governor'``.
+          * ``convene_council(...)`` → the CALLER authorization gate
+            (``_check_team_membership(caller, 'governor', caller_version_tag)``)
+            consults the v2 meta and passes, AND the councilor-vs-governor
+            guard (``_check_team_membership('governor', canonical,
+            gov_version_tag)``) also consults the v2 meta and passes —
+            ``manager.spawn_instance`` is called with ``agent_id='governor'``.
 
-        Without the version-tag fix, the closure would consult the base
-        empty ``team_members`` and ``_check_team_membership`` would
-        reject with the standard "not allowed to spawn 'governor'"
-        denial — and the closure would raise ``ValueError`` before
-        reaching ``manager.spawn_instance``.
+        The spawned governor's version is the per-project default resolved by
+        ``_resolve_default_version_tag``; this stub returns ``'v2'`` so the
+        councilor guard consults the v2 governor meta (which lists
+        ``developer``), not the deliberately-empty base meta. Base stays
+        empty so a regression in the CALLER gate (silently dropping to base)
+        would still reject (``'governor'`` ∉ ``[]``) and fail the test.
         """
         from daemon.tools.instance import create_instance_tools
 
         # Registry: base has empty team_members; v2 includes 'governor'
-        # (reconciled with the closure's hard-coded target).
+        # (reconciled with the closure's hard-coded target) AND 'developer'
+        # (the canonical councilor_agent_id the test invokes, required by the
+        # closure's councilor-vs-governor team-membership guard).
         # ``resolve_pure_id`` is identity so 'governor' canonicalizes to
         # itself.
         base_meta = _make_meta("governor", team_members=[])
-        v2_meta = _make_meta("governor", team_members=["governor"])
+        v2_meta = _make_meta("governor", team_members=["governor", "developer"])
         registry = _make_registry_with_versions(
             base_meta=base_meta, versioned_meta=v2_meta,
         )
@@ -1250,6 +1257,12 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
             patch("daemon.tools.instance.scan_tools_for_full_docs"),
             patch("daemon.tools.instance._apply_tool_filter",
                   side_effect=_noop_filter),
+            # Stub the per-project default-version resolver so the spawned
+            # governor is v2 (matching the registry's versioned meta). This
+            # makes the councilor-vs-governor guard consult the v2 governor
+            # meta, which lists 'developer'.
+            patch("daemon.tools.instance._resolve_default_version_tag",
+                  new=AsyncMock(return_value="v2")),
         ]
 
         # Build and invoke the real convene_council tool with version_tag='v2'.
@@ -1311,7 +1324,7 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
             agent_id="governor",
             parent_id="parent-iid",
             instance_name=None,
-            version_tag=None,
+            version_tag="v2",
         )
         # enqueue_message was awaited with the governor's id.
         manager.enqueue_message.assert_awaited_once()

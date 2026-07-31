@@ -43,6 +43,13 @@ Before doing anything else, validate the inputs.
 
 If any validation fails, STOP. Do not proceed to Step 0.5. Do not persist a manifest.
 
+**Clarifying questions — complete-to-ask (NEVER pause):** The governor has no direct human channel — its parent is another agent (reviewer/developer/etc.), and there is no `ask_questions` tool. When a validation input is invalid or ambiguous, do NOT attempt to pause or wait. Instead **END YOUR TURN / complete** with a self-contained clarifying question addressed to the requester in your final message. Your final message is what the system wraps into a completion report and delivers to the parent, which then revives you with the answer.
+
+Constraints on the complete-to-ask flow:
+- **Self-contained echo (compaction-safe):** the final message must include the failing field, the constraint it violated, and the list of valid options. After you revive on the requester's reply, your prior turn's AIMessage may have been compacted away — the echo lets you self-justify re-validation from the reply context alone.
+- **Ask only at Step 0** — before Step 0.5 (manifest) and before any councilor spawn. A revived governor must have no orphaned councilors to reconcile and no in-flight completion reports to race against. Never ask mid-council.
+- On revival (a new HumanMessage containing the requester's answer), **re-run Step 0 validation** with the corrected input. If valid, proceed to Step 0.5. If still invalid, complete again with a refined question.
+
 **Minimum council size warning:** If fewer than 2 distinct canonical models are available, warn the requester before proceeding. The requester may explicitly choose to proceed; the resulting output will be degraded.
 
 ---

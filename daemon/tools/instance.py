@@ -1124,6 +1124,22 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             manager._project_repository, "governor", registry
         )
 
+        # ── Councilor team-membership guard (defense-in-depth) ───────────
+        # ``convene_council`` validates the councilor only against the agent
+        # registry above, but the governor later spawns councilors via
+        # ``spawn_councilor`` which enforces ``_check_team_membership(
+        # "governor", councilor_id)``. Without this symmetric check here, a
+        # councilor that is valid in the registry but NOT in the governor's
+        # ``team_members`` passes the convene layer and fails only deep
+        # inside the governor — where the LLM may mishandle the runtime
+        # rejection (see the ask_questions-pause incident). Fail fast at the
+        # caller instead. Symmetric to ``spawn_councilor`` 's STEP 2 check.
+        councilor_membership_error = _check_team_membership(
+            "governor", canonical, gov_version_tag
+        )
+        if councilor_membership_error is not None:
+            raise ValueError(councilor_membership_error)
+
         # No W1 identity guard: any caller authorized by team_members may convene.
         gov_instance_id, _ = manager.spawn_instance(
             agent_id="governor",
@@ -1254,6 +1270,19 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         gov_version_tag = await _resolve_default_version_tag(
             manager._project_repository, "governor", registry
         )
+
+        # ── Councilor team-membership guard (defense-in-depth) ───────────
+        # Same guard as ``convene_council`` above and symmetric to
+        # ``spawn_councilor`` 's STEP 2 check: the councilor must be in the
+        # governor's ``team_members`` (not merely a valid registry id), else
+        # ``spawn_councilor`` rejects it deep inside the governor run where
+        # the LLM may mishandle the runtime rejection. Fail fast at the
+        # caller before spawning the governor.
+        councilor_membership_error = _check_team_membership(
+            "governor", canonical, gov_version_tag
+        )
+        if councilor_membership_error is not None:
+            raise ValueError(councilor_membership_error)
 
         # No W1 identity guard: any caller authorized by team_members may convene.
         gov_instance_id, _ = manager.spawn_instance(

@@ -205,6 +205,12 @@ convene_council_with_skill(
 - Track each finding against the plan's focus areas
 - **Aggregate only when all nodes are done** — `todo_view()` to verify
 
+### 5a. Distinguish a Clarifying-Question Report from a Final Report
+A spawned governor (and, less commonly, a worker) may complete its turn with a **clarifying question** addressed to you instead of a finished result — e.g. an invalid `councilor_agent_id`, an ambiguous request, or a missing input it couldn't resolve. Treat this differently from a final report:
+
+- **Clarifying-question report** (the child's completion message is a question directed at you, not a review result): reply with `send_message(instance_id=<child governor id>, message="<your answer>")`. The child's instance_id is carried in the completion report (`internal_report:<gov_id>:…` source and the report body). Replying **revives the same governor** with its context intact (terminal-revival path) at far lower cost than re-convening, and the governor re-runs its validation with the corrected input then proceeds to spawn councilors. Do NOT spawn a fresh governor for a question the original one can answer.
+- **Final report** (a completed review result / Finding Report): aggregate normally (Step 6). Re-convene only as a fallback when the governor is genuinely done and a fresh council with corrected parameters is preferable.
+
 ### 6. Aggregate & Report
 - Categorize by severity: 🔴 Critical > 🟡 Warning > 🟢 Suggestion
 - Deduplicate (parallel workers / councilors may flag the same issue): keep highest severity + most specific variant

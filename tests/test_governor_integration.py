@@ -265,11 +265,16 @@ class TestGovernorAgentMetadata:
         assert "developer" in data["team_members"], (
             "governor must include 'developer' in team_members (councilor target)"
         )
+        assert "worker" in data["team_members"], (
+            "governor must include 'worker' in team_members (default deep-review "
+            "councilor target — reviewer workflow convenes worker councils)"
+        )
         # D4: max 4 councilors is enforced by the governor workflow, not by
         # the tool — just sanity-check team size is reasonable.
-        assert len(data["team_members"]) <= 6, (
+        assert len(data["team_members"]) <= 7, (
             f"governor team_members too large: {len(data['team_members'])}; "
-            "expected ≤6 (developer, coder, wanderer, explorer, doc-writer, reviewer)"
+            "expected ≤7 (developer, coder, wanderer, explorer, doc-writer, "
+            "reviewer, worker)"
         )
 
     def test_governor_team_members_includes_required_agents(self):

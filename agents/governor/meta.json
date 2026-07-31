@@ -17,7 +17,6 @@
       "self",
       "project",
       "help",
-      "question",
       "shared_context",
       "knowledge",
       "time"
@@ -29,6 +28,7 @@
     "wanderer",
     "explorer",
     "doc-writer",
-    "reviewer"
+    "reviewer",
+    "worker"
   ]
 }
