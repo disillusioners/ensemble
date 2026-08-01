@@ -476,27 +476,15 @@ class TestReportLaneGuard:
         assert claimed.worker_id == "worker-1"
 
     def test_process_message_blocked_by_cross_system_guard(self, engine, task_repo):
-        """PROCESS_MESSAGE with a non-matching message_id IS blocked — guard fires.
-
-        Contrast test for the same setup: the parent's MESSAGE job is
-        PROCESSING with ``metadata.message_id = "msg-user-123"``. A
-        PROCESS_MESSAGE task exists for the same parent with
-        ``message_id = "msg-other-789"`` (does NOT match the job's
-        message_id).
-
-        Invariant: ``claim_pending_task`` MUST return None. This proves
-        the guard is still active for PROCESS_MESSAGE — the bypass is
-        scoped to PROCESS_REPORT only, not all tasks.
-        """
+        """PROCESS_MESSAGE with matching work_id is blocked by the work_id-keyed guard."""
         parent_id = _seed_instance(engine)
-        _seed_job(
+        jid = _seed_job(
             engine,
             instance_id=parent_id,
             status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-123"},
         )
-        # A PROCESS_MESSAGE task with a non-matching message_id (not
-        # the unified-dispatcher admission for the job above).
+        # message_id differs because it is no longer the correlation axis.
         msg_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id=parent_id,
@@ -504,13 +492,17 @@ class TestReportLaneGuard:
         )
         assert msg_task.status == TaskStatus.PENDING.value
 
-        # The cross-system guard MUST block this — the MESSAGE job is
-        # actively PROCESSING and no Task row exists for the matching
-        # message_id (the unified-dispatcher admission carve-out does
-        # not apply).
+        # Align Task.work_id to JobItem.job_id so the new guard fires.
+        with Session(engine) as s:
+            t = s.get(Task, msg_task.id)
+            assert t is not None
+            t.work_id = jid
+            s.commit()
+
+        # Matching work_id to the backing active JobItem fires the guard.
         claimed = task_repo.claim_pending_task(worker_id="worker-1")
         assert claimed is None, (
-            f"PROCESS_MESSAGE with non-matching message_id MUST be blocked "
+            f"PROCESS_MESSAGE with matching work_id MUST be blocked "
             f"by the cross-system guard (got {claimed})"
         )
 
@@ -523,31 +515,21 @@ class TestReportLaneGuard:
     def test_process_message_unblocked_when_message_id_matches(
         self, engine, task_repo
     ):
-        """PROCESS_MESSAGE with matching message_id IS claimed — admission carve-out.
-
-        Third axis of the contract: the unified-dispatcher admission
-        carve-out. A PROCESS_MESSAGE task whose message_id matches the
-        job's metadata.message_id IS claimed (the MESSAGE job is the
-        FIFO placeholder for the admission, not driving graph.astream).
-
-        This pins the ``status IN ('pending', 'running')`` filter on the
-        Task-side carve-out and ensures the bypass for reports does not
-        accidentally extend to all PROCESS_MESSAGE tasks.
-        """
+        """PROCESS_MESSAGE is claimed when work_id does not match an active JobItem."""
         parent_id = _seed_instance(engine)
-        _seed_job(
+        jid = _seed_job(
             engine,
             instance_id=parent_id,
             status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-matching-001"},
         )
-        # PROCESS_MESSAGE task with the SAME message_id as the job —
-        # this is the unified-dispatcher admission signal.
+        # Matching message_id is not a carve-out; work_id is the guard key.
         admitted_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id=parent_id,
             message_id="msg-matching-001",
         )
+        assert admitted_task.work_id != jid
 
         claimed = task_repo.claim_pending_task(worker_id="worker-1")
         assert claimed is not None
