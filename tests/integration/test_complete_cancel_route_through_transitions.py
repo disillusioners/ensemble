@@ -197,9 +197,16 @@ def _seed_running_task_with_all_8_mirrors(
     # 4. job_locks mirror — held lock for this job.
     # Each call gets a unique lock_slot to avoid the
     # (project_id, queue_id, lock_slot) UNIQUE constraint collision
-    # across multiple seeded instances.
+    # across multiple seeded instances. The previous hash()-based
+    # value used only 7 slots, which collided under multi-instance
+    # seed runs (flakiness surfaced in the Inc 4 final regression
+    # pack). The unused _seed_lock_slot computation was the intended
+    # fix — wire it up with a wider random range.
     import os as _os_seed
-    _seed_lock_slot = int(_os_seed.environ.get("PYTEST_HARDWARE_SEED_LOCK_SLOT", "0")) + ord(_os_seed.urandom(1)) % 7
+    _seed_lock_slot = (
+        int(_os_seed.environ.get("PYTEST_HARDWARE_SEED_LOCK_SLOT", "0"))
+        + ((ord(_os_seed.urandom(1)) << 8) | ord(_os_seed.urandom(1)))
+    )
     with Session(engine) as session:
         session.add(
             JobLock(
@@ -207,7 +214,7 @@ def _seed_running_task_with_all_8_mirrors(
                 queue_id="default",
                 job_id=job_id,
                 instance_id=instance_id,
-                lock_slot=hash((instance_id, work_id)) % 7,
+                lock_slot=_seed_lock_slot,
                 acquired_at=now_iso,
             )
         )

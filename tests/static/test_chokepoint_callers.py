@@ -48,7 +48,14 @@ APPENDIX_A_CALL_COUNTS: Counter[tuple[str, str, str]] = Counter(
         ("daemon/services/task_processor.py", "ProcessMessageProcessor._skip_task_as_completed", "complete_task"): 1,
         ("daemon/services/task_processor.py", "ProcessMessageProcessor._build_callbacks.on_success", "complete_task"): 1,
         ("daemon/services/job_queue_service.py", "JobQueueService.cancel_task_by_work_id", "cancel_task"): 1,
-        ("daemon/manager.py", "InstanceManager.resume_processing_job", "cancel_task"): 1,
+        # NOTE: Inc 4 (cced02cc, 2026-08-01) moved the cancel_task call out
+        # of resume_processing_job into the shared helper
+        # _schedule_explicit_handle_resume (the antiphantom-race guard
+        # is identical — same cancel reason, same task, same logical
+        # caller). Direct caller identity is now the helper, not the
+        # public resume_processing_job entry point. Same caller
+        # semantically; documented in the helper's docstring.
+        ("daemon/manager.py", "InstanceManager._schedule_explicit_handle_resume", "cancel_task"): 1,
         ("daemon/manager.py", "InstanceManager._resume_processing_background", "fail_task"): 1,
     }
 )
