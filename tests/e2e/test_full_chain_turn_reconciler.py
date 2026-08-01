@@ -495,12 +495,17 @@ def test_full_chain_claim_process_pause_resume_answer_complete(
     assert handle_after_resume[0] == TaskStatus.CANCELLED.value
     assert handle_after_resume[1] is None
     assert handle_after_resume[2] is None
-    # Selector returns None after consumption (idempotency).
-    assert task_repo.find_paused_or_cancellable_turn(iid) is None, (
-        "After ResumeTurn consumes the handle, the pause-cascade "
-        "selector MUST return None — this is the §11.4.1 idempotency "
-        "invariant for the full chain."
+    # After ResumeTurn consumes the handle, the selector returns the
+    # CANCELLED task (Phase 3 W2: CANCELLED is the resume cascade's
+    # "resumed" marker so the next routing pass can mint a fresh
+    # driver turn). §11.4.1 idempotency: exactly one matching row.
+    post_resume_turn = task_repo.find_paused_or_cancellable_turn(iid)
+    assert post_resume_turn is not None, (
+        "After ResumeTurn, the pause-cascade selector MUST return the "
+        "CANCELLED task (Phase 3 W2 marker) — §11.4.1 idempotency."
     )
+    assert post_resume_turn.work_id == work_id
+    assert post_resume_turn.status == TaskStatus.CANCELLED.value
     _mirror_invariants_hold(engine, work_id=work_id, message_id=mid)
 
     # ─── Step 4: Worker mid-resume emits ask_questions ───────────
