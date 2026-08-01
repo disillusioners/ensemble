@@ -3050,6 +3050,24 @@ class InstanceManager:
           NO-OP on PG. SQLite counterpart lives in
           ``daemon/migrations/versions/20260627_000003_task_is_deferred.sql``.
           See feature/virtual-job-management-surface.
+        - task.suspension_reason and task.resume_target_turn_id
+          (Increment 4 turn-reconciler migration, 2026-08-01): nullable
+          turn-suspension handles. ``suspension_reason`` records one of
+          ``awaiting_answer``, ``awaiting_children``, or
+          ``paused_external``; ``resume_target_turn_id`` stores the
+          authoritative target ``Task.work_id``. Existing PostgreSQL
+          databases receive both columns through the idempotent ALTER
+          statements below, then the composite
+          ``idx_task_resume_target`` index on
+          ``(resume_target_turn_id, suspension_reason)``. The legacy
+          paused-row backfill runs after the columns and index are
+          present, setting ``paused_external`` and ``work_id`` wherever
+          ``status='paused'`` and ``suspension_reason IS NULL``. Fresh
+          databases get the fields and index from
+          ``SQLModel.metadata.create_all()``. The SQLite counterpart,
+          including the guarded ALTERs and the same idempotent backfill,
+          lives in
+          ``daemon/migrations/versions/20260801_000001_task_turn_handles.sql``.
         - job_queue_items.admission_state (Phase 2, 2026-06-28): the
           queue-proxy admission column. Dual-writes with ``status``
           in every write site; ``status`` becomes a write-only
@@ -3377,6 +3395,26 @@ class InstanceManager:
             # re-run and on fresh databases where create_all already
             # created it from the model.
             "CREATE INDEX IF NOT EXISTS ix_task_is_background ON task(is_background)",
+            # ── Turn suspension handles (Increment 4, 2026-08-01) ─────
+            # Explicit resume routing stores why a Task is suspended and
+            # which authoritative ``work_id`` should be resumed. Both
+            # columns are nullable and intentionally have no individual
+            # indexes; the composite index matches the handle lookup.
+            # Order matters: add both columns before creating the index and
+            # before backfilling legacy paused rows. Every operation is
+            # idempotent, and the SQLite counterpart lives in
+            # ``20260801_000001_task_turn_handles.sql``.
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS suspension_reason VARCHAR",
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS resume_target_turn_id VARCHAR",
+            (
+                "CREATE INDEX IF NOT EXISTS idx_task_resume_target "
+                "ON task (resume_target_turn_id, suspension_reason)"
+            ),
+            (
+                "UPDATE task SET suspension_reason = 'paused_external', "
+                "resume_target_turn_id = work_id WHERE status = 'paused' "
+                "AND suspension_reason IS NULL"
+            ),
             # ── Phase 2 admission_state column (Job-as-Queue-Proxy) ──
             # Adds the ``admission_state`` column to ``job_queue_items``
             # alongside the existing ``status`` column. Dual-write in
@@ -4825,257 +4863,354 @@ class InstanceManager:
         silent: bool = False,
         images: list[str] | None = None,
     ) -> dict | None:
-        """Resume a paused instance by resuming from checkpoint.
+        """Resume a paused instance via an explicit suspension handle.
 
-        This method routes based on instance type:
-        - Root instances (have a PAUSED/RUNNING PROCESS_MESSAGE Task): resume from checkpoint
-        - Child instances (no PAUSED/RUNNING PROCESS_MESSAGE Task): use WorkerPool via enqueue_message()
+        Phase 4 (Increment 4, 2026-08-01). The previous root-vs-child
+        routing was inference-based
+        (``find_paused_or_running_by_instance`` plus the Bug-A
+        ``find_resume_root_candidate_by_active_job`` fallback); both
+        have been removed. The explicit
+        ``suspension_reason`` / ``resume_target_turn_id`` handle
+        persisted by :class:`SuspendTurn` at SUSPEND_TURN time is now
+        the authoritative routing input.
 
-        When silent=False (default), appends the resume message to the conversation.
-        When silent=True, resumes from checkpoint without appending any new message.
+        Four explicit outcomes per §9.3:
 
-        Phase 2.5 (2026-06-27, D13 consumption-site rewrite). The root-
-        vs-child routing decision was previously driven by looking up
-        a PROCESSING MESSAGE ``JobItem`` via
-        ``JobRepository.find_processing_message_jobs_by_instance`` —
-        after D13, messages no longer create ``JobItem`` rows, so the
-        decision moves onto the ``task`` table. We use the new
-        :meth:`TaskRepository.find_paused_or_running_by_instance`
-        which returns the first PAUSED-or-RUNNING ``PROCESS_MESSAGE``
-        task. If found → root instance (checkpoint resume via
-        ``_resume_processing_background``). If ``None`` → child
-        instance (enqueue a fresh message via WorkerPool).
+          * ``answer_gate_existing_turn`` — an explicit
+            ``suspension_reason='awaiting_answer'`` handle was
+            resolved; the persisted ``resume_target_turn_id`` is the
+            authoritative work_id a later ``ResumeTurn`` reattaches
+            to. The answer payload is delivered onto the existing
+            turn; no new Task or JobItem is created (§9.1 steps 4-7).
+          * ``report_or_external_resume`` — the pause-cascade
+            selector (:meth:`TaskRepository.find_paused_or_cancellable_turn`)
+            resolved an explicit PAUSED/RUNNING turn. The turn's
+            own ``work_id`` is the resume point. Includes the
+            pause-during-``process_report`` regression case from
+            Bug A.
+          * ``internal_child_noop`` — ``silent=True`` with no
+            handle. Legitimate silent child cascade where the parent
+            owns the actual work and the child does not need a new
+            message. Preserved per §9.3.
+          * ``invalid_or_missing_handle`` — no answer-gate handle,
+            no paused turn, ``silent=False``. Log a warning and
+            return ``None``. Do NOT fabricate a Task via
+            ``enqueue_message``; the answer-gate
+            ``source="cascade_resume"`` fallback has been removed
+            per §9.4.
 
-        The ``old_job_id`` parameter threaded downstream into
-        ``_resume_processing_background`` and ultimately
-        ``_process_resume_finalize`` (Task 2.5.5) is now derived from
-        ``task.work_id`` (the Task's stable UUID4 cross-system
-        identifier) rather than a ``JobItem.job_id`` or the int ``id``
-        primary key. The consumer in ``_resume_processing_background``
-        resolves it back to a Task row via
-        ``_task_repo.get_by_work_id(old_job_id)`` — the int PK would
-        break that round-trip and silently skip the per-instance guard
-        release on resume failure. Post-D13, ``job_id`` is a logical
-        alias for the Task row's ``work_id``; ``_finalize_job_db_sync``
-        accepts ``job_id=None`` and skips Step 1 (no JobItem UPDATE)
-        while still running Steps 2+3 (instance status + lock release).
+        §9.4 (narrow removal): the previous
+        ``enqueue_message(source="cascade_resume")`` answer-gate
+        fallback is gone. Legitimate non-answer internal
+        orchestration that does not flow through this method is
+        unaffected — only the answer-gate path is removed. The
+        ``message_source="cascade_resume"`` label inside
+        ``_resume_processing_background`` (the graph driver call)
+        is the resume flow's own message tag and stays.
+
+        ``old_job_id`` is derived from the explicit handle's
+        ``work_id`` (the suspended Task's ``work_id`` for
+        ``report_or_external_resume``, the persisted
+        ``resume_target_turn_id`` for ``answer_gate_existing_turn``).
+        The consumer in ``_resume_processing_background`` resolves
+        it back via ``_task_repo.get_by_work_id(old_job_id)``.
+
+        Structured route logging (§9.3) emits
+        ``route_outcome``, ``suspension_reason``, ``handle_work_id``,
+        and ``target_work_id`` so operators can identify the
+        selected turn and outcome without answer payload exposure.
 
         Args:
             instance_id: The instance ID.
-            message: The resume message text (ignored when silent=True and checkpoint exists).
-            silent: If True, resume from checkpoint without injecting a new message.
-            images: Optional list of base64-encoded images for multimodal content.
+            message: The resume message text (ignored when
+                ``silent=True``).
+            silent: If True, resume from checkpoint without
+                injecting a new message.
+            images: Optional list of base64-encoded images for
+                multimodal content.
 
-        Returns dict with result info (instance_id, job_id, message_id), or None on error.
+        Returns dict with result info (``instance_id``, ``job_id``,
+        ``message_id``, ``status``), or ``None`` for the
+        ``invalid_or_missing_handle`` outcome.
         """
-        logger.info(f"[RESUME] instance={instance_id[:8]} resume_processing_job called, message={repr(message)}, silent={silent}")
-
-        # 1. Find existing PAUSED/RUNNING PROCESS_MESSAGE Task for this
-        #    instance. Pre-D13: queried MESSAGE JobItems (no longer
-        #    created after D13/Phase 2). Post-D13: query the task table
-        #    via the new find_paused_or_running_by_instance primitive
-        #    (Task 2.5.1). The presence of such a task identifies the
-        #    root instance (an in-flight graph turn to resume from).
-        existing_task = await asyncio.to_thread(
-            self._task_repo.find_paused_or_running_by_instance,
-            instance_id,
+        logger.info(
+            f"[RESUME] instance={instance_id[:8]} resume_processing_job "
+            f"called, message={repr(message)}, silent={silent}"
         )
 
-        # Phase 1 / Step B (Bug A, Revision 2, 2026-08-01):
-        # Active-orphan fallback. When the regular root-route lookup
-        # returns None AND there is still an ``active`` JobItem on the
-        # instance whose original PROCESS_MESSAGE Task has reached a
-        # terminal state, the most likely explanation is the Bug A
-        # incident state: a ``process_report`` turn is in flight,
-        # the original message Task is terminal, and the JobItem is
-        # orphaned (holding a lock without a live backing Task). The
-        # fallback routes the resume to the ROOT path (via the
-        # terminal Task's stable ``work_id``), letting
-        # ``_resume_processing_background`` + ``_process_resume_finalize``
-        # explicitly finalize the JobItem ``active → done`` and
-        # release the lock.
-        #
-        # The fallback routes to ROOT (not child) because the
-        # JobItem's lock is real and the existing root-checkpoint
-        # resume path is the correct cleanup. A child-branch
-        # enqueue would race the orphaned JobItem's lock.
-        #
-        # Logged separately as ``root_active_orphan`` so future
-        # operators can correlate the Bug A fix with its actual
-        # incident rate.
-        if existing_task is None:
-            existing_task = await asyncio.to_thread(
-                self._task_repo.find_resume_root_candidate_by_active_job,
+        # 1. Check for explicit answer-gate suspension (§9.1).
+        #    The selector is keyed on the persisted
+        #    ``suspension_reason='awaiting_answer'`` handle set by
+        #    SuspendTurn at question-pause time. The handle's
+        #    ``resume_target_turn_id`` is the authoritative work_id
+        #    a later ResumeTurn should reattach to. The instance_id
+        #    alone is enough — answers map to instances, then the
+        #    handle provides uniqueness (§8.1).
+        try:
+            suspended_turn = await asyncio.to_thread(
+                self._task_repo.find_suspended_turn_for_answer,
                 instance_id,
             )
-            if existing_task is not None:
-                logger.info(
-                    f"[RESUME] instance={instance_id[:8]} "
-                    f"active-orphan fallback hit: terminal task "
-                    f"work_id={existing_task.work_id[:8]}... "
-                    f"status={existing_task.status} "
-                    f"will route through ROOT cleanup path "
-                    f"(B5 W2 finalize via exact-ID overload)"
-                )
+        except ValueError as exc:
+            # §8.1 ambiguity: more than one row matched. Surface as
+            # a logged invariant violation; route to the invalid
+            # handle path so we never silently fabricate a Task.
+            logger.error(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"find_suspended_turn_for_answer invariant "
+                f"violation: {exc}"
+            )
+            suspended_turn = None
 
-        # Determine the route reason for structured logging.
-        # ``root_existing_task`` = regular PAUSED/RUNNING/CANCELLED
-        # route; ``root_active_orphan`` = Bug A fallback; ``child``
-        # = neither matched.
-        if existing_task is not None:
-            # Distinguish via a flag — we don't have direct visibility
-            # into which lookup produced the result. We use the
-            # ``active_orphan`` marker for the Bug A case by checking
-            # whether the task's status is in the terminal set AND
-            # there's a non-deleted active JobItem on the instance
-            # correlating via work_id == job_id.
-            from daemon.repositories.task.models import TaskStatus
-            if existing_task.status in (
-                TaskStatus.COMPLETED.value,
-                TaskStatus.FAILED.value,
-            ):
-                route_reason = "root_active_orphan"
-            else:
-                route_reason = "root_existing_task"
-        else:
-            route_reason = "child"
+        if suspended_turn is not None:
+            # answer_gate_existing_turn: explicit awaiting_answer
+            # handle resolved. Resume via the target work_id; do NOT
+            # create a new Task or JobItem, and do NOT call
+            # enqueue_message (§9.1 steps 4-7, §9.4).
+            return await self._schedule_explicit_handle_resume(
+                instance_id=instance_id,
+                message=message,
+                silent=silent,
+                images=images,
+                target_work_id=suspended_turn.resume_target_turn_id,
+                selected_suspension_reason=suspended_turn.suspension_reason,
+                handle_work_id=suspended_turn.work_id,
+                route_outcome="answer_gate_existing_turn",
+            )
 
-        logger.info(
-            f"[RESUME] instance={instance_id[:8]} "
-            f"existing_task_id={existing_task.id if existing_task else None}, "
-            f"branch={'root' if existing_task else 'child'}, "
-            f"route_reason={route_reason}"
-        )
+        # 2. Check for paused/cancellable turn (§9.2). This is the
+        #    pause-cascade selector — PAUSED/RUNNING PROCESS_MESSAGE
+        #    or PROCESS_REPORT rows that the named transitions may
+        #    legally act upon. The pause-during-report-turn
+        #    scenario lands here, surfacing the in-flight
+        #    PROCESS_REPORT row as a root candidate.
+        try:
+            paused_turn = await asyncio.to_thread(
+                self._task_repo.find_paused_or_cancellable_turn,
+                instance_id,
+            )
+        except ValueError as exc:
+            # §8.2: one-running-turn-per-instance invariant
+            # violation. Surface the inconsistency in logs; treat
+            # as no handle. We do NOT fall through to enqueue
+            # (the answer-gate fallback that used to live here has
+            # been removed per §9.4).
+            logger.error(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"find_paused_or_cancellable_turn invariant "
+                f"violation: {exc}"
+            )
+            paused_turn = None
 
-        # Deduplication: prevent multiple concurrent resume tasks for the same instance
-        graph_task = self._graph_tasks.get(instance_id)
-        if graph_task and not graph_task.done():
-            logger.warning(f"Resume already in progress for {instance_id[:8]}")
+        if paused_turn is not None:
+            # report_or_external_resume: explicit non-answer
+            # suspended turn. Resume the existing turn's work_id
+            # (the turn itself is the resume point — no separate
+            # target indirection is required here).
+            return await self._schedule_explicit_handle_resume(
+                instance_id=instance_id,
+                message=message,
+                silent=silent,
+                images=images,
+                target_work_id=paused_turn.work_id,
+                selected_suspension_reason=paused_turn.suspension_reason,
+                handle_work_id=paused_turn.work_id,
+                route_outcome="report_or_external_resume",
+            )
+
+        # 3. No suspension handle and no paused turn.
+        if silent:
+            # internal_child_noop: legitimate silent child cascade
+            # where the parent owns the actual work and the child
+            # does not need a new message. Preserved per §9.3.
+            logger.info(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"route_outcome=internal_child_noop "
+                f"silent=True — skipping message enqueue"
+            )
             return {
                 "instance_id": instance_id,
-                "job_id": existing_task.work_id if existing_task else None,
+                "job_id": None,
+                "message_id": None,
+                "status": "silent_resume",
+            }
+
+        # invalid_or_missing_handle: no answer-gate handle, no
+        # paused turn, silent=False. Log a warning and return
+        # None. Do NOT fabricate a Task. Do NOT call
+        # enqueue_message(source="cascade_resume") — the
+        # answer-gate cascade_resume fallback is removed per §9.4.
+        # The previous "child instance path" fall-through that
+        # enqueued a fresh message via WorkerPool and returned
+        # status="queued" is gone; an absent handle is now a
+        # routing error, not a routing default.
+        logger.warning(
+            f"[RESUME] instance={instance_id[:8]} "
+            f"route_outcome=invalid_or_missing_handle — "
+            f"no suspended or paused turn found"
+        )
+        return None
+
+    async def _schedule_explicit_handle_resume(
+        self,
+        *,
+        instance_id: str,
+        message: str,
+        silent: bool,
+        images: list[str] | None,
+        target_work_id: str,
+        selected_suspension_reason: str | None,
+        handle_work_id: str,
+        route_outcome: str,
+    ) -> dict:
+        """Schedule graph resume against an explicit suspension handle.
+
+        Phase 4 (Increment 4, 2026-08-01). Shared by the
+        ``answer_gate_existing_turn`` and ``report_or_external_resume``
+        routes — the difference between them is the SELECTOR that
+        produced the handle, not the schedule / cleanup logic.
+
+        The flow (matches the previous root-resume path):
+
+          1. Deduplicate against any in-flight resume in
+             ``_graph_tasks[instance_id]`` (W4 case 5 invariant).
+          2. Clean stale ``MessageQueue`` rows (PENDING /
+             PROCESSING / RETRYING) for the instance — the
+             antiphantom-race guard prevents a fresh PROCESS_REPORT
+             claim from being phantom-completed.
+          3. Schedule ``_resume_processing_background`` against
+             ``target_work_id`` (the work_id a later ResumeTurn
+             reattaches to).
+
+        Args:
+            instance_id: The instance being resumed.
+            message: The resume message text (ignored when
+                ``silent=True``).
+            silent: If True, skip message injection during checkpoint
+                resume.
+            images: Optional list of base64-encoded images for
+                multimodal content.
+            target_work_id: The work_id a later ``ResumeTurn``
+                reattaches to. For ``answer_gate_existing_turn``,
+                this is the suspended Task's persisted
+                ``resume_target_turn_id`` (the authoritative
+                target). For ``report_or_external_resume``, this
+                is the suspended Task's own ``work_id`` (it IS
+                the resume point).
+            selected_suspension_reason: The ``suspension_reason``
+                recorded on the selected handle, for structured
+                logging. ``None`` when the cascade backfill set
+                ``paused_external`` legacy-style without a
+                recorded reason (the repo method already returns
+                the column value, which may be None for a
+                legacy row).
+            handle_work_id: The work_id of the selected handle
+                row itself (for log correlation).
+            route_outcome: The semantically named outcome for
+                structured logging
+                (``answer_gate_existing_turn`` or
+                ``report_or_external_resume``).
+        """
+        logger.info(
+            f"[RESUME] instance={instance_id[:8]} "
+            f"route_outcome={route_outcome} "
+            f"suspension_reason={selected_suspension_reason} "
+            f"handle_work_id={handle_work_id} "
+            f"target_work_id={target_work_id}"
+        )
+
+        # Deduplication: prevent multiple concurrent resume tasks
+        # for the same instance. If a resume is already in flight,
+        # return ``already_resuming`` rather than start a second
+        # graph turn (W4 case 5 invariant).
+        graph_task = self._graph_tasks.get(instance_id)
+        if graph_task and not graph_task.done():
+            logger.warning(
+                f"Resume already in progress for {instance_id[:8]}"
+            )
+            return {
+                "instance_id": instance_id,
+                "job_id": target_work_id,
                 "message_id": None,
                 "status": "already_resuming",
             }
 
-        if not existing_task:
-            # Child instance path: use WorkerPool via enqueue_message()
-            # Child instances don't have a PAUSED/RUNNING PROCESS_MESSAGE
-            # Task (they use WorkerPool with no parent-level checkpoint
-            # resume). When silent=True (cascade resume), DON'T enqueue
-            # any message. The parent's send_message tool will send the
-            # child its actual work. Only the selected target instance
-            # gets the resume message injected.
-            if silent:
-                logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, silent=True — skipping message enqueue (child will resume via parent's send_message)")
-                return {
-                    "instance_id": instance_id,
-                    "job_id": None,
-                    "message_id": None,
-                    "status": "silent_resume",
-                }
-
-            logger.info(f"No PAUSED/RUNNING PROCESS_MESSAGE task for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
-
-            # Enqueue a message via WorkerPool path with resume_mode metadata.
-            # Cascade-resume is INTERNAL orchestration (the user's message
-            # propagates to children) — therefore MUST NOT create a JobItem
-            # mirror on the child path. The principle: child instances never
-            # have their own job; only root-instance external traffic
-            # (POST /messages, chat adapters, scheduler) creates JobItems.
-            # The ``source="cascade_resume"`` tag and ``resume_mode`` metadata
-            # MUST survive the round-trip so downstream observers can
-            # distinguish cascade-resume traffic.
-            try:
-                result = await self.enqueue_message(
-                    instance_id=instance_id,
-                    message=message,
-                    source="cascade_resume",
-                    images=images,
-                    metadata={"resume_mode": True, "silent": silent},
-                )
-                logger.info(f"Child instance {instance_id[:8]}... enqueued via WorkerPool: message_id={result.message_id[:8] if result.message_id else None}...")
-                return {
-                    "instance_id": instance_id,
-                    "job_id": None,
-                    "message_id": result.message_id,
-                    "status": "queued",
-                }
-            except Exception as e:
-                logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {type(e).__name__}: {e}")
-                return None
-
-        # Root instance path: has a PAUSED/RUNNING PROCESS_MESSAGE Task
-        # Phase 1 (Virtual Job Management Surface): ``old_job_id`` is the
-        # Task's stable ``work_id`` (UUID4 string), NOT the integer PK.
-        # The consumer in ``_resume_processing_background`` (line ~3322)
-        # resolves it via ``_task_repo.get_by_work_id(old_job_id)`` and
-        # calls ``fail_task(task.id, ...)`` — using the int PK would break
-        # the resolver round-trip and silently skip the per-instance
-        # guard release.
-        old_job_id = existing_task.work_id
-        logger.info(
-            f"Found PAUSED/RUNNING PROCESS_MESSAGE task id="
-            f"{existing_task.id} (status={existing_task.status}) for root "
-            f"instance {instance_id[:8]}..., resuming from checkpoint"
-        )
-
-        # 1. Clean stale MessageQueue entries (PENDING, PROCESSING, RETRYING)
-        #    These are stale entries from the previous processing attempt
+        # 1. Clean stale MessageQueue entries (PENDING, PROCESSING,
+        #    RETRYING). These are stale entries from the previous
+        #    processing attempt.
         try:
-            # Use list() with instance_id filter, then filter by status in Python
+            # Use list() with instance_id filter, then filter by
+            # status in Python.
             all_messages = await asyncio.to_thread(
                 self._queue_repository.list,
                 instance_id=instance_id,
             )
-            # Filter to stale statuses
             pending_messages = [
                 msg for msg in all_messages
-                if msg.status in (MessageStatus.PENDING.value, MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value)
+                if msg.status in (
+                    MessageStatus.PENDING.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                )
             ]
             completed_count = 0
             skipped_phantom_count = 0
             for msg in pending_messages:
-                if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value):
+                if msg.status in (
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ):
                     # ANTIPHANTOM-RACE-FIX (Root Cause B — PRIMARY FIX):
-                    # Look up the corresponding task BEFORE marking this
-                    # PROCESSING/RETRYING message as COMPLETED. The race:
-                    # after ``_resume_cascade_db_sync`` lifted the pause and
-                    # woke the WorkerPool, a freshly-claimed PROCESS_REPORT
-                    # task (status RUNNING) may have transitioned its message
-                    # READY → PROCESSING just before this cleanup runs.
-                    # Marking such a message COMPLETED would "phantom-complete"
-                    # it and the subsequent ``cancel_task`` would kill the
-                    # worker's in-flight LLM call, stranding the parent (no
+                    # Look up the corresponding task BEFORE marking
+                    # this PROCESSING/RETRYING message as COMPLETED.
+                    # The race: after ``_resume_cascade_db_sync``
+                    # lifted the pause and woke the WorkerPool, a
+                    # freshly-claimed PROCESS_REPORT task (status
+                    # RUNNING) may have transitioned its message
+                    # READY → PROCESSING just before this cleanup
+                    # runs. Marking such a message COMPLETED would
+                    # "phantom-complete" it and the subsequent
+                    # ``cancel_task`` would kill the worker's
+                    # in-flight LLM call, stranding the parent (no
                     # lifecycle event emitted).
                     #
-                    # Safe to clean up the message ONLY when the task is in a
-                    # terminal/stale state — i.e. no worker will (or can)
-                    # deliver it. Task statuses that mean "safe to mark
-                    # message COMPLETED + cancel task":
-                    #   • PAUSED  — cascade hadn't reached it yet (defensive)
-                    #   • CANCELLED — cascade already cancelled it (PAUSED→CANCELLED)
-                    #   • COMPLETED / FAILED — task finished; message is orphan
-                    # Task statuses that mean "leave it alone — worker is/will be driving":
+                    # Safe to clean up the message ONLY when the
+                    # task is in a terminal/stale state — i.e. no
+                    # worker will (or can) deliver it. Task
+                    # statuses that mean "safe to mark message
+                    # COMPLETED + cancel task":
+                    #   • PAUSED  — cascade hadn't reached it yet
+                    #     (defensive)
+                    #   • CANCELLED — cascade already cancelled it
+                    #     (PAUSED→CANCELLED)
+                    #   • COMPLETED / FAILED — task finished; message
+                    #     is orphan
+                    # Task statuses that mean "leave it alone —
+                    # worker is/will be driving":
                     #   • PENDING  — worker will claim naturally
-                    #   • RUNNING  — worker has claimed and is processing (LLM call active)
-                    # No task row at all → defensive: do NOT touch orphan messages.
+                    #   • RUNNING  — worker has claimed and is
+                    #     processing (LLM call active)
+                    # No task row at all → defensive: do NOT touch
+                    # orphan messages.
                     try:
                         stale_task = await asyncio.to_thread(
                             self._task_repo.get_by_message, msg.message_id
                         )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to look up task for message {msg.message_id[:8]}...; "
-                            f"skipping cleanup (phantom-completion guard): {e}"
+                            f"Failed to look up task for message "
+                            f"{msg.message_id[:8]}...; skipping cleanup "
+                            f"(phantom-completion guard): {e}"
                         )
                         continue
 
                     if stale_task is None:
-                        # Defensive: no task row → don't touch orphan messages.
+                        # Defensive: no task row → don't touch
+                        # orphan messages.
                         logger.info(
-                            f"[RESUME] skipping message {msg.message_id[:8]}... "
-                            f"— no task found (phantom-completion guard)"
+                            f"[RESUME] skipping message "
+                            f"{msg.message_id[:8]}... — no task "
+                            f"found (phantom-completion guard)"
                         )
                         skipped_phantom_count += 1
                         continue
@@ -5084,34 +5219,50 @@ class InstanceManager:
                         TaskStatus.PENDING.value,
                         TaskStatus.RUNNING.value,
                     ):
-                        # Worker is processing (RUNNING) or about to claim
-                        # (PENDING). Marking the message COMPLETED here would
-                        # kill the active LLM call or skip natural delivery.
+                        # Worker is processing (RUNNING) or about
+                        # to claim (PENDING). Marking the message
+                        # COMPLETED here would kill the active LLM
+                        # call or skip natural delivery.
                         logger.info(
-                            f"[RESUME] skipping message {msg.message_id[:8]}... "
-                            f"— task {stale_task.id} status={stale_task.status} "
-                            f"is worker-driven (phantom-completion guard)"
+                            f"[RESUME] skipping message "
+                            f"{msg.message_id[:8]}... — task "
+                            f"{stale_task.id} status="
+                            f"{stale_task.status} is worker-driven "
+                            f"(phantom-completion guard)"
                         )
                         skipped_phantom_count += 1
                         continue
 
-                    # stale_task.status is PAUSED / CANCELLED / COMPLETED /
-                    # FAILED — the task will not deliver this message, so
-                    # it is safe to mark COMPLETED and cancel the task.
+                    # stale_task.status is PAUSED / CANCELLED /
+                    # COMPLETED / FAILED — the task will not deliver
+                    # this message, so it is safe to mark
+                    # COMPLETED and cancel the task.
                     try:
-                        await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
+                        await asyncio.to_thread(
+                            self._queue_repository.complete, msg.message_id
+                        )
                         completed_count += 1
-                        logger.info(f"Completed stale message entry {msg.message_id[:8]}... for resume")
+                        logger.info(
+                            f"Completed stale message entry "
+                            f"{msg.message_id[:8]}... for resume"
+                        )
                     except Exception as e:
-                        logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
-                    # Cancel the WorkerPool task that drives this message so it
-                    # is NOT re-armed/re-claimed on resume. ``_resume_cascade_db_sync``
-                    # transitions PAUSED tasks PAUSED→CANCELLED; without cancelling
-                    # here, the re-claimed ``process_message`` task would re-drive
-                    # the graph a SECOND time (a duplicate turn that races with
-                    # ``_resume_processing_background`` and corrupts the checkpoint
-                    # — the add_messages reducer replaces the project-context
-                    # message with a bare re-injection of the same ID).
+                        logger.warning(
+                            f"Failed to complete stale message "
+                            f"{msg.message_id[:8]}...: {e}"
+                        )
+                    # Cancel the WorkerPool task that drives this
+                    # message so it is NOT re-armed/re-claimed on
+                    # resume. ``_resume_cascade_db_sync``
+                    # transitions PAUSED tasks PAUSED→CANCELLED;
+                    # without cancelling here, the re-claimed
+                    # ``process_message`` task would re-drive the
+                    # graph a SECOND time (a duplicate turn that
+                    # races with ``_resume_processing_background``
+                    # and corrupts the checkpoint — the
+                    # add_messages reducer replaces the
+                    # project-context message with a bare
+                    # re-injection of the same ID).
                     try:
                         await asyncio.to_thread(
                             self._task_repo.cancel_task,
@@ -5119,70 +5270,87 @@ class InstanceManager:
                             "Superseded by resume_processing_job graph driver",
                         )
                         logger.info(
-                            f"[RESUME] cancelled stale task {stale_task.id} "
-                            f"(message {msg.message_id[:8]}..., prior status="
-                            f"{stale_task.status}) — graph driving owned by "
-                            f"resume_processing_job"
+                            f"[RESUME] cancelled stale task "
+                            f"{stale_task.id} (message "
+                            f"{msg.message_id[:8]}..., prior status="
+                            f"{stale_task.status}) — graph driving "
+                            f"owned by resume_processing_job"
                         )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to cancel stale task for message "
-                            f"{msg.message_id[:8]}...: {e}"
+                            f"Failed to cancel stale task for "
+                            f"message {msg.message_id[:8]}...: {e}"
                         )
                 elif msg.status == MessageStatus.PENDING.value:
-                    logger.info(f"Preserving PENDING message {msg.message_id[:8]}... for post-resume delivery")
-            pending_count = sum(1 for msg in pending_messages if msg.status == MessageStatus.PENDING.value)
-            if completed_count > 0 or pending_count > 0 or skipped_phantom_count > 0:
+                    logger.info(
+                        f"Preserving PENDING message "
+                        f"{msg.message_id[:8]}... for post-resume "
+                        f"delivery"
+                    )
+            pending_count = sum(
+                1 for msg in pending_messages
+                if msg.status == MessageStatus.PENDING.value
+            )
+            if (
+                completed_count > 0
+                or pending_count > 0
+                or skipped_phantom_count > 0
+            ):
                 logger.info(
                     f"[RESUME] instance={instance_id[:8]} cleaned "
-                    f"{completed_count} stale PROCESSING/RETRYING messages, "
-                    f"preserved {pending_count} PENDING messages, "
-                    f"skipped {skipped_phantom_count} phantom-completion "
-                    f"guards (active worker)"
+                    f"{completed_count} stale PROCESSING/RETRYING "
+                    f"messages, preserved {pending_count} PENDING "
+                    f"messages, skipped {skipped_phantom_count} "
+                    f"phantom-completion guards (active worker)"
                 )
         except Exception as e:
-            logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
+            logger.warning(
+                f"Failed to find/complete stale messages for "
+                f"{instance_id[:8]}...: {e}"
+            )
 
-        # 2. Create a fresh message_id for tracking (not enqueued, just for internal tracking)
+        # 2. Create a fresh message_id for tracking (not enqueued,
+        #    just for internal tracking).
         message_id = str(uuid.uuid4())
 
-        # 3. Return immediately - processing happens in background task
-        #    This allows the HTTP response to return fast while the LLM processes asynchronously
-        logger.info(f"[RESUME] instance={instance_id[:8]} scheduling background processing for task {existing_task.id}")
+        # 3. Return immediately — processing happens in the
+        #    background task. This allows the HTTP response to
+        #    return fast while the LLM processes asynchronously.
+        logger.info(
+            f"[RESUME] instance={instance_id[:8]} scheduling "
+            f"background processing against target_work_id="
+            f"{target_work_id}"
+        )
 
-        # Create background task for processing and job completion
-        # Store in _graph_tasks so it can be cancelled by pause_instance_cascade
-        # W4: Register with the request registry BEFORE creating the task so
-        # ``pause_instance_cascade`` (which calls
-        # ``_request_registry.cancel_by_instance`` cooperatively) can
-        # interrupt the in-flight LLM streaming via the CancellationToken
-        # rather than killing the asyncio task abruptly. The registry
-        # returns a CancellationTokenSource; we thread ``.token`` into the
-        # background task and unregister in the outermost finally block.
-        #
-        # Phase 2.5: ``old_job_id`` is now the WorkerPool Task ID (not a
-        # ``JobItem.job_id``); the post-D13 ``_process_resume_finalize``
-        # path (Task 2.5.5) and ``_finalize_job_db_sync`` (Task 2.5.4)
-        # accept ``job_id=None` and skip Step 1 (JobItem UPDATE) when no
-        # ``JobItem` exists.
+        # W4: Register with the request registry BEFORE creating
+        # the task so ``pause_instance_cascade`` (which calls
+        # ``_request_registry.cancel_by_instance`` cooperatively)
+        # can interrupt the in-flight LLM streaming via the
+        # CancellationToken rather than killing the asyncio task
+        # abruptly. The registry returns a
+        # CancellationTokenSource; we thread ``.token`` into the
+        # background task and unregister in the outermost finally
+        # block.
         cancellation_source = self._request_registry.register(
             message_id=message_id,
             instance_id=instance_id,
         )
-        task = asyncio.create_task(self._resume_processing_background(
-            instance_id=instance_id,
-            message=message if not silent else "",
-            message_id=message_id,
-            old_job_id=old_job_id,
-            silent=silent,
-            images=images,
-            cancellation_token=cancellation_source.token,
-        ))
+        task = asyncio.create_task(
+            self._resume_processing_background(
+                instance_id=instance_id,
+                message=message if not silent else "",
+                message_id=message_id,
+                old_job_id=target_work_id,
+                silent=silent,
+                images=images,
+                cancellation_token=cancellation_source.token,
+            )
+        )
         self._graph_tasks[instance_id] = task
 
         return {
             "instance_id": instance_id,
-            "job_id": old_job_id,
+            "job_id": target_work_id,
             "message_id": message_id,
             "status": "resuming",
         }

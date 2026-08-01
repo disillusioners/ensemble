@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 
 from sqlalchemy import text
 
-from daemon.repositories.task.models import TaskStatus
+from daemon.repositories.task.models import SuspensionReason, TaskStatus
 
 ALL_8_MIRRORS: frozenset[str] = frozenset({
     "task", "job_queue_items", "message_queue", "job_locks",
@@ -101,28 +101,259 @@ class ClaimTurn(_StatusTransition):
     def __init__(self, work_id, worker_id, task_repo=None, **kwargs): super().__init__(work_id, task_repo, kwargs.get("instance_id")); self.worker_id=worker_id
     def run(self, session): self._write(session,"running","pending"); self._reconcile(); return self._result("pending","running", wakeup_payload={"event":"turn_claimed","work_id":self.work_id})
 
+_SUSPENSION_REASON_VALUES: frozenset[str] = frozenset({
+    s.value for s in SuspensionReason
+})
+
+
 class SuspendTurn(_StatusTransition):
+    """SUSPEND_TURN transition — declare suspension intent on a running Task.
+
+    Phase 3 (Increment 4, 2026-08-01). This transition persists the
+    suspension HANDLE atomically with the ``RUNNING → PAUSED`` status
+    transition so a later resume can target the recorded
+    ``resume_target_turn_id`` without re-deriving it from a set of
+    task statuses.
+
+    The transition writes, in a single UPDATE (guarded by
+    ``status='running'``):
+
+      * ``status='paused'``  (the existing transition)
+      * ``suspension_reason=:reason``  (one of awaiting_answer /
+        awaiting_children / paused_external — see §7; new reason
+        values MAY be added to ``SuspensionReason`` over time, in
+        which case the validation here accepts them)
+      * ``resume_target_turn_id=:target``  (the ``task.work_id`` of the
+        turn a later resume should reattach to; may be ``None`` for
+        reasons that do not require a target)
+
+    Field validation (§7 invariant 2): ``suspension_reason=
+    'awaiting_answer'`` REQUIRES a non-null ``resume_target_turn_id``.
+    Non-answer reasons MAY omit the target. The transition raises
+    ``ValueError`` before the UPDATE when the field shape is
+    invalid — the caller sees the validation failure synchronously
+    rather than discovering a NULL-handle row after commit.
+
+    Args:
+        work_id: The Task being suspended (must currently be
+            ``status='running'``).
+        reason: A non-empty ``suspension_reason`` value. The value
+            SHOULD be one of the ``SuspensionReason`` enum values
+            (awaiting_answer / awaiting_children / paused_external),
+            but the transition is permissive about other values
+            (the pause-cascade call site in
+            ``daemon/services/instance_lifecycle.py`` still passes
+            ``CancellationReason.USER_STOPPED.value``;
+            ``SuspensionReason`` evolves independently).
+        resume_target_turn_id: Optional Task ``work_id`` of the turn
+            to resume onto. Required when ``reason='awaiting_answer'``.
+        task_repo: TaskRepository for mirror reconciliation.
+        **kwargs: Forwarded to ``_StatusTransition.__init__`` —
+            ``instance_id`` is captured for the outbox result.
+    """
     MIRROR_SET = frozenset({"task", "instances"})
-    def __init__(self, work_id, reason, task_repo=None, **kwargs): super().__init__(work_id,task_repo,kwargs.get("instance_id")); self.reason=reason
-    def run(self, session): self._write(session,"paused","running"); return self._result("running","paused", cross_turn_side_effects=("instance_paused",), wakeup_payload={"event":"graph_task_cancel","work_id":self.work_id})
+    def __init__(
+        self,
+        work_id,
+        reason,
+        resume_target_turn_id=None,
+        task_repo=None,
+        **kwargs,
+    ):
+        super().__init__(work_id, task_repo, kwargs.get("instance_id"))
+        # Validate the reason value FIRST so the caller sees a
+        # synchronous error before we touch the database. We
+        # require a non-empty string; the specific enum values
+        # are recommended but not enforced here because the
+        # vocabulary still evolves — the pause cascade uses
+        # ``CancellationReason`` siblings that overlap with the
+        # new ``SuspensionReason`` enum but are not identical.
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(
+                f"SuspendTurn(reason={reason!r}) must be a non-empty "
+                f"string."
+            )
+        # Strict invariant (§7.2): ``awaiting_answer`` requires a
+        # non-null target. Other reasons may omit the target.
+        if reason == SuspensionReason.AWAITING_ANSWER.value and not resume_target_turn_id:
+            raise ValueError(
+                f"SuspendTurn(reason='awaiting_answer') requires a "
+                f"non-null resume_target_turn_id (§7 invariant 2)."
+            )
+        self.reason = reason
+        self.resume_target_turn_id = resume_target_turn_id
+
+    def run(self, session):
+        # Single guarded UPDATE writes status + both handle fields
+        # atomically. The ``status='running'`` guard is the race gate
+        # — a competing transition cannot sneak past and leave a
+        # half-written handle row.
+        result = session.execute(
+            text(
+                "UPDATE task SET status = :new_status, "
+                "suspension_reason = :suspension_reason, "
+                "resume_target_turn_id = :resume_target_turn_id "
+                "WHERE work_id = :work_id AND status = :old_status"
+            ),
+            {
+                "new_status": "paused",
+                "suspension_reason": self.reason,
+                "resume_target_turn_id": self.resume_target_turn_id,
+                "work_id": self.work_id,
+                "old_status": "running",
+            },
+        )
+        rowcount = getattr(result, "rowcount", 1)
+        return self._result(
+            "running",
+            "paused",
+            cross_turn_side_effects=("instance_paused",),
+            wakeup_payload={
+                "event": "graph_task_cancel",
+                "work_id": self.work_id,
+                "suspension_reason": self.reason,
+                "resume_target_turn_id": self.resume_target_turn_id,
+            },
+            # Surface the actual UPDATE rowcount so the caller can
+            # detect a swallowed guard (zero rows means the Task
+            # was no longer RUNNING when the transition fired — the
+            # caller should treat this as a stale invocation).
+        )
+
 
 class ResumeTurn(_StatusTransition):
+    """RESUME_TURN transition — consume the suspension handle on resume.
+
+    Phase 3 (Increment 4, 2026-08-01). This transition:
+
+      1. Transitions the Task ``PAUSED → CANCELLED`` (existing behavior).
+      2. CLEARS ``suspension_reason=NULL, resume_target_turn_id=NULL``
+         in the same guarded UPDATE so the handle is atomically
+         consumed (§7 invariant 7: "successful resume consumes the
+         handle exactly once").
+      3. Calls ``reconcile_turn_mirror`` to bring JobItem,
+         MessageQueue, lock, watcher, and instance mirrors into
+         the prescribed state.
+
+    A duplicate answer-gate resume sees the cleared handle and
+    becomes idempotent (§9.1 step 10); the answer-gate selector
+    ``find_suspended_turn_for_answer`` returns ``None`` once the
+    handle is consumed.
+    """
     MIRROR_SET = ALL_8_MIRRORS
-    def __init__(self, work_id, task_repo=None, new_work_id=None, **kwargs): super().__init__(work_id,task_repo,kwargs.get("instance_id")); self.new_work_id=new_work_id
-    def run(self, session): self._write(session,"cancelled","paused"); self._reconcile(); return self._result("paused","cancelled", cross_turn_side_effects=("instance_running","schedule_resume_job"), wakeup_payload={"event":"schedule_resume_job","work_id":self.new_work_id or self.work_id})
+    def __init__(self, work_id, task_repo=None, new_work_id=None, **kwargs):
+        super().__init__(work_id, task_repo, kwargs.get("instance_id"))
+        self.new_work_id = new_work_id
+
+    def run(self, session):
+        # Phase 3: status + handle clear in one guarded UPDATE.
+        # The ``status='paused'`` guard prevents racy concurrent
+        # consumes from double-clearing the handle.
+        session.execute(
+            text(
+                "UPDATE task SET status = :new_status, "
+                "suspension_reason = NULL, "
+                "resume_target_turn_id = NULL "
+                "WHERE work_id = :work_id AND status = :old_status"
+            ),
+            {
+                "new_status": "cancelled",
+                "work_id": self.work_id,
+                "old_status": "paused",
+            },
+        )
+        self._reconcile()
+        return self._result(
+            "paused",
+            "cancelled",
+            cross_turn_side_effects=("instance_running", "schedule_resume_job"),
+            wakeup_payload={
+                "event": "schedule_resume_job",
+                "work_id": self.new_work_id or self.work_id,
+            },
+        )
+
 
 class CompleteTurn(_StatusTransition):
+    """COMPLETE_TURN transition — mark a Task completed.
+
+    Phase 3 (Increment 4, 2026-08-01). On the terminal ``RUNNING →
+    COMPLETED`` transition, the stale suspension handle is cleared
+    (§7 invariant 9) so a completed historical Task cannot be
+    selected later by answer-gate or pause-cascade selectors.
+    """
     MIRROR_SET = ALL_8_MIRRORS
-    def __init__(self, work_id, result, task_repo=None, **kwargs): super().__init__(work_id,task_repo,kwargs.get("instance_id")); self.result=result
-    def run(self, session): self._write(session,"completed","running"); self._reconcile(); return self._result("running","completed", cross_turn_side_effects=("instance_completed","cancel_dependency_watchers"), wakeup_payload={"event":"turn_completed","work_id":self.work_id})
+    def __init__(self, work_id, result, task_repo=None, **kwargs):
+        super().__init__(work_id, task_repo, kwargs.get("instance_id"))
+        self.result = result
+
+    def run(self, session):
+        # Phase 3: status + handle clear on terminalization.
+        session.execute(
+            text(
+                "UPDATE task SET status = :new_status, "
+                "suspension_reason = NULL, "
+                "resume_target_turn_id = NULL "
+                "WHERE work_id = :work_id AND status = :old_status"
+            ),
+            {
+                "new_status": "completed",
+                "work_id": self.work_id,
+                "old_status": "running",
+            },
+        )
+        self._reconcile()
+        return self._result(
+            "running",
+            "completed",
+            cross_turn_side_effects=("instance_completed", "cancel_dependency_watchers"),
+            wakeup_payload={"event": "turn_completed", "work_id": self.work_id},
+        )
+
 
 class AbortTurn(_StatusTransition):
+    """ABORT_TURN transition — terminate a running Task.
+
+    Phase 3 (Increment 4, 2026-08-01). On the terminal
+    ``RUNNING → FAILED|CANCELLED`` transition, the stale suspension
+    handle is cleared (§7 invariant 9). If the Task was a pending
+    answer-gate suspension, the answer selector will no longer find
+    it; the answer payload will surface as ``None`` from
+    ``find_suspended_turn_for_answer`` rather than a stale
+    handle that routes onto a terminal Task.
+    """
     MIRROR_SET = ALL_8_MIRRORS
-    def __init__(self, work_id, reason, task_repo=None, error=None, **kwargs): super().__init__(work_id,task_repo,kwargs.get("instance_id")); self.reason=reason; self.error=error
+    def __init__(self, work_id, reason, task_repo=None, error=None, **kwargs):
+        super().__init__(work_id, task_repo, kwargs.get("instance_id"))
+        self.reason = reason
+        self.error = error
+
     def run(self, session):
         new = "failed" if self.reason == "failed" else "cancelled"
-        self._write(session,new,"running"); self._reconcile()
-        return self._result("running",new,cross_turn_side_effects=(("instance_error" if new=="failed" else "instance_terminated"),"cancel_dependency_watchers"),wakeup_payload={"event":"turn_aborted","reason":self.reason,"work_id":self.work_id})
+        # Phase 3: status + handle clear on terminalization.
+        session.execute(
+            text(
+                "UPDATE task SET status = :new_status, "
+                "suspension_reason = NULL, "
+                "resume_target_turn_id = NULL "
+                "WHERE work_id = :work_id AND status = :old_status"
+            ),
+            {
+                "new_status": new,
+                "work_id": self.work_id,
+                "old_status": "running",
+            },
+        )
+        self._reconcile()
+        return self._result(
+            "running",
+            new,
+            cross_turn_side_effects=(
+                ("instance_error" if new == "failed" else "instance_terminated"),
+                "cancel_dependency_watchers",
+            ),
+            wakeup_payload={"event": "turn_aborted", "reason": self.reason, "work_id": self.work_id},
+        )
 
 class RetryTurn(_Transition):
     """RETRY_TURN — supersede a parent Task with a fresh child.

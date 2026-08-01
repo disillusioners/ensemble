@@ -2020,11 +2020,48 @@ def test_pause_after_spawn_then_resume():
 
 # --------------------------------------------------------------------------- #
 # Test 2b — Bug A: pause-during-report-turn then resume (active-orphan routing)
+#
+# Phase 3 (Increment 4, 2026-08-01): the
+# ``find_resume_root_candidate_by_active_job`` heuristic this test
+# was built around is REMOVED. The pause-during-report-turn routing
+# gap is now closed by ``find_paused_or_cancellable_turn`` (which
+# includes PROCESS_REPORT alongside PROCESS_MESSAGE) and the
+# explicit ``suspension_reason`` / ``resume_target_turn_id``
+# handle. The full Phase-4 E2E test for the explicit-handle answer
+# routing will live in a new file (plan increment4-plan.md §11.4.1).
 # --------------------------------------------------------------------------- #
+@pytest.mark.skip(
+    reason="Phase 3 removed the active-orphan heuristic this test "
+    "exercised (Increment 4 schema/transition phase). The full "
+    "replacement test — explicit-handle answer routing — is part "
+    "of the Phase 4 routing rewrite (increment4-plan.md §11.4.1)."
+)
 def test_pause_during_report_turn_then_resume():
     """E2E Test 2b (Bug A Phase 1 / Step B): the active-orphan fallback path.
 
-    Production deadlock scenario (2026-07-29):
+    Phase 3 (Increment 4, 2026-08-01): this test is SKIPPED.
+    The ``find_resume_root_candidate_by_active_job`` heuristic
+    is removed; the equivalent routing gap (pause-during-
+    report-turn) is now closed by
+    ``TaskRepository.find_paused_or_cancellable_turn`` (which
+    widens ``task_type`` to include PROCESS_REPORT) plus the
+    explicit ``suspension_reason`` / ``resume_target_turn_id``
+    handle persisted at SUSPEND_TURN time.
+
+    The full scenario this test verifies — leader receives a
+    user message, a ``process_report`` fires, an
+    ``ask_questions`` pause leaves the JobItem orphaned, the
+    answer routes to ROOT instead of fabricating a fresh child
+    enqueue — is now covered by the Phase 4 answer-gate E2E
+    test plan (increment4-plan.md §11.4.1, "Resume cascade routes
+    by recorded handle, no inference consulted, no enqueue_message
+    fallback fires").
+
+    The historical scenario docstring is preserved below for
+    reference.
+
+    ---- historical scenario (2026-07-29) ----
+    Production deadlock scenario:
       1. Leader receives a user message.
       2. Original ``PROCESS_MESSAGE`` Task reaches a terminal state
          (e.g. ``COMPLETED`` after a normal LLM turn ended).
@@ -2038,45 +2075,45 @@ def test_pause_during_report_turn_then_resume():
       6. The user's answer arrives → ``resume_processing_job`` is
          called. Pre-fix: the resume misroutes to the child branch
          (``enqueue_message`` via WorkerPool) because the existing
-         root-route lookup (``find_paused_or_running_by_instance``)
-         finds no PAUSED/RUNNING/CANCELLED Task. The fresh answer
-         Task is blocked forever by the orphaned active JobItem's
-         lock — permanent deadlock.
-      7. Post-fix: ``resume_processing_job`` consults the new
-         ``find_resume_root_candidate_by_active_job`` primitive as
-         a fallback. The fallback returns the terminal backing Task
-         (correlated via ``work_id == job_id``), the resume routes
-         to the ROOT branch, ``_resume_processing_background``
-         drives the checkpoint resume, and
-         ``_process_resume_finalize`` explicitly transitions the
+         root-route lookup (the deleted
+         inference-based selector that filtered ``task_type =
+         process_message``) finds no PAUSED/RUNNING/CANCELLED
+         Task. The fresh answer Task is blocked forever by the
+         orphaned active JobItem's lock — permanent deadlock.
+      7. Phase 1 / Step B (2026-08-01) patched the gap with
+         ``find_resume_root_candidate_by_active_job`` — the
+         active-orphan fallback that returns the terminal backing
+         Task (correlated via ``work_id == job_id``), letting
+         the resume route to ROOT and
+         ``_process_resume_finalize`` explicitly transition the
          orphaned JobItem ``active → done`` via the F13 exact-ID
          overload.
 
-    This test proves the active-orphan routing fix end-to-end via
-    the public API. It does NOT rely on a deterministic hook inside
-    ``ask_questions`` (the actual pause trigger) — instead, it
-    verifies the routing layer by directly constructing the
-    orphaned-state fixtures (terminal PROCESS_MESSAGE Task +
-    matching active JobItem) and asserting the resume returns
-    ``status="resuming"`` with the terminal Task's stable
-    ``work_id`` as ``job_id`` (the F13 exact-ID lookup key).
-
-    The pause cascade flips the original RUNNING ``PROCESS_MESSAGE``
-    Task to ``PAUSED``; for the active-orphan fallback to fire,
-    ``find_paused_or_running_by_instance`` must return ``None`` and
-    ``find_resume_root_candidate_by_active_job`` must find a
-    terminal backing Task correlated with an active JobItem. We
-    therefore UPDATE the paused Task directly to ``COMPLETED`` (the
-    production scenario: the original turn already ended before the
-    mid-process_report pause), and INSERT a matching active JobItem
-    that mirrors its ``work_id``.
-
-    NOTE: This test is a routing-layer E2E coverage. A full
-    ``ask_questions`` mid-report-turn fixture is harder to make
-    deterministic without an internal synchronization hook in the
-    test agent — see the plan §5 for the long-form E2E plan that
-    recommends such a hook.
+    Phase 3 (Increment 4, 2026-08-01): the heuristic is
+    superseded by explicit turn handles. See
+    ``.agents/shared/planning/turn-reconciler-migration/
+    increment4-plan.md`` §9.2 for the new pause-during-report
+    flow and §11.4.1 for the full E2E replacement.
     """
+    leader_id: str | None = None
+    seeded_job_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 2b: Bug A active-orphan routing via resume API (SKIPPED — Phase 3)")
+    logger.info("=" * 60)
+
+    # Phase 3 (Increment 4) removes the active-orphan heuristic this
+    # test exercised. The replacement is the explicit-handle E2E
+    # test from the Phase 4 routing rewrite. The body is preserved
+    # below as documentation of the historical scenario; it is
+    # expected to fail under the Phase 3 manager because
+    # ``find_paused_or_cancellable_turn`` does not surface terminal
+    # Tasks (status filter is PAUSED/RUNNING only, per plan §8.2).
+    pytest.skip(
+        "Phase 3 removed find_resume_root_candidate_by_active_job; "
+        "the equivalent routing gap is now closed by "
+        "find_paused_or_cancellable_turn + explicit handles. See "
+        "increment4-plan.md §11.4.1 for the Phase 4 replacement."
+    )
     leader_id: str | None = None
     seeded_job_id: str | None = None
     logger.info("=" * 60)

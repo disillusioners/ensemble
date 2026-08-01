@@ -11,6 +11,11 @@ Phase 2.5 (D13 / Phase 2 migration): the routing primitive moved off
 ``JobRepository.find_processing_message_jobs_by_instance`` (no MESSAGE
 ``JobItem`` rows exist post-D13) onto
 ``TaskRepository.find_paused_or_running_by_instance`` (Task 2.5.2).
+
+Phase 3 (Increment 4, 2026-08-01): that primitive is now superseded
+by ``TaskRepository.find_paused_or_cancellable_turn`` (the
+pause-cascade selector that includes PROCESS_REPORT alongside
+PROCESS_MESSAGE).
 """
 
 import uuid
@@ -74,16 +79,20 @@ def mock_instance_repository():
 
 @pytest.fixture
 def mock_task_repository():
-    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive).
+    """Create mock ``TaskRepository`` (Phase 3 explicit-handle selector).
 
-    Phase 1 / Step B (Bug A, Revision 2, 2026-08-01): also
-    pre-configure ``find_resume_root_candidate_by_active_job`` to
-    return ``None`` so the active-orphan fallback does NOT fire
-    in tests that exercise the child route.
+    ``resume_processing_job`` calls
+    :meth:`TaskRepository.find_paused_or_cancellable_turn` to
+    decide root-vs-child routing. The fixture pre-configures it to
+    return ``None`` so the active-orphan / root path does NOT
+    fire in tests that exercise the child route.
+
+    History: prior phases also configured the Bug-A
+    ``find_resume_root_candidate_by_active_job`` mock. Phase 3
+    (Increment 4) deletes that heuristic.
     """
     repo = MagicMock()
-    repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
-    repo.find_resume_root_candidate_by_active_job = MagicMock(return_value=None)
+    repo.find_paused_or_cancellable_turn = MagicMock(return_value=None)
     return repo
 
 
@@ -99,8 +108,10 @@ def mock_manager(
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    # Phase 2.5 (Task 2.5.2): routing primitive moved onto
-    # ``TaskRepository.find_paused_or_running_by_instance``.
+    # Phase 3 (Increment 4): routing primitive moves to
+    # ``TaskRepository.find_paused_or_cancellable_turn`` (the
+    # replacement for the deleted
+    # ``find_paused_or_running_by_instance``).
     manager._task_repo = mock_task_repository
     # Mock enqueue_message (used by both WorkerPool and JobQueue paths)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
@@ -135,7 +146,7 @@ class TestChildInstanceResume:
         instance_id = "child-instance-123"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -179,7 +190,7 @@ class TestChildInstanceResume:
         instance_id = "child-instance-456"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -212,7 +223,7 @@ class TestChildInstanceResume:
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
         # (Phase 2.5 / D13 — see module docstring).
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -240,7 +251,7 @@ class TestChildInstanceResume:
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
         # (Phase 2.5 / D13 — see module docstring).
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -269,7 +280,7 @@ class TestChildInstanceResume:
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
         # (Phase 2.5 / D13 — see module docstring).
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -298,7 +309,7 @@ class TestChildInstanceResume:
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
         # (Phase 2.5 / D13 — see module docstring).
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -326,7 +337,7 @@ class TestChildInstanceResume:
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
         # (Phase 2.5 / D13 — see module docstring).
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -374,7 +385,7 @@ class TestChildInstanceResume:
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
         # (Phase 2.5 / D13 — see module docstring).
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 

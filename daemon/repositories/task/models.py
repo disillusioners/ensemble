@@ -52,6 +52,14 @@ class TaskStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class SuspensionReason(str, enum.Enum):
+    """Reason a turn is suspended and awaiting an explicit resume."""
+
+    AWAITING_ANSWER = "awaiting_answer"
+    AWAITING_CHILDREN = "awaiting_children"
+    PAUSED_EXTERNAL = "paused_external"
+
+
 # Module-level Column kept as a reference for use in Task.__mapper_args__.
 # SQLAlchemy's mapper_coercions only accepts a Column expression (or a
 # string key) for version_id_col — it rejects the Pydantic-FieldInfo-
@@ -103,6 +111,7 @@ class Task(SQLModel, table=True):
     __tablename__ = "task"
     __table_args__ = (
         Index("idx_task_status_created", "status", "created_at"),
+        Index("idx_task_resume_target", "resume_target_turn_id", "suspension_reason"),
     )
 
     # Primary key (INTEGER PRIMARY KEY AUTOINCREMENT for SQLite)
@@ -122,6 +131,13 @@ class Task(SQLModel, table=True):
 
     # Status
     status: str = Field(default=TaskStatus.PENDING.value, index=True)
+
+    # Persisted suspension handle used to route a later resume to the
+    # authoritative turn identified by ``work_id``. The fields remain
+    # nullable for tasks that are not suspended and use only the composite
+    # ``idx_task_resume_target`` index declared above.
+    suspension_reason: str | None = Field(default=None, max_length=32)
+    resume_target_turn_id: str | None = Field(default=None, index=False)
 
     # Worker assignment
     worker_id: str | None = Field(default=None, index=True)
@@ -221,6 +237,8 @@ class Task(SQLModel, table=True):
             "instance_id": self.instance_id,
             "message_id": self.message_id,
             "status": self.status,
+            "suspension_reason": self.suspension_reason,
+            "resume_target_turn_id": self.resume_target_turn_id,
             "worker_id": self.worker_id,
             "retry_count": self.retry_count,
             "next_retry_at": self.next_retry_at,

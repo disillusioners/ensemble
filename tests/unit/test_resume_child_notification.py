@@ -1,16 +1,23 @@
 """Tests for resume_processing_job new queue flow behavior.
 
 With the new implementation:
-1. Child instances (no PAUSED/RUNNING PROCESS_MESSAGE Task): enqueue_message() via WorkerPool
-2. Root instances (has PAUSED/RUNNING PROCESS_MESSAGE Task): resume from checkpoint via _process_message_with_tracking
+1. Child instances (no PAUSED/RUNNING task): enqueue_message() via WorkerPool
+2. Root instances (has PAUSED/RUNNING task): resume from checkpoint via _process_message_with_tracking
 
 The _process_child_completion_and_notify_parent is now called directly by resume_processing_job
 for root instances, after processing completes successfully.
 
 Phase 2.5 (D13 / Phase 2 migration): the routing primitive moved off
-``JobRepository.find_processing_message_jobs_by_instance`` (no MESSAGE
-``JobItem`` rows exist post-D13) onto
+``JobRepository.find_processing_message_jobs_by_instance`` onto
 ``TaskRepository.find_paused_or_running_by_instance`` (Task 2.5.2).
+
+Phase 3 (Increment 4, 2026-08-01): that primitive is deleted.
+The replacement selector ``find_paused_or_cancellable_turn``
+includes PROCESS_REPORT and PROCESS_MESSAGE; answer-gate routing
+uses ``find_suspended_turn_for_answer`` against the persisted
+``suspension_reason`` / ``resume_target_turn_id`` handle (see
+``daemon/services/turn_transitions.py`` for the SUSPEND_TURN /
+RESUME_TURN extensions).
 """
 
 import uuid
@@ -55,13 +62,18 @@ class MockMessageResult:
 
 
 class MockJob:
-    """Mock ``Task`` row returned by ``TaskRepository.find_paused_or_running_by_instance``.
+    """Mock ``Task`` row returned by the Phase 3 explicit-handle selector.
 
     Phase 2.5 (D13): the legacy ``MockJob`` (which simulated a
     ``JobItem`` row) now stands in for a ``Task`` row instead. The
     ``.id`` attribute matches what ``resume_processing_job`` reads
     (``existing_task.id``) — the new routing primitive returns a Task
     row, not a JobItem.
+
+    Phase 3 (Increment 4): ``MockJob`` is now the candidate returned
+    by ``find_paused_or_cancellable_turn`` (the pause-cascade
+    selector that supersedes
+    ``find_paused_or_running_by_instance``).
     """
 
     def __init__(self, job_id: str = "test-job-123", message_id: str = "test-msg-456"):
@@ -105,20 +117,26 @@ def mock_instance_repository():
 
 @pytest.fixture
 def mock_task_repository():
-    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive).
+    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive;
+    Phase 3 routing moved to explicit turn handles — Increment 4).
 
-    Phase 1 / Step B (Bug A, Revision 2, 2026-08-01): add the
-    ``find_resume_root_candidate_by_active_job`` method to the mock
-    fixture so the active-orphan fallback has a real method to call.
-    Default behavior: returns ``None`` (no active orphan detected),
-    matching the typical case where the resume does NOT trigger the
-    Bug A fallback path.
+    ``resume_processing_job`` calls
+    :meth:`TaskRepository.find_paused_or_cancellable_turn` to
+    decide root-vs-child routing. Default behavior: returns
+    ``None`` (no paused/cancellable turn detected) so the resume
+    routes through the child branch — matching the typical case
+    where the resume does NOT trigger the root path.
+
+    History: prior phases exposed the inference-based
+    ``find_paused_or_running_by_instance`` selector and the
+    Bug-A ``find_resume_root_candidate_by_active_job``
+    heuristic. Phase 3 (Increment 4) deletes both; routing is
+    now driven by the explicit
+    ``suspension_reason`` / ``resume_target_turn_id`` handle
+    persisted at SUSPEND_TURN time.
     """
     repo = MagicMock()
-    repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
-    # Bug A active-orphan fallback — default to None so existing
-    # tests (which expect the child route) continue to pass.
-    repo.find_resume_root_candidate_by_active_job = MagicMock(return_value=None)
+    repo.find_paused_or_cancellable_turn = MagicMock(return_value=None)
     return repo
 
 
@@ -134,8 +152,10 @@ def mock_manager(
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    # Phase 2.5 (Task 2.5.2): routing primitive moved onto
-    # ``TaskRepository.find_paused_or_running_by_instance``.
+    # Phase 3 (Increment 4): routing primitive moves to
+    # ``TaskRepository.find_paused_or_cancellable_turn``
+    # (the replacement for the deleted
+    # ``find_paused_or_running_by_instance``).
     manager._task_repo = mock_task_repository
     # Mock enqueue_message for WorkerPool path (child instances)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
@@ -177,7 +197,7 @@ class TestChildNotificationWorkerPoolPath:
         instance_id = "child-instance-123"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -210,7 +230,7 @@ class TestChildNotificationWorkerPoolPath:
         instance_id = "child-instance-silent"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -233,7 +253,7 @@ class TestChildNotificationWorkerPoolPath:
         instance_id = "child-instance-msgid"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -261,7 +281,7 @@ class TestChildNotificationJobQueuePath:
         job_id = "job-abc-789"
 
         # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=MockJob(job_id=job_id, message_id="msg-456")
         )
 
@@ -297,7 +317,7 @@ class TestChildNotificationJobQueuePath:
         job_id = "job-xyz-789"
 
         # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=MockJob(job_id=job_id, message_id="msg-456")
         )
 
@@ -330,7 +350,7 @@ class TestChildNotificationErrorHandling:
         instance_id = "child-instance-fail"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -353,7 +373,7 @@ class TestChildNotificationErrorHandling:
         job_id = "job-123"
 
         # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=MockJob(job_id=job_id, message_id="msg-456")
         )
 
@@ -374,13 +394,25 @@ class TestChildNotificationErrorHandling:
 
 
 class MockTerminalTask:
-    """Mock Task row returned by the active-orphan fallback primitive."""
+    """Mock Task row used by phase-3 explicit-handle tests.
+
+    History: previously returned by the Bug-A
+    ``find_resume_root_candidate_by_active_job`` heuristic. Phase 3
+    (Increment 4) deletes that heuristic; the explicit
+    ``suspension_reason`` / ``resume_target_turn_id`` handle
+    declared at SUSPEND_TURN time is now the authoritative resume
+    routing input. The class is retained for the resumed-task test
+    fixtures in this file (e.g. a Task object that resumes routes
+    to ROOT).
+    """
 
     def __init__(
         self,
         work_id: str = "terminal-task-work-id",
         status: str = "completed",
         task_id: int = 42,
+        suspension_reason: str | None = None,
+        resume_target_turn_id: str | None = None,
     ):
         self.work_id = work_id
         self.status = status
@@ -388,94 +420,39 @@ class MockTerminalTask:
         self.task_type = "process_message"
         self.instance_id = "test-instance"
         self.message_id = "msg-original"
+        self.suspension_reason = suspension_reason
+        self.resume_target_turn_id = resume_target_turn_id
 
 
-class TestActiveOrphanFallbackRouting:
-    """Manager-level routing tests for the Bug A active-orphan fallback.
+class TestSuspendedTurnForAnswerRouting:
+    """Manager-level routing tests for Phase 3 explicit-handle routing.
 
-    Phase 1 / Step B (Revision 2, 2026-08-01). ``resume_processing_job``
-    must use the new ``find_resume_root_candidate_by_active_job``
-    primitive as a fallback when ``find_paused_or_running_by_instance``
-    returns ``None``. The fallback routes the resume to the ROOT path
-    (not child) so the orphaned JobItem is explicitly finalized via
-    ``_process_resume_finalize`` with the F13 exact-ID overload.
+    ``resume_processing_job`` calls
+    :meth:`TaskRepository.find_paused_or_cancellable_turn` to decide
+    root-vs-child. The previous ``find_resume_root_candidate_by_
+    active_job`` heuristic is removed; the explicit
+    ``suspension_reason`` / ``resume_target_turn_id`` handle
+    persisted at SUSPEND_TURN time is the authoritative routing
+    input.
 
     These tests mock the graph/queue dependencies but exercise the
     real ``resume_processing_job`` routing logic.
     """
 
     @pytest.mark.asyncio
-    async def test_active_orphan_fallback_selects_root(
+    async def test_no_suspended_turn_routes_child(
         self, instance_manager, mock_manager
     ):
-        """Active-orphan fallback selects ROOT branch (Bug A incident case).
+        """No paused/cancellable turn → child branch.
 
-        When the regular root-route lookup returns None AND the
-        active-orphan fallback finds a terminal PROCESS_MESSAGE Task
-        with matching active JobItem, the manager routes to the ROOT
-        branch — NOT the child branch. The terminal Task's stable
-        ``work_id`` is returned as ``job_id`` for downstream
-        finalization via the F13 exact-ID overload.
+        When the pause-cascade selector returns ``None``, the
+        resume routes to the child branch via WorkerPool
+        (existing behavior, preserved).
         """
-        instance_id = "active-orphan-instance"
-        terminal_work_id = "orphan-work-id-abc123"
-
-        # Regular root-route lookup: no PAUSED/RUNNING/CANCELLED task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=None
-        )
-
-        # Active-orphan fallback returns a terminal Task.
-        terminal_task = MockTerminalTask(
-            work_id=terminal_work_id,
-            status="completed",
-            task_id=99,
-        )
-        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
-            return_value=terminal_task
-        )
-
-        # Instance exists and is in normal state.
-        mock_manager._instance_repository.get = MagicMock(
-            return_value=MockInstanceMeta(
-                instance_id=instance_id,
-                status=InstanceStatus.RUNNING.value,
-            )
-        )
-
-        result = await instance_manager.resume_processing_job(
-            instance_id, message="resume", silent=False
-        )
-
-        # Must route to ROOT — not enqueue via WorkerPool.
-        mock_manager.enqueue_message.assert_not_called()
-        # Must use the terminal Task's work_id as the job_id for
-        # downstream F13 exact-ID finalization.
-        assert result["job_id"] == terminal_work_id, (
-            "Active-orphan fallback MUST return the terminal Task's "
-            "stable work_id so downstream _process_resume_finalize "
-            "uses the F13 exact-ID overload"
-        )
-        assert result["status"] == "resuming"
-
-        # Fallback primitive was consulted AFTER the regular lookup.
-        mock_manager._task_repo.find_resume_root_candidate_by_active_job.assert_called_once_with(
-            instance_id
-        )
-
-    @pytest.mark.asyncio
-    async def test_no_fallback_selects_child(
-        self, instance_manager, mock_manager
-    ):
-        """Neither lookup matches → child branch (existing behavior)."""
         instance_id = "ordinary-child-instance"
 
-        # Regular root-route: None
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=None
-        )
-        # Active-orphan fallback: None
-        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+        # No paused/cancellable turn.
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -489,31 +466,22 @@ class TestActiveOrphanFallbackRouting:
         assert result["job_id"] is None
 
     @pytest.mark.asyncio
-    async def test_existing_resumable_task_takes_precedence_over_fallback(
+    async def test_paused_cancellable_turn_routes_root(
         self, instance_manager, mock_manager
     ):
-        """Existing resumable Task wins; fallback MUST NOT be consulted.
+        """``find_paused_or_cancellable_turn`` returns a Task → ROOT.
 
-        When ``find_paused_or_running_by_instance`` returns a Task
-        (the normal pause-then-resume case), the existing route owns
-        the routing decision. The active-orphan fallback is a
-        SECONDARY detector and must not interfere.
+        When the pause-cascade selector returns a Task (the
+        normal pause-then-resume case), the resume routes to the
+        ROOT branch via ``_resume_processing_background``.
         """
         instance_id = "regular-paused-instance"
         existing_job_id = "existing-job-xyz"
 
-        # Regular root-route returns a Task.
+        # Cancellable turn (PAUSED/RUNNING) — root-route.
         existing_task = MockJob(job_id=existing_job_id)
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=existing_task
-        )
-
-        # Active-orphan fallback MUST NOT be called (per
-        # ``find_resume_root_candidate_by_active_job`` design — it
-        # short-circuits internally if a PAUSED/RUNNING/CANCELLED
-        # Task exists).
-        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
-            return_value=None
         )
 
         mock_manager._instance_repository.get = MagicMock(
@@ -527,41 +495,82 @@ class TestActiveOrphanFallbackRouting:
             instance_id, message="resume"
         )
 
-        # Routes to ROOT via existing route.
+        # Routes to ROOT via the pause-cascade selector.
         assert result["status"] == "resuming"
         assert result["job_id"] == existing_job_id
 
     @pytest.mark.asyncio
-    async def test_concurrent_resume_dedup_on_fallback_path(
+    async def test_paused_during_report_turn_routes_root(
         self, instance_manager, mock_manager
     ):
-        """W4 case 5: concurrent graph_tasks dedup works on the fallback path.
+        """PROCESS_REPORT pause → ROOT branch (Bug A incident regression).
 
-        If the active-orphan instance is already being resumed in
-        ``_graph_tasks`` (another concurrent resume is in flight),
-        the fallback path MUST deduplicate (return
-        ``already_resuming``) rather than start a second graph turn.
+        After the pause-during-report-turn fix (Phase 3, Increment 4),
+        a PAUSED/RUNNING PROCESS_REPORT task is treated as a root
+        candidate by ``find_paused_or_cancellable_turn`` (it now
+        includes PROCESS_REPORT alongside PROCESS_MESSAGE). The
+        manager routes to ROOT — NOT child — even though no
+        PROCESS_MESSAGE task exists on the instance. This is the
+        regression test for the historical Bug A incident state.
         """
-        instance_id = "concurrent-orphan-instance"
-        terminal_work_id = "orphan-work-id-concurrent"
-        existing_job_id = "orphan-work-id-concurrent"  # same value
+        instance_id = "report-paused-instance"
+        report_work_id = "report-turn-work-id"
 
-        # No resumable task, but the fallback returns a terminal.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=None
+        report_task = MockTerminalTask(
+            work_id=report_work_id,
+            status="paused",
+            task_id=77,
+            task_type="process_report" if hasattr(MockTerminalTask, "task_type") else "process_report",
         )
-        terminal_task = MockTerminalTask(
-            work_id=terminal_work_id,
-            status="completed",
+        # task_type is hardcoded in MockTerminalTask; override here
+        # so this case reflects a paused PROCESS_REPORT row.
+        report_task.task_type = "process_report"
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
+            return_value=report_task
         )
-        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
-            return_value=terminal_task
+
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+            )
+        )
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume"
+        )
+
+        # Routes to ROOT via the report turn's work_id — the
+        # explicit-handle routing fix for Bug A.
+        mock_manager.enqueue_message.assert_not_called()
+        assert result["status"] == "resuming"
+        assert result["job_id"] == report_work_id
+
+    @pytest.mark.asyncio
+    async def test_concurrent_resume_dedup_on_root_path(
+        self, instance_manager, mock_manager
+    ):
+        """Concurrent graph_tasks dedup works on the explicit-handle ROOT path.
+
+        If the resumable turn is already being resumed in
+        ``_graph_tasks`` (another concurrent resume is in flight),
+        the ROOT path MUST deduplicate (return ``already_resuming``)
+        rather than start a second graph turn. This is the W4 case 5
+        dedup invariant preserved after the heuristic removal.
+        """
+        instance_id = "concurrent-resume-instance"
+        existing_work_id = "paused-task-concurrent"
+
+        # Pause-cascade selector returns a Task.
+        existing_task = MockJob(job_id=existing_work_id)
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
+            return_value=existing_task
         )
 
         # Pre-populate _graph_tasks with an in-flight resume.
-        existing_task = MagicMock()
-        existing_task.done = MagicMock(return_value=False)
-        instance_manager._graph_tasks[instance_id] = existing_task
+        existing_graph_task = MagicMock()
+        existing_graph_task.done = MagicMock(return_value=False)
+        instance_manager._graph_tasks[instance_id] = existing_graph_task
 
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
@@ -569,7 +578,7 @@ class TestActiveOrphanFallbackRouting:
 
         # Dedup kicks in BEFORE the routing decision.
         assert result["status"] == "already_resuming"
-        assert result["job_id"] == terminal_work_id
+        assert result["job_id"] == existing_work_id
 
     @pytest.mark.asyncio
     async def test_silent_cascade_resume_child_returns_silent_resume(
@@ -578,16 +587,12 @@ class TestActiveOrphanFallbackRouting:
         """W4 case 4: silent cascade-resume for a child remains a no-op.
 
         A cascade-resume with ``silent=True`` for an ordinary child
-        (no resumable Task, no active orphan) must still return
-        ``silent_resume`` without enqueuing any message. The fallback
-        primitive MUST return None for ordinary children.
+        (no paused/cancellable turn) must still return
+        ``silent_resume`` without enqueuing any message.
         """
         instance_id = "silent-child-instance"
 
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
-            return_value=None
-        )
-        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 

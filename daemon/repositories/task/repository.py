@@ -24,7 +24,7 @@ from daemon.services.turn_transitions import (
 
 from ..instance.models import Instance, InstanceStatus
 from ..job_queue.models import AdmissionState, JobItem, active_admission_states_sql
-from .models import Task, TaskStatus, TaskType
+from .models import SuspensionReason, Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -250,53 +250,169 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
-    def find_paused_or_running_by_instance(
+    def find_suspended_turn_for_answer(
         self, instance_id: str
     ) -> Task | None:
-        """Return the first PAUSED or RUNNING ``PROCESS_MESSAGE`` ``task`` for ``instance_id``.
+        """Return the explicitly suspended answer-gate ``task`` for ``instance_id``.
 
-        Phase 2.5 (2026-06-27, D13 consumption-site rewrite). The
-        root-vs-child routing primitive for
-        ``InstanceManager.resume_processing_job``. Pre-D13, the same
-        decision was made by looking up a PROCESSING ``JobItem`` via
-        ``JobRepository.find_processing_message_jobs_by_instance`` —
-        after D13, messages no longer create ``JobItem`` rows, so the
-        routing decision moves onto the ``task`` table.
+        Phase 3 (Increment 4). The answer-routing primitive for
+        ``InstanceManager.resume_processing_job`` (or its answer-specific
+        caller established by Increment 3). Replaces the
+        inference-based ``find_paused_or_running_by_instance`` lookup
+        with an authoritative handle lookup: only a Task that was
+        SUSPENDED via ``SuspendTurn`` with
+        ``suspension_reason='awaiting_answer'`` and a non-null
+        ``resume_target_turn_id`` qualifies.
 
-        Widened sister query to :meth:`find_running_by_instance` (the
-        happy-path RUNNING-only lookup) and :meth:`has_inflight_task`
-        (PENDING-or-RUNNING EXISTS check):
+        The filter shape:
 
-          * PAUSED tasks are included because a paused root instance is
-            exactly the case where checkpoint resume must fire
-            (``task.status`` was transitioned ``RUNNING → PAUSED`` by
-            ``_pause_cascade_db_sync`` and will be transitioned back to
-            ``PENDING`` by ``_resume_cascade_db_sync`` — the resume
-            path needs to recognise that state and re-attach the
-            graph driver).
-          * PAUSED is intentionally NOT included by
-            :meth:`has_inflight_task` — that helper is the
-            ``job_continue`` concurrency gate, which must let PAUSED
-            through (paused tasks are not actively driving the
-            graph). The two semantics are deliberately different.
+          * ``instance_id = :instance_id``  (correlates by the
+            langgraph thread_id — see §8.1 implementation note re
+            question/answer schema: answers map to instances, then
+            the handle provides uniqueness; we deliberately do NOT
+            key on ``answer_message_id`` because the question
+            schema lives outside the ``task`` table).
+          * ``suspension_reason = 'awaiting_answer'``  (the explicit
+            handle set by ``SuspendTurn``; required for
+            ``find_suspended_turn_for_answer`` per §7 invariant 8).
+          * ``resume_target_turn_id IS NOT NULL``  (required per §7
+            invariant 2 — ``awaiting_answer`` MUST carry a target).
+          * ``status = 'paused'``  (a Task that already terminalised
+            cannot be the suspended answer gate; the terminal
+            transitions clear the handle, so this is defence in
+            depth against a leaked non-null handle).
 
-        Filters on ``task_type = PROCESS_MESSAGE`` so report tasks
-        (``PROCESS_REPORT``) do not collide with the resume routing
-        decision — a paused report task is irrelevant to whether the
-        root instance has an in-flight graph turn to resume.
-
-        Pattern (parameterised ``IN`` clause) matches the dual-driver
-        approach in :meth:`has_inflight_task` — works on both SQLite
-        and PostgreSQL without dialect branching.
+        Ambiguity policy (§8.1 return behavior): returns ``None``
+        when no row matches, returns the single row when exactly
+        one matches, and raises ``ValueError`` if multiple rows
+        match — the answer gate has exactly one authoritative
+        suspension handle per instance, so duplicates indicate an
+        invariant violation that must NOT be resolved by recency.
 
         Args:
             instance_id: The langgraph thread_id / instance_id.
 
         Returns:
-            The first PAUSED or RUNNING ``PROCESS_MESSAGE`` Task for
-            the instance, or ``None``.
+            The single suspended answer-gate Task (with its
+            authoritative ``work_id`` and ``resume_target_turn_id``),
+            or ``None`` if no such turn exists. Raises
+            ``ValueError`` if multiple matching rows exist
+            (ambiguity).
+        """
+        # Phase 3: dual-driver SQL — count(*) for ambiguity, then a
+        # single-row read via the composite index. SQLModel's
+        # ``session.scalar`` returns the first row; the COUNT guard
+        # detects duplicates and raises ValueError so the caller
+        # sees the invariant violation rather than silently picking
+        # by recency.
+        with SQLModelSession(self.engine) as db_session:
+            count_stmt = (
+                select(func.count(col(Task.id)))
+                .where(Task.instance_id == instance_id)
+                .where(Task.suspension_reason == SuspensionReason.AWAITING_ANSWER.value)
+                .where(Task.resume_target_turn_id.isnot(None))
+                .where(Task.status == TaskStatus.PAUSED.value)
+            )
+            match_count = db_session.exec(count_stmt).one()
+            if match_count > 1:
+                raise ValueError(
+                    f"find_suspended_turn_for_answer({instance_id!r}) "
+                    f"matched {match_count} suspended answer-gate rows "
+                    f"— answer-gate routing requires exactly 0 or 1 "
+                    f"(ambiguity must not be resolved by recency)."
+                )
+            if match_count == 0:
+                return None
+
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.suspension_reason == SuspensionReason.AWAITING_ANSWER.value)
+                .where(Task.resume_target_turn_id.isnot(None))
+                .where(Task.status == TaskStatus.PAUSED.value)
+            )
+            return db_session.exec(stmt).first()
+
+    def find_paused_or_cancellable_turn(
+        self, instance_id: str
+    ) -> Task | None:
+        """Return the most recent PAUSED-or-RUNNING ``task`` for ``instance_id``.
+
+        Phase 3 (Increment 4). The pause-cascade selector — the
+        turn that the ``SUSPEND_TURN`` / ``CANCEL_TURN`` transition
+        may legally act upon. Replaces the inference-based
+        ``find_paused_or_running_by_instance`` for pause-cascade
+        consumers (NOT answer routing).
+
+        The filter shape:
+
+          * ``instance_id = :instance_id``
+          * ``status IN ('paused', 'running')``  (the named
+            transitions may only operate on a non-terminal Task;
+            CANCELLED is deliberately EXCLUDED — the resume cascade
+            uses CANCELLED as a "resumed" marker, and CANCELLED rows
+            are no longer cancellable).
+          * ``task_type IN ('process_message', 'process_report')``
+            (per plan §8.2: include ``PROCESS_REPORT`` where a
+            report turn is the active checkpoint-bearing turn).
+            ``SEND_REPORT`` and ``CLEANUP`` are excluded because
+            they are NOT active graph turns.
+          * Ordered by ``created_at`` DESC — return the most
+            recent (deterministic for the typical one-turn-per-
+            instance invariant).
+
+        Ambiguity policy (§8.2): raises ``ValueError`` if more
+        than one concurrently eligible turn exists for the same
+        instance. The one-running-turn-per-instance invariant means
+        multiple matching rows indicate an inconsistency; the
+        caller MUST surface this as an invariant violation rather
+        than pick a winner.
+
+        Sister query to :meth:`find_running_by_instance` (the
+        RUNNING-only narrow lookup) — same shape, widened to include
+        ``PAUSED`` and broadened on ``task_type``.
+
+        Args:
+            instance_id: The langgraph thread_id / instance_id.
+
+        Returns:
+            The most recent PAUSED-or-RUNNING PROCESS_MESSAGE /
+            PROCESS_REPORT Task for the instance, or ``None``.
+            Raises ``ValueError`` if more than one concurrently
+            eligible row exists (one-running-turn-per-instance
+            invariant violation).
         """
         with SQLModelSession(self.engine) as db_session:
+            # Count first — a two-concurrent-eligible-turns state
+            # is an invariant violation and must surface as such, not
+            # silently pick by recency (per plan §8.2).
+            count_stmt = (
+                select(func.count(col(Task.id)))
+                .where(Task.instance_id == instance_id)
+                .where(
+                    Task.status.in_([
+                        TaskStatus.PAUSED.value,
+                        TaskStatus.RUNNING.value,
+                    ])
+                )
+                .where(
+                    Task.task_type.in_([
+                        TaskType.PROCESS_MESSAGE.value,
+                        TaskType.PROCESS_REPORT.value,
+                    ])
+                )
+            )
+            match_count = db_session.exec(count_stmt).one()
+            if match_count > 1:
+                raise ValueError(
+                    f"find_paused_or_cancellable_turn({instance_id!r}) "
+                    f"matched {match_count} concurrently-eligible "
+                    f"turns — one-running-turn-per-instance invariant "
+                    f"violated."
+                )
+            if match_count == 0:
+                return None
+
             stmt = (
                 select(Task)
                 .where(Task.instance_id == instance_id)
@@ -304,148 +420,13 @@ class TaskRepository:
                     Task.status.in_([
                         TaskStatus.PAUSED.value,
                         TaskStatus.RUNNING.value,
-                        # CANCELLED is included because ``_resume_cascade_db_sync``
-                        # transitions PAUSED tasks to CANCELLED atomically with
-                        # the instance resume (Phase 3 W2 fix). A CANCELLED task
-                        # is the marker that this instance was paused-and-resumed
-                        # and the resume driver ``resume_processing_job`` must run
-                        # the root cleanup path (stale message → COMPLETED, then
-                        # ``_resume_processing_background``). Without CANCELLED
-                        # in the IN clause, ``resume_processing_job`` finds no
-                        # task, misroutes the instance to the WorkerPool child
-                        # path, and the stale PENDING/PROCESSING message from the
-                        # paused turn wedges the parent at waiting_children after
-                        # the final LLM turn (E2E test_pause_after_spawn_then_resume
-                        # regression).
-                        TaskStatus.CANCELLED.value,
                     ])
                 )
-                .where(Task.task_type == TaskType.PROCESS_MESSAGE.value)
-                .order_by(col(Task.created_at).desc())
-            )
-            return db_session.exec(stmt).first()
-
-    def find_resume_root_candidate_by_active_job(
-        self, instance_id: str
-    ) -> Task | None:
-        """Detect the report-turn-pause orphan state and return the
-        terminal backing ``PROCESS_MESSAGE`` Task (Bug A fallback).
-
-        Phase 1 / Step B (Revision 2, 2026-08-01). The complementary
-        primitive to :meth:`find_paused_or_running_by_instance`. When
-        that method returns ``None`` AND there is still an ``active``
-        JobItem on the instance, the most likely explanation is the
-        Bug A incident state: a ``process_report`` turn is in flight,
-        the original ``PROCESS_MESSAGE`` Task has reached a terminal
-        state, and the ``active`` JobItem mirrors a work_id that
-        ``find_paused_or_running_by_instance`` does not recognise.
-
-        Returns the most-recent ``PROCESS_MESSAGE`` Task on the
-        instance ONLY when ALL of these conditions hold:
-
-          * No PAUSED / RUNNING / CANCELLED ``PROCESS_MESSAGE`` Task
-            exists on the instance (i.e.
-            :meth:`find_paused_or_running_by_instance` returns
-            ``None``). A live or paused Task means the existing root
-            route owns the instance and the fallback must NOT steal
-            the routing decision.
-          * The most-recent ``PROCESS_MESSAGE`` Task on the instance
-            is in a TERMINAL state (``COMPLETED``, ``CANCELLED``, or
-            ``FAILED``).
-          * A non-deleted ``active`` JobItem exists on the instance
-            whose ``job_id`` equals the terminal Task's ``work_id``
-            (direct column-to-column join — NO JSON extraction). The
-            JobItem is the orphaned mirror: the Task ended but the
-            JobItem still holds a lock.
-
-        Correlation axis: ``job_queue_items.job_id = task.work_id``
-        (direct column join). The retry-path rationale for
-        work_id-keyed correlation (instead of message_id-keyed)
-        applies here too — see
-        the shared in-flight JobItem predicate for the
-        full discussion of the ``message_id`` → ``work_id``
-        re-keying.
-
-        Returns ``None`` when:
-
-          * An ordinary child instance with no active JobItem
-            (``find_paused_or_running_by_instance`` already handles
-            the child branch via ``enqueue_message``).
-          * The instance has a resumable Task (PAUSED / RUNNING /
-            CANCELLED) — :meth:`find_paused_or_running_by_instance`
-            owns the routing.
-          * The most-recent PROCESS_MESSAGE Task is non-terminal
-            (PENDING, RUNNING, PAUSED) — but those are excluded by
-            the first condition above; the method short-circuits.
-          * No PROCESS_MESSAGE Task exists at all.
-          * No active JobItem correlates via ``work_id == job_id``
-            (orphaned Task without an orphaned JobItem, or queued/
-            done/deleted JobItem).
-          * A ``PROCESS_REPORT`` Task is the most-recent row but a
-            newer PROCESS_MESSAGE terminal Task also exists — the
-            query orders by ``created_at DESC`` and filters on
-            ``task_type = PROCESS_MESSAGE`` so report tasks never
-            appear in the candidate set.
-
-        Args:
-            instance_id: The langgraph thread_id / instance_id.
-
-        Returns:
-            The terminal backing ``PROCESS_MESSAGE`` Task (with its
-            stable ``work_id``), or ``None`` if no such candidate
-            exists.
-
-        Dual-driver: the SQL uses direct column-to-column joins
-        (``task.work_id = job_queue_items.job_id``) without JSON
-        extraction, ``rowid``, or other backend-only operators. Works
-        identically on SQLite and PostgreSQL.
-        """
-        # First, defer to the existing root-route primitive. If a
-        # resumable Task exists, the regular route owns the instance
-        # and the fallback MUST return None.
-        if self.find_paused_or_running_by_instance(instance_id) is not None:
-            return None
-
-        # No PAUSED / RUNNING / CANCELLED PROCESS_MESSAGE Task.
-        # Look for the most-recent PROCESS_MESSAGE Task on the
-        # instance (any status — we'll filter below) plus a
-        # correlated non-deleted active JobItem via work_id ==
-        # job_id. The terminal-status filter applies AFTER the
-        # correlation — a non-terminal row with no correlated
-        # JobItem is also a non-match.
-        #
-        # CANCELLED is intentionally EXCLUDED from the candidate
-        # set. The existing ``find_paused_or_running_by_instance``
-        # treats CANCELLED as a "resumable marker" (the
-        # pause-cascade transitions PAUSED → CANCELLED), and the
-        # ``_resume_cascade_db_sync`` flow expects the existing
-        # route to own CANCELLED Tasks. Including CANCELLED in
-        # the fallback would steal routing from the cascade-
-        # resume path. CANCELLED can also come from ``schedule_retry``
-        # (Phase 3 retry path) — in that case the active JobItem
-        # correlates via ``work_id`` and the retry child Task
-        # (PENDING) drives the actual work. The fallback does NOT
-        # service the retry path; retry children are claimed by
-        # the regular ``claim_pending_task`` path (FIFO recovery).
-        terminal_statuses = [
-            TaskStatus.COMPLETED.value,
-            TaskStatus.FAILED.value,
-        ]
-        with SQLModelSession(self.engine) as db_session:
-            stmt = (
-                select(Task)
-                .where(Task.instance_id == instance_id)
-                .where(Task.task_type == TaskType.PROCESS_MESSAGE.value)
-                .where(Task.status.in_(terminal_statuses))
                 .where(
-                    # EXISTS a non-deleted active JobItem whose
-                    # job_id matches this Task's work_id (direct
-                    # column-to-column join — NO JSON extraction).
-                    select(JobItem.job_id)
-                    .where(JobItem.job_id == Task.work_id)
-                    .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
-                    .where(JobItem.deleted_at.is_(None))
-                    .exists()
+                    Task.task_type.in_([
+                        TaskType.PROCESS_MESSAGE.value,
+                        TaskType.PROCESS_REPORT.value,
+                    ])
                 )
                 .order_by(col(Task.created_at).desc())
             )
@@ -478,8 +459,9 @@ class TaskRepository:
         not block a ``job_continue`` call against a paused instance
         (the user has explicitly paused it and is now choosing to
         unpause via a separate flow). This is the inverse of
-        :meth:`find_paused_or_running_by_instance`, which DOES
-        include PAUSED for the resume-routing primitive.
+        :meth:`find_paused_or_cancellable_turn`, which DOES
+        include PAUSED for the pause-cascade selector (Phase 3,
+        Increment 4).
 
         Dual-driver SQL: pure SQLModel via ``session.scalar`` —
         the parameterized ``IN (:pending, :running)`` works on

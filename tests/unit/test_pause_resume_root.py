@@ -1,25 +1,39 @@
-"""Phase 2.5 / Task 2.5.10 — Pause/resume E2E for root instance.
+"""Phase 3 / Increment 4 — Pause/resume E2E for root instance, plus
+explicit-handle selectors.
 
 End-to-end exercise of the post-D13 pause/resume cycle against a real
-in-memory SQLite engine, verifying the new
-``TaskRepository.find_paused_or_running_by_instance`` routing primitive
-plus the ``_finalize_job_db_sync(job_id=None)`` path that lets an
-instance reach a terminal status without a ``JobItem`` row.
+in-memory SQLite engine, verifying the
+``TaskRepository.find_paused_or_cancellable_turn`` pause-cascade
+selector, the ``TaskRepository.find_suspended_turn_for_answer``
+answer-gate selector, and the explicit ``suspension_reason`` /
+``resume_target_turn_id`` handle persisted by
+``SuspendTurn`` / ``ResumeTurn`` (see
+``daemon/services/turn_transitions.py``).
 
-The scenario mirrors the documented Phase 2.5 contract (D13 consumption-
-site rewrite):
-
+Phase 2.5 (Task 2.5.10): the original ``find_paused_or_running_by_instance``
+test surface is migrated here to the equivalent
+``find_paused_or_cancellable_turn`` tests (the old selector is
+deleted in Phase 3). The pause/resume scenario mirrors the
+documented Phase 2.5 contract (D13 consumption-site rewrite):
   1. Seed a RUNNING instance with a RUNNING ``PROCESS_MESSAGE`` task.
   2. ``_pause_cascade_db_sync`` — instance + task both go PAUSED in one
-     transaction.
-  3. ``find_paused_or_running_by_instance`` returns the task (the root
-     routing decision would pick ``_resume_processing_background``).
+     transaction. ``SuspendTurn`` (Phase 3) persists the suspension
+     handle fields (``suspension_reason``,
+     ``resume_target_turn_id``) in the same UPDATE.
+  3. ``find_paused_or_cancellable_turn`` returns the task (the
+     pause-cascade selector would feed ``SUSPEND_TURN`` /
+     ``RESUME_TURN``).
   4. ``_resume_cascade_db_sync`` — instance goes RUNNING and the
      task transitions PAUSED → CANCELLED (the resume driver owns the
      graph turn; re-arming the task would race with the resume path).
-  5. ``find_paused_or_running_by_instance`` returns ``None`` (task is
-     CANCELLED, not PAUSED/RUNNING) — the routing decision would now
-     fall through to the child / WorkerPool path.
+     ``ResumeTurn`` (Phase 3) clears the suspension handle in the
+     same guarded UPDATE.
+  5. ``find_paused_or_cancellable_turn`` does NOT return the
+     CANCELLED task (CANCELLED is not in the pause-cascade eligible
+     set — the selector returns the task for an external pause
+     cascade, but CANCELLED is excluded because the task is no longer
+     cancellable). The resume cleanup path drives the natural
+     recovery.
   6. ``_finalize_job_db_sync(job_id=None, terminal_status="completed",
      ...)`` — Step 1 (JobItem UPDATE) is skipped, Steps 2+3 (instance
      status → COMPLETED, lock release) run, and the instance reaches a
@@ -52,7 +66,7 @@ from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue.models import JobLock, AdmissionState, JobItem
-from daemon.repositories.task.models import Task, TaskStatus, TaskType
+from daemon.repositories.task.models import SuspensionReason, Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.instance_lifecycle import InstanceLifecycleService
@@ -253,9 +267,10 @@ class TestPauseResumeRoot:
 
     Drives the production ``_pause_cascade_db_sync`` and
     ``_resume_cascade_db_sync`` helpers against a real in-memory SQLite
-    engine and verifies the new
-    ``TaskRepository.find_paused_or_running_by_instance`` primitive
-    plus the ``_finalize_job_db_sync(job_id=None)`` no-JobItem path.
+    engine and verifies the
+    ``TaskRepository.find_paused_or_cancellable_turn`` pause-cascade
+    selector plus the ``_finalize_job_db_sync(job_id=None)`` no-JobItem
+    path.
     """
 
     def test_pause_then_resume_then_finalize_reaches_completed(
@@ -271,14 +286,16 @@ class TestPauseResumeRoot:
 
           1. Seed instance (RUNNING) + PROCESS_MESSAGE task (RUNNING).
           2. ``_pause_cascade_db_sync`` — instance + task both PAUSED.
-          3. ``find_paused_or_running_by_instance`` returns the task
-             (root-instance routing decision would fire checkpoint
-             resume via ``_resume_processing_background``).
+          3. ``find_paused_or_cancellable_turn`` returns the task
+             (pause-cascade selector for the explicit SUSPEND_TURN
+             path).
           4. ``_resume_cascade_db_sync`` — instance RUNNING, task
              PAUSED → CANCELLED (resume driver owns the graph turn;
              the task is non-claimable so the WorkerPool cannot race).
-          5. ``find_paused_or_running_by_instance`` now returns
-             ``None`` (CANCELLED is not in the PAUSED/RUNNING set).
+          5. ``find_paused_or_cancellable_turn`` now returns
+             ``None`` (CANCELLED is not in the pause-cascade eligible
+             set — the selector restricts to PAUSED/RUNNING for the
+             named pause/cancel transitions per §8.2).
           6. ``_finalize_job_db_sync(job_id=None, terminal_status=
              "completed", ...)`` — Step 1 (JobItem UPDATE) is skipped,
              Steps 2+3 (instance → COMPLETED, lock release) run.
@@ -313,12 +330,12 @@ class TestPauseResumeRoot:
         assert inst_after_pause.status == InstanceStatus.PAUSED.value
         assert task_after_pause.status == TaskStatus.PAUSED.value
 
-        # 3. Routing decision after pause: root path (PAUSED PROCESS_MESSAGE task)
-        routed_task = task_repo.find_paused_or_running_by_instance(iid)
+        # 3. Pause-cascade selector returns the PAUSED task.
+        routed_task = task_repo.find_paused_or_cancellable_turn(iid)
         assert routed_task is not None, (
-            "find_paused_or_running_by_instance must return the paused "
-            "PROCESS_MESSAGE task after pause cascade (root routing "
-            "decision — checkpoint resume via _resume_processing_background)"
+            "find_paused_or_cancellable_turn must return the paused "
+            "PROCESS_MESSAGE task after pause cascade (the pause-"
+            "cascade selector for SUSPEND_TURN)"
         )
         assert routed_task.id == task_id
         assert routed_task.status == TaskStatus.PAUSED.value
@@ -349,30 +366,18 @@ class TestPauseResumeRoot:
             "WorkerPool from re-claiming and racing)"
         )
 
-        # 5. Routing decision after resume: still a root candidate.
-        # The resume cascade transitions the task PAUSED → CANCELLED to
-        # prevent the WorkerPool from re-claiming (W2 fix), but the
-        # task is still the marker that this instance was paused-and-
-        # resumed. ``find_paused_or_running_by_instance`` MUST include
-        # CANCELLED in its status set so ``resume_processing_job`` can
-        # locate the task, run the stale-message cleanup, and route to
-        # ``_resume_processing_background`` (the root path).
-        #
-        # Without CANCELLED in the IN clause, ``resume_processing_job``
-        # falls through to the WorkerPool child path, enqueues a NEW
-        # task alongside the stale PAUSED/PROCESSING message from the
-        # paused turn, and the parent wedges at ``waiting_children``
-        # after the final LLM turn (the E2E
-        # ``test_pause_after_spawn_then_resume`` regression).
-        routed_after_resume = task_repo.find_paused_or_running_by_instance(iid)
-        assert routed_after_resume is not None, (
-            "find_paused_or_running_by_instance must return the CANCELLED "
-            "task after resume cascade; CANCELLED is the marker that the "
-            "instance was paused-and-resumed and needs the resume cleanup "
-            "path (stale message → COMPLETED + _resume_processing_background)"
+        # 5. Pause-cascade selector after resume: CANCELLED is
+        # NOT in the eligible status set (the selector restricts to
+        # PAUSED/RUNNING for the named pause/cancel transitions,
+        # per §8.2). The CANCELLED task is a no-longer-cancellable
+        # marker — the resume cleanup path drives the natural
+        # recovery, not the pause cascade.
+        routed_after_resume = task_repo.find_paused_or_cancellable_turn(iid)
+        assert routed_after_resume is None, (
+            "find_paused_or_cancellable_turn must return None when "
+            "the only candidate is CANCELLED (CANCELLED is not in "
+            "the pause-cascade eligible set per §8.2)"
         )
-        assert routed_after_resume.status == TaskStatus.CANCELLED.value
-        assert routed_after_resume.id == task_id
 
         # 6. Finalize WITHOUT a JobItem — the post-D13 no-JobItem path.
         # Step 1 (JobItem UPDATE) is skipped because ``job_id is None``;
@@ -432,17 +437,18 @@ class TestPauseResumeRoot:
             ).all()
             assert len(list(jobs)) == 0
 
-    def test_find_paused_or_running_excludes_pending_task(
+    def test_find_paused_or_cancellable_excludes_pending_task(
         self, engine, write_guard, lifecycle_service
     ):
-        """``find_paused_or_running_by_instance`` ignores PENDING tasks.
+        """``find_paused_or_cancellable_turn`` ignores PENDING tasks.
 
         Sister query to ``find_running_by_instance``: only PAUSED or
-        RUNNING ``PROCESS_MESSAGE`` tasks qualify. A PENDING task is
-        not yet "in flight" — it has not been claimed by a worker —
-        so it does not identify a root instance for checkpoint resume.
-        The routing decision must treat it as a child path so a fresh
-        message can be enqueued normally.
+        RUNNING ``PROCESS_MESSAGE`` / ``PROCESS_REPORT`` tasks
+        qualify. A PENDING task is not yet "in flight" — it has not
+        been claimed by a worker — so it does not identify a turn
+        for the pause cascade. The selector must treat it as "no
+        match" so the cascade does not act on a not-yet-running
+        task.
         """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_task(
@@ -452,22 +458,23 @@ class TestPauseResumeRoot:
         )
         task_repo = TaskRepository(engine)
 
-        routed = task_repo.find_paused_or_running_by_instance(iid)
+        routed = task_repo.find_paused_or_cancellable_turn(iid)
         assert routed is None, (
-            "PENDING tasks must NOT count as root-resume candidates — "
-            "only PAUSED/RUNNING PROCESS_MESSAGE tasks do"
+            "PENDING tasks must NOT count as pause-cascade "
+            "candidates — only PAUSED/RUNNING PROCESS_MESSAGE / "
+            "PROCESS_REPORT tasks do (per §8.2)"
         )
 
-    def test_find_paused_or_running_excludes_report_task(
+    def test_find_paused_or_cancellable_includes_report_task(
         self, engine, write_guard, lifecycle_service
     ):
-        """``find_paused_or_running_by_instance`` filters on ``task_type``.
+        """``find_paused_or_cancellable_turn`` INCLUDES ``PROCESS_REPORT``.
 
-        Only ``PROCESS_MESSAGE`` tasks identify a root instance for
-        checkpoint resume. ``PROCESS_REPORT`` tasks (Phase 1, report
-        lane) ride alongside user messages on the same ``task`` table
-        but are a sibling notification lane — a paused report task
-        must NOT trigger the root-resume routing.
+        Per the plan §8.2 / §9.2 Bug-A fix: a paused ``PROCESS_REPORT``
+        turn is a valid pause-cascade candidate. The selector widens
+        ``task_type`` from ``PROCESS_MESSAGE`` only to include
+        ``PROCESS_REPORT`` so the pause cascade sees the in-flight
+        report turn — the regression test for pause-during-report.
         """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_task(
@@ -478,452 +485,376 @@ class TestPauseResumeRoot:
         )
         task_repo = TaskRepository(engine)
 
-        routed = task_repo.find_paused_or_running_by_instance(iid)
-        assert routed is None, (
-            "PROCESS_REPORT tasks must NOT identify a root-resume "
-            "candidate — only PROCESS_MESSAGE tasks do"
+        routed = task_repo.find_paused_or_cancellable_turn(iid)
+        assert routed is not None, (
+            "PROCESS_REPORT tasks MUST count as pause-cascade "
+            "candidates — this is the §8.2 widening that closes "
+            "the pause-during-report-turn routing gap (Bug A)"
         )
+        assert routed.task_type == TaskType.PROCESS_REPORT.value
 
 
-# ─── Phase 1 Bug A / Step B: find_resume_root_candidate_by_active_job ───────
+# ─── Phase 3 (Increment 4): find_suspended_turn_for_answer ─────────────────
 
 
-def _seed_job_item_for_test(
-    engine: Engine,
-    *,
-    job_id: str,
-    instance_id: str,
-    admission_state: str = AdmissionState.ACTIVE.value,
-    message_id: str | None = None,
-    deleted_at: str | None = None,
-) -> JobItem:
-    """Seed a JobItem for the routing-primitive tests.
+class TestFindSuspendedTurnForAnswer:
+    """Repository unit tests for the explicit answer-gate selector.
 
-    Uses ``queue_id=None`` to avoid the FK constraint on
-    ``job_queues.queue_id`` (the test engine has FKs enabled).
-    """
-    from daemon.repositories.job_queue.models import JobItem
-    job = JobItem(
-        job_id=job_id,
-        agent_id="developer",
-        agent_dir="/tmp/agents/developer",
-        message="orphan-routing-test",
-        source="api",
-        project_id="test-project",
-        priority=5,
-        job_metadata={"message_id": message_id} if message_id else {},
-        queue_id=None,  # FK: avoid requiring a job_queues row
-        job_type="task",
-        instance_id=instance_id,
-        admission_state=admission_state,
-        deleted_at=deleted_at,
-    )
-    with Session(engine) as s:
-        s.add(job)
-        s.commit()
-        s.refresh(job)
-    return job
+    Phase 3 (Increment 4, 2026-08-01).
+    ``find_suspended_turn_for_answer(instance_id)`` is the
+    answer-routing primitive that supersedes the inference-based
+    ``find_paused_or_running_by_instance`` for answer-gate
+    selection. It MUST only return a Task that was suspended via
+    ``SuspendTurn(reason='awaiting_answer')`` with a non-null
+    ``resume_target_turn_id`` and ``status='paused'`` (§7/§8.1).
 
-
-class TestFindResumeRootCandidateByActiveJob:
-    """Repository unit tests for the report-turn-pause fallback primitive.
-
-    Phase 1 / Step B (Bug A). ``find_resume_root_candidate_by_active_job``
-    is the active-orphan fallback for ``resume_processing_job``. The
-    full test matrix is documented in the plan §3.2.
+    Per plan §8.1: returns ``None`` for 0 rows, returns the
+    single row for 1 row, raises ``ValueError`` for ambiguity
+    (>1 rows). Tests below cover the positive case, the
+    negative case, the ambiguity case, and the suspension
+    handle invariants.
     """
 
-    def test_terminal_task_with_active_jobitem_returns_candidate(
+    def test_awaiting_answer_paused_with_target_returns_row(
         self, engine, write_guard, lifecycle_service
     ):
-        """Positive: terminal PROCESS_MESSAGE Task + matching active JobItem.
-
-        The Bug A incident state — the original PROCESS_MESSAGE Task
-        has reached COMPLETED, and an active JobItem correlates via
-        ``work_id == job_id``. The fallback returns the terminal Task
-        so ``resume_processing_job`` can route to the root path.
-        """
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        task_work_id = str(uuid.uuid4().hex)
-        task = _seed_task_with_work_id(
+        """Positive: PAUSED + awaiting_answer + non-null target → row returned."""
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        target_work_id = str(uuid.uuid4().hex)
+        # Seed a PAUSED task with the await-answer handle set.
+        _seed_task_with_handle(
             engine,
             instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
+            status=TaskStatus.PAUSED.value,
             task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=task_work_id,
+            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+            resume_target_turn_id=target_work_id,
         )
-        _seed_job_item_for_test(
-            engine,
-            job_id=task_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-        )
-
         task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is not None, (
-            "Active-orphan fallback must return the terminal backing "
-            "PROCESS_MESSAGE Task correlated via work_id == job_id"
+        suspended = task_repo.find_suspended_turn_for_answer(iid)
+        assert suspended is not None, (
+            "Awaiting-answer PAUSED task with a non-null "
+            "resume_target_turn_id MUST be returned by "
+            "find_suspended_turn_for_answer (the explicit-handle "
+            "answer-routing primitive)"
         )
-        assert candidate.work_id == task_work_id
-        assert candidate.status == TaskStatus.COMPLETED.value
+        assert suspended.suspension_reason == SuspensionReason.AWAITING_ANSWER.value
+        assert suspended.resume_target_turn_id == target_work_id
 
-    def test_paused_task_blocks_fallback_returns_none(
+    def test_paused_without_handle_returns_none(
         self, engine, write_guard, lifecycle_service
     ):
-        """Existing route owns it — PAUSED PROCESS_MESSAGE Task present.
+        """PAUSED without ``suspension_reason`` set → ``None``.
 
-        When ``find_paused_or_running_by_instance`` already returns a
-        Task (the normal paused-before-resume case), the active-orphan
-        fallback MUST return ``None`` so the existing root route owns
-        the routing decision.
+        Pre-Increment-4 paused tasks (the B2 backfill set these to
+        ``paused_external`` during the schema phase; pre-backfill
+        row data is exercised here for the empty-handle shape) MUST
+        NOT be selected as the awaiting-answer gate.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        _seed_task_with_handle(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            suspension_reason=None,
+            resume_target_turn_id=None,
+        )
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_suspended_turn_for_answer(iid) is None
+
+    def test_running_task_not_selected(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """RUNNING task is not yet a ``PAUSED`` answer-gate.
+
+        ``find_suspended_turn_for_answer`` requires ``status='paused'`` —
+        RUNNING is excluded. The defence-in-depth filter complements
+        the ``SuspendTurn`` write path which atomically sets
+        ``status='paused'`` + handle in one UPDATE.
         """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        # A PAUSED PROCESS_MESSAGE Task — existing route owns it.
+        _seed_task_with_handle(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.RUNNING.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+            resume_target_turn_id=str(uuid.uuid4().hex),
+        )
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_suspended_turn_for_answer(iid) is None
+
+    def test_non_answer_reason_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """PAUSED with ``paused_external`` / ``awaiting_children`` → ``None``.
+
+        Per §7 invariant 8: non-answer reasons MUST NOT be selected
+        by ``find_suspended_turn_for_answer``. The selector is
+        strictly answer-gate.
+        """
+        for non_answer_reason in (
+            SuspensionReason.PAUSED_EXTERNAL.value,
+            SuspensionReason.AWAITING_CHILDREN.value,
+        ):
+            iid = _seed_instance(
+                engine, status=InstanceStatus.PAUSED.value
+            )
+            _seed_task_with_handle(
+                engine,
+                instance_id=iid,
+                status=TaskStatus.PAUSED.value,
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                suspension_reason=non_answer_reason,
+                resume_target_turn_id=str(uuid.uuid4().hex),
+            )
+            task_repo = TaskRepository(engine)
+            assert task_repo.find_suspended_turn_for_answer(iid) is None, (
+                f"PAUSED task with suspension_reason="
+                f"{non_answer_reason!r} MUST NOT be selected by "
+                f"the answer-gate selector (§7 invariant 8)"
+            )
+
+    def test_awaiting_answer_with_null_target_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """``awaiting_answer`` with NULL target → ``None``.
+
+        §7 invariant 2: ``suspension_reason='awaiting_answer'``
+        REQUIRES a non-null target. The selector filter is
+        ``resume_target_turn_id IS NOT NULL`` — a leaked NULL
+        target is treated as no answer-gate candidate (defence in
+        depth; ``SuspendTurn.__init__`` also rejects this shape
+        with a ``ValueError`` before the write).
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        _seed_task_with_handle(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+            resume_target_turn_id=None,
+        )
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_suspended_turn_for_answer(iid) is None
+
+    def test_multiple_awaiting_answer_raises_value_error(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Multiple awaiting-answer rows → ``ValueError`` (§8.1 ambiguity).
+
+        Per plan §8.1: "If multiple rows for one answer: fail
+        loudly/log an invariant violation; never choose by
+        recency." The selector's COUNT guard raises ``ValueError``
+        rather than silently picking a winner.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        # Two rows with the awaiting-answer handle set. This is an
+        # invariant violation — the answer gate has exactly one
+        # authoritative suspension handle per instance.
+        _seed_task_with_handle(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+            resume_target_turn_id=str(uuid.uuid4().hex),
+        )
+        _seed_task_with_handle(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+            resume_target_turn_id=str(uuid.uuid4().hex),
+        )
+        task_repo = TaskRepository(engine)
+        with pytest.raises(ValueError, match="find_suspended_turn_for_answer"):
+            task_repo.find_suspended_turn_for_answer(iid)
+
+    def test_no_task_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """No ``task`` row at all → ``None``."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_suspended_turn_for_answer(iid) is None
+
+
+# ─── Phase 3 (Increment 4): find_paused_or_cancellable_turn ──────────────
+
+
+class TestFindPausedOrCancellableTurn:
+    """Repository unit tests for the pause-cascade selector.
+
+    Phase 3 (Increment 4, 2026-08-01).
+    ``find_paused_or_cancellable_turn(instance_id)`` is the
+    pause-cascade primitive that supersedes
+    ``find_paused_or_running_by_instance`` for pause / cancel
+    consumers. It selects PAUSED or RUNNING ``PROCESS_MESSAGE`` /
+    ``PROCESS_REPORT`` tasks for the instance and raises
+    ``ValueError`` when more than one concurrently eligible turn
+    exists (§8.2 one-running-turn-per-instance invariant).
+    """
+
+    def test_paused_message_task_returns_row(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """PAUSED PROCESS_MESSAGE task → returned."""
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
         _seed_task(
             engine,
             instance_id=iid,
             status=TaskStatus.PAUSED.value,
             task_type=TaskType.PROCESS_MESSAGE.value,
         )
-        # And a terminal Task with matching JobItem (the bug A scenario).
-        # The fallback MUST NOT return this because the PAUSED task
-        # already represents a resumable marker.
-        terminal_work_id = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=terminal_work_id,
-        )
-        _seed_job_item_for_test(
-            engine,
-            job_id=terminal_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-        )
-
         task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None, (
-            "When a PAUSED PROCESS_MESSAGE Task exists (existing route "
-            "owns it), the active-orphan fallback MUST return None — "
-            "do not double-route"
-        )
+        candidate = task_repo.find_paused_or_cancellable_turn(iid)
+        assert candidate is not None
+        assert candidate.status == TaskStatus.PAUSED.value
+        assert candidate.task_type == TaskType.PROCESS_MESSAGE.value
 
-    def test_running_task_blocks_fallback_returns_none(
+    def test_running_report_task_returns_row(
         self, engine, write_guard, lifecycle_service
     ):
-        """Existing route owns it — RUNNING PROCESS_MESSAGE Task present."""
+        """RUNNING PROCESS_REPORT task → returned (Bug A fix).
+
+        Per §8.2: PROCESS_REPORT is INCLUDED in the eligible
+        set so the pause cascade sees the in-flight report turn.
+        This was previously excluded by the inference-based
+        ``find_paused_or_running_by_instance`` heuristic that
+        filtered on ``task_type = PROCESS_MESSAGE`` — a regression
+        in the pause-during-report-turn incident.
+        """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_task(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.RUNNING.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_cancelled_task_blocks_fallback_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Existing route owns it — CANCELLED Task (resume cascade marker)."""
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        _seed_task(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.CANCELLED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_queued_jobitem_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Queued JobItem (not active) → fallback returns None.
-
-        Only ``admission_state = 'active'`` JobItems trigger the
-        fallback. A queued mirror (F1 stuck-mirror) does NOT match.
-        """
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        task_work_id = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=task_work_id,
-        )
-        _seed_job_item_for_test(
-            engine,
-            job_id=task_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.QUEUED.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_done_jobitem_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Done JobItem (terminal) → fallback returns None.
-
-        The JobItem has reached its terminal admission state and is
-        no longer holding a lock; nothing to orphan-resume.
-        """
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        task_work_id = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=task_work_id,
-        )
-        _seed_job_item_for_test(
-            engine,
-            job_id=task_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.DONE.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_deleted_jobitem_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Deleted (soft-delete) JobItem → fallback returns None."""
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        task_work_id = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=task_work_id,
-        )
-        _seed_job_item_for_test(
-            engine,
-            job_id=task_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-            deleted_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_mismatched_work_id_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Mismatched work_id → no match.
-
-        The JobItem's job_id differs from the Task's work_id. They
-        do NOT correlate. The fallback returns None.
-        """
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=str(uuid.uuid4().hex),
-        )
-        # JobItem with a DIFFERENT job_id
-        _seed_job_item_for_test(
-            engine,
-            job_id=str(uuid.uuid4().hex),  # not matching
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_no_jobitem_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """No JobItem at all → fallback returns None."""
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=str(uuid.uuid4().hex),
-        )
-        # No JobItem seeded
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_no_task_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """No PROCESS_MESSAGE Task at all → fallback returns None."""
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        # No Task seeded
-        _seed_job_item_for_test(
-            engine,
-            job_id=str(uuid.uuid4().hex),
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
-
-    def test_report_task_only_no_match_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Only PROCESS_REPORT Tasks exist → fallback returns None.
-
-        The fallback filters on ``task_type = PROCESS_MESSAGE``. A
-        PROCESS_REPORT-only history is irrelevant.
-        """
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        work_id_report = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
             engine,
             instance_id=iid,
             status=TaskStatus.RUNNING.value,
             task_type=TaskType.PROCESS_REPORT.value,
-            work_id=work_id_report,
         )
-        _seed_job_item_for_test(
-            engine,
-            job_id=work_id_report,
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-        )
-
         task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None
+        candidate = task_repo.find_paused_or_cancellable_turn(iid)
+        assert candidate is not None, (
+            "PROCESS_REPORT tasks MUST be candidates for the "
+            "pause-cascade selector (Bug A regression coverage)"
+        )
+        assert candidate.task_type == TaskType.PROCESS_REPORT.value
 
-    def test_newest_terminal_message_with_active_jobitem_returns_newest(
+    def test_pending_task_returns_none(
         self, engine, write_guard, lifecycle_service
     ):
-        """Newest terminal PROCESS_MESSAGE Task with matching active JobItem.
-
-        When multiple terminal PROCESS_MESSAGE Tasks exist, the
-        fallback returns the newest one. The active JobItem correlates
-        to that newest Task via ``work_id == job_id``.
-        """
+        """PENDING task → ``None`` (not yet "in flight")."""
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        # Older terminal Task — no JobItem correlation
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=str(uuid.uuid4().hex),
-        )
-        # Newer terminal Task — with matching active JobItem
-        newer_work_id = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.COMPLETED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=newer_work_id,
-        )
-        _seed_job_item_for_test(
-            engine,
-            job_id=newer_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-        )
-
-        task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is not None
-        assert candidate.work_id == newer_work_id, (
-            "Fallback must return the most-recent terminal PROCESS_MESSAGE "
-            "Task with matching active JobItem correlation"
-        )
-
-    def test_retry_scenario_parent_cancelled_retry_pending_returns_none(
-        self, engine, write_guard, lifecycle_service
-    ):
-        """Retry scenario (W4 case 1, KEY regression).
-
-        Parent Task: CANCELLED, with matching active JobItem.
-        Retry child Task: PENDING (same message_id, distinct work_id).
-        The fallback MUST return ``None`` because:
-
-        1. The CANCELLED parent is treated by the existing
-           ``find_paused_or_running_by_instance`` as a "resumable
-           marker" — the regular root route owns the instance.
-        2. The retry path (schedule_retry) is NOT what the fallback
-           services; the retry child is claimed by the regular
-           ``claim_pending_task`` flow (FIFO recovery).
-
-        The KEY regression (W4 case 1) at the admission-guard
-        level (Step A) is covered in
-        ``tests/test_terminal_orphan_matrix.py::
-        TestRetryScenarioRegression``. This Step-B primitive test
-        pins the retry-child routing contract: the fallback MUST
-        NOT steal retry-path work.
-        """
-        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        shared_message_id = "msg-retry-shared"
-
-        # Parent CANCELLED with work_id X and matching active JobItem
-        parent_work_id = str(uuid.uuid4().hex)
-        _seed_task_with_work_id(
-            engine,
-            instance_id=iid,
-            status=TaskStatus.CANCELLED.value,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=parent_work_id,
-            message_id=shared_message_id,
-        )
-        _seed_job_item_for_test(
-            engine,
-            job_id=parent_work_id,
-            instance_id=iid,
-            admission_state=AdmissionState.ACTIVE.value,
-            message_id=shared_message_id,
-        )
-
-        # Retry child PENDING with FRESH work_id Y, same message_id
-        retry_work_id = str(uuid.uuid4().hex)
-        assert retry_work_id != parent_work_id, (
-            "Retry must have a distinct work_id from parent"
-        )
-        _seed_task_with_work_id(
+        _seed_task(
             engine,
             instance_id=iid,
             status=TaskStatus.PENDING.value,
             task_type=TaskType.PROCESS_MESSAGE.value,
-            work_id=retry_work_id,
-            message_id=shared_message_id,
         )
-
         task_repo = TaskRepository(engine)
-        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
-        assert candidate is None, (
-            "Retry scenario: CANCELLED parent is owned by the existing "
-            "root route (resume cascade marker). The fallback MUST return "
-            "None — the retry child is claimed via FIFO recovery, NOT "
-            "via this fallback."
+        assert task_repo.find_paused_or_cancellable_turn(iid) is None
+
+    def test_cancelled_task_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """CANCELLED task → ``None``.
+
+        CANCELLED is the resume-cascade marker, not a cancellable
+        turn. The selector restricts to PAUSED/RUNNING for the
+        named pause/cancel transitions (§8.2).
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.CANCELLED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
         )
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_paused_or_cancellable_turn(iid) is None
+
+    def test_completed_terminal_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """COMPLETED terminal → ``None`` (not cancellable)."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_paused_or_cancellable_turn(iid) is None
+
+    def test_multiple_eligible_raises_value_error(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Multiple eligible turns → ``ValueError`` (§8.2 invariant).
+
+        The one-running-turn-per-instance invariant requires that
+        at most one PAUSED/RUNNING turn exist for an instance.
+        Multiple matching rows means an inconsistency that must
+        surface as a ``ValueError`` rather than a silent pick.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        # Two PAUSED PROCESS_MESSAGE tasks — invariant violation.
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+        task_repo = TaskRepository(engine)
+        with pytest.raises(ValueError, match="find_paused_or_cancellable_turn"):
+            task_repo.find_paused_or_cancellable_turn(iid)
+
+    def test_no_task_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """No ``task`` row → ``None``."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        task_repo = TaskRepository(engine)
+        assert task_repo.find_paused_or_cancellable_turn(iid) is None
+
+    def test_send_report_excluded(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """SEND_REPORT / CLEANUP tasks are NOT pause-cascade eligible.
+
+        Only the active graph turns (PROCESS_MESSAGE, PROCESS_REPORT)
+        are eligible. SEND_REPORT is the report delivery back-channel;
+        CLEANUP is housekeeping; neither participates in the
+        pause-cascade contract.
+        """
+        for excluded_type in (
+            TaskType.SEND_REPORT.value,
+            TaskType.CLEANUP.value,
+        ):
+            iid = _seed_instance(
+                engine, status=InstanceStatus.RUNNING.value
+            )
+            _seed_task(
+                engine,
+                instance_id=iid,
+                status=TaskStatus.RUNNING.value,
+                task_type=excluded_type,
+            )
+            task_repo = TaskRepository(engine)
+            assert task_repo.find_paused_or_cancellable_turn(iid) is None, (
+                f"{excluded_type} tasks MUST NOT be pause-cascade "
+                f"candidates (§8.2 — only PROCESS_MESSAGE and "
+                f"PROCESS_REPORT are eligible)"
+            )
 
 
 def _seed_task_with_work_id(
@@ -946,6 +877,59 @@ def _seed_task_with_work_id(
             work_id=work_id,
             created_at=now,
             updated_at=now,
+        )
+        s.add(task)
+        s.commit()
+        s.refresh(task)
+        return int(task.id)
+
+
+def _seed_task_with_handle(
+    engine: Engine,
+    *,
+    instance_id: str,
+    status: str,
+    task_type: str = TaskType.PROCESS_MESSAGE.value,
+    suspension_reason: str | None = None,
+    resume_target_turn_id: str | None = None,
+    work_id: str | None = None,
+) -> int:
+    """Insert a Task row with explicit suspension-handle fields.
+
+    Used by Phase 3 (Increment 4) answer-gate selector tests to
+    set the ``suspension_reason`` and ``resume_target_turn_id``
+    columns directly without driving the full ``SuspendTurn``
+    transition (which requires a transaction and a non-trivial
+    setup). Mirrors the ``_seed_task_with_work_id`` helper but
+    for the handle columns.
+
+    Args:
+        engine: SQLAlchemy engine bound to the test schema.
+        instance_id: Instance to attach the task to.
+        status: Task status (e.g. ``PAUSED``, ``RUNNING``).
+        task_type: Task type (default ``PROCESS_MESSAGE``).
+        suspension_reason: One of the ``SuspensionReason`` enum
+            values, or ``None`` for the unset (legacy) shape.
+        resume_target_turn_id: The Task ``work_id`` of the turn a
+            later resume should reattach to; ``None`` when not
+            applicable.
+        work_id: Optional explicit ``work_id`` (auto-generated if
+            ``None``).
+
+    Returns:
+        The task ``id`` of the inserted row.
+    """
+    now = datetime.now(timezone.utc)
+    with Session(engine) as s:
+        task = Task(
+            task_type=task_type,
+            instance_id=instance_id,
+            status=status,
+            work_id=work_id or str(uuid.uuid4()),
+            created_at=now,
+            updated_at=now,
+            suspension_reason=suspension_reason,
+            resume_target_turn_id=resume_target_turn_id,
         )
         s.add(task)
         s.commit()

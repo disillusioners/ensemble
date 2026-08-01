@@ -14,6 +14,10 @@ off ``JobRepository.find_processing_message_jobs_by_instance`` (no
 MESSAGE ``JobItem`` rows exist post-D13) onto
 ``TaskRepository.find_paused_or_running_by_instance`` (Task 2.5.2).
 The legacy ``MockJob`` keeps working as a ``Task`` row alias.
+
+Phase 3 (Increment 4, 2026-08-01): that selector is replaced by
+``TaskRepository.find_paused_or_cancellable_turn`` (includes
+PROCESS_REPORT alongside PROCESS_MESSAGE).
 """
 
 import uuid
@@ -24,7 +28,7 @@ from daemon.request_registry import ActiveRequestRegistry
 
 
 class MockJob:
-    """Mock ``Task`` row returned by ``TaskRepository.find_paused_or_running_by_instance``.
+    """Mock ``Task`` row returned by the Phase 3 explicit-handle selector.
 
     Phase 2.5 (D13): the legacy ``MockJob`` simulated a ``JobItem``
     row; after D13 the equivalent primitive returns a ``Task`` row
@@ -32,6 +36,11 @@ class MockJob:
     ``resume_processing_job`` reads (``existing_task.id``,
     ``existing_task.status``) plus the pre-D13 attributes kept for
     backwards-compat with call sites that haven't been rewritten.
+
+    Phase 3 (Increment 4): ``MockJob`` is now the candidate
+    returned by ``find_paused_or_cancellable_turn`` (the
+    pause-cascade selector that supersedes the deleted
+    ``find_paused_or_running_by_instance``).
 
     The ``work_id`` attribute (a UUID4 string) is the stable Task
     handle the production code derives ``old_job_id`` from when
@@ -113,21 +122,20 @@ def mock_instance_repository():
 
 @pytest.fixture
 def mock_task_repository():
-    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive).
+    """Create mock ``TaskRepository`` (Phase 3 explicit-handle selector).
 
     ``resume_processing_job`` calls
-    ``self._task_repo.find_paused_or_running_by_instance(instance_id)``
-    — a non-None ``Task`` → root path (checkpoint resume); ``None`` →
-    child path (WorkerPool enqueue).
+    ``self._task_repo.find_paused_or_cancellable_turn(instance_id)``
+    to decide root-vs-child routing — a non-None ``Task`` → root
+    path (checkpoint resume); ``None`` → child path (WorkerPool
+    enqueue).
 
-    Phase 1 / Step B (Bug A, Revision 2, 2026-08-01): also
-    pre-configure ``find_resume_root_candidate_by_active_job`` to
-    return ``None`` so the active-orphan fallback does NOT fire
-    in tests that exercise the child route.
+    History: prior phases also configured the Bug-A
+    ``find_resume_root_candidate_by_active_job`` mock. Phase 3
+    (Increment 4) deletes that heuristic.
     """
     repo = MagicMock()
-    repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
-    repo.find_resume_root_candidate_by_active_job = MagicMock(return_value=None)
+    repo.find_paused_or_cancellable_turn = MagicMock(return_value=None)
     return repo
 
 
@@ -143,8 +151,10 @@ def mock_manager(
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    # Phase 2.5 (Task 2.5.2): routing primitive moved onto
-    # ``TaskRepository.find_paused_or_running_by_instance``.
+    # Phase 3 (Increment 4): routing primitive moves to
+    # ``TaskRepository.find_paused_or_cancellable_turn`` (the
+    # replacement for the deleted
+    # ``find_paused_or_running_by_instance``).
     manager._task_repo = mock_task_repository
     # Mock enqueue_message for WorkerPool path (child instances)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
@@ -192,7 +202,7 @@ class TestResumeMessageIdUniqueness:
         old_message_id = "original-msg-123"
 
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -223,7 +233,7 @@ class TestResumeMessageIdUniqueness:
         old_job = MockJob(message_id=old_message_id)
 
         # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists for this instance.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=old_job
         )
 
@@ -260,7 +270,7 @@ class TestResumeMessageIdUniqueness:
     async def test_each_call_generates_different_message_id(self, instance_manager, mock_manager):
         """Test that each resume call generates a different message_id."""
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -296,7 +306,7 @@ class TestResumeMessageIdUniqueness:
         enqueued. The parent's send_message tool will deliver the actual work.
         """
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -316,7 +326,7 @@ class TestResumeMessageIdUniqueness:
     async def test_message_content_preserved_in_enqueue(self, instance_manager, mock_manager):
         """Test that the resume message content is passed to enqueue."""
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
@@ -334,7 +344,7 @@ class TestResumeMessageIdUniqueness:
     async def test_source_is_cascade_resume(self, instance_manager, mock_manager):
         """Test that source is set to cascade_resume for resume messages."""
         # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
-        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+        mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
 
