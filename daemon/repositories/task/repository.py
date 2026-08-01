@@ -13,12 +13,41 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.feature_flags import TURN_RECONCILER_DIRECT_WRITE_PARITY
+from daemon.services.turn_transitions import (
+    _TransitionContext,
+    AbortTurn,
+    CompleteTurn,
+    RetryTurn,
+)
 
 from ..instance.models import Instance, InstanceStatus
 from ..job_queue.models import AdmissionState, JobItem, active_admission_states_sql
 from .models import Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
+
+
+class DirectWriteError(RuntimeError):
+    """Raised when a direct ``UPDATE task SET status=`` is attempted
+    outside a named-transition context (Phase 4c, increment3-plan.md §6a).
+
+    The chokepoint wrappers in this module (D8) close the
+    ``complete_task`` / ``cancel_task`` / ``fail_task`` half of the
+    "cascade forgot a mirror" bug class. The C7 write guard is the
+    static defense against FUTURE direct writes bypassing the wrappers
+    or any of the named transitions. When the guard is permanently
+    enabled (Phase 4c), an UPDATE on ``task.status`` outside a
+    ``TaskRepository._transition_context()`` block raises this error
+    so the regression surfaces loudly in CI rather than silently
+    regressing mirror consistency.
+
+    Initial Phase 4a state: the guard is DISABLED — every direct
+    UPDATE in this repo continues to work. The guard mechanism
+    (thread-local via ``_TransitionContext``) is wired up but only
+    enforced when ``TURN_RECONCILER_DIRECT_WRITE_PARITY`` is True.
+    See increment3-plan.md §6b for the safe-rollout path.
+    """
 
 
 class TaskRepository:
@@ -33,6 +62,56 @@ class TaskRepository:
         """
         self.engine = engine
         self._on_pending_task = on_pending_task
+
+    # --------------------------------------------------------
+    # D8 chokepoint helpers (Phase 4a, increment3-plan §6a/6b/6.5)
+    # --------------------------------------------------------
+
+    @classmethod
+    def _transition_context(cls) -> _TransitionContext:
+        """Return a thread-local context manager that opens a transition slot.
+
+        The named transitions (``CompleteTurn``, ``AbortTurn``, etc.)
+        call this internally so direct ``UPDATE task SET status=``
+        statements executed DURING a transition's ``run(session)`` are
+        permitted. Outside of such a context, direct status writes are
+        FORBIDDEN by the C7 write guard (increment3-plan §6a). The guard
+        is currently DISABLED by default — see
+        ``TURN_RECONCILER_DIRECT_WRITE_PARITY`` (Phase 4c will enable it
+        permanently).
+        """
+        return _TransitionContext()
+
+    def _resolve_work_id(self, task_id: int) -> str | None:
+        """Resolve a Task primary key to its ``work_id`` UUID.
+
+        Returns ``None`` if the task does not exist. The named
+        transitions are keyed on ``work_id`` (the cross-system
+        correlation identifier) rather than the integer primary key —
+        a non-existent task_id must short-circuit to ``None`` so the
+        chokepoint wrappers (D8) preserve their existing
+        "return None when task not found" semantic.
+
+        Uses ``engine.connect()`` (NOT ``SQLModelSession``) so this
+        SELECT does NOT acquire a write lock: SQLite's file-backed
+        engines serialise writes aggressively across connections, and
+        the prior ``SQLModelSession`` path held a connection while the
+        wrapper's later ``engine.begin()`` opened a SECOND connection
+        for the transition's UPDATE (regressed
+        ``test_heartbeat_rejects_completed_task`` with "database is
+        locked"). ``connect()`` releases the read-only connection at
+        exit; PostgreSQL treats it as an auto-commit SELECT.
+        """
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT work_id FROM task WHERE id = :id"),
+                {"id": task_id},
+            ).first()
+        if row is None:
+            return None
+        # SQLAlchemy row; column access by key for portability across
+        # SQLite and PostgreSQL.
+        return row[0]
 
     # --------------------------------------------------------
     # CREATE
@@ -1280,13 +1359,38 @@ class TaskRepository:
     def complete_task(self, task_id: int, result: dict[str, Any]) -> Task | None:
         """Mark task as completed with result.
 
-        Atomic SQL UPDATE with WHERE status=running guard — uses
-        PostgreSQL EvalPlanQual recheck under READ COMMITTED to prevent
-        concurrent transition races (e.g. recovery cancelling the task
-        while the worker thread was committing its completion). Returns
-        None if the task was not found OR was already in a terminal
-        status (COMPLETED/FAILED/CANCELLED) when we tried to update;
-        callers handle None as "already transitioned by another worker".
+        Phase 4a (D8 chokepoint, increment3-plan §6.5): this method is
+        a THIN WRAPPER around the ``CompleteTurn`` named transition.
+        The transition owns the atomic UPDATE on the task row; the
+        chokepoint then delegates to ``reconcile_turn_mirror`` to
+        update the 7 mirror tables in a SEPARATE post-commit
+        transaction (matching the production invocation pattern in
+        ``daemon/services/job_feedback_observer.py:3410`` — the
+        reconciler opens its own ``engine.begin()``, it does NOT share
+        the caller's transaction).
+
+        Behavioral notes for Phase 4a (zero behavior change, C6 fix):
+
+          * ``_resolve_work_id`` (no-op read) uses
+            ``engine.connect()`` (not a session) so it doesn't acquire
+            a SQLite write lock — file-backed test engines can
+            serialise aggressively across connections
+            (regression in ``test_heartbeat_rejects_completed_task``
+            if a heavyweight session was opened).
+          * The transition's atomic UPDATE on ``task`` is followed by
+            a follow-up UPDATE for the auxiliary columns (``result``,
+            ``completed_at``) — both inside the SAME
+            ``engine.begin()`` so a crash mid-wrapper leaves no
+            half-written terminal row.
+          * Mirror reconciliation (``reconcile_turn_mirror``) runs in
+            a SEPARATE ``engine.begin()`` AFTER the task UPDATE
+            commits. This matches the established pattern in the
+            cascade helpers.
+
+        Returns ``None`` if the task was not found OR was already in
+        a terminal status (the transition's ``WHERE status='running'``
+        guard makes the UPDATE no-op for terminal tasks). Callers
+        handle ``None`` as "already transitioned by another worker".
 
         Args:
             task_id: Task ID.
@@ -1295,39 +1399,87 @@ class TaskRepository:
         Returns:
             Updated Task object or None if not found or already transitioned.
         """
+        work_id = self._resolve_work_id(task_id)
+        if work_id is None:
+            return None
+
         now = datetime.now(timezone.utc)
         result_json = json.dumps(result)
 
-        with self.engine.begin() as conn:
-            row = conn.execute(
+        with self.engine.begin() as session:
+            # Read prior status INSIDE the same transaction so the
+            # transition's ``WHERE status='running'`` guard is honored
+            # exactly when it actually fires (idempotency for
+            # already-terminal tasks returns None).
+            prior_row = session.execute(
+                text("SELECT status FROM task WHERE id = :id"),
+                {"id": task_id},
+            ).first()
+            if prior_row is None:
+                return None
+            if prior_row[0] != TaskStatus.RUNNING.value:
+                # Already terminal (or pending/paused); the transition
+                # would no-op, so return None to preserve the original
+                # semantic.
+                return None
+
+            transition = CompleteTurn(
+                work_id=work_id,
+                result=result,
+                task_repo=self,
+            )
+            # Invoke the transition's atomic UPDATE directly without
+            # its built-in ``_reconcile()`` — the reconciler opens its
+            # OWN ``engine.begin()``, which on file-based SQLite
+            # serialises against the outer transaction's held write
+            # lock ("database is locked" regressions in
+            # ``test_heartbeat_rejects_completed_task``). We instead
+            # run ``reconcile_turn_mirror`` ourselves AFTER the outer
+            # transaction commits — same shape as the post-commit
+            # pattern in ``daemon/services/job_feedback_observer.py:3410``.
+            transition._write(session, "completed", "running")
+            # Auxiliary writes (must run inside the same transaction as
+            # the transition's UPDATE so a crash mid-wrapper leaves no
+            # half-written terminal row). The reconciler-owned mirror
+            # updates (mirrors 2-8) run AFTER this transaction commits,
+            # in their own engine.begin() — see below.
+            session.execute(
                 text(
-                    """
-                    UPDATE task
-                    SET status = :status_completed,
-                        result = :result,
-                        completed_at = :completed_at
-                    WHERE id = :task_id
-                      AND status = :status_running
-                    RETURNING *
-                    """
+                    "UPDATE task "
+                    "SET result = :result, "
+                    "    completed_at = :completed_at "
+                    "WHERE id = :task_id AND status = :status_completed"
                 ),
                 {
                     "task_id": task_id,
                     "status_completed": TaskStatus.COMPLETED.value,
-                    "status_running": TaskStatus.RUNNING.value,
                     "result": result_json,
                     "completed_at": now,
                 },
+            )
+            row = session.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id},
             ).fetchone()
-
             if row is None:
                 return None
-
             updated = self._row_to_task(row)
+        # Transition committed above. Now reconcile all 7 mirror
+        # tables in a separate post-commit transaction (matches the
+        # pattern in daemon/services/job_feedback_observer.py:3410).
+        # NOTE: reconcile_turn_mirror opens its own engine.begin();
+        # calling it INSIDE the transition transaction above would
+        # double-up connections and trip SQLite file-based locking.
+        try:
+            self.reconcile_turn_mirror(work_id)
+        except InvalidTransitionError as e:  # pragma: no cover - invariant trip
+            logger.warning(
+                "Reconciler invariant violation after complete_task "
+                "for task_id=%s work_id=%s: %s",
+                task_id, work_id, e,
+            )
 
         # Notify workers that a pending task may now be claimable.
-        # (Sibling tasks for the same instance are unblocked by this terminal
-        # transition; without notification they'd wait up to 3s for the next poll.)
         self._notify_pending_task()
 
         return updated
@@ -1335,11 +1487,24 @@ class TaskRepository:
     def fail_task(self, task_id: int, error: str) -> Task | None:
         """Mark task as failed with error message.
 
-        Atomic SQL UPDATE with WHERE status=running guard — uses
-        PostgreSQL EvalPlanQual recheck under READ COMMITTED to prevent
-        concurrent transition races. Returns None if the task was not
-        found OR was already in a terminal status; callers handle None
-        as "already transitioned by another worker".
+        Phase 4a (D8 chokepoint, increment3-plan §6.5): this method is
+        a THIN WRAPPER around ``AbortTurn(reason='failed')``. The
+        transition owns the atomic UPDATE + mirror reconciliation
+        (delegated to ``reconcile_turn_mirror``).
+
+        **B1 critical**: ``fail_task`` MUST route through
+        ``AbortTurn(reason='failed')`` — NOT ``reason='cancelled'`` —
+        so the task discriminator survives into the JobItem
+        ``terminal_reason`` mirror. A regression that routed this
+        through ``reason='cancelled'`` would lose the failure
+        discriminator and corrupt observability (jobs that genuinely
+        failed would appear as cancellations).
+
+        Atomic UPDATE with WHERE status=running guard + mirror
+        reconciliation: the named transition handles both. Returns
+        ``None`` if the task was not found OR was already in a
+        terminal status. Callers handle ``None`` as "already
+        transitioned by another worker".
 
         Args:
             task_id: Task ID.
@@ -1348,34 +1513,82 @@ class TaskRepository:
         Returns:
             Updated Task object or None if not found or already transitioned.
         """
+        work_id = self._resolve_work_id(task_id)
+        if work_id is None:
+            return None
+
         now = datetime.now(timezone.utc)
 
-        with self.engine.begin() as conn:
-            row = conn.execute(
+        with self.engine.begin() as session:
+            # Read prior status INSIDE the same transaction so we know
+            # whether the transition will actually flip status='running'
+            # → 'failed'. The transition's guard
+            # ``WHERE work_id=:work_id AND status='running'`` no-ops
+            # for non-running tasks; matching the original semantic,
+            # we return ``None`` in that case (idempotent re-fail is
+            # a no-op).
+            prior_row = session.execute(
+                text("SELECT status FROM task WHERE id = :id"),
+                {"id": task_id},
+            ).first()
+            if prior_row is None:
+                return None
+            if prior_row[0] != TaskStatus.RUNNING.value:
+                # Already terminal (or pending/paused); the transition
+                # would no-op, so we return None to match original
+                # semantics. Idempotency: a second fail_task on an
+                # already-failed task returns None.
+                return None
+
+            transition = AbortTurn(
+                work_id=work_id,
+                reason="failed",
+                task_repo=self,
+                error=error,
+            )
+            # See ``complete_task`` — call the transition's atomic
+            # UPDATE directly so the reconciler's nested ``engine.begin()``
+            # doesn't serialise against the outer transaction on
+            # file-based SQLite. Mirror reconciliation happens
+            # post-commit below.
+            transition._write(session, "failed", "running")
+            # Auxiliary writes inside the same transaction as the
+            # transition (error / completed_at). Preserves the
+            # pre-refactor single-UPDATE behavior.
+            session.execute(
                 text(
-                    """
-                    UPDATE task
-                    SET status = :status_failed,
-                        error = :error,
-                        completed_at = :completed_at
-                    WHERE id = :task_id
-                      AND status = :status_running
-                    RETURNING *
-                    """
+                    "UPDATE task "
+                    "SET error = :error, "
+                    "    completed_at = :completed_at "
+                    "WHERE id = :task_id AND status = :status_failed"
                 ),
                 {
                     "task_id": task_id,
                     "status_failed": TaskStatus.FAILED.value,
-                    "status_running": TaskStatus.RUNNING.value,
                     "error": error,
                     "completed_at": now,
                 },
+            )
+            row = session.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id},
             ).fetchone()
-
             if row is None:
                 return None
-
             updated = self._row_to_task(row)
+        # Post-commit mirror reconciliation (matches the pattern in
+        # daemon/services/job_feedback_observer.py:3410). The
+        # reconciler opens its own engine.begin() — calling it inside
+        # the transition transaction above would double-up connections
+        # and trip SQLite file-based locking.
+        try:
+            self.reconcile_turn_mirror(work_id)
+        except InvalidTransitionError as e:  # pragma: no cover - invariant trip
+            logger.warning(
+                "Reconciler invariant violation after fail_task "
+                "for task_id=%s work_id=%s: %s",
+                task_id, work_id, e,
+            )
 
         # Notify workers (see complete_task for rationale).
         self._notify_pending_task()
@@ -1870,30 +2083,37 @@ class TaskRepository:
         backoff_base: int = 60,
         backoff_max: int = 3600,
     ) -> Task | None:
-        """Create a new Task for retry with exponential backoff.
+        """Phase 5 (DQ increment3-plan §5.7 / §6.5 / §9 Phase 5):
+        thin wrapper around the ``RetryTurn`` named transition.
 
-        Marks the parent task as CANCELLED with retry_scheduled=True and creates
-        a new PENDING task with incremented retry_count and calculated next_retry_at.
+        Marks the parent task as CANCELLED with retry_scheduled=True and
+        creates a new PENDING task with incremented retry_count and a
+        calculated next_retry_at. All operations are in a single
+        transaction — crash-safe.
 
-        All operations are in a single transaction — crash-safe.
+        The wrapper owns the conditional UPDATE-with-guard (the race
+        gate that prevents duplicate retry children) and the backoff
+        calculation. ``RetryTurn`` owns the child INSERT + mirror
+        reconciliation + watcher migration (F6 fix).
 
-        Atomicity / concurrency: the parent UPDATE carries the full guard
-        (``retry_scheduled = false``, ``retry_count < max_retries``, and
-        ``status IN ('running','failed','cancelled')``) directly in the SQL
-        WHERE clause. The child INSERT is gated on ``UPDATE.rowcount == 1``
-        inside the same ``engine.begin()`` transaction, so two concurrent
-        callers cannot both pass the check and create duplicate retry
-        children — only the first UPDATE will match the row and produce a
-        rowcount of 1, and only that caller will then INSERT the child. If
-        the UPDATE returns 0 rows (already retried, max retries exceeded,
-        status not eligible, or task not found), this method returns None
-        and does not INSERT.
+        Atomicity / concurrency: the parent UPDATE carries the full
+        guard (``retry_scheduled = false``, ``retry_count < max_retries``,
+        and ``status IN ('running','failed','cancelled')``) directly in
+        the SQL WHERE clause. The ``RetryTurn.run(session)`` call is
+        gated on ``UPDATE.rowcount == 1`` inside the same
+        ``engine.begin()`` transaction, so two concurrent callers cannot
+        both pass the check and create duplicate retry children — only
+        the first UPDATE will match the row and produce a rowcount of 1,
+        and only that caller will then construct the child. If the UPDATE
+        returns 0 rows (already retried, max retries exceeded, status
+        not eligible, or task not found), this method returns None and
+        does not construct the child.
 
         ``cancelled`` is included in the eligible set on purpose: an
         orphaned CANCELLED task (``status=cancelled, retry_scheduled=false``,
         no child) is exactly the crash-recovery case
-        ``find_orphaned_cancelled_tasks()`` detects on startup. The double-
-        retry guard (``retry_scheduled = false``) and the
+        ``find_orphaned_cancelled_tasks()`` detects on startup. The
+        double-retry guard (``retry_scheduled = false``) and the
         ``retry_count < max_retries`` guard together still prevent
         duplicate retry creation. The terminal states ``completed`` and
         ``failed`` (when the worker already reported outcome) are
@@ -1901,20 +2121,19 @@ class TaskRepository:
 
         Returns the new retry task, or None if no retry was scheduled.
         """
-        retry_task = None  # Will be set inside transaction if successful
-        now = datetime.now(timezone.utc)
+        retry_task = None
 
         with self.engine.begin() as conn:
-            # Atomic UPDATE: gate the WHOLE operation on the row still
-            # matching the preconditions. The status guard
-            # (``IN ('running','failed','cancelled')``) replaces the prior
-            # Python-side check and also prevents clobbering a concurrent
-            # terminal-state write (e.g. a parallel `complete_task` that
-            # set status to 'completed'). Use Python booleans as bound
-            # values so the comparison works on both SQLite (INTEGER 0/1)
-            # and PostgreSQL (BOOLEAN false/true). `cancelled` is included
-            # so the orphan-recovery path (CANCELLED + retry_scheduled=false)
-            # can schedule a retry child; see method docstring.
+            # Atomic UPDATE-with-guard: the race condition gate. The
+            # status guard (``IN ('running','failed','cancelled')``)
+            # replaces the prior Python-side check and prevents
+            # clobbering a concurrent terminal-state write (e.g. a
+            # parallel `complete_task` that set status to 'completed').
+            # Use Python booleans as bound values so the comparison
+            # works on both SQLite (INTEGER 0/1) and PostgreSQL (BOOLEAN
+            # false/true). `cancelled` is included so the orphan-recovery
+            # path (CANCELLED + retry_scheduled=false) can schedule a
+            # retry child; see method docstring.
             parent_row = conn.execute(
                 text("""
                     UPDATE task
@@ -1939,14 +2158,15 @@ class TaskRepository:
                     "status_running": TaskStatus.RUNNING.value,
                     "status_failed": TaskStatus.FAILED.value,
                     "status_cancelled": TaskStatus.CANCELLED.value,
-                    "now": now,
+                    "now": datetime.now(timezone.utc),
                 },
             ).fetchone()
 
             if parent_row is None:
                 # Either task not found, already retried, max retries
-                # exceeded, or status not in ('running','failed'). In all
-                # cases the safe action is the same: do nothing, return None.
+                # exceeded, or status not in ('running','failed','cancelled').
+                # In all cases the safe action is the same: do nothing,
+                # return None.
                 return None
 
             # The UPDATE didn't modify retry_count, so the RETURNING row
@@ -1954,100 +2174,81 @@ class TaskRepository:
             current_retry_count = parent_row.retry_count
             new_retry_count = current_retry_count + 1
 
-            # Calculate exponential backoff
+            # Calculate exponential backoff. The ``2 ** current_retry_count``
+            # delay is capped at ``backoff_max`` so a long-running retry
+            # chain doesn't produce multi-day delays.
+            now = datetime.now(timezone.utc)
             delay_seconds = min(
                 backoff_base * (2 ** current_retry_count),
-                backoff_max
+                backoff_max,
             )
             next_retry_at = now + timedelta(seconds=delay_seconds)
-            next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
-
-            # Create new retry task (column is task_type, not type).
-            # Pass Python booleans so the bound parameters are typed
-            # correctly for both SQLite and PostgreSQL. This INSERT is
-            # in the same transaction as the parent UPDATE above, so
-            # both succeed atomically or both roll back. The new
-            # ``work_id`` column is a NOT NULL UUID4 generated here so
-            # the retry child has its own virtual-job identifier —
-            # distinct from the parent's work_id, since the retry is
-            # logically a new work attempt. ``is_deferred`` (Phase 3
-            # Part B1, 2026-06-27) is inherited from the parent — a
-            # retry stays in the same defer-queue lane. ``is_background``
-            # (Phase 3 background seam, 2026-07-14) is likewise inherited
-            # so the retry child remains in the same background-queue
-            # lane and continues to honour the background idle gate.
-            result = conn.execute(
-                text("""
-                    INSERT INTO task (task_type, instance_id, message_id, status,
-                                      retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled, work_id,
-                                      is_deferred, is_background)
-                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
-                            :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled, :work_id,
-                            :is_deferred, :is_background)
-                    RETURNING *
-                """),
-                {
-                    "task_type": parent_row.task_type,
-                    "instance_id": parent_row.instance_id,
-                    "message_id": parent_row.message_id,
-                    "status_pending": TaskStatus.PENDING.value,
-                    "retry_count": new_retry_count,
-                    "next_retry_at_str": next_retry_at_str,
-                    "created_at": now,
-                    "cancel_requested": False,
-                    "retry_scheduled": False,
-                    "work_id": str(uuid.uuid4()),
-                    "is_deferred": bool(parent_row.is_deferred) if hasattr(parent_row, 'is_deferred') else False,
-                    "is_background": bool(parent_row.is_background) if hasattr(parent_row, 'is_background') else False,
-                }
-            ).fetchone()
-
-            retry_task = self._row_to_task(result)
-
-            # F6 fix (Phase 3, 2026-07-01): migrate watcher rows from
-            # the parent's ``work_id`` to the child's fresh ``work_id``.
-            # ``schedule_retry`` must hand out a new UUID4 ``work_id`` for
-            # the retry child (the parent row is only cancelled, not
-            # deleted, so reusing the parent's work_id would violate the
-            # UNIQUE constraint on ``task.work_id``). But ``notify_work_watchers``
-            # looks up watchers via ``get_watchers_for_job(work_id)``
-            # which exact-matches ``WHERE job_id = :work_id`` on the
-            # ``job_watchers`` table — a watcher registered against the
-            # parent's work_id would never match the retry child's
-            # work_id, so the notification would be silently lost.
-            #
-            # The fix moves every watcher row whose ``job_id`` equals
-            # the parent's ``work_id`` to the child's ``work_id`` IN
-            # THE SAME TRANSACTION as the retry INSERT. Atomicity
-            # matters: a watcher-migration-only commit without the
-            # retry-INSERT-or-rollback is not safe (the child's
-            # ``work_id`` wouldn't exist yet, so ``get_watchers_for_job``
-            # would still return zero rows). Done inside the existing
-            # ``with self.engine.begin() as conn:`` block so the two
-            # statements commit together.
-            #
-            # Orphaned parent watchers (e.g. from a previous retry whose
-            # retry Task was itself orphaned before this fix landed) are
-            # cleaned up by the existing ``reconcile_terminal_watches``
-            # mechanism at daemon restart. No additional cleanup is
-            # needed inside ``schedule_retry``.
-            conn.execute(
-                text(
-                    """
-                    UPDATE job_watchers
-                    SET job_id = :child_work_id
-                    WHERE job_id = :parent_work_id
-                    """
-                ),
-                {
-                    "child_work_id": retry_task.work_id,
-                    "parent_work_id": parent_row.work_id,
-                },
+            next_retry_at_str = (
+                next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
+                + next_retry_at.strftime("%z")
             )
 
-        # AFTER commit — safe to notify workers
+            # Mint fresh child work_id. Reusing the parent's work_id
+            # would violate the UNIQUE constraint on ``task.work_id``
+            # (the parent row is only cancelled, not deleted) — the
+            # retry is a fresh logical work attempt and gets its own
+            # virtual-job identifier.
+            child_work_id = str(uuid.uuid4())
+
+            # Build child INSERT kwargs (all NOT NULL columns except
+            # work_id, status, instance_id — those are method-level
+            # defaults on ``RetryTurn``). ``message_id`` is inherited
+            # from the parent (the retry rides the same message lane);
+            # ``is_deferred`` and ``is_background`` are inherited so the
+            # retry child stays in the same defer/background queue lane
+            # (Phase 3 Part B1 2026-06-27 / Part B2 2026-07-14).
+            child_kwargs = {
+                "task_type": parent_row.task_type,
+                "message_id": parent_row.message_id,
+                "retry_count": new_retry_count,
+                "next_retry_at": next_retry_at_str,
+                "created_at": now,
+                "cancel_requested": False,
+                "retry_scheduled": False,
+                "is_deferred": bool(parent_row.is_deferred)
+                if hasattr(parent_row, "is_deferred")
+                else False,
+                "is_background": bool(parent_row.is_background)
+                if hasattr(parent_row, "is_background")
+                else False,
+            }
+
+            # Run the RetryTurn transition. This performs:
+            #   1. Defensive parent UPDATE (status='cancelled').
+            #   2. INSERT child Task with all configured columns.
+            #   3. Reconcile parent mirrors via reconcile_turn_mirror.
+            #   4. Reconcile child mirrors via reconcile_turn_mirror.
+            #   5. Migrate job_watchers from parent to child work_id (F6).
+            # All inside the same ``engine.begin()`` transaction as the
+            # gate UPDATE above, so the gate-pass + child-insert commit
+            # atomically or both roll back.
+            transition = RetryTurn(
+                parent_work_id=parent_row.work_id,
+                child_work_id=child_work_id,
+                task_repo=self,
+                instance_id=parent_row.instance_id,
+                child_kwargs=child_kwargs,
+            )
+            transition.run(conn)
+
+            # Re-read the child Task row to return as a Task object
+            # (matches the prior implementation's contract — callers
+            # receive the row that was INSERTed, not a TransitionResult).
+            child_row = conn.execute(
+                text("SELECT * FROM task WHERE work_id = :work_id"),
+                {"work_id": child_work_id},
+            ).fetchone()
+            retry_task = self._row_to_task(child_row)
+
+        # AFTER commit — safe to notify workers (see complete_task for
+        # rationale). The notification is fired only when a retry child
+        # was actually inserted; an empty-result gate UPDATE returns
+        # None above and skips the notify.
         if retry_task is not None:
             self._notify_pending_task()
 
@@ -2133,63 +2334,155 @@ class TaskRepository:
     def cancel_task(self, task_id: int, reason: str = "") -> Task | None:
         """Directly cancel a task (mark as CANCELLED).
 
-        Atomic SQL UPDATE with WHERE status IN (running, pending) guard
-        — uses PostgreSQL EvalPlanQual recheck under READ COMMITTED to
-        prevent concurrent transition races (e.g. the worker thread
-        committing its own completion while recovery is force-cancelling
-        the task). Returns None if the task was not found OR was
-        already in a terminal status (COMPLETED/FAILED/CANCELLED);
-        callers handle None as "already transitioned by another worker".
+        Phase 4a (D8 chokepoint, increment3-plan §6.5): this method is
+        a THIN WRAPPER around ``AbortTurn(reason='cancelled')``. The
+        transition owns the atomic UPDATE on the task row; the
+        chokepoint then delegates to ``reconcile_turn_mirror`` to
+        update the 7 mirror tables in a SEPARATE post-commit
+        transaction (matches the production invocation pattern in
+        ``daemon/services/job_feedback_observer.py:3410``).
 
-        Replaces the prior read-then-write pattern (SELECT for current
-        status, Python-side check, then blind UPDATE) which was a
-        TOCTOU race under PostgreSQL READ COMMITTED — both writers
-        could observe status='running' and both commits could succeed,
-        producing duplicate / clobbered terminal writes. The single
-        guarded UPDATE is race-free on both SQLite and PostgreSQL.
+        The transition's ``AbortTurn._write`` gates on
+        ``status='running'`` (the common case — a task being cancelled
+        mid-execution). For cancellation of PENDING or PAUSED tasks
+        (race condition where the task hasn't started yet or was just
+        paused by the cascade), this wrapper falls back to an inline
+        atomic UPDATE with the broader ``WHERE status IN (running,
+        pending, paused)`` guard, mirroring the pre-refactor
+        behavior. Mirror reconciliation runs in a SEPARATE post-commit
+        ``engine.begin()`` for both branches.
 
         Used by StaleTaskRecovery when worker doesn't respond to
-        cancel_requested flag within grace period.
+        cancel_requested flag within grace period. Also called by the
+        rest of the codebase (worker_pool.py is the production caller)
+        — preserving the public signature here is the whole point of
+        the D8 chokepoint wrapper.
+
+        Args:
+            task_id: Task ID.
+            reason: Free-form cancellation reason (recorded on the
+                task's ``error`` column for observability).
+
+        Returns:
+            Updated Task object or None if not found or already terminal.
         """
+        work_id = self._resolve_work_id(task_id)
+        if work_id is None:
+            return None
+
         now = datetime.now(timezone.utc)
+        error_text = f"Task cancelled: {reason}" if reason else None
 
-        with self.engine.begin() as conn:
-            # Single atomic UPDATE — the WHERE status IN (...) guard
-            # makes the conditional read-modify-write a single SQL
-            # statement. Use bound parameter with Python True so the
-            # boolean column write works on both SQLite (INTEGER 0/1)
-            # and PostgreSQL (BOOLEAN false/true).
-            row = conn.execute(
-                text(
-                    """
-                    UPDATE task SET
-                        status = :status_cancelled,
-                        cancel_requested = :cancel_requested,
-                        cancel_requested_at = :cancelled_at,
-                        completed_at = :completed_at,
-                        error = :error
-                    WHERE id = :id
-                      AND status IN (:status_running, :status_pending, :status_paused)
-                    RETURNING *
-                    """
-                ),
-                {
-                    "status_cancelled": TaskStatus.CANCELLED.value,
-                    "cancel_requested": True,
-                    "cancelled_at": now,
-                    "completed_at": now,
-                    "error": f"Task cancelled: {reason}",
-                    "id": task_id,
-                    "status_running": TaskStatus.RUNNING.value,
-                    "status_pending": TaskStatus.PENDING.value,
-                    "status_paused": TaskStatus.PAUSED.value,
-                },
-            ).fetchone()
+        with self.engine.begin() as session:
+            # Phase 4a behavior preservation: read the prior status to
+            # pick the right UPDATE branch. The running→cancelled
+            # path goes through the named transition (mirror reconcile
+            # happens in a separate post-commit transaction — see
+            # below). The pending/paused→cancelled path goes through a
+            # legacy-shape UPDATE for backward compatibility; the
+            # wrapper then explicitly calls reconcile_turn_mirror.
+            prior_row = session.execute(
+                text("SELECT status FROM task WHERE work_id = :wid"),
+                {"wid": work_id},
+            ).first()
+            if prior_row is None:
+                return None
+            prior_status = prior_row[0]
 
-            if row is None:
+            if prior_status == TaskStatus.RUNNING.value:
+                # Hot path: route through the named transition's
+                # atomic UPDATE. We bypass the transition's
+                # built-in ``_reconcile()`` (same SQLite-locking
+                # reason as in ``complete_task`` / ``fail_task``:
+                # the reconciler opens its own ``engine.begin()``
+                # which serialises against the outer transaction on
+                # file-based engines). Mirror reconciliation runs
+                # post-commit, below.
+                transition = AbortTurn(
+                    work_id=work_id,
+                    reason="cancelled",
+                    task_repo=self,
+                    error=error_text,
+                )
+                transition._write(session, "cancelled", "running")
+                # Auxiliary writes (cancel_requested bookkeeping,
+                # completed_at) — kept inside the same transaction as
+                # the transition's UPDATE for atomicity.
+                session.execute(
+                    text(
+                        "UPDATE task "
+                        "SET cancel_requested = :cancel_requested_true, "
+                        "    cancel_requested_at = :cancelled_at, "
+                        "    completed_at = :completed_at, "
+                        "    error = :error "
+                        "WHERE id = :task_id AND status = :status_cancelled"
+                    ),
+                    {
+                        "task_id": task_id,
+                        "status_cancelled": TaskStatus.CANCELLED.value,
+                        "cancel_requested_true": True,
+                        "cancelled_at": now,
+                        "completed_at": now,
+                        "error": error_text,
+                    },
+                )
+            elif prior_status in (
+                TaskStatus.PENDING.value,
+                TaskStatus.PAUSED.value,
+            ):
+                # Cold path: legacy-shape atomic UPDATE for
+                # pending/paused cancellation.
+                row = session.execute(
+                    text(
+                        "UPDATE task SET "
+                        "status = :status_cancelled, "
+                        "cancel_requested = :cancel_requested_true, "
+                        "cancel_requested_at = :cancelled_at, "
+                        "completed_at = :completed_at, "
+                        "error = :error "
+                        "WHERE id = :id "
+                        "  AND status IN (:status_running, :status_pending, :status_paused) "
+                        "RETURNING *"
+                    ),
+                    {
+                        "status_cancelled": TaskStatus.CANCELLED.value,
+                        "cancel_requested_true": True,
+                        "cancelled_at": now,
+                        "completed_at": now,
+                        "error": error_text,
+                        "id": task_id,
+                        "status_running": TaskStatus.RUNNING.value,
+                        "status_pending": TaskStatus.PENDING.value,
+                        "status_paused": TaskStatus.PAUSED.value,
+                    },
+                ).fetchone()
+                if row is None:
+                    return None
+            else:
+                # Already terminal (completed/failed/cancelled) or
+                # unknown status — match original behavior: return
+                # None (no-op).
                 return None
 
+            row = session.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id},
+            ).fetchone()
+            if row is None:
+                return None
             result = self._row_to_task(row)
+        # Post-commit mirror reconciliation. The reconciler opens
+        # its own engine.begin(); calling it inside the transaction
+        # above would double-up connections and trip SQLite
+        # file-based locking.
+        try:
+            self.reconcile_turn_mirror(work_id)
+        except InvalidTransitionError as e:  # pragma: no cover - invariant trip
+            logger.warning(
+                "Reconciler invariant violation after cancel_task "
+                "for task_id=%s work_id=%s: %s",
+                task_id, work_id, e,
+            )
 
         # Notify workers (see complete_task for rationale). Notification
         # is safe after the commit; the worst case is a spurious wakeup
@@ -2206,28 +2499,53 @@ class TaskRepository:
         backoff_base: int = 60,
         backoff_max: int = 3600,
     ) -> Task | None:
-        """Atomically cancel a task and schedule a retry in a single transaction.
+        """Phase 4b.14 (DQ increment3-plan §5.7 / §6.5 / §9 Phase 4b):
+        thin wrapper around ``RetryTurn`` (with the parent ``error``
+        column set to the force-cancel reason).
 
-        Combines cancel_task() + schedule_retry() to prevent the window where
-        a crash would leave an orphaned CANCELLED task with no retry child.
+        Atomically cancels a task and schedules a retry in a single
+        transaction. Combines ``cancel_task()`` + ``schedule_retry()``
+        to prevent the window where a crash would leave an orphaned
+        CANCELLED task with no retry child.
 
-        Atomicity / concurrency: same atomic-UPDATE-with-guard pattern as
-        ``schedule_retry``. The parent UPDATE is conditional on
+        The wrapper owns the conditional UPDATE-with-guard (the race
+        gate that prevents duplicate retry children) and the backoff
+        calculation. ``RetryTurn`` owns the child INSERT + mirror
+        reconciliation + watcher migration (F6 fix). The parent cancel
+        and ``error`` recording are achieved by the gate UPDATE; the
+        ``RetryTurn`` parent UPDATE is a defensive idempotent
+        operation that re-records the error (same value) and the
+        cancelled status (no-op).
+
+        Differences from ``schedule_retry``:
+
+          * The eligible parent status set is smaller
+            (``('running','failed')`` only) — ``cancelled`` is NOT
+            eligible because the force-cancel path is reached after
+            ``request_cancel`` was already set, and a cancelled parent
+            is not a force-cancel candidate.
+          * The parent's ``error`` column is set to
+            ``f"Force cancelled: {reason}"`` for observability
+            (caller-supplied ``reason`` string).
+          * Both ``cancel_requested`` and ``cancel_requested_at`` are
+            set on the parent (the same as ``schedule_retry``).
+
+        Atomicity / concurrency: same atomic-UPDATE-with-guard pattern
+        as ``schedule_retry``. The parent UPDATE is conditional on
         ``retry_scheduled = False AND retry_count < max_retries AND
         status IN ('running','failed')`` so concurrent callers can only
-        create one retry child. The child INSERT is gated on
-        ``UPDATE.rowcount == 1`` inside the same ``engine.begin()``
-        transaction. Use Python booleans as bound values so the boolean
-        column writes work on both SQLite (INTEGER 0/1) and PostgreSQL
-        (BOOLEAN false/true).
+        create one retry child. The ``RetryTurn.run(session)`` call is
+        gated on ``UPDATE.rowcount == 1`` inside the same
+        ``engine.begin()`` transaction.
 
         Returns the new retry task, or None if the parent is missing,
         already has ``retry_scheduled=True``, has
         ``retry_count >= max_retries``, or is not in
         ``('running', 'failed')`` status.
         """
-        retry_task = None  # Will be set inside transaction if successful
+        retry_task = None
         now = datetime.now(timezone.utc)
+        parent_error = f"Force cancelled: {reason}"
 
         with self.engine.begin() as conn:
             # Force-cancel parent and set retry_scheduled guard in a
@@ -2253,7 +2571,7 @@ class TaskRepository:
                     "status_cancelled": TaskStatus.CANCELLED.value,
                     "cancel_requested_true": True,
                     "now": now,
-                    "error": f"Force cancelled: {reason}",
+                    "error": parent_error,
                     "retry_scheduled_true": True,
                     "retry_scheduled_false": False,
                     "max_retries": max_retries,
@@ -2273,7 +2591,8 @@ class TaskRepository:
             current_retry_count = parent_row.retry_count
             new_retry_count = current_retry_count + 1
 
-            # Calculate backoff
+            # Calculate backoff (same exponential formula as
+            # ``schedule_retry``).
             delay_seconds = min(
                 backoff_base * (2 ** current_retry_count),
                 backoff_max,
@@ -2284,46 +2603,51 @@ class TaskRepository:
                 + next_retry_at.strftime("%z")
             )
 
-            # Create retry child. Same transaction as the parent UPDATE.
-            # New ``work_id`` is generated for the same reason as in
-            # ``schedule_retry`` above: a retry is a fresh logical work
-            # attempt and gets its own virtual-job identifier.
-            # ``is_deferred`` is inherited from the parent so the retry
-            # child stays in the same defer-queue lane. ``is_background``
-            # (Phase 3 background seam, 2026-07-14) is likewise inherited
-            # so the retry child remains in the same background-queue
-            # lane and continues to honour the background idle gate.
-            result = conn.execute(
-                text("""
-                    INSERT INTO task (task_type, instance_id, message_id, status,
-                                      retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled, work_id,
-                                      is_deferred, is_background)
-                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
-                            :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled, :work_id,
-                            :is_deferred, :is_background)
-                    RETURNING *
-                """),
-                {
-                    "task_type": parent_row.task_type,
-                    "instance_id": parent_row.instance_id,
-                    "message_id": parent_row.message_id,
-                    "status_pending": TaskStatus.PENDING.value,
-                    "retry_count": new_retry_count,
-                    "next_retry_at_str": next_retry_at_str,
-                    "created_at": now,
-                    "cancel_requested": False,
-                    "retry_scheduled": False,
-                    "work_id": str(uuid.uuid4()),
-                    "is_deferred": bool(parent_row.is_deferred) if hasattr(parent_row, 'is_deferred') else False,
-                    "is_background": bool(parent_row.is_background) if hasattr(parent_row, 'is_background') else False,
-                },
+            # Mint fresh child work_id.
+            child_work_id = str(uuid.uuid4())
+
+            # Build child INSERT kwargs (same as ``schedule_retry``).
+            child_kwargs = {
+                "task_type": parent_row.task_type,
+                "message_id": parent_row.message_id,
+                "retry_count": new_retry_count,
+                "next_retry_at": next_retry_at_str,
+                "created_at": now,
+                "cancel_requested": False,
+                "retry_scheduled": False,
+                "is_deferred": bool(parent_row.is_deferred)
+                if hasattr(parent_row, "is_deferred")
+                else False,
+                "is_background": bool(parent_row.is_background)
+                if hasattr(parent_row, "is_background")
+                else False,
+            }
+
+            # Run the RetryTurn transition with parent_error to
+            # record the force-cancel reason on the parent task. The
+            # gate UPDATE above already set the same error value;
+            # ``RetryTurn`` re-records it (idempotent — same value).
+            transition = RetryTurn(
+                parent_work_id=parent_row.work_id,
+                child_work_id=child_work_id,
+                task_repo=self,
+                instance_id=parent_row.instance_id,
+                child_kwargs=child_kwargs,
+                parent_error=parent_error,
+            )
+            transition.run(conn)
+
+            # Re-read the child Task row to return as a Task object.
+            child_row = conn.execute(
+                text("SELECT * FROM task WHERE work_id = :work_id"),
+                {"work_id": child_work_id},
             ).fetchone()
+            retry_task = self._row_to_task(child_row)
 
-            retry_task = self._row_to_task(result)
-
-        # AFTER commit — safe to notify workers (see complete_task for rationale).
+        # AFTER commit — safe to notify workers (see ``complete_task``
+        # for rationale). The notification is fired only when a retry
+        # child was actually inserted; an empty-result gate UPDATE
+        # returns None above and skips the notify.
         if retry_task is not None:
             self._notify_pending_task()
 
@@ -2378,3 +2702,81 @@ class TaskRepository:
                 "message_id": message_id,
             }).fetchall()
             return [self._row_to_task(row) for row in rows]
+
+    # --------------------------------------------------------
+    # C7 — _status_write_guard (Phase 4c, increment3-plan §6a)
+    # --------------------------------------------------------
+    # The chokepoint wrappers (D8) close the *accidental* bypass — but
+    # a determined future developer writing a one-off UPDATE on
+    # ``task.status`` could still reintroduce the bug class. The
+    # repository-level write guard is the static defense: it RAISES
+    # ``DirectWriteError`` if ``UPDATE task SET status=`` is executed
+    # outside a transition context (the thread-local flag in
+    # ``turn_transitions._TransitionContext``).
+    #
+    # Initial Phase 4a state: the guard is DISABLED by default — every
+    # direct UPDATE in this repo continues to work. The
+    # ``_status_write_guard`` method exists so tests and the eventual
+    # Phase 4c rollout can opt in / verify. The flag that controls the
+    # global on/off is the module-level ``TURN_RECONCILER_DIRECT_WRITE_PARITY``
+    # boolean (see ``daemon.services.feature_flags``).
+    #
+    # Tests (planned, ships with Phase 4c):
+    #   * ``tests/unit/test_write_guard.py::test_direct_status_update_raises``
+    #   * ``tests/unit/test_write_guard.py::test_in_transition_context_allows_write``
+    #
+    # ``_status_write_guard(op)`` is intended to be CALLED from the
+    # atomic status-UPDATE helper inside this repository
+    # (``complete_task``, ``fail_task``, ``cancel_task``, the various
+    # claim / heartbeat / state-change methods). The current Phase 4a
+    # implementation does NOT call it from inside the named
+    # transitions themselves — the named transitions set the thread-
+    # local flag during their ``run()`` execution and the auxiliary
+    # column writes inside the chokepoint wrappers naturally inherit
+    # that flag.
+
+    @staticmethod
+    def _status_write_guard(op: str) -> None:
+        """Raise ``DirectWriteError`` if a direct status write is
+        attempted outside a transition context AND the global feature
+        flag is enabled.
+
+        Phase 4a behavior: NO-OP. The flag is OFF, so the only way to
+        trigger this raise is to (a) enable ``TURN_RECONCILER_DIRECT_WRITE_PARITY``
+        AND (b) be outside a ``_TransitionContext``. Both are required
+        — the flag opt-in keeps the rollout safe (see increment3-plan
+        §6a / §6b).
+
+        Reads the flag via ``daemon.services.feature_flags`` module
+        reference (NOT a copied module-level binding) so a runtime
+        ``monkeypatch.setattr(feature_flags,
+        'TURN_RECONCILER_DIRECT_WRITE_PARITY', True)`` flips behavior
+        without re-importing the repository module. The same indirection
+        handles the thread-local guard read in ``turn_transitions``.
+
+        Args:
+            op: Short description of the attempted operation, included
+                in the error message (e.g. ``"complete_task direct UPDATE"``).
+        """
+        # Runtime lookup of the flag (allows tests / deployment
+        # scripts to flip the flag without reloading the module).
+        try:
+            from daemon.services import feature_flags as _ff
+        except ImportError:  # pragma: no cover - import path is fixed
+            return
+        if not getattr(_ff, "TURN_RECONCILER_DIRECT_WRITE_PARITY", False):
+            return
+        # When the flag is on, check the thread-local guard from
+        # ``turn_transitions._TransitionContext``.
+        try:
+            from daemon.services import turn_transitions as _tt_module
+        except ImportError:  # pragma: no cover - import path is fixed
+            return
+        enabled = getattr(_tt_module._guard, "enabled", False)
+        if not enabled:
+            raise DirectWriteError(
+                f"Direct {op} on task.status is forbidden (C7 write guard). "
+                f"Use CompleteTurn / AbortTurn / RetryTurn / BeginTurn / "
+                f"ClaimTurn / SuspendTurn / ResumeTurn instead. "
+                f"See increment3-plan.md §6a."
+            )

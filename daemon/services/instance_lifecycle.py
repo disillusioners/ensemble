@@ -23,7 +23,7 @@ from ..repositories.dependency_bus.models import (
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
 from ..repositories.job_queue.models import AdmissionState
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-from ..repositories.task.models import TaskStatus
+from ..repositories.task.models import Task, TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .dependency_bus import get_dependency_bus
@@ -31,6 +31,7 @@ from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
 from .language_utils import get_language_preference, is_auto_language
 from .project_normalizer import normalize_project_id
+from .turn_transitions import ResumeTurn, SuspendTurn, TransitionResult
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -3060,62 +3061,13 @@ status=InstanceStatus.IDLE.value,
         paused_at_iso: str,
         paused_instances_data: list[tuple[str, str | None]],
     ) -> _CascadeUpdateResult:
-        """Sync DB half of ``pause_instance_cascade`` (L14 fix + Phase 2 W1).
+        """Persist a tree pause and suspend each in-flight turn.
 
-        Runs in the caller's thread (sync). Performs the per-tree-node
-        pause updates in ONE batched ``UPDATE ... WHERE instance_id IN
-        (...)`` statement instead of N+1 per-node updates.
-
-        Pre-fix, the cascade loop called ``repo.update(node_id, ...)``
-        for every node — N separate transactions. A crash mid-loop left
-        half the tree paused and half running (zombie / split-brain state).
-        L14 collapses the N updates into a single ``UPDATE`` so a crash
-        either pauses the entire tree or none of it.
-
-        Phase 2 (pause/resume redesign, 2026-06-25) — W1 atomicity:
-        the same ``WriteGuardSession`` transaction now performs TWO
-        batched UPDATEs so a single crash leaves no half-paused state
-        across tables:
-
-          1. ``instances`` (PAUSED)   — eligible non-terminal statuses
-          2. ``task`` (RUNNING → PAUSED)  — pause gate for the per-task
-             worker (``claim_pending_task`` already excludes PAUSED
-             instances; the task row itself must also reflect PAUSED so
-             the worker's ``complete_task`` cannot flip PAUSED →
-             COMPLETED in the finally block — B2 race protection)
-
-        Phase 4 (Job as Queue Proxy): the ``job_queue_items`` UPDATE
-        (formerly UPDATE 2 in Phase 3 — flipping status PROCESSING →
-        PAUSED) was DELETED. Pause is an *Instance* concern, not a
-        queue concern. The job stays in ``admission_state='active'``
-        with its lock held; the ``claim_pending_task`` SQL guard on
-        ``instance.status == PAUSED`` (``task/repository.py:552-577``)
-        and ``_process_next_job``'s ``instance.status == PAUSED``
-        pre-check (``job_processor.py:634-646``) prevent the
-        JobProcessor from claiming work for a paused instance. Plan
-        §8.1 makes this explicit and the integration test in
-        ``test_cascade_pause_resume.py`` covers it.
-
-        The two remaining UPDATEs share ONE ``WriteGuardSession`` so
-        the commit is atomic (all-or-nothing). The pre-DB side effects
-        (graph task cancellation + ``request_registry.cancel_by_instance``)
-        remain in-memory and out-of-band — they fire BEFORE the helper
-        runs (see ``pause_instance_cascade``).
-
-        Args:
-            engine: The shared SQLAlchemy engine.
-            write_guard: The shared WritePauseGuard.
-            tree_ids: All node IDs in the tree (from
-                ``repo.get_tree_ids(root_id)``).
-            paused_at_iso: ISO-8601 timestamp for the paused_at column.
-            paused_instances_data: List of ``(instance_id, agent_id)`` tuples
-                for nodes that should be paused. The caller pre-filters
-                out already-paused nodes (skip behavior).
-
-        Returns:
-            ``_CascadeUpdateResult`` with the list of updated IDs and
-            their captured ``agent_id`` so the async caller can fire
-            ``stream_status_change`` SSE per node.
+        Instance state is tree-scoped, so the cascade owns that one update.
+        Task lifecycle state is turn-scoped and is deliberately delegated to
+        :class:`SuspendTurn`; keeping the two operations in one guarded
+        session preserves the all-or-nothing pause boundary.  The transition
+        results are the post-commit outbox records (wakeup/SSE payloads).
         """
         if not paused_instances_data:
             return _CascadeUpdateResult(
@@ -3124,27 +3076,29 @@ status=InstanceStatus.IDLE.value,
                 agent_ids_by_instance={},
             )
 
-        updated_ids = [iid for iid, _agent in paused_instances_data]
+        updated_ids = [instance_id for instance_id, _agent_id in paused_instances_data]
         agent_ids_by_instance = {
-            iid: agent for iid, agent in paused_instances_data
+            instance_id: agent_id
+            for instance_id, agent_id in paused_instances_data
         }
+        task_repo = self._task_repo
+        suspended_work_ids: list[str] = []
+        deferred_reconcile_ids: list[str] = []
+        transition_results: list[TransitionResult] = []
+
+        # ``TaskRepository.reconcile_turn_mirror`` owns its own connection.
+        # Defer that call until this guarded transaction commits; otherwise a
+        # nested engine transaction could publish a half-cascade.
+        class _TransitionTaskRepo:
+            def reconcile_turn_mirror(_self, work_id: str):
+                deferred_reconcile_ids.append(work_id)
+
+            def __getattr__(_self, name: str):
+                return getattr(task_repo, name)
+
+        transition_task_repo = _TransitionTaskRepo()
 
         with WriteGuardSession(Session(engine), write_guard) as session:
-            # ─── UPDATE 1: instances → PAUSED ──────────────────────────
-            # L14 fix: single batched UPDATE. The ``tree_ids`` list is
-            # expanded into the ``IN`` clause via SQLAlchemy's
-            # ``expanding=True`` parameter. SQLite and PostgreSQL both
-            # accept the expanded IN list.
-            #
-            # F03 status guard: mirror the resume helper's predicate
-            # pattern so a concurrent pause/resume that already flipped
-            # the status is a no-op on that row (rowcount drops). Only
-            # non-terminal, non-paused states are eligible for pause
-            # — pausing a terminal row would lose the terminal write.
-            #
-            # Note: column is intentionally NOT in the SET
-            # clause — the legacy reset was removed with the
-            # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
             session.execute(
                 text(
                     "UPDATE instances "
@@ -3152,10 +3106,9 @@ status=InstanceStatus.IDLE.value,
                     "    paused_at = :paused_at, "
                     "    updated_at = :paused_at "
                     "WHERE instance_id IN :tree_ids "
-                    "  AND status IN (:running_status, :idle_status, :waiting_children_status)"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
+                    "  AND status IN (:running_status, :idle_status, "
+                    "                   :waiting_children_status)"
+                ).bindparams(bindparam("tree_ids", expanding=True)),
                 {
                     "paused_status": InstanceStatus.PAUSED.value,
                     "paused_at": paused_at_iso,
@@ -3166,94 +3119,59 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # ─── UPDATE 2: task → PAUSED (Phase 2 / W1) ───────────────
-            # At the same transaction boundary as UPDATE 1, transition
-            # any RUNNING task for a paused instance to PAUSED. The
-            # ``WHERE status = running`` guard mirrors ``complete_task``'s
-            # own guard — it makes this UPDATE mutually exclusive with
-            # the worker's terminal write (B2 race protection):
-            # if the worker's ``complete_task`` commits FIRST, this
-            # UPDATE rowcount drops to 0 (task already terminal); if
-            # THIS UPDATE commits FIRST, ``complete_task``'s
-            # ``WHERE status = running`` guard rowcount drops to 0
-            # and the worker falls through the ``return None`` branch.
-            # Either ordering produces the same observable state:
-            # PAUSED never gets flipped back to COMPLETED by a worker
-            # whose task was interrupted mid-flight.
-            #
-            # ``claim_pending_task`` already excludes PAUSED instances
-            # via its pause-gate ``WHERE status NOT IN (paused,
-            # terminated)`` subquery; this UPDATE protects PAUSED tasks
-            # from being claimed too (the per-instance guard excludes
-            # any instance with a RUNNING task; once RUNNING flips to
-            # PAUSED, the instance re-enters the eligible set, and any
-            # new PENDING tasks for it become claimable — which is the
-            # correct "queue in PENDING until resume" behaviour).
-            #
-            # ``RETURNING work_id`` captures the work_ids of the Tasks
-            # this cascade actually transitioned. The Turn-Reconciler
-            # migration (Increment 1, 2026-08-01) consumes this returned
-            # set to invoke ``reconcile_turn_mirror`` on each paused
-            # Task's work_id after the commit (ADDITIVE — does not
-            # replace any existing pause logic).
-            paused_task_rows = session.execute(
+            task_rows = session.execute(
                 text(
-                    "UPDATE task "
-                    "SET status = :paused_status "
+                    "SELECT work_id, instance_id "
+                    "FROM task "
                     "WHERE instance_id IN :tree_ids "
-                    "  AND status = :running_status "
-                    "RETURNING work_id"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
+                    "  AND status = :running_status"
+                ).bindparams(bindparam("tree_ids", expanding=True)),
                 {
-                    "paused_status": TaskStatus.PAUSED.value,
-                    "running_status": TaskStatus.RUNNING.value,
                     "tree_ids": updated_ids,
+                    "running_status": TaskStatus.RUNNING.value,
                 },
-            ).fetchall()
-            paused_task_work_ids: list[str] = [
-                str(row[0]) for row in paused_task_rows if row[0] is not None
-            ]
+            ).mappings().all()
 
-            # Single commit for ALL DB writes (Phase 2 / W1
-            # atomicity, Phase 4 / Plan §8.1 — pause is an Instance
-            # concern, job_queue_items is no longer touched here).
-            # If any UPDATE raises, none of them commit — the
-            # ``WriteGuardSession.__exit__`` rolls back via the
-            # underlying ``Session.close``.
+            for row in task_rows:
+                result = SuspendTurn(
+                    work_id=str(row["work_id"]),
+                    reason=CancellationReason.USER_STOPPED.value,
+                    task_repo=transition_task_repo,
+                    instance_id=row["instance_id"],
+                ).run(session)
+                if result is not None:
+                    transition_results.append(result)
+                    status_row = session.execute(
+                        text("SELECT status FROM task WHERE work_id = :work_id"),
+                        {"work_id": str(row["work_id"])},
+                    ).scalar_one_or_none()
+                    if status_row == TaskStatus.PAUSED.value:
+                        suspended_work_ids.append(str(row["work_id"]))
+
             session.commit()
 
-        # ─── Turn-Reconciler Migration (Increment 1) — pause call site ──
-        # The reconciler (``TaskRepository.reconcile_turn_mirror``) is
-        # the authoritative mirror normalization primitive. It covers
-        # all 8 tables (task, job_queue_items, job_locks, message_queue,
-        # dependency_watchers, report_injections, instances, job_watchers)
-        # in a single transaction, guards writes by the Task snapshot,
-        # and raises ``InvalidTransitionError`` on invariant violation.
-        #
-        # This integration is ADDITIVE — the existing guards above
-        # remain unchanged. The reconciler is invoked AFTER the core
-        # RUNNING→PAUSED transition commits so a crash in the
-        # reconciler cannot roll back the pause. On
-        # ``InvalidTransitionError``, let it PROPAGATE (§5.1) — the
-        # pause cascade runs inside a controlled transaction context
-        # and an invariant violation means the transition is
-        # structurally invalid and must surface to the caller.
-        #
-        # For a freshly paused Task the reconciler's guarded SQL
-        # handlers are mostly no-ops (mirrors already consistent),
-        # but the value here is closing any stale message_queue /
-        # dependency_watcher rows the worker's in-flight turn left
-        # behind before pause fired.
-        for work_id in paused_task_work_ids:
-            self._task_repo.reconcile_turn_mirror(work_id)
+        # ``SuspendTurn`` is the lifecycle owner.  Keep this post-commit call
+        # for repositories that expose the Increment-1 reconciler as a separate
+        # transaction (and for compatibility with the pre-transition helper).
+        # It is idempotent when the transition already reconciled the turn.
+        if task_repo is not None:
+            for work_id in dict.fromkeys(suspended_work_ids + deferred_reconcile_ids):
+                task_repo.reconcile_turn_mirror(work_id)
 
-        # Skipped = nodes that were already paused (filtered out by the
-        # caller before passing to this helper). We re-derive from
-        # ``tree_ids`` minus ``updated_ids``.
-        skipped_ids = [iid for iid in tree_ids if iid not in set(updated_ids)]
+        # The transition result is the outbox payload.  Existing async callers
+        # emit status SSE after this helper returns; log payloads here so a
+        # configured transition outbox can observe the same post-commit data
+        # without coupling this synchronous DB boundary to asyncio.
+        for result in transition_results:
+            if result.wakeup_payload or result.sse_payload:
+                logger.debug(
+                    "pause transition outbox: work_id=%s wakeup=%s sse=%s",
+                    result.work_id,
+                    result.wakeup_payload,
+                    result.sse_payload,
+                )
 
+        skipped_ids = [instance_id for instance_id in tree_ids if instance_id not in updated_ids]
         return _CascadeUpdateResult(
             updated_ids=updated_ids,
             skipped_ids=skipped_ids,
@@ -3531,54 +3449,14 @@ status=InstanceStatus.IDLE.value,
         ancestor_ids: set[str],
         is_root_resume: bool,
     ) -> _CascadeUpdateResult:
-        """Sync DB half of ``resume_instance_cascade`` (L14 fix + Phase 3 W2).
+        """Resume a tree and retire each paused turn through ``ResumeTurn``.
 
-        Runs in the caller's thread (sync). Performs the per-tree-node
-        resume updates in ONE batched ``UPDATE ... WHERE instance_id IN
-        (...)`` statement instead of N+1 per-node updates.
-
-        Phase 3 (pause/resume redesign, 2026-06-25) — W2 atomicity:
-        the same ``WriteGuardSession`` transaction now performs TWO
-        batched UPDATEs so a single crash leaves no half-resumed state
-        across tables (mirrors Phase 2's ``_pause_cascade_db_sync``):
-
-          1. ``instances`` (PAUSED → RUNNING) — clears ``paused_at``.
-          2. ``task`` (PAUSED → CANCELLED) — the cascade cancels paused
-             tasks (``cancel_requested=true``, ``retry_scheduled=true``)
-             rather than re-arming them to ``PENDING``. On resume,
-             ``resume_processing_job`` owns the graph turn for the root
-             instance (driving ``graph.astream`` from the checkpoint);
-             the previously paused task was the WORKER's
-             ``process_message`` task for that same turn. Re-arming it
-             to ``PENDING`` would let ``WorkerPool → claim_pending_task``
-             re-claim and re-process the message as a FRESH turn
-             (``is_retry=False``), racing ``resume_processing_job``
-             under the ExecutionGate and corrupting the checkpoint.
-             Cancelling makes the task non-claimable
-             (``claim_pending_task`` filters ``status='pending'``) and
-             lets the worker that may have already entered the pipeline
-             short-circuit on the load-time idempotency guard in
-             ``ProcessMessageProcessor``. ``retry_scheduled=true``
-             prevents the retry engine from scheduling a retry child;
-             the resume driver owns the outcome, so no retry is
-             desired.
-
-        Phase 4 (Job as Queue Proxy): the ``job_queue_items`` UPDATE
-        (formerly UPDATE 2 in Phase 3 — flipping status PAUSED →
-        PROCESSING) was DELETED. Resume is an *Instance* concern; the
-        job was never paused in admission (Phase 4 paused-cascade
-        removal) so its ``admission_state='active'`` and lock remain
-        intact through the pause/resume cycle. Plan §8.1 makes this
-        explicit.
-
-        The two remaining UPDATEs share ONE ``WriteGuardSession`` so
-        the commit is atomic (all-or-nothing).
-
-        Returns ``_CascadeUpdateResult`` with the updated IDs.
+        The instance update remains tree-scoped.  Each paused Task is a
+        separate turn transition: ``ResumeTurn`` changes it to CANCELLED and
+        reconciles its mirrors, while this wrapper retains the legacy resume
+        bookkeeping and post-reconcile completion re-fire.
         """
-        # The caller pre-filters out nodes that are not in PAUSED status
-        # (skip behavior). The set we get here is the union of nodes
-        # that are actually paused.
+        del ancestor_ids, is_root_resume  # retained for the public helper contract
         if not tree_ids:
             return _CascadeUpdateResult(
                 updated_ids=[],
@@ -3592,19 +3470,26 @@ status=InstanceStatus.IDLE.value,
 
         now_iso = datetime.now(timezone.utc).isoformat()
         now_dt = datetime.now(timezone.utc)
+        task_repo = self._task_repo
+        cancelled_task_ids: list[int] = []
+        cancelled_task_work_ids: list[str] = []
+        cancelled_task_message_ids: list[str | None] = []
+        deferred_reconcile_ids: list[str] = []
+        transition_results: list[TransitionResult] = []
+
+        # The repository reconciler opens its own transaction.  Use a tiny
+        # transaction-local sink while the cascade is open, then drain it
+        # only after the guarded instance/task writes commit.
+        class _TransitionTaskRepo:
+            def reconcile_turn_mirror(_self, work_id: str):
+                deferred_reconcile_ids.append(work_id)
+
+            def __getattr__(_self, name: str):
+                return getattr(task_repo, name)
+
+        transition_task_repo = _TransitionTaskRepo()
+
         with WriteGuardSession(Session(engine), write_guard) as session:
-            # ─── UPDATE 1: instances → RUNNING (existing L14 behaviour) ───
-            # Single batched UPDATE: status + paused_at for all nodes
-            # that are currently paused. The ``status = 'paused'``
-            # predicate is the guard so a concurrent pause/resume that
-            # already flipped the status is a no-op on that row
-            # (rowcount drops).
-            #
-            # Note: column is intentionally NOT in the SET
-            # clause — the legacy reset and the ancestor bump were
-            # removed with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag
-            # in Phase 3. The CM-authoritative path preserves the
-            # existing values.
             session.execute(
                 text(
                     "UPDATE instances "
@@ -3613,9 +3498,7 @@ status=InstanceStatus.IDLE.value,
                     "    updated_at = :now "
                     "WHERE instance_id IN :tree_ids "
                     "  AND status = :paused_status"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
+                ).bindparams(bindparam("tree_ids", expanding=True)),
                 {
                     "running_status": InstanceStatus.RUNNING.value,
                     "paused_status": InstanceStatus.PAUSED.value,
@@ -3624,169 +3507,60 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # ─── UPDATE 2: task → CANCELLED (resume re-claim bug fix) ────
-            # At the same transaction boundary as UPDATE 1, transition
-            # any PAUSED task for a resumed instance to CANCELLED (NOT
-            # PENDING). The ``WHERE status = 'paused'`` guard makes the
-            # UPDATE mutually exclusive with any concurrent task
-            # lifecycle writes.
-            #
-            # Why CANCELLED and not PENDING (previous Phase 3 / W2
-            # behaviour):
-            # On resume, ``resume_processing_job`` owns the graph turn
-            # for the root instance (driving ``graph.astream`` from the
-            # checkpoint). The previously paused task was the WORKER's
-            # ``process_message`` task that was driving the SAME turn
-            # before pause. Re-arming it to PENDING allowed the
-            # WorkerPool to re-claim and re-process the message as a
-            # FRESH turn (``is_retry=False``), racing with
-            # ``resume_processing_job`` under the ExecutionGate and
-            # corrupting the checkpoint (add_messages reducer replaced
-            # the project-context-wrapped HumanMessage with a bare
-            # re-injection of the same ID — lost project context,
-            # duplicate SSE output, lost injected resume message).
-            # Setting to CANCELLED makes the task non-claimable
-            # (``claim_pending_task`` filters ``status='pending'``) and
-            # lets the worker that may have already entered the
-            # pipeline short-circuit on the load-time idempotency guard
-            # in ``ProcessMessageProcessor``.
-            #
-            # ``retry_scheduled=true`` prevents the retry engine from
-            # scheduling a retry child for the cancelled task
-            # (``find_orphaned_cancelled_tasks`` filters on
-            # ``retry_scheduled=false``). The resume driver owns the
-            # outcome; no retry is desired.
-            #
-            # ``RETURNING id`` captures the task ids that the cascade
-            # actually transitioned. The async caller invokes
-            # ``cancel_bus_watchers_for_task_async`` for each so any
-            # PENDING ``dependency_watchers`` rows keyed on those ids
-            # are released. Without this step those watchers stay
-            # PENDING forever and the parent remains in
-            # ``waiting_children`` (production incident 2026-07-08,
-            # leader 088d3335 stuck after pause/resume). The retry
-            # engine's ``retry_scheduled=true`` short-circuit prevents
-            # it from running its own cancellation pass; the resume
-            # cascade is therefore the only path that can drop the
-            # watchers and must do so itself.
-            cancelled_task_rows = session.execute(
+            task_rows = session.execute(
                 text(
-                    "UPDATE task "
-                    "SET status = :cancelled_status, "
-                    "    cancel_requested = :cancel_requested_true, "
-                    "    cancel_requested_at = :now_iso, "
-                    "    completed_at = :now_dt, "
-                    "    retry_scheduled = :retry_scheduled_true, "
-                    "    error = :error_msg "
+                    "SELECT id, work_id, message_id "
+                    "FROM task "
                     "WHERE instance_id IN :tree_ids "
-                    "  AND status = :paused_status "
-                    "RETURNING id, work_id, message_id"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
+                    "  AND status = :paused_status"
+                ).bindparams(bindparam("tree_ids", expanding=True)),
                 {
-                    "cancelled_status": TaskStatus.CANCELLED.value,
-                    "cancel_requested_true": True,
-                    "retry_scheduled_true": True,
-                    "paused_status": TaskStatus.PAUSED.value,
-                    "now_iso": now_iso,
-                    "now_dt": now_dt,
-                    "error_msg": "Superseded by resume cascade — resume_processing_job owns graph driving",
                     "tree_ids": tree_ids,
+                    "paused_status": TaskStatus.PAUSED.value,
                 },
-            ).fetchall()
-            cancelled_task_ids = [int(row[0]) for row in cancelled_task_rows]
-            # Phase 2 (Bug B): the RETURNING projection now also captures
-            # ``work_id`` and ``message_id`` for each cancelled Task.
-            # UPDATE 4 (cascade-scoped ``completion_report`` reconciliation)
-            # consumes this returned set as its ONLY source of eligibility
-            # — historical Tasks that were already ``cancelled`` BEFORE
-            # this resume cascade are intentionally excluded (C4 in the
-            # Phase 2 plan). The returned rows are also returned to the
-            # async caller via the new ``_CascadeUpdateResult`` fields
-            # for logging and the post-reconcile re-fire (Task 17).
-            cancelled_task_work_ids: list[str] = [
-                str(row[1]) for row in cancelled_task_rows
-            ]
-            cancelled_task_message_ids: list[str | None] = [
-                row[2] for row in cancelled_task_rows
-            ]
+            ).mappings().all()
 
-            # ─── UPDATE 4 (Phase 2, Bug B) — REPLACED by Turn-Reconciler ─
-            # The original UPDATE 4 was a dialect-branched
-            # ``completion_report`` reconciliation that ran INSIDE the
-            # ``WriteGuardSession`` alongside UPDATE 1/2/3. The
-            # Turn-Reconciler migration (Increment 1, 2026-08-01)
-            # supersedes it: ``TaskRepository.reconcile_turn_mirror``
-            # normalizes ALL 8 mirror tables (task, job_queue_items,
-            # job_locks, message_queue, dependency_watchers,
-            # report_injections, instances, job_watchers) in one
-            # transaction with snapshot-guarded writes and an
-            # ``InvalidTransitionError`` invariant check.
-            #
-            # The reconciler is invoked AFTER the ``session.commit()``
-            # below (outside the ``WriteGuardSession``) — one call per
-            # cancelled task's ``work_id``. The old UPDATE 4's
-            # ``reconciled_message_ids`` set is now derived by querying
-            # ``message_queue`` for the cancelled task's message_ids
-            # that landed in ``completed`` status after the reconciler
-            # ran. This keeps ``_post_reconcile_completion_refire``
-            # (line ~4181) wired to the same trigger condition it
-            # used under the old block.
-            #
-            # Initialize the local so the structured log + return
-            # below can reference it; the real values are populated
-            # after the commit and reconciler calls.
-            reconciled_message_ids: list[str] = []
+            for row in task_rows:
+                work_id = str(row["work_id"])
+                result = ResumeTurn(
+                    work_id=work_id,
+                    task_repo=transition_task_repo,
+                    new_work_id=None,
+                    instance_id=None,
+                ).run(session)
+                if result is not None:
+                    transition_results.append(result)
 
-            # ─── UPDATE 3: job_queue_items → ACTIVE (resume mirror) ────
-            # RF3 (2026-07-06): Phase 4 removed the JobItem PAUSED → ACTIVE
-            # transition from this cascade (Plan §8.1 — pause/resume is an
-            # Instance concern only). That left message-type JobItems in
-            # ``admission_state='paused'`` after resume (a non-canonical
-            # value in the 4-state ``AdmissionState`` enum, written by
-            # legacy pre-Phase-5 paths or by drift reconcilers that flip
-            # the legacy ``status`` mirror). ``_finalize_job_db_sync``'s
-            # Step 1 WHERE clause (``admission_state IN ('active',
-            # 'queued')``) then missed these rows → rowcount=0 →
-            # silent no-op → JobItem leaked as ``paused`` forever.
-            #
-            # This UPDATE restores the transition in the SAME
-            # ``WriteGuardSession`` as UPDATE 1 + UPDATE 2 — atomic
-            # commit, no half-resumed state across the three tables.
-            # The ``job_type='message'`` filter scopes the UPDATE to the
-            # message-type JobItem mirror (``instance_messaging.enqueue_
-            # message`` writes ``job_type='message'``); task-type JobItems
-            # are unaffected by resume (their lifecycle is driven by the
-            # task UPDATE above).
-            #
-            # The ``admission_state IN ('active', 'paused')`` guard is
-            # intentionally permissive:
-            #   * ``active`` — the no-op current state (pause is a
-            #     no-op under Phase 4 / ``_LEGACY_TO_ADMISSION``: both
-            #     legacy ``paused`` and ``processing`` map to ``active``,
-            #     so the column value does not change through the
-            #     pause/resume cycle for the canonical path). The
-            #     UPDATE still matches and is idempotent.
-            #   * ``paused`` — defensive guard for any legacy / drift
-            #     path that wrote the non-canonical literal ``paused``
-            #     to ``admission_state``. The final WHERE-row UPDATE
-            #     lifts it back to the canonical ``active`` state so the
-            #     finalize guard accepts it.
-            # The UPDATE is safe to run repeatedly (rowcount drops to 0
-            # on the second pass — ``active`` is already the target).
+                # These columns are task-local resume metadata, not lifecycle
+                # status.  Keep the old contract (the resume driver owns the
+                # graph turn and the retry engine must not mint a child).
+                task_record = session.get(Task, int(row["id"]))
+                if task_record is not None and task_record.status == TaskStatus.CANCELLED.value:
+                    task_record.cancel_requested = True
+                    task_record.cancel_requested_at = now_iso
+                    task_record.completed_at = now_dt
+                    task_record.retry_scheduled = True
+                    task_record.error = (
+                        "Superseded by resume cascade — "
+                        "resume_processing_job owns graph driving"
+                    )
+                    session.add(task_record)
+                    cancelled_task_ids.append(int(row["id"]))
+                    cancelled_task_work_ids.append(work_id)
+                    cancelled_task_message_ids.append(row["message_id"])
+
+            # Keep the queue admission mirror canonical while the
+            # transition's post-commit reconciler runs.  This is a no-op for
+            # the normal ``active`` value, but preserves the legacy
+            # paused-admission recovery contract atomically.
             session.execute(
                 text(
                     "UPDATE job_queue_items "
                     "SET admission_state = :active_admission "
                     "WHERE instance_id IN :tree_ids "
                     "  AND job_type = :message_job_type "
-                    "  AND admission_state IN ("
-                    "    :active_admission, :paused_legacy"
-                    "  )"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
+                    "  AND admission_state IN (:active_admission, :paused_legacy)"
+                ).bindparams(bindparam("tree_ids", expanding=True)),
                 {
                     "active_admission": AdmissionState.ACTIVE.value,
                     "paused_legacy": "paused",
@@ -3795,111 +3569,34 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # Single commit for ALL DB writes (Phase 3 / W2 atomicity;
-            # RF3 fix: ``job_queue_items`` is once again part of the
-            # resume cascade — the 3 UPDATEs commit together or not at
-            # all). If any UPDATE raises, none of them commit — the
-            # ``WriteGuardSession.__exit__`` rolls back via the
-            # underlying ``Session.close``.
             session.commit()
 
-        # ─── Turn-Reconciler Migration (Increment 1) — resume call site ─
-        # The reconciler (``TaskRepository.reconcile_turn_mirror``) is
-        # the authoritative mirror normalization primitive. It covers
-        # all 8 tables (task, job_queue_items, job_locks, message_queue,
-        # dependency_watchers, report_injections, instances, job_watchers)
-        # in a single transaction per work_id, guards writes by the Task
-        # snapshot, and raises ``InvalidTransitionError`` on invariant
-        # violation.
-        #
-        # This REPLACES the old dialect-branched UPDATE 4 block (the
-        # ``completion_report`` message_queue reconciliation) and runs
-        # AFTER the core ``session.commit()`` so a crash in the
-        # reconciler cannot roll back the resume transitions. On
-        # ``InvalidTransitionError``, let it PROPAGATE (§5.1) — the
-        # resume cascade runs inside a ``WriteGuardSession`` and an
-        # invariant violation must surface to the caller.
-        #
-        # One reconciler call per cancelled task's work_id. The
-        # ``cancelled_task_work_ids`` set was returned by UPDATE 2's
-        # ``RETURNING`` clause above; it is exactly the set the old
-        # UPDATE 4 used to scope itself to.
-        for work_id in cancelled_task_work_ids:
-            if work_id:
-                self._task_repo.reconcile_turn_mirror(work_id)
+        # A transition may reconcile in-session or expose the Increment-1
+        # reconciler as a separate transaction.  The second call is guarded
+        # and idempotent, and keeps both implementations behaviorally equal.
+        if task_repo is not None:
+            for work_id in dict.fromkeys(
+                cancelled_task_work_ids + deferred_reconcile_ids
+            ):
+                task_repo.reconcile_turn_mirror(work_id)
 
-        # Derive ``reconciled_message_ids`` for the post-reconcile
-        # completion re-fire (``_post_reconcile_completion_refire``,
-        # line ~3860). The old UPDATE 4 populated this list from the
-        # CTE / ``RETURNING`` of the same statement; the reconciler
-        # does not expose the list directly, so query the message_queue
-        # for the cancelled task's message_ids that landed in
-        # ``completed`` status. The query runs on a fresh session
-        # (the cascade's ``WriteGuardSession`` is committed and closed)
-        # and is read-only.
-        candidate_mids: list[str] = [
-            mid for mid in cancelled_task_message_ids if mid
+        candidate_message_ids = [
+            message_id for message_id in cancelled_task_message_ids if message_id
         ]
-        if candidate_mids:
-            with Session(engine) as post_session:
-                # ``.scalars()`` unwraps single-column SELECTs to
-                # scalars (one ``message_id`` str per row), not Row
-                # 1-tuples. Defensive tuple-check below for drivers
-                # that return Row objects instead.
-                post_reconciled_rows = post_session.exec(
+        reconciled_message_ids: list[str] = []
+        if candidate_message_ids:
+            with Session(engine) as session:
+                rows = session.execute(
                     select(MessageQueue.message_id).where(
-                        MessageQueue.message_id.in_(candidate_mids),
+                        MessageQueue.message_id.in_(candidate_message_ids),
                         MessageQueue.status == MessageStatus.COMPLETED.value,
                     )
-                ).scalars().all()
+                ).all()
                 reconciled_message_ids = [
-                    str(mid[0]) if isinstance(mid, tuple) else str(mid)
-                    for mid in post_reconciled_rows
+                    str(row[0] if isinstance(row, tuple) else row[0])
+                    for row in rows
                 ]
 
-        # Structured logging of the cancellation/reconciliation.
-        # Replaces the old UPDATE 4 log with a reconciler-aware summary.
-        logger.info(
-            "resume_cascade_db_sync: cancelled %d task(s) "
-            "[work_ids=%s], reconciler normalized %d message_queue "
-            "row(s) [message_ids=%s]",
-            len(cancelled_task_ids),
-            cancelled_task_work_ids,
-            len(reconciled_message_ids),
-            reconciled_message_ids,
-        )
-
-        # ─── Phase 2 A5.1: post-reconcile completion re-fire ────────────
-        # After UPDATE 4 commits, evaluate ``pending_count`` for the
-        # affected instance tree via the shared positive-polarity
-        # predicate. If ``pending_count == 0`` for an instance AND the
-        # instance is otherwise ready to complete (no pending Tasks,
-        # no pending children, no pending JobItem), synchronously call
-        # ``_process_child_completion_db_sync`` to re-fire the
-        # completion reevaluation.
-        #
-        # Why the re-fire is needed (see phase2-plan.md §A5):
-        # The DependencyBus only fires ``_process_child_completion_db_
-        # sync`` from a watcher's terminal event. For already-stuck
-        # instances where ALL children have already reported (all bus
-        # watchers already FIRED) AND where UPDATE 4 has just
-        # reconciled the orphan rows, there is no pending watcher to
-        # re-fire the completion check. The instance would remain
-        # permanently stuck at ``WAITING_CHILDREN`` until the next
-        # natural child event (which never comes). The re-fire
-        # self-heals the parent in the same worker thread that ran
-        # the cascade (still inside the original ``asyncio.to_thread``
-        # wrapper from the async caller).
-        #
-        # Safety: ``_process_child_completion_db_sync`` has explicit
-        # idempotency guards at ``child_reports.py:1212-1219`` that
-        # short-circuit on terminal status (COMPLETED/ERROR/PAUSED),
-        # so a re-entry on a stale or already-completed instance is a
-        # no-op. The function is a sync method on
-        # ``ChildReportsService``; it opens its own
-        # ``WriteGuardSession`` (the cascade's session has committed
-        # and is closed by now), so there is no nested-transaction
-        # issue.
         if reconciled_message_ids:
             try:
                 self._post_reconcile_completion_refire(
@@ -3907,28 +3604,35 @@ status=InstanceStatus.IDLE.value,
                     tree_ids=list(tree_ids),
                     write_guard=write_guard,
                 )
-            except Exception as refire_err:
-                # The re-fire is best-effort. The shared predicate
-                # guard at ``child_reports.py:1459`` already prevents
-                # the parent from completing prematurely, and the
-                # update reconciliation (UPDATE 4) has already
-                # committed. If the re-fire fails (e.g. unexpected
-                # exception), the parent stays ``waiting_children``
-                # until the next natural event — same observable
-                # behaviour as before Phase 2. The Phase 2.5
-                # operator cleanup can recover stuck instances.
+            except Exception as refire_error:
                 logger.warning(
-                    "resume_cascade_db_sync: post-reconcile re-fire "
-                    "raised (%s: %s); parent may stay "
-                    "waiting_children until next event",
-                    type(refire_err).__name__,
-                    refire_err,
+                    "resume_cascade_db_sync: post-reconcile re-fire raised "
+                    "(%s: %s); parent may stay waiting_children until next event",
+                    type(refire_error).__name__,
+                    refire_error,
                 )
 
+        for result in transition_results:
+            if result.wakeup_payload or result.sse_payload:
+                logger.debug(
+                    "resume transition outbox: work_id=%s wakeup=%s sse=%s",
+                    result.work_id,
+                    result.wakeup_payload,
+                    result.sse_payload,
+                )
+
+        logger.info(
+            "resume_cascade_db_sync: cancelled %d task(s) [work_ids=%s], "
+            "reconciler normalized %d message_queue row(s) [message_ids=%s]",
+            len(cancelled_task_ids),
+            cancelled_task_work_ids,
+            len(reconciled_message_ids),
+            reconciled_message_ids,
+        )
         return _CascadeUpdateResult(
             updated_ids=list(tree_ids),
             skipped_ids=[],
-            agent_ids_by_instance={},  # caller pre-fetches for SSE
+            agent_ids_by_instance={},
             cancelled_task_ids=cancelled_task_ids,
             cancelled_task_work_ids=cancelled_task_work_ids,
             cancelled_task_message_ids=cancelled_task_message_ids,
