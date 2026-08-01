@@ -849,11 +849,25 @@ class TestJoberWatchIntegration:
             )
             try:
                 stdout, stderr = proc.communicate(timeout=12)
-            except subprocess.TimeoutExpired:
-                # 12s is enough for dev.sh to print its banner + uvicorn to
-                # reach "Application startup complete." Longer = leaks port.
+            except subprocess.TimeoutExpired as first_timeout:
+                # Kill the process group, then collect output with a bounded wait.
+                # An unbounded communicate() can hang if a reload child retains the
+                # inherited stdout/stderr pipes after the group leader exits.
                 _kill_process_group()
-                stdout, stderr = proc.communicate()
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired as second_timeout:
+                    stdout = second_timeout.output or first_timeout.output or ""
+                    stderr = second_timeout.stderr or first_timeout.stderr or ""
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    if proc.stderr is not None:
+                        proc.stderr.close()
+                    _kill_process_group()
+                    if isinstance(stdout, bytes):
+                        stdout = stdout.decode(errors="replace")
+                    if isinstance(stderr, bytes):
+                        stderr = stderr.decode(errors="replace")
 
             # PASS criteria: dev.sh is runnable. It either exited cleanly (0),
             # was terminated by the legacy external `timeout` (124), or was
