@@ -282,7 +282,7 @@ class TaskRepository:
         (direct column join). The retry-path rationale for
         work_id-keyed correlation (instead of message_id-keyed)
         applies here too — see
-        :meth:`_admitted_task_carve_out_sql` Branch 2 for the
+        the shared in-flight JobItem predicate for the
         full discussion of the ``message_id`` → ``work_id``
         re-keying.
 
@@ -747,48 +747,11 @@ class TaskRepository:
         same langgraph thread_id, which would race on ``graph.astream`` and
         shadow channel writes in the Postgres checkpointer.
 
-        The MESSAGE-job check is critical because the child-completion
-        handler enqueues completion reports as tasks, but the parent's
-        original user message is typically being processed by the job-queue
-        path. Without the cross-system guard, the task forks the checkpoint
-        from a stale state and the "Done! 👋" AIMessage produced by the
-        original job is shadowed/lost.
-
-        WAITING_CHILDREN carve-out: when a job is mid-flight and the
-        instance transitions to ``WAITING_CHILDREN`` (the parent spawned
-        children and is awaiting their reports), ``MessageJobHandler``
-        defers job completion — the job stays ``PROCESSING`` until the
-        instance lifecycle resolves. But the job is *not* driving
-        ``graph.astream`` in this window; ``JobFeedbackObserver`` will
-        complete the job when the instance finally completes. If we
-        blocked on the PROCESSING status alone, the child-completion
-        report task would be unable to claim and deliver the child
-        result to the parent — a deadlock where the job waits for the
-        child report and the child report waits for the job. We therefore
-        also check the instance's ``WAITING_CHILDREN``
-        status and only treat the job as a blocker when the instance is
-        NOT in that deferred state.
-
-        Unified-dispatcher admission carve-out: in the Phase C/D unified
-        dispatcher, the ``JobFeedbackObserver`` admits a MESSAGE job to a
-        Task row BEFORE the worker claims it. The JobItem is
-        in ``PROCESSING`` status (set by ``JobProcessor.start_job``) and
-        is intended to stay there until the instance lifecycle resolves
-        — the Task drives ``graph.astream``, the JobItem is just a FIFO
-        placeholder. The cross-system guard above would deadlock: the
-        Task can't claim because the MESSAGE job is ``PROCESSING``,
-        but the JobItem can't reach its terminal transition because the
-        Task never claimed. We therefore also exclude MESSAGE jobs that
-        have a corresponding ``task`` row for the same ``message_id``
-        with status ``pending`` or ``running`` — the dispatcher has
-        already taken ownership, the worker is allowed to claim. The
-        ``status IN ('pending', 'running')`` filter (rather than any
-        status) is deliberate: a Task in ``COMPLETED`` / ``FAILED`` /
-        ``CANCELLED`` is no longer driving ``graph.astream`` for the
-        instance, so a new admission would not race. The legacy
-        dual-path (where ``MessageJobHandler.handle`` directly drives
-        ``graph.astream`` for the parent) does NOT create a Task row
-        for the parent message, so the carve-out is inert there.
+        Cross-system coordination uses
+        :meth:`_active_jobitem_with_inflight_task_sql`: an active JobItem
+        blocks only while its backing Task is PENDING, RUNNING, or PAUSED.
+        Orphan cleanup belongs to ``reconcile_turn_mirror``. The retained
+        WAITING_CHILDREN exception prevents child-report deadlock.
 
         ``deleted_at IS NULL`` matches the canonical job-side query
         (a soft-deleted PROCESSING job never auto-completes and would
@@ -824,48 +787,6 @@ class TaskRepository:
         """
         now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + now.strftime("%z")
-
-        # Build the JSON-extract fragment for the unified-dispatcher
-        # admission carve-out. The MESSAGE job's message_id lives in
-        # ``job_metadata`` (a JSONBType column mapped to the DB column
-        # ``metadata`` — see JobItem.job_metadata's sa_column override),
-        # and we need to match it against ``task.message_id`` (a VARCHAR
-        # column). The two backends use different syntax:
-        #
-        #   * PostgreSQL JSONB: ``column->>'key'`` returns TEXT directly.
-        #   * SQLite:          ``json_extract(column, '$.key')`` returns
-        #                       JSON; we cast to TEXT inline.
-        #
-        # A missing/NULL ``job_metadata`` produces NULL on both backends
-        # and ``NOT EXISTS`` correctly defaults to TRUE (blocker fires).
-        # The cross-system guard fragment itself is built once by
-        # :meth:`_admitted_task_carve_out_sql` (shared with the
-        # busy-instance probe so P1 and F11 can never diverge).
-        #
-        # The FIFO concurrency-fix orphan exclusion (Phase 1, Bug A,
-        # Revision 2, 2026-08-01) needs two layers — both layers are
-        # preserved here:
-        #
-        #   * ``orphan_json_extract`` — the dialect-aware
-        #     ``job_metadata.message_id`` JSON extract, used by the F1
-        #     stuck-mirror exclusion (``queued AND NOT EXISTS matching
-        #     Task``). Portable to PostgreSQL via ``->>'message_id'``
-        #     (no SQLite-only ``json_extract`` function).
-        #   * ``_terminal_orphan_active_sql`` — the broadened work_id-
-        #     keyed exclusion (Bug A fix) that handles active/queued
-        #     JobItems whose matching Task rows are all terminal.
-        #
-        # The OLD excluded single ``_orphan_json_extract`` was removed
-        # because it would deadlock the retry path (``schedule_retry``
-        # reuses ``message_id`` while minting a fresh ``work_id`` —
-        # see W4 case 1 in the plan). However, the F1 case (queued
-        # mirrors with NO matching Task at all) still requires the
-        # message_id-keyed correlation as a separate layer because
-        # those mirrors have no work_id to correlate against. The
-        # two layers compose orthogonally.
-        orphan_json_extract = self._json_extract_text_sql(
-            column="j.metadata", key="message_id"
-        )
 
         # Cross-system guard scope: the report lane (PROCESS_REPORT)
         # bypasses the job-coordination exclusion entirely — reports
@@ -1000,25 +921,13 @@ class TaskRepository:
                     -- sibling job to complete, which triggers
                     -- ``notify_work`` and re-evaluates the claim).
                     --
-                    -- The carve-out in
-                    -- ``_admitted_task_carve_out_sql`` Branch 1
-                    -- handles the cross-system blocker case for the
-                    -- SAME instance (a queued stuck-mirror JobItem
-                    -- with a matching message_id Task releases the
-                    -- guard). The FIFO concurrency fix added the new
-                    -- orphan-exclusion filter at the end of the
-                    -- blocking set to release truly-orphaned mirrors
-                    -- (queued JobItem with NO matching Task at all).
-                    -- This Part 2 guard is task-scoped (checks
-                    -- ``work_id`` directly) and is independent of
-                    -- the instance-scoped cross-system guard — both
-                    -- are needed because they filter on different
-                    -- axes (cross-system: instance_id + message_id;
-                    -- Part 2: work_id).
+                    -- A queued linked JobItem still enforces FIFO
+                    -- admission. Cross-system orphan cleanup is handled by
+                    -- reconcile_turn_mirror rather than this task-scoped gate.
                     AND NOT EXISTS (
                         SELECT 1 FROM job_queue_items _qi
                         WHERE _qi.job_id = task.work_id
-                          AND _qi.admission_state = :status_queued_admission
+                          AND _qi.admission_state = '{AdmissionState.QUEUED.value}'
                           AND _qi.deleted_at IS NULL
                     )
                     AND instance_id NOT IN (
@@ -1096,86 +1005,7 @@ class TaskRepository:
                             WHERE j.admission_state IN {active_admission_states_sql()}
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
-                              AND (i.status IS NULL OR i.status != :status_waiting_children)
-                              -- Phase 3 P1 fix (2026-06-30): NULL-safe
-                              -- cross-system guard. When a JobItem has no
-                              -- ``message_id`` in its metadata, the
-                              -- ``NOT EXISTS`` subquery below would
-                              -- compare ``t.message_id = NULL`` and
-                              -- resolve to UNKNOWN, so ``NOT EXISTS``
-                              -- would default to TRUE — the JobItem
-                              -- would block its own instance's task
-                              -- (self-deadlock). The guard now requires
-                              -- the JobItem to actually carry a
-                              -- ``message_id`` before it can block on
-                              -- the corresponding Task row. A JobItem
-                              -- without ``message_id`` is the legacy
-                              -- dual-path / dispatch-only case and
-                              -- never participates in the
-                              -- message-coordination carve-out.
-                              -- The fragment is shared with the
-                              -- busy-instance probe via
-                              -- :meth:`_admitted_task_carve_out_sql`.
-                              AND {self._admitted_task_carve_out_sql("j")}
-                              -- Phase 1 (Bug A, Revision 2, 2026-08-01):
-                              -- broadened terminal-orphan exclusion for
-                              -- ``active`` JobItems. The previous
-                              -- exclusion only released the guard when a
-                              -- ``queued`` JobItem had no Task at all
-                              -- (F1 strategy-a). The broadened exclusion
-                              -- also releases the guard when an
-                              -- ``active`` JobItem's backing Task row
-                              -- (correlated via the direct column join
-                              -- ``task.work_id = j.job_id``) is in a
-                              -- terminal state (no PENDING/RUNNING/
-                              -- PAUSED Task row matches). This closes the
-                              -- production deadlock where an ``active``
-                              -- JobItem (whose original PROCESS_MESSAGE
-                              -- Task had already reached COMPLETED)
-                              -- permanently blocked a fresh answer
-                              -- Task from being claimed. PAUSED is
-                              -- included in the live set because pause
-                              -- cascade owns the Task and may re-arm/
-                              -- resume it. The correlation axis is
-                              -- ``work_id == job_id`` (NOT
-                              -- ``message_id == metadata.message_id``)
-                              -- — see :meth:`_admitted_task_carve_out_sql`
-                              -- Branch 2 for the retry-path rationale
-                              -- (schedule_retry reuses ``message_id``
-                              -- while minting a fresh ``work_id``).
-                              AND NOT (
-                                  {self._terminal_orphan_active_sql("j")}
-                              )
-                              -- F1 stuck-mirror exclusion (preserved
-                              -- from the FIFO concurrency fix,
-                              -- 2026-07-26): exclude ``queued``
-                              -- JobItems that have NO matching Task
-                              -- at all. These are truly orphaned
-                              -- mirrors — the Task was deleted or
-                              -- never existed because the Task
-                              -- transaction was rolled back. They
-                              -- cannot be coordinating any in-flight
-                              -- work, so they must not block the
-                              -- instance. Correlation is via
-                              -- ``message_id`` (matches
-                              -- ``job_metadata.message_id`` via JSON
-                              -- extraction) — the F1 case is about
-                              -- the mirror's logical identity
-                              -- (message_id-keyed), NOT the
-                              -- Bug-A work_id-keyed terminal check.
-                              -- The ``_terminal_orphan_active_sql``
-                              -- helper above handles the
-                              -- at-least-one-matching-but-all-terminal
-                              -- sub-case (Bug A fix); this clause
-                              -- handles the no-matching-at-all
-                              -- sub-case (F1 fix).
-                              AND NOT (
-                                  j.admission_state = :status_queued_admission
-                                  AND NOT EXISTS (
-                                      SELECT 1 FROM task _orphan_check
-                                      WHERE _orphan_check.message_id = {orphan_json_extract}
-                                  )
-                              )
+                              AND {self._active_jobitem_with_inflight_task_sql("j")}
                         )
                     )
                   ORDER BY created_at ASC LIMIT 1
@@ -1215,13 +1045,6 @@ class TaskRepository:
                 # background task is selected instead.
                 "is_background_true": True,
                 "is_background_false": False,
-                # Carve-out (admission_state-aware, 2026-07-06):
-                # bind the two admission_state values so the
-                # bifurcated carve-out can distinguish stuck-queued
-                # mirrors (F1 case) from actively-processing
-                # JobItems (restored original behavior).
-                "status_queued_admission": AdmissionState.QUEUED.value,
-                "status_active_admission": AdmissionState.ACTIVE.value,
             }).fetchone()
 
             if row is None:
@@ -1254,265 +1077,22 @@ class TaskRepository:
 
         return claimed_task
 
-    def _json_extract_text_sql(self, column: str, key: str) -> str:
-        """Return a dialect-aware SQL fragment that extracts ``key`` from
-        a JSON/JSONB ``column`` as TEXT.
+    def _active_jobitem_with_inflight_task_sql(self, job_alias: str) -> str:
+        """Single-source-of-truth simplified cross-system predicate.
 
-        The two supported backends use different syntax for TEXT
-        extraction of a JSON value:
-
-        * PostgreSQL JSONB: ``column->>'key'`` returns TEXT directly
-          (no cast needed).
-        * SQLite: ``json_extract(column, '$.key')`` returns the JSON
-          value; we wrap it in ``CAST(... AS TEXT)`` so the comparison
-          against a VARCHAR column (e.g. ``task.message_id``) is
-          string-based, matching the ``->>`` semantics on PG.
-
-        Unlike ``_json_path_text`` in ``daemon.repositories.infra.repository``,
-        this helper returns a *raw SQL string fragment* (not a
-        SQLAlchemy expression) because the call sites here use
-        ``text("...")`` and cannot compose with SQLAlchemy expression
-        objects without a full query rewrite. The ``key`` value is
-        interpolated as a constant — callers MUST pass a static string
-        and never a user-supplied value (this method is not
-        user-input-safe by design).
-
-        Args:
-            column: Bare column reference (e.g. ``"j.job_metadata"``).
-                Callers are responsible for aliasing.
-            key: Static JSON key to extract.
-
-        Returns:
-            SQL fragment suitable for direct interpolation into a
-            ``text()`` statement.
-        """
-        if self.engine.dialect.name == "postgresql":
-            return f"{column}->>'{key}'"
-        return f"CAST(json_extract({column}, '$.{key}') AS TEXT)"
-
-    def _admitted_task_carve_out_sql(self, job_alias: str) -> str:
-        """Return the admission_state-aware unified-dispatcher carve-out.
-
-        Single source of truth for the "a JobItem is NOT actively
-        blocking its instance's task when a matching Task row exists"
-        predicate. :meth:`claim_pending_task` (P1) and
-        :meth:`has_pending_tasks_blocked_by_busy_instance` (F11) both
-        interpolate this fragment, so the two execution gates cannot
-        disagree — the "MUST stay in sync" comment that used to sit
-        between them is now enforced by sharing one string.
-
-        The carve-out is **admission_state-aware** — the F1 fix
-        (commit ``386a22be``, 2026-07-03) removed the status filter on
-        the Task side to fix a stuck-queued mirror JobItem self-
-        deadlock on PostgreSQL, but that broke the active-JobItem case:
-        a COMPLETED Task with matching ``message_id`` would
-        incorrectly release the guard for a *different* ``message_id``
-        Task (e.g. a child-completion report arriving while the
-        parent's user message JobItem is still in ``active`` state,
-        which would race the parent's astream).
-
-        The fix bifurcates the carve-out on ``admission_state``:
-
-        * ``queued`` JobItems are stuck mirror rows that never made it
-          to ``active`` because the PostgreSQL
-          ``trg_job_queue_items_active_lock_guard`` trigger rejected
-          the eager activation (MESSAGE-type JobItems have no
-          ``job_locks`` row). They are NOT driving ``graph.astream``
-          and MUST NOT block any new Task — ANY matching Task
-          (including a COMPLETED one from the prior cycle) releases
-          the guard. This is the F1 fix case; it remains correct.
-
-        * ``active`` JobItems ARE driving ``graph.astream``. Only a
-          PENDING / RUNNING Task with matching ``message_id`` can
-          release the guard — a COMPLETED Task means the prior cycle
-          ended and a fresh Task with a DIFFERENT ``message_id`` is
-          a different operation that must wait. Restoring the status
-          filter on this branch fixes the active-side regression
-          without re-introducing the stuck-queued deadlock.
-
-        Args:
-            job_alias: The outer query's alias for ``job_queue_items``
-                (``"j"`` for the claim path, ``"j_running"`` for the
-                busy-instance probe).
-
-        Returns:
-            SQL text with no leading ``AND``; the caller prefixes
-            ``AND``. The fragment references the bound parameters
-            ``:status_pending`` and ``:status_running``, which the
-            caller MUST supply in its execute params.
-        """
-        json_extract = self._json_extract_text_sql(
-            column=f"{job_alias}.metadata", key="message_id"
-        )
-        # Build the terminal-orphan fragment referenced inside the
-        # ``active`` branch below. The fragment asks: "does this
-        # ``active`` JobItem have a backing Task row whose ``work_id``
-        # equals the JobItem's ``job_id`` AND whose status is non-
-        # terminal (PENDING/RUNNING/PAUSED)?". If no such Task row
-        # exists, the JobItem is an orphaned active mirror — the
-        # original backing Task reached terminal state and no new
-        # Task inherits the lease, so the JobItem must not block a
-        # fresh ``PROCESS_MESSAGE`` answer Task.
-        #
-        # Correlation axis: ``task.work_id = j.job_id`` (DIRECT
-        # column-to-column join — NO JSON extraction). This is the
-        # axis already established by the Part 2 queue-awareness guard
-        # at :meth:`claim_pending_task` lines 640-645 and the linkage
-        # contract ``JobItem.job_id MUST equal Task.work_id`` enforced
-        # at ``instance_messaging.py:1218-1222``.
-        #
-        # Why NOT ``message_id`` (Revision 2 / W4 case 1 KEY regression):
-        # ``schedule_retry`` (this file, lines 1793-1935) reuses the
-        # parent's ``message_id`` while minting a fresh ``work_id``
-        # for the retry child. A ``NOT EXISTS`` keyed on
-        # ``task.message_id = json_extract(j.metadata, 'message_id')``
-        # would find the LIVE retry child (PENDING, same ``message_id``)
-        # and incorrectly treat the JobItem as still alive — reproducing
-        # the production deadlock via the automatic retry path.
-        # ``work_id`` correlation does NOT have this defect: the retry
-        # child has its own fresh ``work_id``, so the ``task.work_id =
-        # j.job_id`` predicate only matches the CANCELLED parent row
-        # (which is terminal and thus excluded by the live-set IN-list).
-        #
-        # The fragment is interpolated into both :meth:`claim_pending_task`
-        # (P1) and :meth:`has_pending_tasks_blocked_by_busy_instance`
-        # (F11), so the two execution gates cannot disagree.
-        return (
-            # NULL-safe guard (Phase 3 P1, 2026-06-30): JobItems
-            # without a stamped ``message_id`` are the legacy /
-            # dispatch-only case and MUST NOT block their instance's
-            # Task — the original ``json_extract(...) = task.message_id``
-            # comparison would resolve to UNKNOWN (NULL = X) and
-            # default the carve-out to "blocker". The IS NOT NULL
-            # precondition keeps the legacy path inert without
-            # removing it from the active path.
-            f"({json_extract} IS NOT NULL\n"
-            f"                AND (\n"
-            # Branch 1 — ``queued`` JobItem (F1 stuck-mirror case,
-            # 2026-07-03): any Task with matching message_id
-            # (regardless of Task status) releases the guard. The
-            # JobItem is stuck and never drove astream; a COMPLETED
-            # Task from the prior cycle is sufficient evidence that
-            # the mirror is orphaned.
-            #
-            # Strategy (a) "truly no Task" — IMPLEMENTED as a
-            # separate WHERE-clause filter on the blocking set
-            # (see the ``AND NOT`` exclusion below the carve-out)
-            # rather than inverting Branch 1. Inverting Branch 1
-            # would make the cross-system guard block the entire
-            # instance for any queued JobItem with a matching Task
-            # — which is too broad because the cross-system guard
-            # is instance-scoped. The FIFO-denied bypass is
-            # correctly handled at the task scope by the Part 2
-            # queue-awareness guard in ``claim_pending_task``, so
-            # the cross-system guard only needs to release orphans
-            # (truly no matching Task) without flipping the
-            # stuck-mirror semantics.
-            f"                    ({job_alias}.admission_state = :status_queued_admission\n"
-            f"                     AND NOT EXISTS (\n"
-            f"                         SELECT 1 FROM task _admitted\n"
-            f"                         WHERE _admitted.message_id = {json_extract}\n"
-            f"                     ))\n"
-            f"                    OR\n"
-            # Branch 2 — ``active`` JobItem (real processing,
-            # original behavior restored 2026-07-06): only a
-            # PENDING or RUNNING Task with matching message_id
-            # releases the guard. A COMPLETED Task means the prior
-            # cycle ended; a fresh Task with a DIFFERENT message_id
-            # is a distinct operation that must wait for the
-            # parent's astream to finish.
-            #
-            # REVISION 2 NOTE (2026-08-01): Branch 2 retains its
-            # original ``message_id``-keyed predicate. The Bug A fix
-            # is implemented as a separate exclusion layer
-            # (:meth:`_terminal_orphan_active_sql`) below this point,
-            # which correlates via ``work_id == job_id`` and adds
-            # ``PAUSED`` to the live set. Mixing the correlation
-            # axes inside Branch 2 itself would break the unified-
-            # dispatcher admission path (where the Task is created
-            # independently of the JobItem and shares ``message_id``
-            # but not ``work_id``).
-            f"                    ({job_alias}.admission_state = :status_active_admission\n"
-            f"                     AND NOT EXISTS (\n"
-            f"                         SELECT 1 FROM task _admitted\n"
-            f"                         WHERE _admitted.message_id = {json_extract}\n"
-            f"                           AND _admitted.status IN (:status_pending, :status_running, :status_paused)\n"
-            f"                     ))\n"
-            f"                ))"
-        )
-
-    def _terminal_orphan_active_sql(self, job_alias: str) -> str:
-        """Return the terminal-orphan JobItem exclusion fragment.
-
-        Phase 1 (Bug A, Revision 2, 2026-08-01): a JobItem is treated
-        as an orphaned mirror when a backing Task row exists with
-        ``task.work_id = job_queue_items.job_id`` but ALL such rows
-        are in a terminal state (no PENDING / RUNNING / PAUSED Task
-        exists for this JobItem).
-
-        The exclusion applies to BOTH ``active`` AND ``queued``
-        JobItems:
-
-        * ``active`` JobItem with at-least-one-matching but
-          only-terminal backing Task rows — the canonical Bug A
-          case. The active JobItem holds a lock but the original
-          ``PROCESS_MESSAGE`` Task already reached a terminal
-          state (e.g. COMPLETED after the normal message turn
-          ended). It must not block a fresh answer Task.
-
-        * ``queued`` JobItem with at-least-one-matching but
-          only-terminal backing Task rows — the broadened F1
-          stuck-mirror case. The previous F1 carve-out's Branch
-          1 only released queued mirrors when there was NO
-          matching Task at all; this broadened exclusion also
-          releases when matching Tasks exist but are terminal.
-
-        CRITICAL non-equivalence with F1 Branch 1: this exclusion
-        does NOT release a JobItem that has NO matching Task at
-        all. An active JobItem with no backing Task row is a
-        legitimate lock holder (the JobItem's lock has no Task to
-        validate against yet — a worker may be in the process of
-        creating one). Releasing it would let a fresh candidate
-        race the in-flight dispatch. The F1 Branch 1 carve-out
-        (handled by ``_admitted_task_carve_out_sql``) covers the
-        queued-with-no-matching-Task sub-case; this exclusion is
-        strictly an ORTHOGONAL layer for the at-least-one-
-        matching-but-only-terminal case.
-
-        Correlation axis: ``task.work_id = j.job_id`` (DIRECT
-        column-to-column join — NO JSON extraction). This avoids
-        the retry-path deadlock (``schedule_retry`` reuses
-        ``message_id`` while minting a fresh ``work_id``; see
-        :meth:`_admitted_task_carve_out_sql` Branch 2 for the
-        full rationale).
-
-        Args:
-            job_alias: The outer query's alias for ``job_queue_items``
-                (``"j"`` for the claim path, ``"j_running"`` for the
-                busy-instance probe).
-
-        Returns:
-            SQL text with NO leading ``AND``; the caller prefixes
-            ``AND``. The fragment references bound parameters
-            ``:status_queued_admission``, ``:status_active_admission``,
-            ``:status_pending``, ``:status_running``, ``:status_paused``.
-            Callers MUST supply ALL five binds in their execute
-            params. This is the canonical reason the
-            ``status_paused`` bind is now mandatory at both the
-            claim path AND the busy-instance probe (Revision 2,
-            W1).
+        Post-Increment 2, orphan reconciliation belongs to
+        ``reconcile_turn_mirror``. Active JobItems block only while their
+        backing Task is in flight. The WAITING_CHILDREN exception is retained
+        because those JobItems intentionally semaphore child-completion reports.
+        Both claim and busy-probe gates call this helper (P1/F11 invariant).
         """
         return (
-            f"{job_alias}.admission_state IN (:status_queued_admission, :status_active_admission)\n"
-            f"  AND EXISTS (\n"
-            f"      SELECT 1 FROM task _orphan_exists\n"
-            f"      WHERE _orphan_exists.work_id = {job_alias}.job_id\n"
-            f"  )\n"
-            f"  AND NOT EXISTS (\n"
-            f"      SELECT 1 FROM task _orphan_check\n"
-            f"      WHERE _orphan_check.work_id = {job_alias}.job_id\n"
-            f"        AND _orphan_check.status IN (:status_pending, :status_running, :status_paused)\n"
-            f"  )"
+            f"EXISTS (\n"
+            f"    SELECT 1 FROM task t\n"
+            f"    WHERE t.work_id = {job_alias}.job_id\n"
+            f"      AND t.status IN (:status_pending, :status_running, :status_paused)\n"
+            f")\n"
+            f"AND (i.status IS NULL OR i.status != :status_waiting_children)"
         )
 
     def requeue_task_with_backoff(
@@ -1964,50 +1544,13 @@ class TaskRepository:
             return db_session.exec(stmt).one()
 
     def has_pending_tasks_blocked_by_busy_instance(self) -> bool:
-        """Check whether any pending task is blocked by a per-instance guard.
+        """Return whether pending work is held by an in-flight sibling.
 
-        Returns True if there is at least one PENDING task whose ``instance_id``
-        also has a RUNNING task OR an *actively* PROCESSING MESSAGE job. A
-        MESSAGE job is only "actively" blocking when the instance is NOT in
-        ``WAITING_CHILDREN`` — in that state the job is just a FIFO
-        placeholder waiting for the instance lifecycle to resolve, not
-        holding the langgraph thread, so a child-completion report task is
-        not actually blocked. Used by the worker pool to distinguish "no
-        work" from "work exists but instance is busy" in the empty-claim
-        path. The job-queue probe joins ``instances`` (via
-        ``idx_instances_status``) and the ``job_queue_items.instance_id``
-        index, so it stays cheap.
-
-        FIFO carve-out: ``i.status != waiting_children`` (mirrors ``claim_pending_task``).
-
-        Mirrors the unified-dispatcher admission carve-out in
-        :meth:`claim_pending_task`: a PROCESSING MESSAGE job is also NOT
-        actively blocking when a corresponding Task row exists for the
-        same ``message_id`` with status ``pending`` or ``running`` (the
-        unified dispatcher has already taken ownership — see
-        ``claim_pending_task`` for full rationale). The two methods MUST
-        use the same predicate, otherwise the worker pool makes
-        inconsistent idle/busy decisions (spurious wakeups or workers
-        sleeping through admissible work).
-
-        Phase 3 F11 fix (2026-06-30): the carve-out above is now NULL-
-        safe — the predicate requires ``j_running.metadata->>'message_id'``
-        to be non-NULL before consulting the unified-dispatcher
-        carve-out. A JobItem without ``message_id`` is the legacy /
-        dispatch-only case and must NOT be treated as a blocker via the
-        message-coordination carve-out (the ``t_admitted.message_id =
-        NULL`` comparison is UNKNOWN, so ``NOT EXISTS`` would default
-        to TRUE and the JobItem would block its own instance). The
-        guard mirrors the P1 fix in :meth:`claim_pending_task` so the
-        claim path and the busy-instance probe never disagree.
-
-        Returns:
-            True if any pending task is blocked by Fix B's per-instance guard
-            (task-level or job-queue-level).
+        The task-level RUNNING guard and shared JobItem predicate mirror
+        ``claim_pending_task``. JobItems block only when their backing Task is
+        PENDING, RUNNING, or PAUSED; the reconciler owns orphan cleanup. The
+        WAITING_CHILDREN exception remains part of the shared predicate.
         """
-        # The cross-system guard fragment is shared with the claim path
-        # via :meth:`_admitted_task_carve_out_sql` so this probe and
-        # ``claim_pending_task`` can never disagree (the P1/F11 class).
         with self.engine.begin() as conn:
             stmt = text(f"""
                 SELECT 1
@@ -2035,45 +1578,7 @@ class TaskRepository:
                             WHERE j_running.admission_state IN {active_admission_states_sql()}
                               AND j_running.instance_id = t_pending.instance_id
                               AND j_running.deleted_at IS NULL
-                              -- FIFO carve-out (mirrors claim_pending_task).
-                              AND (i.status IS NULL OR i.status != :status_waiting_children)
-                            -- Unified-dispatcher admission carve-out
-                            -- (mirror of claim_pending_task). A TASK
-                            -- job with a corresponding pending/running
-                            -- Task row is the FIFO placeholder for an
-                            -- admitted dispatch — NOT driving astream —
-                            -- so it is NOT actively blocking the
-                            -- instance.
-                            --
-                            -- D13: removed ``j_running.job_type =
-                            -- 'message'`` filter — messages no longer
-                            -- create ``JobItem`` rows. The subquery
-                            -- now checks ALL processing ``JobItem``
-                            -- rows (TASK-type dispatch-queue jobs).
-                            --
-                            -- The NULL-safe cross-system guard fragment
-                            -- is shared with the claim path via
-                            -- :meth:`_admitted_task_carve_out_sql` so
-                            -- the P1 and F11 sites can never diverge.
-                            AND {self._admitted_task_carve_out_sql("j_running")}
-                            -- Phase 1 (Bug A, Revision 2, 2026-08-01):
-                            -- broadened terminal-orphan exclusion for
-                            -- ``active`` JobItems. Mirrors the claim
-                            -- path's ``_terminal_orphan_active_sql``
-                            -- inclusion so the P1 and F11 sites agree
-                            -- on whether an ``active`` JobItem with
-                            -- only-terminal backing Tasks is a blocker
-                            -- (it is NOT). Correlation is
-                            -- ``task.work_id = j_running.job_id``
-                            -- (direct column join — NO JSON
-                            -- extraction). PAUSED is in the live set;
-                            -- without ``status_paused`` in the bind
-                            -- dict the shared helper raises
-                            -- ``KeyError`` at execute time
-                            -- (Revision 2, W1).
-                            AND NOT (
-                                {self._terminal_orphan_active_sql("j_running")}
-                            )
+                              AND {self._active_jobitem_with_inflight_task_sql("j_running")}
                         )
                     )
                 )
@@ -2082,29 +1587,8 @@ class TaskRepository:
             row = conn.execute(stmt, {
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
-                # Phase 1 (Bug A, Revision 2, 2026-08-01) — W1 fix:
-                # ``status_paused`` MUST be bound here. The shared
-                # fragment ``_terminal_orphan_active_sql`` (now used
-                # by both the claim path and this probe) references
-                # ``:status_paused`` in the ``task.status IN (PENDING,
-                # RUNNING, PAUSED)`` live-set subquery. Without this
-                # bind, the busy-instance probe raises
-                # ``KeyError``/``MissingParameter`` at execute time
-                # when the carve-out's ``NOT EXISTS`` subquery fires.
-                # The claim path's bind dict already includes
-                # ``status_paused`` (line ~778); the busy-probe's
-                # bind dict was previously incomplete.
                 "status_paused": TaskStatus.PAUSED.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
-                # Carve-out (admission_state-aware, 2026-07-06):
-                # bind the two admission_state values so the
-                # bifurcated carve-out can distinguish stuck-queued
-                # mirrors (F1 case) from actively-processing
-                # JobItems (restored original behavior). MUST match
-                # the bind set on :meth:`claim_pending_task` so the
-                # two gates can never disagree.
-                "status_queued_admission": AdmissionState.QUEUED.value,
-                "status_active_admission": AdmissionState.ACTIVE.value,
             }).fetchone()
             return row is not None
 

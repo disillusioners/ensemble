@@ -244,7 +244,7 @@ class TestConcurrencyEnforced:
     message serialization.
 
     Phase 5 (Option B) cutover: messages no longer rely on the per-
-    instance Task guard (``_admitted_task_carve_out_sql``) for
+    instance Task guard (``_active_jobitem_with_inflight_task_sql``) for
     serialization. Instead, the slot-based
     ``start_job_atomic_with_lock`` is the gate: with
     ``concurrency_limit=1`` (FIFO queue), only one message can hold a

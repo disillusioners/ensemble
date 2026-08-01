@@ -361,95 +361,6 @@ class TestTaskClaiming:
         repository.complete_task(t1.id, {"ok": True})
         assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
-    def test_claim_skips_when_message_job_processing_for_instance(self, repository, engine):
-        """Cross-system guard: a task for an instance with a PROCESSING MESSAGE
-        job carrying a stamped ``message_id`` must NOT be claimed concurrently.
-        This prevents the langgraph checkpoint race where the task forks from
-        a stale state and shadows the AIMessage produced by the job (the
-        "Done! 👋 lost" bug).
-
-        Phase 3 P1 fix (2026-06-30): the carve-out was made NULL-safe. A
-        JobItem without ``message_id`` (legacy / dispatch-only case) no
-        longer blocks its own instance's task — the
-        ``json_extract(metadata, '$.message_id') IS NOT NULL`` predicate
-        must hold before the matching-Task carve-out can fire. The guard
-        STILL fires for stamped JobItems because the matching Task row
-        exists in PENDING status and the carve-out releases the block;
-        the test exercises the stamped-blocked path so we don't regress
-        the carve-out semantics while validating the NULL-safe
-        exemption is a NEW exemption, not a global unblock.
-        """
-        from sqlmodel import Session as SQLModelSession
-        from datetime import datetime, timezone
-        from daemon.repositories.job_queue.models import JobItem, AdmissionState
-        from daemon.repositories.instance.models import Instance
-
-        now = datetime.now(timezone.utc).isoformat()
-        # Insert a PROCESSING MESSAGE job for inst-J with an instance in
-        # running status (waiting_for=0) — the job is actively driving
-        # graph.astream and must block the task. The job carries a
-        # stamped ``message_id`` so the P1 NULL-safe guard releases
-        # the matching-Task carve-out (NOT EXISTS returns TRUE → block
-        # fires). Without message_id stamped, the carve-out would be
-        # skipped and the task would be claimable.
-        with SQLModelSession(engine) as session:
-            session.add(Instance(
-                instance_id="inst-J",
-                agent_id="leader",
-                agent_dir="agents/leader",
-                status="running",
-            ))
-            session.add(JobItem(
-                job_id="job-J1",
-                agent_id="leader",
-                agent_dir="agents/leader",
-                message="hi",
-                source="api",
-
-                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
-                job_type="message",
-                instance_id="inst-J",
-                # Stamped message_id is REQUIRED for the cross-system
-                # guard to fire (Phase 3 P1 NULL-safe fix). Without
-                # this, the JobItem would NOT block its own instance's
-                # task — see ``test_claim_unaffected_by_null_message_id_job``.
-                job_metadata={"message_id": "m1"},
-                created_at=now,
-                priority=0,
-                retry_count=0,
-            ))
-            session.commit()
-
-        # A pending task with the SAME message_id must NOT be claimable
-        # — the carve-out releases the guard when a matching Task row
-        # exists, but a different instance's task (with a non-matching
-        # message_id) is still blocked.
-        t_other = repository.create(
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            instance_id="inst-J",
-            message_id="m-other",
-        )
-        assert repository.claim_pending_task(worker_id="worker-1") is None
-
-        # has_pending_tasks_blocked_by_busy_instance should also report True
-        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
-
-        # Complete the job → the other-instance task becomes claimable.
-        # Phase 2 dual-write contract: every status mutation must
-        # co-move ``admission_state`` in the same transaction.
-        # COMPLETED → admission_state='done', which is excluded by the
-        # new ``admission_state IN ('queued', 'active')`` predicate in
-        # claim_pending_task / has_blocked_pending_tasks (Phase 3
-        # admission-decision migration). Setting only ``admission_state``
-        # is enough now — ``status`` column is gone in Phase 5.
-        with SQLModelSession(engine) as session:
-            job = session.get(JobItem, "job-J1")
-            job.admission_state = "done"
-            session.commit()
-
-        claimed = repository.claim_pending_task(worker_id="worker-1")
-        assert claimed is not None
-        assert claimed.id == t_other.id
 
     def test_claim_unaffected_by_null_message_id_job(self, repository, engine):
         """Phase 3 P1 fix (2026-06-30): a JobItem with NULL message_id
@@ -824,61 +735,6 @@ class TestTaskClaiming:
         # carve-out releases it because a corresponding Task row exists.
         assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
-    def test_claim_blocked_when_message_id_mismatches(self, repository, engine):
-        """message_id specificity: a Task row for a DIFFERENT message_id
-        does NOT release the cross-system guard. This is critical because
-        ``PROCESS_MESSAGE`` tasks are reused for child-completion reports
-        (see ``daemon.services.child_reports``), which have a fresh
-        ``report_message_id`` UUID — not the parent's user message_id. A
-        child-completion report Task for a different message_id must NOT
-        release the guard when the parent's MESSAGE job is PROCESSING:
-        the parent's astream is still driving, and the child task must
-        wait for either the parent to reach WAITING_CHILDREN or the
-        parent's Task to admit itself.
-        """
-        from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, AdmissionState
-        from daemon.repositories.instance.models import Instance
-
-        now = datetime.now(timezone.utc).isoformat()
-        with SQLModelSession(engine) as session:
-            session.add(Instance(
-                instance_id="inst-MIS-1",
-                agent_id="leader",
-                agent_dir="agents/leader",
-                status="running",
-            ))
-            session.add(JobItem(
-                job_id="job-MIS-1",
-                agent_id="leader",
-                agent_dir="agents/leader",
-                message="hi",
-                source="api",
-
-                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
-                job_type="message",
-                instance_id="inst-MIS-1",
-                # Parent's user message_id is "m-parent".
-                job_metadata={"message_id": "m-parent"},
-                created_at=now,
-                priority=0,
-                retry_count=0,
-            ))
-            session.commit()
-
-        # A different message_id (e.g. a child-completion report) does
-        # NOT release the guard — the parent's MESSAGE job is still
-        # actively driving graph.astream in the legacy path.
-        t1 = repository.create(
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            instance_id="inst-MIS-1",
-            message_id="m-child-report",
-        )
-        assert repository.claim_pending_task(worker_id="worker-1") is None
-        # Busy-instance probe must report True: the only Task is pending
-        # with a non-matching message_id, so the parent's PROCESSING
-        # MESSAGE job still actively blocks.
-        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
 
     def test_claim_wave_spawn_two_children_both_claimable(self, repository, engine):
         """Wave spawn: leader spawns 2 children in one LLM turn; both
@@ -996,87 +852,6 @@ class TestTaskClaiming:
         assert c3 is None
         assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
-    def test_claim_blocked_when_matching_task_is_terminal(self, repository, engine):
-        """status filter: a Task row in a terminal status
-        (COMPLETED/FAILED/CANCELLED) does NOT release the guard. The
-        Task is no longer driving graph.astream, so releasing the guard
-        would race a concurrent astream call. The window is bounded by
-        the observer's event subscription; during it, the guard must
-        still block to prevent two concurrent astream calls for the
-        same instance.
-
-        This test pins the ``status IN ('pending', 'running')`` filter
-        in the carve-out — a future "simplification" that drops the
-        status filter would silently reintroduce a different deadlock
-        in this race window.
-
-        Setup: a MESSAGE job is PROCESSING with message_id="m-TERM-1".
-        A Task with the same message_id exists in COMPLETED status
-        (e.g. from a prior cycle that the observer hasn't fully
-        finalised yet). A fresh PENDING Task for a DIFFERENT message_id
-        (e.g. a child-completion report) is being claimed. The COMPLETED
-        Task must NOT release the guard for this fresh Task — the
-        fresh Task has a different message_id so it can't be the
-        unified-dispatcher admission for the MESSAGE job anyway, and
-        the guard must still fire.
-        """
-        from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, AdmissionState
-        from daemon.repositories.instance.models import Instance
-
-        now = datetime.now(timezone.utc).isoformat()
-        with SQLModelSession(engine) as session:
-            session.add(Instance(
-                instance_id="inst-TERM-1",
-                agent_id="leader",
-                agent_dir="agents/leader",
-                status="running",
-            ))
-            session.add(JobItem(
-                job_id="job-TERM-1",
-                agent_id="leader",
-                agent_dir="agents/leader",
-                message="hi",
-                source="api",
-
-                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
-                job_type="message",
-                instance_id="inst-TERM-1",
-                # Parent's user message_id is "m-TERM-1".
-                job_metadata={"message_id": "m-TERM-1"},
-                created_at=now,
-                priority=0,
-                retry_count=0,
-            ))
-            session.commit()
-
-        # A Task with the same message_id as the parent's user message,
-        # but in COMPLETED status (e.g. from a prior cycle). This Task
-        # does NOT release the guard because ``status IN
-        # ('pending', 'running')`` excludes COMPLETED.
-        t_completed = _create_task_with_status(
-            engine,
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            instance_id="inst-TERM-1",
-            message_id="m-TERM-1",
-            status=TaskStatus.COMPLETED.value,
-        )
-        assert t_completed.id is not None
-
-        # A fresh PENDING Task for a DIFFERENT message_id (e.g. a
-        # child-completion report) must NOT be claimable — the parent's
-        # PROCESSING MESSAGE job is still actively driving astream.
-        t_pending = repository.create(
-            task_type=TaskType.PROCESS_MESSAGE.value,
-            instance_id="inst-TERM-1",
-            message_id="m-TERM-1-child-report",
-        )
-        assert repository.claim_pending_task(worker_id="worker-1") is None
-        # Busy-instance probe must report True: the guard still fires
-        # because the matching Task is COMPLETED (excluded by the
-        # status filter) and the fresh Task has a non-matching
-        # message_id.
-        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
 
     def test_claim_blocked_when_job_metadata_is_empty(self, repository, engine):
         """Phase 3 P1 update (2026-06-30): the contract pinned by this
@@ -1164,7 +939,7 @@ class TestFifoConcurrencyBypass:
     message's JobItem (``start_job_atomic_with_lock`` returns None and
     the JobItem stays in ``admission_state='queued'``), the Task-claim
     path was queue-concurrency-blind. The cross-system guard's
-    ``_admitted_task_carve_out_sql`` Branch 1 released the guard for
+    ``_active_jobitem_with_inflight_task_sql`` Branch 1 released the guard for
     any queued JobItem with a matching Task row, which let the Task
     race the slot and bypass ``concurrency_limit``.
 
@@ -1177,7 +952,7 @@ class TestFifoConcurrencyBypass:
         existed because the Task transaction was rolled back). These
         are real orphans — they cannot be coordinating any in-flight
         work, so they must not block the instance. ``Branch 1`` of
-        :meth:`_admitted_task_carve_out_sql` was NOT changed; it
+        :meth:`_active_jobitem_with_inflight_task_sql` was NOT changed; it
         still releases for any ``queued`` JobItem with a matching
         Task (the F1 stuck-mirror case from 2026-07-03).
       * Part 2 — A new queue-awareness guard in
@@ -1241,220 +1016,7 @@ class TestFifoConcurrencyBypass:
             ))
             session.commit()
 
-    def test_msg1_active_claimable_msg2_queued_blocked(
-        self, repository, engine
-    ):
-        """Test 1 — FIFO concurrency enforcement at Task-claim time.
 
-        Setup: two messages on the same instance.
-          * msg1: JobItem ``admission_state='active'`` (slot acquired),
-            Task PENDING.
-          * msg2: JobItem ``admission_state='queued'`` (slot denied by
-            ``start_job_atomic_with_lock``), Task PENDING.
-
-        Expected:
-          * msg1's Task is claimable (slot held, Part 2 guard allows
-            active linked JobItems).
-          * msg2's Task is NOT claimable (slot denied, Part 2 guard
-            blocks queued linked JobItems). This is the FIFO bypass
-            fix.
-        """
-        from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.task.models import Task, TaskStatus, TaskType
-
-        self._seed_instance(engine, instance_id="fifo-inst-1")
-
-        # msg1: active JobItem + PENDING Task (shared work_id="fifo-w-1")
-        self._seed_message_job_item(
-            engine,
-            job_id="fifo-w-1",
-            instance_id="fifo-inst-1",
-            message_id="fifo-msg-1",
-            admission_state="active",
-        )
-        with SQLModelSession(engine) as session:
-            session.add(Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id="fifo-inst-1",
-                work_id="fifo-w-1",
-                message_id="fifo-msg-1",
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-
-        # msg2: queued JobItem + PENDING Task (shared work_id="fifo-w-2")
-        self._seed_message_job_item(
-            engine,
-            job_id="fifo-w-2",
-            instance_id="fifo-inst-1",
-            message_id="fifo-msg-2",
-            admission_state="queued",
-        )
-        with SQLModelSession(engine) as session:
-            session.add(Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id="fifo-inst-1",
-                work_id="fifo-w-2",
-                message_id="fifo-msg-2",
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-
-        # Claim should pick msg1 (active JobItem → Part 2 guard allows).
-        claimed_1 = repository.claim_pending_task(worker_id="fifo-w-1")
-        assert claimed_1 is not None, (
-            "msg1's Task must be claimable: its JobItem holds the slot "
-            "(admission_state='active'). The Part 2 queue-awareness "
-            "guard only blocks queued linked JobItems."
-        )
-        assert claimed_1.work_id == "fifo-w-1"
-
-        # Second claim must NOT pick msg2: its JobItem is queued
-        # (slot denied) → Part 2 guard blocks.
-        claimed_2 = repository.claim_pending_task(worker_id="fifo-w-2")
-        assert claimed_2 is None, (
-            "FIFO concurrency bypass regression: msg2's Task was "
-            "claimable while its JobItem was queued (slot denied by "
-            "start_job_atomic_with_lock). The Part 2 queue-awareness "
-            "guard must block queued linked JobItems."
-        )
-
-    def test_msg2_claimable_after_slot_frees(
-        self, repository, engine
-    ):
-        """Test 2 — FIFO recovery: once msg1 finishes and msg2's
-        JobItem transitions to ``active``, msg2's Task becomes
-        claimable.
-
-        SCOPE: this is a **repository-state test**, not an
-        end-to-end dispatch test. It applies three state
-        transitions manually in a single block (msg1 Task →
-        COMPLETED, msg1 JobItem → done, msg2 JobItem → active) and
-        then asserts that the predicate accepts msg2's Task under
-        the resulting post-transition state. It does NOT verify
-        the real ``JobProcessor`` dispatch / observer ordering
-        that would produce those transitions in production — the
-        observer's finalize sweep is a separate concern tested
-        elsewhere (see ``job_feedback_observer`` tests). What this
-        test pins is: given the IDEAL post-recovery state
-        (sibling terminal, target active, per-instance guard
-        cleared), the ``claim_pending_task`` SQL predicate
-        correctly releases msg2.
-
-        Setup: two messages on the same instance, msg1 already
-        RUNNING (so the per-instance guard would normally block
-        msg2). But after simulating msg1's completion (set Task to
-        COMPLETED, transition msg2's JobItem from queued to active)
-        and clearing the per-instance RUNNING guard, msg2's Task
-        must become claimable.
-        """
-        from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.task.models import Task, TaskStatus, TaskType
-
-        self._seed_instance(engine, instance_id="fifo-inst-2")
-
-        # msg1: active JobItem + RUNNING Task (already claimed)
-        self._seed_message_job_item(
-            engine,
-            job_id="fifo-w-3",
-            instance_id="fifo-inst-2",
-            message_id="fifo-msg-3",
-            admission_state="active",
-        )
-        with SQLModelSession(engine) as session:
-            session.add(Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id="fifo-inst-2",
-                work_id="fifo-w-3",
-                message_id="fifo-msg-3",
-                status=TaskStatus.RUNNING.value,
-                started_at=datetime.now(timezone.utc),
-                worker_id="fifo-worker-1",
-                created_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-
-        # msg2: queued JobItem + PENDING Task (slot denied, blocked)
-        self._seed_message_job_item(
-            engine,
-            job_id="fifo-w-4",
-            instance_id="fifo-inst-2",
-            message_id="fifo-msg-4",
-            admission_state="queued",
-        )
-        with SQLModelSession(engine) as session:
-            session.add(Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id="fifo-inst-2",
-                work_id="fifo-w-4",
-                message_id="fifo-msg-4",
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-
-        # Sanity: msg2 is NOT claimable while queued (slot denied).
-        assert repository.claim_pending_task(worker_id="fifo-w-sanity") is None, (
-            "Pre-transition sanity: msg2's Task must not be claimable "
-            "while its JobItem is queued."
-        )
-
-        # Simulate msg1 completion: Task → COMPLETED, msg1's
-        # JobItem → done (the observer finalizes the mirror), and
-        # msg2's JobItem → active (slot now free and claimed by
-        # msg2). All three transitions must happen for the FIFO
-        # recovery to work: the cross-system guard's Branch 2
-        # (``active AND NOT EXISTS(matching Task in pending/running)``)
-        # blocks when msg1's JobItem is still active with a
-        # COMPLETED Task — that is the stuck-mirror case which is
-        # a recovery concern, not a claim-time concern. The
-        # observer's finalize sweep is what clears the mirror.
-        with SQLModelSession(engine) as session:
-            from sqlalchemy import text
-            session.execute(
-                text(
-                    "UPDATE task SET status = :completed, completed_at = :now "
-                    "WHERE work_id = :work_id"
-                ),
-                {
-                    "completed": TaskStatus.COMPLETED.value,
-                    "now": datetime.now(timezone.utc),
-                    "work_id": "fifo-w-3",
-                },
-            )
-            session.execute(
-                text(
-                    "UPDATE job_queue_items SET admission_state = :done "
-                    "WHERE job_id = :job_id"
-                ),
-                {"done": "done", "job_id": "fifo-w-3"},
-            )
-            session.execute(
-                text(
-                    "UPDATE job_queue_items SET admission_state = :active "
-                    "WHERE job_id = :job_id"
-                ),
-                {"active": "active", "job_id": "fifo-w-4"},
-            )
-            session.commit()
-
-        # Now msg2's Task must be claimable: linked JobItem is
-        # active (Part 2 guard allows), per-instance RUNNING guard
-        # cleared (msg1 completed), cross-system guard's
-        # _admitted_task_carve_out_sql Branch 2 releases (active
-        # JobItem with matching PENDING Task).
-        claimed = repository.claim_pending_task(worker_id="fifo-w-final")
-        assert claimed is not None, (
-            "FIFO recovery regression: msg2's Task was not claimable "
-            "after msg1 completed and msg2's JobItem transitioned to "
-            "active. The Part 2 guard must allow active linked "
-            "JobItems, and the cross-system guard's Branch 2 must "
-            "release for an active JobItem with a matching PENDING "
-            "Task."
-        )
-        assert claimed.work_id == "fifo-w-4"
 
     def test_orphaned_queued_jobitem_no_matching_task_recovers(
         self, repository, engine
@@ -1490,7 +1052,7 @@ class TestFifoConcurrencyBypass:
         )
 
         # A Task for a DIFFERENT message on the SAME instance. The
-        # cross-system guard's ``_admitted_task_carve_out_sql`` Branch
+        # cross-system guard's ``_active_jobitem_with_inflight_task_sql`` Branch
         # 1 fires when ``admission_state='queued' AND NOT EXISTS(
         # matching Task)``. The orphan has NO matching Task → Branch
         # 1 is FALSE → the orphan is excluded from the blocking set

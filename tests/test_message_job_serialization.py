@@ -2,7 +2,7 @@
 
 The message-Job mirror participates in serialization for the same
 instance: only 1 Task runs at a time (cross-system guard via
-``_admitted_task_carve_out_sql``). This file is the Phase 2 deliverable
+``_active_jobitem_with_inflight_task_sql``). This file is the Phase 2 deliverable
 tests (Task 6 in the user's brief).
 
 What's covered (Phase 6 / Option B cutover):
@@ -362,7 +362,7 @@ class TestTwoMessageJobsSerialize:
     observed at Task-claim time — two message JobItems triggered two
     Task rows, and ``TaskRepository.claim_pending_task``'s per-instance
     guard held the second Task out of ``RUNNING`` while the first ran.
-    The cross-system ``_admitted_task_carve_out_sql`` predicate looked
+    The cross-system ``_active_jobitem_with_inflight_task_sql`` predicate looked
     up Task rows via ``job_queue_items.metadata.message_id``.
 
     Post-Option B: ``enqueue_message_job`` creates the Task +
