@@ -23,10 +23,10 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
-from daemon.manager import InstanceManager
 from daemon.config import Config
 from daemon.cancellation import CancellationTokenSource
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.request_registry import ActiveRequestRegistry
 
 
 class MockInstanceMeta:
@@ -93,6 +93,13 @@ def mock_task_repository():
     """
     repo = MagicMock()
     repo.find_paused_or_cancellable_turn = MagicMock(return_value=None)
+    # Phase 3 (Increment 4): answer-gate selector wired before the
+    # pause-cascade selector. A bare MagicMock returns a truthy
+    # MagicMock for the unconfigured method, so every test would
+    # enter the answer-gate branch instead of the intended path.
+    # Explicit ``None`` lets the test fixture control the answer-gate
+    # branch per-test via ``mock_manager._task_repo.find_suspended_turn_for_answer.return_value``.
+    repo.find_suspended_turn_for_answer = MagicMock(return_value=None)
     return repo
 
 
@@ -116,12 +123,17 @@ def mock_manager(
     # Mock enqueue_message (used by both WorkerPool and JobQueue paths)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
     manager._graph_tasks = {}
+    manager._execution_gate = MagicMock()
     return manager
 
 
 @pytest.fixture
 def instance_manager(mock_manager):
     """Create InstanceManager with mocked dependencies."""
+    # Defer the ``daemon.manager`` import to fixture time so the
+    # test file's collection-time imports stay lightweight and
+    # avoid the ``daemon.compaction -> daemon.graph`` cycle.
+    from daemon.manager import InstanceManager
     config = MagicMock(spec=Config)
     manager = InstanceManager.__new__(InstanceManager)
     manager._job_queue_service = mock_manager._job_queue_service
@@ -130,6 +142,12 @@ def instance_manager(mock_manager):
     manager._task_repo = mock_manager._task_repo
     manager.enqueue_message = mock_manager.enqueue_message
     manager._graph_tasks = {}
+    manager._execution_gate = mock_manager._execution_gate
+    # W4: real registry so register()/unregister() return a real
+    # CancellationTokenSource. ``resume_processing_job`` calls
+    # ``register`` and the resume background task calls ``unregister``
+    # in its finally block.
+    manager._request_registry = ActiveRequestRegistry()
     return manager
 
 
@@ -375,5 +393,4 @@ class TestChildInstanceResume:
         # Verify the metadata includes resume_mode
         assert "metadata" in call_kwargs
         assert "resume_mode" in call_kwargs["metadata"]
-
 

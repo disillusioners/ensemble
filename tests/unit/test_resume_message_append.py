@@ -69,6 +69,14 @@ class MockJob:
         # PK ``id``). Tests that pin a specific value should pass
         # ``work_id="..."`` explicitly.
         self.work_id = work_id if work_id is not None else str(uuid.uuid4())
+        # Phase 3 (Increment 4) handle columns. The production
+        # ``resume_processing_job`` reads these on the paused turn
+        # to drive the explicit handle resume (see daemon/manager.py
+        # _schedule_explicit_handle_resume). Default ``None`` so
+        # tests that are routing-only (no explicit handle) keep
+        # passing without per-test stubbing.
+        self.suspension_reason = None
+        self.resume_target_turn_id = None
         # Pre-D13 ``JobItem`` attributes (kept for backwards-compat).
         self.job_id = job_id
         self.instance_id = instance_id
@@ -136,6 +144,13 @@ def mock_task_repository():
     """
     repo = MagicMock()
     repo.find_paused_or_cancellable_turn = MagicMock(return_value=None)
+    # Phase 3 (Increment 4): answer-gate selector wired before the
+    # pause-cascade selector. A bare MagicMock returns a truthy
+    # MagicMock for the unconfigured method, so every test would
+    # enter the answer-gate branch instead of the intended path.
+    # Explicit ``None`` lets the test fixture control the answer-gate
+    # branch per-test via ``mock_manager._task_repo.find_suspended_turn_for_answer.return_value``.
+    repo.find_suspended_turn_for_answer = MagicMock(return_value=None)
     return repo
 
 
@@ -163,6 +178,12 @@ def mock_manager(
     # Mock _process_child_completion_and_notify_parent
     manager._process_child_completion_and_notify_parent = AsyncMock()
     manager._graph_tasks = {}
+    # Defensive: prevent the resume background task from crashing on
+    # ``self._execution_gate`` (Phase 3 / Increment 4). The production
+    # code reads this attribute on every resume; without the mock,
+    # background tasks scheduled before the test asserts raise
+    # ``AttributeError`` and corrupt the test result.
+    manager._execution_gate = MagicMock()
     # W4: real registry so register()/unregister() return real
     # CancellationTokenSource. See test_resume_waiting_children for
     # the rationale.
@@ -186,6 +207,7 @@ def instance_manager(mock_manager):
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
     manager._graph_tasks = {}
+    manager._execution_gate = mock_manager._execution_gate
     manager._request_registry = mock_manager._request_registry
     return manager
 
