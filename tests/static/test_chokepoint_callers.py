@@ -18,7 +18,13 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[2]
 DAEMON = ROOT / "daemon"
-CHOKEPOINT_METHODS = frozenset({"complete_task", "cancel_task", "fail_task"})
+CHOKEPOINT_METHODS = frozenset({
+    "complete_task",
+    "cancel_task",
+    "fail_task",
+    "schedule_retry",
+    "force_cancel_and_schedule_retry",
+})
 
 # Appendix A.1, normalized to (relative file, enclosing scope, method).  The
 # counts are the pre-Phase-4b direct-call budget.  A migration can reduce a
@@ -29,11 +35,16 @@ APPENDIX_A_CALL_COUNTS: Counter[tuple[str, str, str]] = Counter(
         ("daemon/services/worker_pool.py", "Worker._handle_cancellation", "complete_task"): 1,
         ("daemon/services/worker_pool.py", "Worker._handle_cancellation", "cancel_task"): 1,
         ("daemon/services/worker_pool.py", "Worker._handle_cancellation", "fail_task"): 1,
+        ("daemon/services/worker_pool.py", "Worker._handle_cancellation", "schedule_retry"): 1,
         ("daemon/services/worker_pool.py", "Worker._handle_task_failure", "fail_task"): 1,
         ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.force_complete_task", "complete_task"): 1,
         ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.fail_task", "fail_task"): 1,
         ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.recover_stale_tasks", "fail_task"): 2,
+        ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.recover_stale_tasks", "force_cancel_and_schedule_retry"): 1,
+        ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.recover_stale_tasks", "schedule_retry"): 1,
         ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.recover_on_startup", "fail_task"): 2,
+        ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.recover_on_startup", "force_cancel_and_schedule_retry"): 1,
+        ("daemon/services/stale_task_recovery.py", "StaleTaskRecovery.recover_on_startup", "schedule_retry"): 1,
         ("daemon/services/task_processor.py", "ProcessMessageProcessor._skip_task_as_completed", "complete_task"): 1,
         ("daemon/services/task_processor.py", "ProcessMessageProcessor._build_callbacks.on_success", "complete_task"): 1,
         ("daemon/services/job_queue_service.py", "JobQueueService.cancel_task_by_work_id", "cancel_task"): 1,
@@ -159,7 +170,8 @@ def test_no_new_direct_chokepoint_callers() -> None:
             over_budget.append((key, count, APPENDIX_A_CALL_COUNTS[key]))
 
     assert not unexpected and not over_budget, (
-        "New direct caller(s) of complete_task/cancel_task/fail_task detected. "
+        "New direct caller(s) of complete_task/cancel_task/fail_task/"
+        "schedule_retry/force_cancel_and_schedule_retry detected. "
         "Migrate to a named transition or add a justified Appendix A entry: "
         f"unexpected={unexpected!r}, over_budget={over_budget!r}"
     )

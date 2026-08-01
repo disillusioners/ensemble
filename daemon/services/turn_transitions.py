@@ -74,6 +74,13 @@ class _StatusTransition(_Transition):
         return TransitionResult(self.work_id, self.instance_id, old, new, touched or self.MIRROR_SET, cross_turn, **kw)
 
 class BeginTurn(_Transition):
+    """BEGIN_TURN transition — Task creation path.
+
+    Phase 4b stub: this transition is defined but has zero production
+    callers currently. The Task-insertion path in repository.py will
+    be migrated to call BeginTurn.run() in a future call-site migration
+    phase. The MIRROR_SET and run() body are complete and tested.
+    """
     MIRROR_SET = frozenset({"task", "job_queue_items", "message_queue", "job_locks"})
     def __init__(self, task_type: str, instance_id: str | None, message_id: str | None, work_id: str, task_repo: Any = None, **kwargs):
         self.task_type, self.instance_id, self.message_id, self.work_id, self.task_repo = task_type, instance_id, message_id, work_id, task_repo
@@ -83,6 +90,13 @@ class BeginTurn(_Transition):
         return TransitionResult(self.work_id, self.instance_id, None, "pending", self.MIRROR_SET, ("instance_running",), None, {"event":"turn_started","work_id":self.work_id}, ())
 
 class ClaimTurn(_StatusTransition):
+    """CLAIM_TURN transition — Worker picks up a pending Task.
+
+    Phase 4b stub: this transition is defined but has zero production
+    callers currently. The Task-claim path in worker_pool.py will be
+    migrated to call ClaimTurn.run() in a future call-site migration
+    phase. The MIRROR_SET and run() body are complete and tested.
+    """
     MIRROR_SET = frozenset({"task", "job_queue_items", "job_locks"})
     def __init__(self, work_id, worker_id, task_repo=None, **kwargs): super().__init__(work_id, task_repo, kwargs.get("instance_id")); self.worker_id=worker_id
     def run(self, session): self._write(session,"running","pending"); self._reconcile(); return self._result("pending","running", wakeup_payload={"event":"turn_claimed","work_id":self.work_id})
