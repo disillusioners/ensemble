@@ -90,7 +90,6 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "dead_letter": "dead",
     }.get(status, "queued")
 
-pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-threading integration")
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -99,12 +98,20 @@ from sqlmodel import Session, SQLModel
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM lock/finalize threading")
+# Phase 5 (CorrelationManager → DependencyBus migration, 2026-08-01):
+# CorrelationManager is removed, so the three existing CM-threading tests
+# below can no longer run. They are skipped PER-TEST (not at module level)
+# so the new F13 exact-ID threading regression test
+# (``test_resume_finalize_threaded_job_id_picks_correct_sibling``) can
+# actually run as a W1 merge gate — see the docstring at the bottom of
+# this file.
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import AdmissionState, JobItem
 # CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
-# Tests in this module are skipped via ``pytestmark`` above.
+# The CM-dependent tests below carry their own per-test
+# ``@pytest.mark.skip`` markers (Phase 5 migration from module-level
+# ``pytestmark`` to per-test skips — see docstring at line 101).
 from daemon.services.job_feedback_observer import JobFeedbackObserver
 from daemon.write_pause_guard import WritePauseGuard
 
@@ -297,6 +304,7 @@ async def real_cm() -> CorrelationManager:
 # =============================================================================
 
 
+@pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-threading integration")
 @pytest.mark.asyncio
 async def test_lock_serializes_register_against_finalize(real_cm: CorrelationManager):
     """Prove the per-parent asyncio.Lock blocks register_message_send.
@@ -393,6 +401,7 @@ async def test_lock_serializes_register_against_finalize(real_cm: CorrelationMan
 # =============================================================================
 
 
+@pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-threading integration")
 @pytest.mark.asyncio
 async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     """Prove the generation-counter post-commit re-arm prevents orphaning.
@@ -646,6 +655,7 @@ async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     set_correlation_manager(None)
 
 
+@pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-threading integration")
 @pytest.mark.asyncio
 async def test_post_commit_rearm_can_be_disabled(engine: Engine):
     """False-positive guard: prove Test 2 FAILS when the re-arm is disabled.
@@ -748,3 +758,195 @@ async def test_post_commit_rearm_can_be_disabled(engine: Engine):
     )
 
     set_correlation_manager(None)
+
+
+# =============================================================================
+# Test 3 — F13 exact-ID threading (W1 merge gate)
+# =============================================================================
+#
+# Regression test for the multi-JobItem Bug A scenario (2026-08-01, Step B
+# W2 fix): ``_process_resume_finalize`` in
+# ``daemon/services/job_feedback_observer.py`` was changed to thread
+# ``job_id`` into ``_get_processing_job_for_instance(instance_id,
+# job_id=job_id)``. That uses the F13 exact-ID overload in
+# ``daemon/repositories/job_queue/repository.py`` (``get_active_by_instance``
+# with a non-None ``job_id``), which resolves JobItems by exact
+# ``JobItem.job_id`` instead of the freshest-by-``created_at`` ordering.
+#
+# This test pins the F13 exact-ID overload end-to-end through the
+# observer — without it, the multi-JobItem Bug A path is untested, and a
+# future refactor could regress the threading silently.
+
+
+@pytest.mark.asyncio
+async def test_resume_finalize_threaded_job_id_picks_correct_sibling(
+    engine: Engine,
+):
+    """F13 exact-ID threading: when ``_process_resume_finalize`` threads
+    ``job_id`` into ``_get_processing_job_for_instance``, the
+    defense-in-depth re-query resolves the JobItem by EXACT ID — NOT
+    by freshest-by-``created_at``.
+
+    Scenario (the multi-JobItem Bug A case from the W1 review):
+      * Two ACTIVE ``JobItem`` rows for the SAME instance, with
+        DIFFERENT ``job_id`` values.
+      * ``orphan_work_id`` is the OLDER row (the one we want to
+        finalize — caller has its stable ``work_id`` from a Task row).
+      * ``live_work_id`` is the NEWER row (a freshly-created sibling
+        that would shadow the orphan under the legacy freshest-by-
+        ``created_at`` ordering).
+      * Caller passes ``job_id=orphan_work_id``. The helper MUST
+        return a ``_ProcessingJobContext`` whose ``job_id`` equals
+        ``orphan_work_id`` — proving F13 resolved by exact ID.
+      * ``live_work_id`` row remains ACTIVE and UNTOUCHED in the DB
+        (the helper only READS — finalize side effects belong to the
+        caller and are out of scope for this lookup-helper test).
+
+    Why this test matters
+    ---------------------
+    Without the F13 exact-ID overload threading, ``_get_processing_job_for_instance``
+    would fall back to ``get_active_by_instance(instance_id, None)``
+    which uses freshest-by-``created_at`` ordering — that would return
+    ``live_work_id`` (the NEWER row), not ``orphan_work_id`` (the
+    row the caller wants to finalize). The caller would then drive
+    finalize against the WRONG JobItem — the classic wrong-sibling
+    bug that F13 is designed to close.
+
+    Code path exercised
+    -------------------
+    The defense-in-depth re-query at
+    ``daemon/services/job_feedback_observer.py:770`` fires only when
+    ``get_job_by_instance`` returns a row that is NOT ACTIVE / NOT
+    QUEUED-with-non-PENDING-task. To hit this path we configure the
+    mock to return a synthesized terminal row (``admission_state="done"``,
+    representing the freshest row being a stale CANCELLED sibling) —
+    this simulates the production scenario where the helper's first
+    lookup returns a non-ACTIVE row and the defense-in-depth re-query
+    has to find the surviving ACTIVE orphan by exact ID.
+    """
+    from datetime import datetime, timezone
+
+    # ── Arrange: seed two ACTIVE JobItems for one instance ──────────────────
+    # Use explicit ``created_at`` strings so the freshest-by-``created_at``
+    # ordering is deterministic — the orphan MUST be older than the live
+    # row for the test to prove F13 actually changes behavior.
+    instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+    orphan_work_id = f"job-orphan-{uuid.uuid4().hex[:8]}"
+    live_work_id = f"job-live-{uuid.uuid4().hex[:8]}"
+
+    orphan_iso = "2026-01-01T12:00:00+00:00"
+    live_iso = "2026-01-01T12:01:00+00:00"  # 1 minute newer than orphan
+
+    with Session(engine) as s:
+        for jid, created_at in [
+            (orphan_work_id, orphan_iso),
+            (live_work_id, live_iso),
+        ]:
+            s.add(
+                JobItem(
+                    job_id=jid,
+                    agent_id="developer",
+                    agent_dir="/tmp/agents/developer",
+                    message="w1-test",
+                    source="api",
+                    project_id="test-project",
+                    priority=5,
+                    job_metadata={},
+                    queue_id=None,  # FK: avoid requiring a job_queues row
+                    job_type="task",
+                    instance_id=instance_id,
+                    admission_state=AdmissionState.ACTIVE.value,
+                    created_at=created_at,
+                )
+            )
+        s.commit()
+
+    # ── Build observer with real_job_repo=True so get_active_by_instance runs SQL ──
+    observer, mocks = make_observer(engine, real_job_repo=True)
+
+    # ── Configure mock to drive the helper through the defense-in-depth
+    #    re-query at line 770. Returning a row with ``admission_state="done"``
+    #    ensures ``get_job_by_instance`` does NOT short-circuit at line 729
+    #    (happy-path ACTIVE) or line 737 (QUEUED-with-non-PENDING-task).
+    #    This simulates the production scenario where the freshest row is
+    #    a stale terminal sibling and the still-ACTIVE orphan is what
+    #    needs finalization.
+    mocks["job_queue_service"].get_job_by_instance = AsyncMock(
+        return_value=MagicMock(
+            spec=JobItem,
+            job_id="stale-terminal-row",
+            admission_state=AdmissionState.DONE.value,
+            instance_id=instance_id,
+        )
+    )
+
+    # ── Act: call the helper with the F13 exact-ID overload ────────────────
+    # Caller has the orphan's stable ``work_id`` (e.g., from the terminal
+    # backing Task row) and threads it through. F13 must resolve by exact
+    # ID — NOT by freshest-by-``created_at``.
+    ctx = await observer._get_processing_job_for_instance(
+        instance_id, job_id=orphan_work_id
+    )
+
+    # ── Assert 1: helper returned a context with the ORPHAN's job_id ───────
+    assert ctx is not None, (
+        "Helper returned None — expected _ProcessingJobContext. "
+        "The defense-in-depth re-query did not find the orphan."
+    )
+    assert ctx.job_id == orphan_work_id, (
+        f"F13 exact-ID overload did not fire. "
+        f"Expected ctx.job_id={orphan_work_id}, got {ctx.job_id}. "
+        f"Without F13 the helper would have returned live_work_id "
+        f"(freshest-by-created_at) — the classic wrong-sibling bug. "
+        f"This means _process_resume_finalize's threading of job_id is "
+        f"NOT actually reaching the F13 overload at "
+        f"JobRepository.get_active_by_instance."
+    )
+    assert ctx.instance_id == instance_id, (
+        f"Context instance_id mismatch: expected {instance_id}, "
+        f"got {ctx.instance_id}"
+    )
+
+    # ── Assert 2: the LIVE JobItem is UNTOUCHED (still ACTIVE in DB) ───────
+    # The lookup helper is read-only — it must NOT mutate any sibling rows.
+    # The other JobItem (``live_work_id``) must still be ACTIVE in the DB
+    # after the call.
+    live_re_read = re_read_job(engine, live_work_id)
+    assert live_re_read is not None, (
+        f"live_work_id={live_work_id} disappeared from DB — the helper "
+        f"must not mutate sibling rows."
+    )
+    assert live_re_read.admission_state == AdmissionState.ACTIVE.value, (
+        f"live_work_id should still be ACTIVE (untouched), "
+        f"got admission_state={live_re_read.admission_state}. "
+        f"The helper mutated a sibling row — it must be read-only."
+    )
+
+    # ── Assert 3: orphan is also still ACTIVE (the helper returned its
+    #    identity, it did not finalize it). ───────────────────────────────
+    orphan_re_read = re_read_job(engine, orphan_work_id)
+    assert orphan_re_read is not None
+    assert orphan_re_read.admission_state == AdmissionState.ACTIVE.value, (
+        f"orphan_work_id should still be ACTIVE (helper is read-only), "
+        f"got admission_state={orphan_re_read.admission_state}"
+    )
+
+    # ── Sanity check: the LEGACY freshest-by-``created_at`` path WOULD
+    #    return live_work_id (the freshest ACTIVE row) — proving F13
+    #    actually changes behavior in this scenario. Without this, the
+    #    test would be a false positive (returning orphan_work_id would
+    #    be the obvious answer regardless of F13).
+    from daemon.repositories.job_queue import JobRepository
+    repo = JobRepository(engine)
+    legacy_result = repo.get_active_by_instance(instance_id)  # job_id=None
+    assert legacy_result is not None, (
+        "Legacy path returned None — there should be at least one ACTIVE row."
+    )
+    assert legacy_result.job_id == live_work_id, (
+        f"Legacy path (job_id=None, freshest-by-created_at) should return "
+        f"live_work_id, got {legacy_result.job_id}. This means the "
+        f"orphan/live ordering in the seed is wrong — the test cannot "
+        f"prove F13 changes behavior because the legacy path already "
+        f"happens to return the right answer."
+    )
+
