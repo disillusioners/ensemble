@@ -3241,10 +3241,9 @@ status=InstanceStatus.IDLE.value,
         # and an invariant violation means the transition is
         # structurally invalid and must surface to the caller.
         #
-        # For a freshly paused Task the reconciler's fast-path probe
-        # (job_queue_items admission/lock consistency) is typically a
-        # no-op because the mirror is already consistent. The
-        # reconciler's value here is closing any stale message_queue /
+        # For a freshly paused Task the reconciler's guarded SQL
+        # handlers are mostly no-ops (mirrors already consistent),
+        # but the value here is closing any stale message_queue /
         # dependency_watcher rows the worker's in-flight turn left
         # behind before pause fired.
         for work_id in paused_task_work_ids:

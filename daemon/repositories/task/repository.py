@@ -526,7 +526,6 @@ class TaskRepository:
                 "snapshot_status": snapshot_status,
                 "updated_counts": updated_counts,
                 "drift_flags": drift_flags,
-                "fast_path_skipped": False,
             }
 
             terminal = not found or snapshot_status in terminal_statuses
@@ -566,7 +565,7 @@ class TaskRepository:
                                 WHERE i.instance_id = :task_instance_id
                                   AND i.status = :status_waiting_children
                             ) THEN 'done'
-                            ELSE 'active'
+                            ELSE admission_state
                         END,
                         terminal_reason = CASE
                             WHEN :terminal AND NOT EXISTS (
@@ -613,6 +612,7 @@ class TaskRepository:
                         processing_task_id = NULL,
                         completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
                     WHERE message_id = :task_message_id
+                      AND status IN ('pending', 'ready', 'processing', 'retrying')
                       AND :terminal
                       AND {snapshot_guard}
                 """),

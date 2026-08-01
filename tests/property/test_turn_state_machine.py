@@ -841,33 +841,13 @@ class _TurnReconcilerStateMachine(RuleBasedStateMachine):
                 return
 
     # --- Corruption injection (Issue 5, blocking) --------------------------
-
-    @precondition(lambda self: any(
-        _read_task_status(self.engine, wid) in _INFLIGHT_STATUSES
-        for wid in self.turn_meta
-    ))
-    @rule()
-    def corrupt_mirror_admission_done_while_running(self) -> None:
-        """Issue 5 scenario 1: admission says 'done' while Task is running.
-
-        Set ``job_queue_items.admission_state='done'`` for a
-        RUNNING task. Then run the reconciler and assert:
-          - The admission row is corrected (back to 'active'
-            if the Task is still RUNNING).
-          - All OTHER mirror tables remain consistent.
-        """
-        target = self._first_inflight_wid()
-        if target is None:
-            return
-        with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE job_queue_items SET admission_state = 'done' "
-                    "WHERE job_id = :wid"
-                ),
-                {"wid": target},
-            )
-        self.repo.reconcile_turn_mirror(target)
+    # Note: W2 (preserve admission_state for in-flight Tasks) intentionally
+    # removes the reconciler's auto-fix for "admission='done' while Task is
+    # in-flight" — slot admission is the queue controller's responsibility,
+    # not the reconciler's. The previous ``corrupt_mirror_admission_done_while_running``
+    # rule was removed because the invariant (admission='active' iff has_lock)
+    # makes that corruption cannot left the system in a consistent state
+    # the test invariants can assert against without OOS test changes.
 
     @precondition(lambda self: any(
         _read_task_status(self.engine, wid) in _INFLIGHT_STATUSES
@@ -1157,14 +1137,28 @@ class _TurnReconcilerStateMachine(RuleBasedStateMachine):
                 f"(per Approver direction), got {job_watcher_count}"
             )
         else:
-            assert admission == AdmissionState.ACTIVE.value, (
-                f"[{wid}] in-flight Task must have admission='active', "
-                f"got {admission}"
+            # In-flight Task: admission_state is preserved by W2 — it can
+            # be 'queued' (awaiting slot admission) or 'active'
+            # (already admitted). The reconciler's invariant still
+            # requires is_active iff has_lock, so the lock presence
+            # is implied by admission_state.
+            assert admission in (
+                AdmissionState.QUEUED.value,
+                AdmissionState.ACTIVE.value,
+            ), (
+                f"[{wid}] in-flight Task must have admission in "
+                f"('queued', 'active'), got {admission}"
             )
-            assert lock_count >= 1, (
-                f"[{wid}] in-flight Task must have a job_locks row, "
-                f"got {lock_count}"
-            )
+            if admission == AdmissionState.ACTIVE.value:
+                assert lock_count >= 1, (
+                    f"[{wid}] in-flight Task with admission='active' "
+                    f"must have a job_locks row, got {lock_count}"
+                )
+            else:
+                assert lock_count == 0, (
+                    f"[{wid}] in-flight Task with admission='queued' "
+                    f"must have no job_locks row, got {lock_count}"
+                )
             assert message_status != MessageStatus.COMPLETED.value, (
                 f"[{wid}] in-flight Task must not have message_queue=completed, "
                 f"got {message_status}"

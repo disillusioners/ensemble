@@ -11,7 +11,8 @@ Reference: ``.agents/shared/planning/turn-reconciler-migration/increment1-plan.m
 Coverage matrix (mirrors the plan §8 "New focused coverage"):
 
   1. ``job_queue_items`` — terminal Task → admission_state='done';
-     in-flight Task → admission_state='active'; missing Task →
+     in-flight Task preserves admission_state (e.g. 'queued' stays
+     'queued', 'active' stays 'active'); missing Task →
      admission_state='done', terminal_reason='orphaned_no_task'.
   2. ``job_locks`` — terminal Task → lock deleted; in-flight Task →
      lock untouched; missing Task → lock deleted.
@@ -465,10 +466,17 @@ class TestJobQueueItems:
         assert full["admission_state"] == AdmissionState.DONE.value
         assert full["terminal_reason"] == TaskStatus.COMPLETED.value
 
-    def test_inflight_task_sets_admission_active(
+    def test_inflight_task_preserves_admission_state(
         self, engine: Engine, repo: TaskRepository
     ) -> None:
-        """In-flight Task → admission_state='active'."""
+        """In-flight Task preserves JobItem's admission_state (e.g. 'queued').
+
+        A non-terminal Task's JobItem admission_state is intentionally
+        preserved by the reconciler (e.g. awaiting slot admission as
+        'queued'). The reconciler must NOT promote a 'queued' JobItem
+        to 'active' for an in-flight Task — slot admission is the
+        queue controller's responsibility, not the reconciler's.
+        """
         instance_id = _new_id("inst")
         work_id = _new_id("work")
         message_id = _new_id("msg")
@@ -480,20 +488,55 @@ class TestJobQueueItems:
             message_id=message_id,
             status=TaskStatus.PENDING.value,
         )
-        # JobItem starts in 'queued' admission_state so the
-        # reconciler can flip it to 'active'.
+        # JobItem stays in 'queued' admission_state (awaiting slot
+        # admission) — reconciler must NOT promote it to 'active'.
+        # No job_lock — 'queued' JobItems are awaiting slot admission
+        # and don't have locks yet; the invariant check requires
+        # is_active iff has_lock.
         _seed_job_item(
             engine,
             work_id=work_id,
             instance_id=instance_id,
             admission_state=AdmissionState.QUEUED.value,
         )
+
+        result = repo.reconcile_turn_mirror(work_id)
+
+        assert result["snapshot_status"] == TaskStatus.PENDING.value
+        assert _read_admission(engine, work_id) == AdmissionState.QUEUED.value
+
+    def test_inflight_task_keeps_active_admission_state(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """In-flight Task preserves an already-'active' JobItem.
+
+        Companion to test_inflight_task_preserves_admission_state:
+        if the JobItem is already 'active', the in-flight reconciler
+        must not downgrade it. The non-terminal CASE branch
+        preserves the existing admission_state.
+        """
+        instance_id = _new_id("inst")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, instance_id)
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=TaskStatus.PENDING.value,
+        )
+        _seed_job_item(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
         _seed_job_lock(engine, work_id=work_id, instance_id=instance_id)
 
         result = repo.reconcile_turn_mirror(work_id)
 
         assert result["snapshot_status"] == TaskStatus.PENDING.value
-        assert result["updated_counts"]["job_queue_items"] >= 1
         assert _read_admission(engine, work_id) == AdmissionState.ACTIVE.value
 
     def test_missing_task_sets_admission_done_orphan_reason(
