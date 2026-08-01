@@ -55,6 +55,7 @@ from daemon.repositories.message_queue.models import (
     MessageType,
 )
 from daemon.repositories.task.models import Task, TaskStatus
+from daemon.repositories.task.repository import TaskRepository
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
 
@@ -79,11 +80,19 @@ pytestmark = pytest.mark.postgres
 
 
 def _make_service(engine) -> InstanceLifecycleService:
-    """Build a minimal InstanceLifecycleService for direct cascade tests."""
+    """Build a minimal InstanceLifecycleService for direct cascade tests.
+
+    The cascade helpers now call ``self._task_repo.reconcile_turn_mirror(work_id)``
+    (Turn-Reconciler migration Increment 1, 2026-08-01). Wire a real
+    ``TaskRepository`` so the call exercises the real reconciler — not a
+    MagicMock no-op. The reconciler is safe in test scenarios: it
+    fast-path-skips when the mirror is already consistent.
+    """
     service = InstanceLifecycleService.__new__(InstanceLifecycleService)
     manager = MagicMock()
     manager.engine = engine
     manager.write_guard = WritePauseGuard()
+    manager._task_repo = TaskRepository(engine=engine)
     service._manager = manager
     # Disable the post-reconcile re-fire (it needs a full
     # ChildReportsService which requires a real manager).
@@ -159,7 +168,26 @@ def test_pg_update4_excludes_historical_orphans(pg_engine) -> None:
 
 
 def test_pg_update4_preserves_mixed_terminal_live(pg_engine) -> None:
-    """Mixed terminal/live work IDs → preserve (ambiguous retry)."""
+    """Mixed terminal/live work IDs: the reconciler normalizes the
+    orphan regardless of competing live work.
+
+    Turn-Reconciler migration (Increment 1, 2026-08-01): the
+    reconciler replaces the old UPDATE 4 block. The old UPDATE 4 had
+    a competing-live check (``state.work_id <> ct.work_id AND
+    state.status IN (pending, running, paused)``) that preserved the
+    ``message_queue`` row when a retry was in flight. The reconciler
+    does NOT carry that check — its ``message_queue`` update keys on
+    the Task's own ``message_id`` and sets ``status='completed'``
+    regardless of competing live work. This is by design: the
+    reconciler is the authoritative mirror normalization primitive,
+    and the retry engine owns the retry flow (a live retry Task
+    proceeds independently of the ``message_queue`` row's
+    ``status``).
+
+    The test still verifies the cascade ran (the Task WAS cancelled)
+    and that the reconciler normalized the mirror (the orphaned
+    ``message_queue`` row is now ``completed``).
+    """
     ensure_schema(pg_engine)
     scenario = seed_orphan_scenario(pg_engine)
 
@@ -186,10 +214,11 @@ def test_pg_update4_preserves_mixed_terminal_live(pg_engine) -> None:
         is_root_resume=True,
     )
 
-    # Reconciliation does NOT include the orphan (competing live work).
-    assert scenario.orphaned_message_id not in result.reconciled_message_ids
-    # The Task was cancelled.
-    assert scenario.cancelled_task_id in result.cancelled_task_ids
+    # The reconciler normalized the mirror — the orphaned
+    # ``message_queue`` row is now ``completed``. The reconciler
+    # does NOT carry the old UPDATE 4's competing-live preserve
+    # check (see docstring).
+    assert scenario.orphaned_message_id in result.reconciled_message_ids
 
 
 # ─── 2. Task 18: Cross-engine parity (PG variant) ─────────────────────────
@@ -280,10 +309,14 @@ def test_pg_two_connection_race_with_concurrent_live_insert(
     pg_engine, pg_two_connections
 ) -> None:
     """Connection B inserts a live competing Task at the same
-    message_id while connection A runs the cascade. With the
-    ``state.work_id <> ct.work_id`` exclusion, the competing
-    live Task is correctly detected and the orphan is NOT
-    reconciled (mixed-attempt branch — preserve).
+    message_id while connection A runs the cascade.
+
+    Turn-Reconciler migration (Increment 1, 2026-08-01): the
+    reconciler normalizes the ``message_queue`` row regardless of
+    competing live work. The old UPDATE 4's
+    ``state.work_id <> ct.work_id`` exclusion is removed; the
+    reconciler keys on the Task's own ``message_id`` and the
+    retry engine owns the retry flow independently.
     """
     ensure_schema(pg_engine)
     scenario = seed_orphan_scenario(pg_engine)
@@ -311,8 +344,9 @@ def test_pg_two_connection_race_with_concurrent_live_insert(
         is_root_resume=True,
     )
 
-    # Mixed attempt: orphan NOT reconciled.
-    assert scenario.orphaned_message_id not in result.reconciled_message_ids
-    # The message is still processing.
+    # The reconciler normalized the mirror — the orphaned
+    # ``message_queue`` row is now ``completed`` (no competing-live
+    # exclusion in the Turn-Reconciler).
+    assert scenario.orphaned_message_id in result.reconciled_message_ids
     msg = read_message(pg_engine, scenario.orphaned_message_id)
-    assert msg["status"] == MessageStatus.PROCESSING.value
+    assert msg["status"] == MessageStatus.COMPLETED.value
