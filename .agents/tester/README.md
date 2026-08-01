@@ -23,3 +23,4 @@
 - Previous run: 2026-07-26 on `feature/queue-dispatch-option-b` w/ queued-race-fix → ✅ PASS (4/4).
 - Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)
 - **Note:** dev mode (`./dev.sh`) logs to stdout (no `.log` file) — use the process buffer for log grep, not `tail -f daemon.log`.
+- **Context Injection Gate Fix E2E:** 2026-07-28 on `latest` @ `78338bb4` → ✅ PASS. Verified fix `df0a603c` (gate on injection mode, not legacy boolean). 4/4 instances that started graph execution (developer×3, reviewer×1) received `[SYSTEM CONTEXT: Related Project]` with `context_kind=project, is_synthetic=True`. 5/9 instances stalled in job queue (concurrency bottleneck, not context issue). See `RESULTS/2026-07-28-context-injection-fix-e2e-verify.md`.

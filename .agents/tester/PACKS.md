@@ -7,6 +7,7 @@
 - Context Injection Restructure: 2026-07-28 on `feature/context-injection-restructure` @ `2de4af3a` — 209 new feature tests ALL PASS, 694 core regression pass with 0 NEW failures (41 pre-existing matching baseline). See `RESULTS/2026-07-28-context-injection-restructure.md`
 - V2 Agent Validation: 2026-07-30 on `feature/v2-developer-planner` — static validation of developer[v2] + planner[v2] agent definitions (16/16 checks PASS: meta.json, file completeness, skill-set.yaml, opencode absence, mermaid syntax, registry compat). See `RESULTS/2026-07-30-v2-developer-planner-validation.md`
  - V2 Agent Validation: 2026-07-30 on `feature/tidier-v2` — static validation of tidier[v2] agent definition (26/26 checks PASS across 7 categories: structure, v2 pattern, skills, content, boundary, registration, existing tests + 2 regression packs green). See `RESULTS/2026-07-30-tidier-v2-validation.md`
+- Turn Reconciler Inc 4 (FINAL): 2026-08-01 on `latest` @ `4e82c8c9`+fixes — ~11,900 tests, 0 NEW failures (147 pre-existing baseline), 4 quick-fix commits (test code only). PG 153/0, job_queue 1463/0, msg_queue 419/0, E2E 45/45 NOT FLAKY, ensure.md 8/8 PASS. See `RESULTS/2026-08-01-inc4-turn-reconciler-full-regression.md`
 
 ## Unit Test Packs
 
