@@ -51,7 +51,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import JobLock, AdmissionState
+from daemon.repositories.job_queue.models import JobLock, AdmissionState, JobItem
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import set_dependency_bus
@@ -483,3 +483,471 @@ class TestPauseResumeRoot:
             "PROCESS_REPORT tasks must NOT identify a root-resume "
             "candidate — only PROCESS_MESSAGE tasks do"
         )
+
+
+# ─── Phase 1 Bug A / Step B: find_resume_root_candidate_by_active_job ───────
+
+
+def _seed_job_item_for_test(
+    engine: Engine,
+    *,
+    job_id: str,
+    instance_id: str,
+    admission_state: str = AdmissionState.ACTIVE.value,
+    message_id: str | None = None,
+    deleted_at: str | None = None,
+) -> JobItem:
+    """Seed a JobItem for the routing-primitive tests.
+
+    Uses ``queue_id=None`` to avoid the FK constraint on
+    ``job_queues.queue_id`` (the test engine has FKs enabled).
+    """
+    from daemon.repositories.job_queue.models import JobItem
+    job = JobItem(
+        job_id=job_id,
+        agent_id="developer",
+        agent_dir="/tmp/agents/developer",
+        message="orphan-routing-test",
+        source="api",
+        project_id="test-project",
+        priority=5,
+        job_metadata={"message_id": message_id} if message_id else {},
+        queue_id=None,  # FK: avoid requiring a job_queues row
+        job_type="task",
+        instance_id=instance_id,
+        admission_state=admission_state,
+        deleted_at=deleted_at,
+    )
+    with Session(engine) as s:
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+    return job
+
+
+class TestFindResumeRootCandidateByActiveJob:
+    """Repository unit tests for the report-turn-pause fallback primitive.
+
+    Phase 1 / Step B (Bug A). ``find_resume_root_candidate_by_active_job``
+    is the active-orphan fallback for ``resume_processing_job``. The
+    full test matrix is documented in the plan §3.2.
+    """
+
+    def test_terminal_task_with_active_jobitem_returns_candidate(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Positive: terminal PROCESS_MESSAGE Task + matching active JobItem.
+
+        The Bug A incident state — the original PROCESS_MESSAGE Task
+        has reached COMPLETED, and an active JobItem correlates via
+        ``work_id == job_id``. The fallback returns the terminal Task
+        so ``resume_processing_job`` can route to the root path.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        task_work_id = str(uuid.uuid4().hex)
+        task = _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=task_work_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=task_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is not None, (
+            "Active-orphan fallback must return the terminal backing "
+            "PROCESS_MESSAGE Task correlated via work_id == job_id"
+        )
+        assert candidate.work_id == task_work_id
+        assert candidate.status == TaskStatus.COMPLETED.value
+
+    def test_paused_task_blocks_fallback_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Existing route owns it — PAUSED PROCESS_MESSAGE Task present.
+
+        When ``find_paused_or_running_by_instance`` already returns a
+        Task (the normal paused-before-resume case), the active-orphan
+        fallback MUST return ``None`` so the existing root route owns
+        the routing decision.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        # A PAUSED PROCESS_MESSAGE Task — existing route owns it.
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PAUSED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+        # And a terminal Task with matching JobItem (the bug A scenario).
+        # The fallback MUST NOT return this because the PAUSED task
+        # already represents a resumable marker.
+        terminal_work_id = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=terminal_work_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=terminal_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None, (
+            "When a PAUSED PROCESS_MESSAGE Task exists (existing route "
+            "owns it), the active-orphan fallback MUST return None — "
+            "do not double-route"
+        )
+
+    def test_running_task_blocks_fallback_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Existing route owns it — RUNNING PROCESS_MESSAGE Task present."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.RUNNING.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_cancelled_task_blocks_fallback_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Existing route owns it — CANCELLED Task (resume cascade marker)."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_task(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.CANCELLED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_queued_jobitem_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Queued JobItem (not active) → fallback returns None.
+
+        Only ``admission_state = 'active'`` JobItems trigger the
+        fallback. A queued mirror (F1 stuck-mirror) does NOT match.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        task_work_id = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=task_work_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=task_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.QUEUED.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_done_jobitem_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Done JobItem (terminal) → fallback returns None.
+
+        The JobItem has reached its terminal admission state and is
+        no longer holding a lock; nothing to orphan-resume.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        task_work_id = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=task_work_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=task_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.DONE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_deleted_jobitem_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Deleted (soft-delete) JobItem → fallback returns None."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        task_work_id = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=task_work_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=task_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+            deleted_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_mismatched_work_id_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Mismatched work_id → no match.
+
+        The JobItem's job_id differs from the Task's work_id. They
+        do NOT correlate. The fallback returns None.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=str(uuid.uuid4().hex),
+        )
+        # JobItem with a DIFFERENT job_id
+        _seed_job_item_for_test(
+            engine,
+            job_id=str(uuid.uuid4().hex),  # not matching
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_no_jobitem_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """No JobItem at all → fallback returns None."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=str(uuid.uuid4().hex),
+        )
+        # No JobItem seeded
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_no_task_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """No PROCESS_MESSAGE Task at all → fallback returns None."""
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        # No Task seeded
+        _seed_job_item_for_test(
+            engine,
+            job_id=str(uuid.uuid4().hex),
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_report_task_only_no_match_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Only PROCESS_REPORT Tasks exist → fallback returns None.
+
+        The fallback filters on ``task_type = PROCESS_MESSAGE``. A
+        PROCESS_REPORT-only history is irrelevant.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        work_id_report = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.RUNNING.value,
+            task_type=TaskType.PROCESS_REPORT.value,
+            work_id=work_id_report,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=work_id_report,
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None
+
+    def test_newest_terminal_message_with_active_jobitem_returns_newest(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Newest terminal PROCESS_MESSAGE Task with matching active JobItem.
+
+        When multiple terminal PROCESS_MESSAGE Tasks exist, the
+        fallback returns the newest one. The active JobItem correlates
+        to that newest Task via ``work_id == job_id``.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        # Older terminal Task — no JobItem correlation
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=str(uuid.uuid4().hex),
+        )
+        # Newer terminal Task — with matching active JobItem
+        newer_work_id = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.COMPLETED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=newer_work_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=newer_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is not None
+        assert candidate.work_id == newer_work_id, (
+            "Fallback must return the most-recent terminal PROCESS_MESSAGE "
+            "Task with matching active JobItem correlation"
+        )
+
+    def test_retry_scenario_parent_cancelled_retry_pending_returns_none(
+        self, engine, write_guard, lifecycle_service
+    ):
+        """Retry scenario (W4 case 1, KEY regression).
+
+        Parent Task: CANCELLED, with matching active JobItem.
+        Retry child Task: PENDING (same message_id, distinct work_id).
+        The fallback MUST return ``None`` because:
+
+        1. The CANCELLED parent is treated by the existing
+           ``find_paused_or_running_by_instance`` as a "resumable
+           marker" — the regular root route owns the instance.
+        2. The retry path (schedule_retry) is NOT what the fallback
+           services; the retry child is claimed by the regular
+           ``claim_pending_task`` flow (FIFO recovery).
+
+        The KEY regression (W4 case 1) at the admission-guard
+        level (Step A) is covered in
+        ``tests/test_terminal_orphan_matrix.py::
+        TestRetryScenarioRegression``. This Step-B primitive test
+        pins the retry-child routing contract: the fallback MUST
+        NOT steal retry-path work.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        shared_message_id = "msg-retry-shared"
+
+        # Parent CANCELLED with work_id X and matching active JobItem
+        parent_work_id = str(uuid.uuid4().hex)
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.CANCELLED.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=parent_work_id,
+            message_id=shared_message_id,
+        )
+        _seed_job_item_for_test(
+            engine,
+            job_id=parent_work_id,
+            instance_id=iid,
+            admission_state=AdmissionState.ACTIVE.value,
+            message_id=shared_message_id,
+        )
+
+        # Retry child PENDING with FRESH work_id Y, same message_id
+        retry_work_id = str(uuid.uuid4().hex)
+        assert retry_work_id != parent_work_id, (
+            "Retry must have a distinct work_id from parent"
+        )
+        _seed_task_with_work_id(
+            engine,
+            instance_id=iid,
+            status=TaskStatus.PENDING.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            work_id=retry_work_id,
+            message_id=shared_message_id,
+        )
+
+        task_repo = TaskRepository(engine)
+        candidate = task_repo.find_resume_root_candidate_by_active_job(iid)
+        assert candidate is None, (
+            "Retry scenario: CANCELLED parent is owned by the existing "
+            "root route (resume cascade marker). The fallback MUST return "
+            "None — the retry child is claimed via FIFO recovery, NOT "
+            "via this fallback."
+        )
+
+
+def _seed_task_with_work_id(
+    engine: Engine,
+    *,
+    instance_id: str,
+    status: str,
+    task_type: str = TaskType.PROCESS_MESSAGE.value,
+    work_id: str,
+    message_id: str | None = None,
+) -> int:
+    """Insert a Task row with an explicit work_id. Returns the task id."""
+    now = datetime.now(timezone.utc)
+    with Session(engine) as s:
+        task = Task(
+            task_type=task_type,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=status,
+            work_id=work_id,
+            created_at=now,
+            updated_at=now,
+        )
+        s.add(task)
+        s.commit()
+        s.refresh(task)
+        return int(task.id)

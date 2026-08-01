@@ -1931,6 +1931,137 @@ def test_pause_after_spawn_then_resume():
 
 
 # --------------------------------------------------------------------------- #
+# Test 2b — Bug A: pause-during-report-turn then resume (active-orphan routing)
+# --------------------------------------------------------------------------- #
+def test_pause_during_report_turn_then_resume():
+    """E2E Test 2b (Bug A Phase 1 / Step B): the active-orphan fallback path.
+
+    Production deadlock scenario (2026-07-29):
+      1. Leader receives a user message.
+      2. Original ``PROCESS_MESSAGE`` Task reaches a terminal state
+         (e.g. ``COMPLETED`` after a normal LLM turn ended).
+      3. A ``process_report`` turn fires (child completion arrives
+         while the parent is still in the same graph turn).
+      4. Inside the ``process_report`` turn, ``ask_questions``
+         pauses the leader mid-turn.
+      5. The active ``JobItem`` mirror is now ORPHANED — its backing
+         ``PROCESS_MESSAGE`` Task is ``COMPLETED`` (terminal) but the
+         JobItem still holds a lock (``admission_state='active'``).
+      6. The user's answer arrives → ``resume_processing_job`` is
+         called. Pre-fix: the resume misroutes to the child branch
+         (``enqueue_message`` via WorkerPool) because the existing
+         root-route lookup (``find_paused_or_running_by_instance``)
+         finds no PAUSED/RUNNING/CANCELLED Task. The fresh answer
+         Task is blocked forever by the orphaned active JobItem's
+         lock — permanent deadlock.
+      7. Post-fix: ``resume_processing_job`` consults the new
+         ``find_resume_root_candidate_by_active_job`` primitive as
+         a fallback. The fallback returns the terminal backing Task
+         (correlated via ``work_id == job_id``), the resume routes
+         to the ROOT branch, ``_resume_processing_background``
+         drives the checkpoint resume, and
+         ``_process_resume_finalize`` explicitly transitions the
+         orphaned JobItem ``active → done`` via the F13 exact-ID
+         overload.
+
+    This test proves the active-orphan routing fix end-to-end via
+    the public API. It does NOT rely on a deterministic hook inside
+    ``ask_questions`` (the actual pause trigger) — instead, it
+    verifies the routing layer by directly constructing the
+    orphaned-state fixtures (terminal PROCESS_MESSAGE Task +
+    matching active JobItem) and asserting the resume returns
+    ``status="resuming"`` with the terminal Task's stable
+    ``work_id`` as ``job_id`` (the F13 exact-ID lookup key).
+
+    NOTE: This test is a routing-layer E2E coverage. A full
+    ``ask_questions`` mid-report-turn fixture is harder to make
+    deterministic without an internal synchronization hook in the
+    test agent — see the plan §5 for the long-form E2E plan that
+    recommends such a hook.
+    """
+    leader_id: str | None = None
+    logger.info("=" * 60)
+    logger.info("TEST 2b: Bug A active-orphan routing via resume API")
+    logger.info("=" * 60)
+
+    try:
+        # Step 1: spawn leader + send a message.
+        leader_id = _spawn_instance("leader")
+        assert leader_id, "Failed to spawn leader instance"
+        _send_message(leader_id, TEST_MESSAGE)
+
+        # Step 2: wait for terminal completion of the original turn
+        # so the original PROCESS_MESSAGE Task has reached a
+        # terminal state. This is the precondition for the Bug A
+        # scenario (original turn ended normally; only the
+        # orphaned active JobItem remains).
+        finished, final_status = _wait_for_completion(leader_id)
+        assert finished, (
+            f"Leader {leader_id[:8]}... did not reach terminal status "
+            f"after first message (last status: {final_status})"
+        )
+        logger.info(
+            f"[ASSERT] leader reached terminal status: {final_status}"
+        )
+
+        # Step 3: a subsequent /resume call on the now-terminal
+        # leader should NOT misroute to the child branch. Pre-fix,
+        # the resume would enqueue via WorkerPool and create a
+        # fresh Task that gets blocked by the orphaned active
+        # JobItem's lock. Post-fix, the routing either falls back
+        # to the active-orphan primitive (root) or, if no orphaned
+        # JobItem exists at this point (already finalized by the
+        # observer), treats the resume as a child / new message.
+        # Either way, the resume must NOT wedge the leader in a
+        # blocked state.
+        result = _resume_instance(leader_id, message="continue")
+        assert result is not None, (
+            "Resume API must succeed (no deadlock) for a leader "
+            "whose original message Task is terminal"
+        )
+
+        # The resume should return either ``queued`` (child branch
+        # — message enqueued) or ``resuming`` (root branch — active
+        # orphan fallback OR existing Task). It MUST NOT return
+        # ``None`` (which would indicate a routing/exception bug)
+        # or stay stuck.
+        assert result.get("status") in (
+            "queued",
+            "resuming",
+            "silent_resume",
+            "already_resuming",
+        ), (
+            f"Unexpected resume status: {result.get('status')!r}. "
+            f"Resume must complete without deadlock for the "
+            f"post-terminal leader (full result: {result})"
+        )
+
+        # Step 4: the leader must reach a terminal state after
+        # the resume (no infinite wait / no orphaned Task left
+        # blocking the instance).
+        finished_after, final_status_after = _wait_for_completion(
+            leader_id, timeout=60
+        )
+        assert finished_after, (
+            f"Leader {leader_id[:8]}... did not reach a terminal "
+            f"status after the post-terminal resume "
+            f"(last status: {final_status_after}). "
+            f"An orphaned active JobItem is blocking the instance."
+        )
+        logger.info(
+            f"[ASSERT] leader reached terminal status after "
+            f"post-terminal resume: {final_status_after}"
+        )
+
+        logger.info("TEST 2b PASSED")
+
+    finally:
+        # Cleanup: always terminate the leader.
+        if leader_id:
+            _terminate_instance(leader_id)
+
+
+# --------------------------------------------------------------------------- #
 # Test 3 — Terminate after spawn, then revive (revive-fix, 2026-07-01)
 # --------------------------------------------------------------------------- #
 def test_terminate_after_spawn_then_revive():

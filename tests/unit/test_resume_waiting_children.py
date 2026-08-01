@@ -132,9 +132,18 @@ def mock_task_repository():
     Tests override ``find_paused_or_running_by_instance.return_value`` to
     flip the routing: a non-None ``Task`` → root path (checkpoint
     resume); ``None`` → child path (WorkerPool enqueue).
+
+    Phase 1 / Step B (Bug A, Revision 2, 2026-08-01): also
+    pre-configure ``find_resume_root_candidate_by_active_job`` to
+    return ``None`` so the active-orphan fallback does NOT
+    accidentally fire in tests that exercise the child-route.
+    Without this explicit default, ``MagicMock`` would return a
+    truthy ``MagicMock`` and the fallback would route the resume
+    to the root branch even when the test expects the child branch.
     """
     repo = MagicMock()
     repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
+    repo.find_resume_root_candidate_by_active_job = MagicMock(return_value=None)
     return repo
 
 

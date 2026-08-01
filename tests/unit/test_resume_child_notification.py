@@ -105,9 +105,20 @@ def mock_instance_repository():
 
 @pytest.fixture
 def mock_task_repository():
-    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive)."""
+    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive).
+
+    Phase 1 / Step B (Bug A, Revision 2, 2026-08-01): add the
+    ``find_resume_root_candidate_by_active_job`` method to the mock
+    fixture so the active-orphan fallback has a real method to call.
+    Default behavior: returns ``None`` (no active orphan detected),
+    matching the typical case where the resume does NOT trigger the
+    Bug A fallback path.
+    """
     repo = MagicMock()
     repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
+    # Bug A active-orphan fallback — default to None so existing
+    # tests (which expect the child route) continue to pass.
+    repo.find_resume_root_candidate_by_active_job = MagicMock(return_value=None)
     return repo
 
 
@@ -357,3 +368,235 @@ class TestChildNotificationErrorHandling:
 
         # Should NOT call _process_message_with_tracking synchronously
         mock_manager._process_message_with_tracking.assert_not_called()
+
+
+# ─── Phase 1 Bug A / Step B: Manager-level routing tests ─────────────────────
+
+
+class MockTerminalTask:
+    """Mock Task row returned by the active-orphan fallback primitive."""
+
+    def __init__(
+        self,
+        work_id: str = "terminal-task-work-id",
+        status: str = "completed",
+        task_id: int = 42,
+    ):
+        self.work_id = work_id
+        self.status = status
+        self.id = task_id
+        self.task_type = "process_message"
+        self.instance_id = "test-instance"
+        self.message_id = "msg-original"
+
+
+class TestActiveOrphanFallbackRouting:
+    """Manager-level routing tests for the Bug A active-orphan fallback.
+
+    Phase 1 / Step B (Revision 2, 2026-08-01). ``resume_processing_job``
+    must use the new ``find_resume_root_candidate_by_active_job``
+    primitive as a fallback when ``find_paused_or_running_by_instance``
+    returns ``None``. The fallback routes the resume to the ROOT path
+    (not child) so the orphaned JobItem is explicitly finalized via
+    ``_process_resume_finalize`` with the F13 exact-ID overload.
+
+    These tests mock the graph/queue dependencies but exercise the
+    real ``resume_processing_job`` routing logic.
+    """
+
+    @pytest.mark.asyncio
+    async def test_active_orphan_fallback_selects_root(
+        self, instance_manager, mock_manager
+    ):
+        """Active-orphan fallback selects ROOT branch (Bug A incident case).
+
+        When the regular root-route lookup returns None AND the
+        active-orphan fallback finds a terminal PROCESS_MESSAGE Task
+        with matching active JobItem, the manager routes to the ROOT
+        branch — NOT the child branch. The terminal Task's stable
+        ``work_id`` is returned as ``job_id`` for downstream
+        finalization via the F13 exact-ID overload.
+        """
+        instance_id = "active-orphan-instance"
+        terminal_work_id = "orphan-work-id-abc123"
+
+        # Regular root-route lookup: no PAUSED/RUNNING/CANCELLED task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
+        )
+
+        # Active-orphan fallback returns a terminal Task.
+        terminal_task = MockTerminalTask(
+            work_id=terminal_work_id,
+            status="completed",
+            task_id=99,
+        )
+        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+            return_value=terminal_task
+        )
+
+        # Instance exists and is in normal state.
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+            )
+        )
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=False
+        )
+
+        # Must route to ROOT — not enqueue via WorkerPool.
+        mock_manager.enqueue_message.assert_not_called()
+        # Must use the terminal Task's work_id as the job_id for
+        # downstream F13 exact-ID finalization.
+        assert result["job_id"] == terminal_work_id, (
+            "Active-orphan fallback MUST return the terminal Task's "
+            "stable work_id so downstream _process_resume_finalize "
+            "uses the F13 exact-ID overload"
+        )
+        assert result["status"] == "resuming"
+
+        # Fallback primitive was consulted AFTER the regular lookup.
+        mock_manager._task_repo.find_resume_root_candidate_by_active_job.assert_called_once_with(
+            instance_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_selects_child(
+        self, instance_manager, mock_manager
+    ):
+        """Neither lookup matches → child branch (existing behavior)."""
+        instance_id = "ordinary-child-instance"
+
+        # Regular root-route: None
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
+        )
+        # Active-orphan fallback: None
+        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+            return_value=None
+        )
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=False
+        )
+
+        # Routes to child — enqueues via WorkerPool.
+        mock_manager.enqueue_message.assert_called_once()
+        assert result["status"] == "queued"
+        assert result["job_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_existing_resumable_task_takes_precedence_over_fallback(
+        self, instance_manager, mock_manager
+    ):
+        """Existing resumable Task wins; fallback MUST NOT be consulted.
+
+        When ``find_paused_or_running_by_instance`` returns a Task
+        (the normal pause-then-resume case), the existing route owns
+        the routing decision. The active-orphan fallback is a
+        SECONDARY detector and must not interfere.
+        """
+        instance_id = "regular-paused-instance"
+        existing_job_id = "existing-job-xyz"
+
+        # Regular root-route returns a Task.
+        existing_task = MockJob(job_id=existing_job_id)
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=existing_task
+        )
+
+        # Active-orphan fallback MUST NOT be called (per
+        # ``find_resume_root_candidate_by_active_job`` design — it
+        # short-circuits internally if a PAUSED/RUNNING/CANCELLED
+        # Task exists).
+        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+            return_value=None
+        )
+
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+            )
+        )
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume"
+        )
+
+        # Routes to ROOT via existing route.
+        assert result["status"] == "resuming"
+        assert result["job_id"] == existing_job_id
+
+    @pytest.mark.asyncio
+    async def test_concurrent_resume_dedup_on_fallback_path(
+        self, instance_manager, mock_manager
+    ):
+        """W4 case 5: concurrent graph_tasks dedup works on the fallback path.
+
+        If the active-orphan instance is already being resumed in
+        ``_graph_tasks`` (another concurrent resume is in flight),
+        the fallback path MUST deduplicate (return
+        ``already_resuming``) rather than start a second graph turn.
+        """
+        instance_id = "concurrent-orphan-instance"
+        terminal_work_id = "orphan-work-id-concurrent"
+        existing_job_id = "orphan-work-id-concurrent"  # same value
+
+        # No resumable task, but the fallback returns a terminal.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
+        )
+        terminal_task = MockTerminalTask(
+            work_id=terminal_work_id,
+            status="completed",
+        )
+        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+            return_value=terminal_task
+        )
+
+        # Pre-populate _graph_tasks with an in-flight resume.
+        existing_task = MagicMock()
+        existing_task.done = MagicMock(return_value=False)
+        instance_manager._graph_tasks[instance_id] = existing_task
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume"
+        )
+
+        # Dedup kicks in BEFORE the routing decision.
+        assert result["status"] == "already_resuming"
+        assert result["job_id"] == terminal_work_id
+
+    @pytest.mark.asyncio
+    async def test_silent_cascade_resume_child_returns_silent_resume(
+        self, instance_manager, mock_manager
+    ):
+        """W4 case 4: silent cascade-resume for a child remains a no-op.
+
+        A cascade-resume with ``silent=True`` for an ordinary child
+        (no resumable Task, no active orphan) must still return
+        ``silent_resume`` without enqueuing any message. The fallback
+        primitive MUST return None for ordinary children.
+        """
+        instance_id = "silent-child-instance"
+
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
+        )
+        mock_manager._task_repo.find_resume_root_candidate_by_active_job = MagicMock(
+            return_value=None
+        )
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=True
+        )
+
+        # Silent cascade-resume: no enqueue, no JobItem mirror.
+        mock_manager.enqueue_message.assert_not_called()
+        assert result["status"] == "silent_resume"
+        assert result["job_id"] is None
+        assert result["message_id"] is None

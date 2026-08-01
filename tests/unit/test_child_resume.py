@@ -74,9 +74,16 @@ def mock_instance_repository():
 
 @pytest.fixture
 def mock_task_repository():
-    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive)."""
+    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive).
+
+    Phase 1 / Step B (Bug A, Revision 2, 2026-08-01): also
+    pre-configure ``find_resume_root_candidate_by_active_job`` to
+    return ``None`` so the active-orphan fallback does NOT fire
+    in tests that exercise the child route.
+    """
     repo = MagicMock()
     repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
+    repo.find_resume_root_candidate_by_active_job = MagicMock(return_value=None)
     return repo
 
 

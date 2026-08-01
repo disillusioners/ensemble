@@ -4881,10 +4881,70 @@ class InstanceManager:
             instance_id,
         )
 
+        # Phase 1 / Step B (Bug A, Revision 2, 2026-08-01):
+        # Active-orphan fallback. When the regular root-route lookup
+        # returns None AND there is still an ``active`` JobItem on the
+        # instance whose original PROCESS_MESSAGE Task has reached a
+        # terminal state, the most likely explanation is the Bug A
+        # incident state: a ``process_report`` turn is in flight,
+        # the original message Task is terminal, and the JobItem is
+        # orphaned (holding a lock without a live backing Task). The
+        # fallback routes the resume to the ROOT path (via the
+        # terminal Task's stable ``work_id``), letting
+        # ``_resume_processing_background`` + ``_process_resume_finalize``
+        # explicitly finalize the JobItem ``active → done`` and
+        # release the lock.
+        #
+        # The fallback routes to ROOT (not child) because the
+        # JobItem's lock is real and the existing root-checkpoint
+        # resume path is the correct cleanup. A child-branch
+        # enqueue would race the orphaned JobItem's lock.
+        #
+        # Logged separately as ``root_active_orphan`` so future
+        # operators can correlate the Bug A fix with its actual
+        # incident rate.
+        if existing_task is None:
+            existing_task = await asyncio.to_thread(
+                self._task_repo.find_resume_root_candidate_by_active_job,
+                instance_id,
+            )
+            if existing_task is not None:
+                logger.info(
+                    f"[RESUME] instance={instance_id[:8]} "
+                    f"active-orphan fallback hit: terminal task "
+                    f"work_id={existing_task.work_id[:8]}... "
+                    f"status={existing_task.status} "
+                    f"will route through ROOT cleanup path "
+                    f"(B5 W2 finalize via exact-ID overload)"
+                )
+
+        # Determine the route reason for structured logging.
+        # ``root_existing_task`` = regular PAUSED/RUNNING/CANCELLED
+        # route; ``root_active_orphan`` = Bug A fallback; ``child``
+        # = neither matched.
+        if existing_task is not None:
+            # Distinguish via a flag — we don't have direct visibility
+            # into which lookup produced the result. We use the
+            # ``active_orphan`` marker for the Bug A case by checking
+            # whether the task's status is in the terminal set AND
+            # there's a non-deleted active JobItem on the instance
+            # correlating via work_id == job_id.
+            from daemon.repositories.task.models import TaskStatus
+            if existing_task.status in (
+                TaskStatus.COMPLETED.value,
+                TaskStatus.FAILED.value,
+            ):
+                route_reason = "root_active_orphan"
+            else:
+                route_reason = "root_existing_task"
+        else:
+            route_reason = "child"
+
         logger.info(
             f"[RESUME] instance={instance_id[:8]} "
             f"existing_task_id={existing_task.id if existing_task else None}, "
-            f"branch={'root' if existing_task else 'child'}"
+            f"branch={'root' if existing_task else 'child'}, "
+            f"route_reason={route_reason}"
         )
 
         # Deduplication: prevent multiple concurrent resume tasks for the same instance

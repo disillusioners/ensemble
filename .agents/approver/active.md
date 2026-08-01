@@ -1,5 +1,5 @@
-Current Plan: Context Injection Restructure
-Tracking File: context-injection-restructure-tracking.md
-Iteration: 003
-Status: APPROVED
-Last Updated: 2026-07-28 04:10
+Current Plan: Fix Pause-During-Report-Turn Orphan JobItem
+Tracking File: fix-pause-report-turn-orphan-tracking.md
+Iteration: 002
+Status: IN_PROGRESS
+Last Updated: 2026-08-01 05:55

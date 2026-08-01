@@ -1070,12 +1070,14 @@ class JobFeedbackObserver:
         # ``_process_resume_finalize`` method also calls
         # ``_finalize_job`` from the resume path. Both paths converge
         # on this single line — the ``_finalize_job_db_sync`` atomic
-        # transition ``WHERE status = 'processing'`` ensures only the
-        # first writer wins, so a racing lifecycle event + resume
-        # finalize cannot double-transition. The second caller's
-        # ``atomic_transition`` raises ``InvalidTransitionError`` and
-        # the helper short-circuits via the existing
-        # ``except InvalidTransitionError`` branch below.
+        # transition (using ``admission_state IN ('active','queued',
+        # 'paused')`` per Phase 3 admission-state migration; see
+        # ``_resolve_finalize_status`` and the canonical
+        # ``_ACTIVE_JOB_IDS_SUBQUERY`` in ``lock_repository.py``)
+        # ensures only the first writer wins, so a racing lifecycle
+        # event + resume finalize cannot double-transition. The second
+        # caller's transition rowcount drops to 0 and the helper
+        # short-circuits via the existing ``skip=True`` branch.
         status_to_finalize, error_for_finalize = _resolve_finalize_status(
             bus, instance_id, status, error
         )
@@ -1887,7 +1889,11 @@ class JobFeedbackObserver:
         Double-finalize prevention: both this method and
         :meth:`_process_event` call :meth:`_finalize_job`, which
         delegates to ``_finalize_job_db_sync`` whose atomic
-        transition uses ``WHERE status = 'processing'``. If a
+        transition uses ``admission_state IN ('active','queued',
+        'paused')`` per the Phase 3 admission-state migration (the
+        ``WHERE status = 'processing'`` legacy predicate was
+        retired; see ``_ACTIVE_JOB_IDS_SUBQUERY`` in
+        ``lock_repository.py`` for the canonical form). If a
         lifecycle event-driven finalize lands first, the second
         caller's transition rowcount drops to 0 and the helper
         returns ``skip=True`` — only the first writer wins.
@@ -1901,12 +1907,20 @@ class JobFeedbackObserver:
         Args:
             instance_id: The instance whose resume graph turn just
                 completed.
-            job_id: The job_id (for logging/fallback; the
-                authoritative job is looked up via
-                :meth:`_get_processing_job_for_instance`).
-                Phase 2.5 (Task 2.5.2): after D13, ``job_id`` is
-                the WorkerPool Task ID (a stringified int), NOT a
-                ``JobItem.job_id``. The lookup helper may return
+            job_id: AUTHORITATIVE when provided — the JobItem ID
+                (``JobItem.job_id``, UUID4 string) to resolve via the
+                F13 exact-ID overload of
+                :meth:`_get_processing_job_for_instance`. The Bug A
+                active-orphan fallback path (Phase 1 / Step B,
+                Revision 2, 2026-08-01) passes the terminal backing
+                Task's stable ``work_id`` (which equals the JobItem's
+                ``job_id`` via the linkage contract) so the F13
+                overload resolves the correct JobItem when multiple
+                historical rows exist for the instance. Pass
+                ``None`` to fall back to the legacy freshest-by-
+                ``created_at`` ordering (used when no canonical
+                JobItem ID is available — e.g. pure post-D13 MESSAGE
+                path). The lookup helper may still return
                 ``ctx.job_id=None`` when no JobItem exists for the
                 instance — the terminal transition still fires
                 through ``_finalize_job_db_sync`` Steps 2+3 (instance
@@ -1942,7 +1956,24 @@ class JobFeedbackObserver:
         # post-D13 world, ``ctx`` is non-None whenever the instance
         # row exists (the helper returns a context with
         # ``job_id=None`` when no JobItem exists, instead of None).
-        ctx = await self._get_processing_job_for_instance(instance_id)
+        #
+        # Phase 1 / Step B / W2 fix (Bug A, Revision 2, 2026-08-01):
+        # when ``job_id`` is supplied (the terminal backing Task's
+        # ``work_id`` from the active-orphan fallback path), pass it
+        # to the lookup so the F13 exact-ID overload at
+        # :meth:`_get_processing_job_for_instance` resolves the
+        # JobItem by exact ID. This prevents the F13 wrong-sibling
+        # bug when multiple historical rows exist for the instance
+        # (e.g. an orphaned active JobItem AND a fresh active
+        # JobItem from a sibling request) — without the exact-ID
+        # filter, the freshest-by-``created_at`` ordering could
+        # return the wrong row and finalize the WRONG JobItem.
+        # The threading fix improves finalize safety for ALL
+        # callers (not just the active-orphan path) — any caller
+        # that has the Task's stable ``work_id`` can now pass it.
+        ctx = await self._get_processing_job_for_instance(
+            instance_id, job_id=job_id
+        )
         if ctx is None:
             logger.debug(
                 f"_process_resume_finalize: lookup failed for instance "
