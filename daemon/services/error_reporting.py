@@ -262,14 +262,18 @@ class ErrorReportingService:
                             f"bus callback owns completion"
                         )
                     else:
-                        # Graceful degradation: keep the original inline
-                        # logic with SELECT COUNT(*) fallback. This path
-                        # is also the one exercised by tests that do not
-                        # wire a CM fixture.
-                        # Check if parent has any pending messages
-                        parent_pending = session.exec(
-                            select(func.count())
-                            .select_from(MessageQueue)
+                        # (dead-code fallback — bus-active path bypasses)
+                        # Phase 2 hardening: ``parent_pending`` uses the
+                        # shared positive-polarity predicate so terminal
+                        # backing work does not block parent completion.
+                        # The reachable production site is
+                        # ``child_reports.py:1459``; this is future-proofing
+                        # for any code path that bypasses the bus.
+                        from ..repositories.message_queue.predicates import (
+                            message_queue_counts_as_pending,
+                        )
+                        _fallback_candidates_3 = session.exec(
+                            select(MessageQueue)
                             .where(MessageQueue.instance_id == parent.instance_id)
                             .where(
                                 MessageQueue.status.in_(
@@ -280,7 +284,13 @@ class ErrorReportingService:
                                     ]
                                 )
                             )
-                        ).scalar_one()
+                        ).scalars().all()
+                        parent_pending = sum(
+                            1
+                            for _r in _fallback_candidates_3
+                            if message_queue_counts_as_pending(_r, self._manager.engine)
+                        )
+                        del _fallback_candidates_3
 
                         if parent_pending == 0:
                             # No pending messages, parent is truly complete

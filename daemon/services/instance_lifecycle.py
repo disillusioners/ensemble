@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from langgraph.graph.state import CompiledStateGraph
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import Integer, bindparam, select, text
 from sqlmodel import Session
 
 from ..cancellation import CancellationReason
@@ -22,6 +22,7 @@ from ..repositories.dependency_bus.models import (
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
 from ..repositories.job_queue.models import AdmissionState
+from ..repositories.message_queue.models import MessageStatus, MessageType
 from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
@@ -164,6 +165,14 @@ class _CascadeUpdateResult(NamedTuple):
     skipped_ids: list[str]        # IDs that were already in target status
     agent_ids_by_instance: dict[str, str | None]
     cancelled_task_ids: list[int] = []  # task IDs cancelled by resume cascade (UPDATE 2)
+    # Phase 2 (Bug B): the work_ids/message_ids returned by UPDATE 2's
+    # RETURNING clause. UPDATE 4 (cascade-scoped ``completion_report``
+    # reconciliation) consumed these as its sole eligibility input; the
+    # fields are exposed for structured logging and the post-reconcile
+    # re-fire (Task 17 / A5.1).
+    cancelled_task_work_ids: list[str] = []
+    cancelled_task_message_ids: list[str | None] = []
+    reconciled_message_ids: list[str] = []  # message_queue rows reconciled by UPDATE 4
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
@@ -3290,6 +3299,136 @@ status=InstanceStatus.IDLE.value,
             )
             return 0
 
+    def _post_reconcile_completion_refire(
+        self,
+        *,
+        engine,
+        write_guard,
+        tree_ids: list[str],
+    ) -> None:
+        """Phase 2 A5.1: post-reconcile completion re-fire.
+
+        For each instance in ``tree_ids`` whose ``message_queue``
+        ``pending_count`` (per the shared positive-polarity predicate)
+        is now 0 AFTER the cascade has reconciled the orphan rows,
+        synchronously call
+        ``ChildReportsService._process_child_completion_db_sync`` to
+        re-evaluate the parent-completion guard. The function's
+        idempotency guards at ``child_reports.py:1212-1219`` make
+        this safe: a re-entry on a terminal/paused instance is a
+        no-op.
+
+        This self-heals the production failure (parent stuck at
+        ``WAITING_CHILDREN`` after pause/resume during a
+        ``process_report`` turn) WITHOUT requiring the operator to
+        run the Phase 2.5 cleanup. Historical stuck instances
+        (orphaned before this fix shipped) still need the cleanup
+        script — the re-fire has nothing to attach to for an
+        already-stuck instance.
+
+        NOTE: This is the SYNC half of the re-fire. The async
+        ``_dispatch_post_commit_side_effects`` (SSE, CompletionRegistry,
+        bus ``emit_terminal_for_child_instance``) fires on the event
+        loop in the async caller once the sync helper returns the
+        ``_ChildCompletionDbResult`` outcome. We do NOT call the bus
+        emit directly here — running an async coroutine from a worker
+        thread that has no event loop is a deadlock hazard. The
+        outcome from the sync helper is sufficient for the async
+        caller to fire the appropriate side effects on the next
+        ``asyncio.to_thread`` return.
+
+        Args:
+            engine: The SQLAlchemy engine.
+            write_guard: The shared ``WritePauseGuard`` (unused here
+                but kept for symmetry with other cascade helpers; the
+                sync helper opens its own ``WriteGuardSession``).
+            tree_ids: The instance IDs whose orphan rows were just
+                reconciled by UPDATE 4.
+        """
+        from sqlmodel import Session, select
+
+        from ..repositories.message_queue.models import (
+            MessageQueue,
+            MessageStatus,
+        )
+        from ..repositories.message_queue.predicates import (
+            message_queue_counts_as_pending,
+        )
+        from .child_reports import ChildReportsService
+
+        child_reports = ChildReportsService(self._manager)
+
+        for instance_id in tree_ids:
+            try:
+                # Evaluate ``pending_count`` via the shared predicate
+                # for the current state of this instance's own queue.
+                # The base status filter mirrors ``child_reports.py:1459``.
+                with Session(engine) as session:
+                    candidates = list(
+                        session.exec(
+                            select(MessageQueue).where(
+                                MessageQueue.instance_id == instance_id,
+                                MessageQueue.status.in_([
+                                    MessageStatus.READY.value,
+                                    MessageStatus.PROCESSING.value,
+                                    MessageStatus.RETRYING.value,
+                                ]),
+                            )
+                        )
+                    )
+                pending_count = sum(
+                    1
+                    for row in candidates
+                    if message_queue_counts_as_pending(row, engine)
+                )
+                if pending_count > 0:
+                    # Parent still has live own-queue work — leave
+                    # it alone; the next natural child-completion
+                    # event will re-fire.
+                    continue
+
+                # No pending own-queue work. Re-fire the completion
+                # check via the existing sync helper. The helper
+                # runs the same WriteGuardSession path as the
+                # normal child-completion flow; ``completed_message_
+                # id=None`` and ``last_content=""`` are supported
+                # values per the function's signature. The
+                # idempotency guards at ``child_reports.py:1212-1219``
+                # short-circuit if the instance is already in a
+                # terminal state — protects against double-fire.
+                logger.info(
+                    "resume_cascade_db_sync: post-reconcile re-fire "
+                    "for instance %s (pending_count=0 after UPDATE 4)",
+                    instance_id[:8],
+                )
+                # We invoke the sync helper directly; it is the
+                # minimal primitive for re-evaluation. The async
+                # caller (``resume_instance_cascade``) does not see
+                # this outcome directly, but the state changes
+                # (e.g. ``instances.status=COMPLETED``) commit and
+                # the next event-loop tick will see them.
+                result = child_reports._process_child_completion_db_sync(
+                    instance_id=instance_id,
+                    completed_message_id=None,
+                    last_content="",
+                )
+                logger.info(
+                    "resume_cascade_db_sync: post-reconcile re-fire "
+                    "for %s returned outcome=%s",
+                    instance_id[:8],
+                    result.outcome,
+                )
+            except Exception as e:
+                # Per-instance: never propagate; one instance's
+                # failure must not block the others.
+                logger.warning(
+                    "resume_cascade_db_sync: post-reconcile re-fire "
+                    "failed for instance %s (%s: %s)",
+                    instance_id[:8],
+                    type(e).__name__,
+                    e,
+                )
+
     def _resume_cascade_db_sync(
         self,
         engine,
@@ -3353,6 +3492,9 @@ status=InstanceStatus.IDLE.value,
                 skipped_ids=[],
                 agent_ids_by_instance={},
                 cancelled_task_ids=[],
+                cancelled_task_work_ids=[],
+                cancelled_task_message_ids=[],
+                reconciled_message_ids=[],
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -3445,7 +3587,7 @@ status=InstanceStatus.IDLE.value,
                     "    error = :error_msg "
                     "WHERE instance_id IN :tree_ids "
                     "  AND status = :paused_status "
-                    "RETURNING id"
+                    "RETURNING id, work_id, message_id"
                 ).bindparams(
                     bindparam("tree_ids", expanding=True),
                 ),
@@ -3460,7 +3602,392 @@ status=InstanceStatus.IDLE.value,
                     "tree_ids": tree_ids,
                 },
             ).fetchall()
-            cancelled_task_ids = [int(row[0]) for row in cancelled_task_rows] 
+            cancelled_task_ids = [int(row[0]) for row in cancelled_task_rows]
+            # Phase 2 (Bug B): the RETURNING projection now also captures
+            # ``work_id`` and ``message_id`` for each cancelled Task.
+            # UPDATE 4 (cascade-scoped ``completion_report`` reconciliation)
+            # consumes this returned set as its ONLY source of eligibility
+            # — historical Tasks that were already ``cancelled`` BEFORE
+            # this resume cascade are intentionally excluded (C4 in the
+            # Phase 2 plan). The returned rows are also returned to the
+            # async caller via the new ``_CascadeUpdateResult`` fields
+            # for logging and the post-reconcile re-fire (Task 17).
+            cancelled_task_work_ids: list[str] = [
+                str(row[1]) for row in cancelled_task_rows
+            ]
+            cancelled_task_message_ids: list[str | None] = [
+                row[2] for row in cancelled_task_rows
+            ]
+
+            # ─── UPDATE 4 (Phase 2, Bug B): reconcile orphaned
+            # ``processing``/``retrying`` ``completion_report`` rows tied
+            # to the Tasks this cascade just cancelled.
+            #
+            # Production failure shape (see
+            # ``docs/bugs/pause-during-report-turn-orphans-message-jobitem.md``):
+            #   * a ``process_report`` Task is in flight on a parent
+            #     instance when pause fires;
+            #   * the pause cascade transitions the Task to ``paused``;
+            #   * the resume cascade transitions it to ``cancelled`` (per
+            #     UPDATE 2 above) but the corresponding
+            #     ``message_queue.completion_report`` row stays at
+            #     ``status='processing'`` (the parent is mid-turn when
+            #     pause fires — see A5.2 in the Phase 2 plan);
+            #   * the parent own-queue ``pending_count`` guard at
+            #     ``child_reports.py:1459`` counts that orphaned row
+            #     forever → the parent instance is permanently stuck at
+            #     ``WAITING_CHILDREN``.
+            #
+            # UPDATE 4 reconciles ONLY the ``completion_report`` rows
+            # whose backing work is the Tasks this cascade cancelled.
+            # Eligibility starts from the ``cancelled_task_work_ids`` /
+            # ``cancelled_task_message_ids`` sets above — historical
+            # terminal Tasks (cancelled before this cascade) are
+            # intentionally not eligible (C4). The reconciliation
+            # also requires the queue row to currently be
+            # ``processing`` or ``retrying`` (C5 — terminal queue
+            # rows are skipped).
+            #
+            # The competing-live subquery in the NULL-fallback branch
+            # (no candidate ``processing_task_id``) excludes
+            # ``ct.work_id`` from the live-work check via
+            # ``state.work_id <> ct.work_id`` — this is **load-bearing
+            # for cross-engine parity** (Phase 2 plan §A2 + Task 18):
+            # under PostgreSQL READ COMMITTED the data-modifying CTE
+            # substatements share one snapshot taken before the CTE's
+            # first UPDATE, so without the exclusion the competing-live
+            # subquery re-reads the just-cancelled Task as ``PAUSED``
+            # and falsely blocks reconciliation. On SQLite the
+            # subquery sees the post-UPDATE ``cancelled`` state, so
+            # the exclusion is a no-op there.
+            #
+            # Placement: immediately AFTER UPDATE 2 (Task cancellation)
+            # and BEFORE UPDATE 3 (JobItem activation), so the
+            # reconciliation commits BEFORE the JobItem is eligible
+            # for re-claim — preventing a race where the worker
+            # re-claims the JobItem and observes the still-orphaned
+            # ``processing`` queue row.
+            #
+            # Atomicity: UPDATE 4 runs inside the same
+            # ``WriteGuardSession`` as UPDATE 1, UPDATE 2, and UPDATE
+            # 3 — all-or-nothing commit. ``WriteGuardSession`` is
+            # NOT a cross-connection mutex; PostgreSQL concurrency
+            # correctness comes from the statement-local CTE
+            # returned set and guarded row updates.
+            if cancelled_task_ids:
+                reconciled_message_ids: list[str] = []
+                direct_match_count = 0
+                fallback_match_count = 0
+                # Build the tuples list once — used by both the
+                # PostgreSQL CTE (as 3 expanding arrays) and the
+                # SQLite branch (as a Python list iterated to
+                # build the candidate message_id set).
+                tuples_list: list[tuple[int, str, str | None]] = []
+                for i, task_id in enumerate(cancelled_task_ids):
+                    tuples_list.append(
+                        (
+                            task_id,
+                            cancelled_task_work_ids[i],
+                            cancelled_task_message_ids[i],
+                        )
+                    )
+                if engine.dialect.name == "postgresql":
+                    # ─── PostgreSQL: data-modifying CTE ────────────────
+                    # One statement that combines Task cancellation
+                    # (already committed via UPDATE 2 above in a separate
+                    # statement) and the message_queue reconciliation.
+                    # The CTE is the scope-bounded reconciliation
+                    # primitive on PostgreSQL.
+                    #
+                    # Implementation note: UPDATE 2 above is a standalone
+                    # ``UPDATE task ... RETURNING id, work_id, message_id``
+                    # statement (the existing Phase 3 / W2 contract).
+                    # UPDATE 4 below is a SEPARATE data-modifying CTE
+                    # that reads the (now updated) ``task`` table —
+                    # NOT a CTE that re-runs UPDATE 2. The plan's CTE
+                    # sketch (§A1) is an *implementation sketch*; the
+                    # actual production shape splits the two UPDATEs
+                    # because Phase 3 / W2 already established UPDATE
+                    # 2's signature and the cascade has multiple
+                    # post-cascade consumers (the async caller, the
+                    # re-fire, the structured logs) that depend on
+                    # the cancelled Task list. The CTE form of
+                    # UPDATE 4 still scopes reconciliation to the
+                    # returned cancellation set (via the
+                    # ``cancelled_task_*`` parameters passed below).
+                    # PostgreSQL: data-modifying CTE. We use the
+                    # ``VALUES (...), (...), ...`` literal-row form
+                    # because ``unnest(:array)`` has known issues with
+                    # SQLAlchemy expanding bindparam for typed columns
+                    # (smallint/integer/bigint mismatch). The literal
+                    # form is portable, parameter-safe, and produces
+                    # the same query plan.
+                    if tuples_list:
+                        # Build the VALUES literal. Each tuple is
+                        # ``(id, work_id, message_id)``; message_id
+                        # may be NULL. We use CAST to keep the
+                        # parameterised shape safe.
+                        values_rows_sql = ", ".join(
+                            f"(:ct_id_{i}, :ct_wid_{i}, :ct_mid_{i})"
+                            for i, _ in enumerate(tuples_list)
+                        )
+                        pg_cte = text(
+                            f"""
+                            WITH cancelled AS (
+                                SELECT id::int, work_id, message_id
+                                  FROM (VALUES {values_rows_sql})
+                                  AS t(id, work_id, message_id)
+                            ),
+                            reconciled_messages AS (
+                                UPDATE message_queue AS mq
+                                   SET status = :completed_status,
+                                       completed_at = :now_iso,
+                                       last_activity_at = :now_iso,
+                                       processing_task_id = NULL,
+                                       error_message = COALESCE(
+                                           error_message, ''
+                                       ) || :error_suffix
+                                 WHERE mq.instance_id IN :tree_ids
+                                   AND mq.type = :completion_report_type
+                                   AND mq.status IN (
+                                       :processing_status, :retrying_status
+                                   )
+                                   AND EXISTS (
+                                       SELECT 1 FROM cancelled ct
+                                        WHERE (
+                                            ct.message_id IS NOT NULL
+                                            AND mq.processing_task_id IS NULL
+                                            AND ct.message_id = mq.message_id
+                                            AND NOT EXISTS (
+                                                SELECT 1 FROM task state
+                                                 WHERE state.work_id <> ct.work_id
+                                                   AND state.message_id = mq.message_id
+                                                   AND state.status IN (
+                                                       :pending_status,
+                                                       :running_status,
+                                                       :paused_status
+                                                   )
+                                            )
+                                        )
+                                        OR (
+                                            mq.processing_task_id IS NOT NULL
+                                            AND CAST(mq.processing_task_id AS INTEGER)
+                                                = CAST(ct.id AS INTEGER)
+                                        )
+                                   )
+                                 RETURNING mq.message_id
+                            )
+                            SELECT message_id FROM reconciled_messages
+                            """
+                        ).bindparams(
+                            bindparam("tree_ids", expanding=True),
+                        )
+                        pg_params: dict[str, Any] = {
+                            "completed_status": MessageStatus.COMPLETED.value,
+                            "now_iso": now_iso,
+                            "error_suffix": (
+                                "manual-Phase2-resume: orphaned "
+                                "completion_report; backing work "
+                                "cancelled by resume cascade"
+                            ),
+                            "tree_ids": tree_ids,
+                            "completion_report_type": (
+                                MessageType.COMPLETION_REPORT.value
+                            ),
+                            "processing_status": (
+                                MessageStatus.PROCESSING.value
+                            ),
+                            "retrying_status": (
+                                MessageStatus.RETRYING.value
+                            ),
+                            "pending_status": TaskStatus.PENDING.value,
+                            "running_status": TaskStatus.RUNNING.value,
+                            "paused_status": TaskStatus.PAUSED.value,
+                        }
+                        for i, (tid, wid, mid) in enumerate(tuples_list):
+                            pg_params[f"ct_id_{i}"] = tid
+                            pg_params[f"ct_wid_{i}"] = wid
+                            pg_params[f"ct_mid_{i}"] = mid
+                        pg_result_rows = session.execute(
+                            pg_cte, pg_params
+                        ).fetchall()
+                        reconciled_message_ids = [
+                            str(row[0]) for row in pg_result_rows
+                        ]
+                else:
+                    # ─── SQLite: separate statements (RETURNING) ───────
+                    # SQLite 3.35+ supports ``RETURNING`` so UPDATE 4
+                    # can capture the reconciled ``message_id``s in the
+                    # same single-writer transaction. The competing-live
+                    # subquery is the same shape as the PostgreSQL CTE
+                    # but the ``state.work_id <> ct.work_id`` exclusion
+                    # is a no-op (SQLite reads the post-UPDATE state).
+                    # The reconciliation is per returned (id, work_id,
+                    # message_id) tuple — issued as a single batched
+                    # UPDATE keyed on the message_id set so SQLite's
+                    # single-writer model preserves atomicity.
+                    #
+                    # We collect the set of message_ids whose
+                    # ``completion_report`` rows are eligible, then
+                    # perform ONE batched UPDATE that marks them
+                    # ``completed``. The candidate selection mirrors
+                    # the PostgreSQL CTE's WHERE clause exactly.
+                    #
+                    # CRITICAL: the competing-live check is performed
+                    # using the SAME outer session — NOT a separate
+                    # ``Session(engine)`` — because on SQLite the
+                    # StaticPool shares the connection across sessions,
+                    # and opening a second session on the same
+                    # connection would commit / close the outer
+                    # transaction's pending changes when the inner
+                    # session's ``__exit__`` ran. Using the outer
+                    # session preserves the all-or-nothing commit.
+                    candidate_message_ids: list[str] = []
+                    for _idx, (task_id, work_id, task_msg_id) in enumerate(
+                        zip(
+                            cancelled_task_ids,
+                            cancelled_task_work_ids,
+                            cancelled_task_message_ids,
+                        )
+                    ):
+                        if task_msg_id is None:
+                            continue
+                        # Single-statement competing-live check using
+                        # the OUTER session so we stay inside the
+                        # same transaction. The SQL mirrors the
+                        # PostgreSQL CTE's WHERE clause exactly (the
+                        # ``work_id <> ct.work_id`` exclusion is a
+                        # no-op on SQLite — its single-writer model
+                        # already sees the post-UPDATE state — but
+                        # the SQL is identical for cross-DB parity).
+                        competing_live_rows = session.execute(
+                            text(
+                                """
+                                SELECT 1
+                                  FROM task
+                                 WHERE work_id <> :exclude_work_id
+                                   AND message_id = :msg_id
+                                   AND status IN (
+                                       :pending_status,
+                                       :running_status,
+                                       :paused_status
+                                   )
+                                 LIMIT 1
+                                """
+                            ),
+                            {
+                                "exclude_work_id": work_id,
+                                "msg_id": task_msg_id,
+                                "pending_status": (
+                                    TaskStatus.PENDING.value
+                                ),
+                                "running_status": (
+                                    TaskStatus.RUNNING.value
+                                ),
+                                "paused_status": (
+                                    TaskStatus.PAUSED.value
+                                ),
+                            },
+                        ).fetchone()
+                        competing_live = competing_live_rows is not None
+                        if competing_live:
+                            # Mixed attempt (ambiguous retry) — preserve.
+                            continue
+                        candidate_message_ids.append(task_msg_id)
+                        # All production scenarios are NULL-fallback
+                        # (``processing_task_id`` is never populated by
+                        # any producer today). Direct path is dead code
+                        # in production — counted in Task 1's
+                        # defensive non-NULL test.
+                        direct_match_count += 0
+                        fallback_match_count += 1
+
+                    if candidate_message_ids:
+                        # De-duplicate: the same message_id may have
+                        # been referenced by multiple cancelled Tasks
+                        # (schedule_retry reuses message_id; the same
+                        # work_id never appears twice in the returned
+                        # set because the UPDATE 2 predicate is
+                        # ``status='paused'`` and a Task can only be
+                        # paused once).
+                        unique_msg_ids = list(
+                            dict.fromkeys(candidate_message_ids)
+                        )
+                        result = session.execute(
+                            text(
+                                """
+                                UPDATE message_queue
+                                   SET status = :completed_status,
+                                       completed_at = :now_iso,
+                                       last_activity_at = :now_iso,
+                                       processing_task_id = NULL,
+                                       error_message = COALESCE(
+                                           error_message, ''
+                                       ) || :error_suffix
+                                 WHERE instance_id IN :tree_ids
+                                   AND type = :completion_report_type
+                                   AND status IN (
+                                       :processing_status, :retrying_status
+                                   )
+                                   AND message_id IN :msg_ids
+                                 RETURNING message_id
+                                """
+                            ).bindparams(
+                                bindparam("tree_ids", expanding=True),
+                                bindparam("msg_ids", expanding=True),
+                            ),
+                            {
+                                "completed_status": (
+                                    MessageStatus.COMPLETED.value
+                                ),
+                                "now_iso": now_iso,
+                                "error_suffix": (
+                                    "manual-Phase2-resume: orphaned "
+                                    "completion_report; backing work "
+                                    "cancelled by resume cascade"
+                                ),
+                                "tree_ids": tree_ids,
+                                "completion_report_type": (
+                                    MessageType.COMPLETION_REPORT.value
+                                ),
+                                "processing_status": (
+                                    MessageStatus.PROCESSING.value
+                                ),
+                                "retrying_status": (
+                                    MessageStatus.RETRYING.value
+                                ),
+                                "msg_ids": unique_msg_ids,
+                            },
+                        ).fetchall()
+                        reconciled_message_ids = [
+                            str(row[0]) for row in result
+                        ]
+                # Phase 2 Task 5: structured logging of the
+                # cancellation/reconciliation. Logs the cancelled
+                # Task work IDs and the reconciled message IDs so
+                # operators can audit which rows the cascade touched.
+                logger.info(
+                    "resume_cascade_db_sync: cancelled %d task(s) "
+                    "[work_ids=%s], reconciled %d message_queue row(s) "
+                    "[message_ids=%s] "
+                    "(direct=%d, fallback=%d, skipped_ambiguous=%d)",
+                    len(cancelled_task_ids),
+                    cancelled_task_work_ids,
+                    len(reconciled_message_ids),
+                    reconciled_message_ids,
+                    direct_match_count,
+                    fallback_match_count,
+                    len(cancelled_task_ids) - len(reconciled_message_ids),
+                )
+            else:
+                reconciled_message_ids = []
+                direct_match_count = 0
+                fallback_match_count = 0
+                # Phase 2 Task 5: log when nothing was cancelled.
+                logger.info(
+                    "resume_cascade_db_sync: no tasks cancelled by "
+                    "this cascade (nothing to reconcile)"
+                )
 
             # ─── UPDATE 3: job_queue_items → ACTIVE (resume mirror) ────
             # RF3 (2026-07-06): Phase 4 removed the JobItem PAUSED → ACTIVE
@@ -3526,9 +4053,68 @@ status=InstanceStatus.IDLE.value,
             # underlying ``Session.close``.
             session.commit()
 
+        # ─── Phase 2 A5.1: post-reconcile completion re-fire ────────────
+        # After UPDATE 4 commits, evaluate ``pending_count`` for the
+        # affected instance tree via the shared positive-polarity
+        # predicate. If ``pending_count == 0`` for an instance AND the
+        # instance is otherwise ready to complete (no pending Tasks,
+        # no pending children, no pending JobItem), synchronously call
+        # ``_process_child_completion_db_sync`` to re-fire the
+        # completion reevaluation.
+        #
+        # Why the re-fire is needed (see phase2-plan.md §A5):
+        # The DependencyBus only fires ``_process_child_completion_db_
+        # sync`` from a watcher's terminal event. For already-stuck
+        # instances where ALL children have already reported (all bus
+        # watchers already FIRED) AND where UPDATE 4 has just
+        # reconciled the orphan rows, there is no pending watcher to
+        # re-fire the completion check. The instance would remain
+        # permanently stuck at ``WAITING_CHILDREN`` until the next
+        # natural child event (which never comes). The re-fire
+        # self-heals the parent in the same worker thread that ran
+        # the cascade (still inside the original ``asyncio.to_thread``
+        # wrapper from the async caller).
+        #
+        # Safety: ``_process_child_completion_db_sync`` has explicit
+        # idempotency guards at ``child_reports.py:1212-1219`` that
+        # short-circuit on terminal status (COMPLETED/ERROR/PAUSED),
+        # so a re-entry on a stale or already-completed instance is a
+        # no-op. The function is a sync method on
+        # ``ChildReportsService``; it opens its own
+        # ``WriteGuardSession`` (the cascade's session has committed
+        # and is closed by now), so there is no nested-transaction
+        # issue.
+        if reconciled_message_ids:
+            try:
+                self._post_reconcile_completion_refire(
+                    engine=engine,
+                    tree_ids=list(tree_ids),
+                    write_guard=write_guard,
+                )
+            except Exception as refire_err:
+                # The re-fire is best-effort. The shared predicate
+                # guard at ``child_reports.py:1459`` already prevents
+                # the parent from completing prematurely, and the
+                # update reconciliation (UPDATE 4) has already
+                # committed. If the re-fire fails (e.g. unexpected
+                # exception), the parent stays ``waiting_children``
+                # until the next natural event — same observable
+                # behaviour as before Phase 2. The Phase 2.5
+                # operator cleanup can recover stuck instances.
+                logger.warning(
+                    "resume_cascade_db_sync: post-reconcile re-fire "
+                    "raised (%s: %s); parent may stay "
+                    "waiting_children until next event",
+                    type(refire_err).__name__,
+                    refire_err,
+                )
+
         return _CascadeUpdateResult(
             updated_ids=list(tree_ids),
             skipped_ids=[],
             agent_ids_by_instance={},  # caller pre-fetches for SSE
             cancelled_task_ids=cancelled_task_ids,
+            cancelled_task_work_ids=cancelled_task_work_ids,
+            cancelled_task_message_ids=cancelled_task_message_ids,
+            reconciled_message_ids=reconciled_message_ids,
         )

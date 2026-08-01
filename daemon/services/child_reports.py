@@ -859,17 +859,34 @@ Provide a concise summary:"""
                 )
                 return False, None, None
 
-            # Check if parent has any pending messages
-            parent_pending = session.exec(
-                select(func.count())
-                .select_from(MessageQueue)
+            # (dead-code fallback — bus-active path bypasses) Phase 2
+            # hardening: the ``parent_pending`` count uses the shared
+            # positive-polarity predicate
+            # ``message_queue_counts_as_pending`` so that any
+            # ``processing``/``retrying`` row whose backing work is
+            # terminal (e.g. cancelled by the resume cascade) does not
+            # block the parent from completing. The reachable production
+            # site at ``child_reports.py:1459`` uses the same helper —
+            # the production bus path bypasses this branch entirely
+            # (return above), so this is future-proofing.
+            from ..repositories.message_queue.predicates import (
+                message_queue_counts_as_pending,
+            )
+            _fallback_candidates_1 = session.exec(
+                select(MessageQueue)
                 .where(MessageQueue.instance_id == parent.instance_id)
                 .where(MessageQueue.status.in_([
                     MessageStatus.READY.value,
                     MessageStatus.PROCESSING.value,
                     MessageStatus.RETRYING.value,
                 ]))
-            ).scalar_one()
+            ).scalars().all()
+            parent_pending = sum(
+                1
+                for _r in _fallback_candidates_1
+                if message_queue_counts_as_pending(_r, self._manager.engine)
+            )
+            del _fallback_candidates_1
 
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
@@ -1456,9 +1473,34 @@ Provide a concise summary:"""
                 # this is NOT subject to Race #3.
                 #
                 # Phase 4: WAITING_CHILDREN is DEPRECATED — display/log only.
-                pending_count = session.exec(
-                    select(func.count())
-                    .select_from(MessageQueue)
+                #
+                # Phase 2 (Bug B): this site is the **1 reachable
+                # production parent-completion guard** (the 3 dead-code
+                # fallbacks at ``child_reports.py:863`` / ``:2058`` /
+                # ``error_reporting.py:270`` are gated behind bus-active
+                # early-returns and are dead code in production). The
+                # ``pending_count`` now uses the shared positive-polarity
+                # predicate ``message_queue_counts_as_pending`` — see
+                # ``daemon/repositories/message_queue/predicates.py``.
+                # The base status filter (READY/PROCESSING/RETRYING) is
+                # unchanged; the predicate handles the terminal/live
+                # decision per row using ``work_id`` as the identity
+                # key. This closes the production incident where two
+                # ``completion_report`` rows were orphaned at
+                # ``processing`` with terminal backing Tasks and the
+                # parent stayed stuck at ``WAITING_CHILDREN`` forever.
+                from ..repositories.message_queue.predicates import (
+                    message_queue_counts_as_pending,
+                )
+                # ``.scalars().all()`` ensures we get MessageQueue
+                # instances (not ``Row`` objects) on every dialect —
+                # ``select(MessageQueue).all()`` is documented but the
+                # ``Row``-object fallback was observed in tests under
+                # ``WriteGuardSession`` (the proxy's ``__getattr__`` on
+                # ``exec`` may bypass SQLModel's row-mapping path on
+                # some versions). ``scalars()`` is the supported API.
+                _candidate_rows = session.exec(
+                    select(MessageQueue)
                     .where(MessageQueue.instance_id == instance_id)
                     .where(MessageQueue.message_id != completed_message_id)
                     .where(MessageQueue.status.in_([
@@ -1466,7 +1508,13 @@ Provide a concise summary:"""
                         MessageStatus.PROCESSING.value,
                         MessageStatus.RETRYING.value,
                     ]))
-                ).scalar_one()
+                ).scalars().all()
+                pending_count = sum(
+                    1
+                    for _row in _candidate_rows
+                    if message_queue_counts_as_pending(_row, self._manager.engine)
+                )
+                del _candidate_rows  # scope hygiene
 
                 # WHY ROOT GETS WAITING_CHILDREN BUT NON-ROOT DOES NOT:
                 # This branch is reached only when ``instance.parent_id is None``
@@ -2054,17 +2102,31 @@ Provide a concise summary:"""
                         f"{parent.instance_id[:8]}... — bus callback owns completion"
                     )
                 else:
-                    # Check if parent has any pending messages (legacy path)
-                    parent_pending = session.exec(
-                        select(func.count())
-                        .select_from(MessageQueue)
+                    # (dead-code fallback — bus-active path bypasses)
+                    # Phase 2 hardening: ``parent_pending`` uses the
+                    # shared positive-polarity predicate so terminal
+                    # backing work does not block parent completion.
+                    # The reachable production site is
+                    # ``child_reports.py:1459``; this is future-proofing
+                    # for any code path that bypasses the bus.
+                    from ..repositories.message_queue.predicates import (
+                        message_queue_counts_as_pending,
+                    )
+                    _fallback_candidates_2 = session.exec(
+                        select(MessageQueue)
                         .where(MessageQueue.instance_id == parent.instance_id)
                         .where(MessageQueue.status.in_([
                             MessageStatus.READY.value,
                             MessageStatus.PROCESSING.value,
                             MessageStatus.RETRYING.value,
                         ]))
-                    ).scalar_one()
+                    ).scalars().all()
+                    parent_pending = sum(
+                        1
+                        for _r in _fallback_candidates_2
+                        if message_queue_counts_as_pending(_r, self._manager.engine)
+                    )
+                    del _fallback_candidates_2
 
                     if parent_pending == 0:
                         # No pending messages, parent is truly complete

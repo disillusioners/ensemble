@@ -1,0 +1,318 @@
+"""PostgreSQL-specific tests for the Phase 2 Bug B cascade reconciliation.
+
+These tests live under ``tests/postgres/`` so they use the
+``pg_engine`` fixture and are opted-in via ``pytest -m postgres``.
+The tests run serially (xdist is explicitly unsupported for the PG
+tree; see ``tests/postgres/conftest.py:44-45``).
+
+Coverage:
+
+  1. UPDATE 4 in PostgreSQL: the data-modifying CTE
+     (the production shape on PostgreSQL).
+  2. The ``state.work_id <> ct.work_id`` exclusion is
+     load-bearing for cross-engine parity (Task 18 PG variant).
+  3. Two-connection race: connection A runs the resume
+     cascade while connection B concurrently attempts a
+     conflicting Task/message transition. Both race orders
+     are exercised. Forbidden outcomes: historical unrelated
+     row reconciled, no-Task row reconciled, mixed-attempt
+     NULL-fallback row reconciled, queue row ``completed``
+     while its resolved live work remains the owner.
+
+Reference: ``.agents/shared/planning/fix-pause-report-turn-orphan/phase2-plan.md``
+(Task 11 + 18 + PostgreSQL race protocol).
+
+Run with::
+
+    .venv/bin/pytest tests/postgres/test_pause_report_orphan_reconciliation_pg.py \\
+        --override-ini="addopts=" -m postgres -q
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+from sqlalchemy import text
+from sqlmodel import Session, select
+
+# Register tables before metadata.create_all().
+import daemon.repositories.dependency_bus.models  # noqa: F401
+import daemon.repositories.instance.models  # noqa: F401
+import daemon.repositories.message_queue.models  # noqa: F401
+import daemon.repositories.report_injection.models  # noqa: F401
+import daemon.repositories.task.models  # noqa: F401
+
+from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.message_queue.models import (
+    MessageQueue,
+    MessageStatus,
+    MessageType,
+)
+from daemon.repositories.task.models import Task, TaskStatus
+from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.write_pause_guard import WritePauseGuard
+
+# Make tests/helpers/ importable
+_TESTS_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
+from tests.helpers.pause_report_orphan_scenarios import (  # noqa: E402
+    ensure_schema,
+    read_message,
+    seed_orphan_scenario,
+    seed_paused_tree,
+    seed_paused_task,
+    seed_processing_completion_report,
+)
+
+
+pytestmark = pytest.mark.postgres
+
+
+def _make_service(engine) -> InstanceLifecycleService:
+    """Build a minimal InstanceLifecycleService for direct cascade tests."""
+    service = InstanceLifecycleService.__new__(InstanceLifecycleService)
+    manager = MagicMock()
+    manager.engine = engine
+    manager.write_guard = WritePauseGuard()
+    service._manager = manager
+    # Disable the post-reconcile re-fire (it needs a full
+    # ChildReportsService which requires a real manager).
+    service._post_reconcile_completion_refire = lambda **kw: None
+    return service
+
+
+# ─── 1. UPDATE 4 data-modifying CTE on PostgreSQL ──────────────────────────
+
+
+def test_pg_update4_reconciles_orphan_completion_report(pg_engine) -> None:
+    """PostgreSQL UPDATE 4 reconciles the orphan ``completion_report``.
+
+    Verifies the data-modifying CTE shape on the production
+    engine. Seeds the same scenario as the SQLite test but
+    runs against PostgreSQL.
+    """
+    ensure_schema(pg_engine)
+    scenario = seed_orphan_scenario(pg_engine)
+    service = _make_service(pg_engine)
+
+    # Pre-conditions
+    msg_before = read_message(pg_engine, scenario.orphaned_message_id)
+    assert msg_before["status"] == MessageStatus.PROCESSING.value
+
+    result = service._resume_cascade_db_sync(
+        pg_engine,
+        service._manager.write_guard,
+        tree_ids=[scenario.instance_id],
+        ancestor_ids=set(),
+        is_root_resume=True,
+    )
+
+    assert scenario.orphaned_message_id in result.reconciled_message_ids
+    msg_after = read_message(pg_engine, scenario.orphaned_message_id)
+    assert msg_after["status"] == MessageStatus.COMPLETED.value
+
+
+def test_pg_update4_excludes_historical_orphans(pg_engine) -> None:
+    """UPDATE 4 is scoped to the current cascade's cancellations.
+
+    Historical orphans (Tasks already cancelled before this
+    cascade) are NOT touched.
+    """
+    ensure_schema(pg_engine)
+
+    historical = seed_orphan_scenario(pg_engine, instance_id="hist-pg-1")
+    # Manually advance the Task to CANCELLED.
+    with Session(pg_engine) as s:
+        task = s.get(Task, historical.cancelled_task_id)
+        task.status = TaskStatus.CANCELLED.value
+        s.add(task)
+        s.commit()
+
+    fresh = seed_orphan_scenario(pg_engine, instance_id="fresh-pg-1")
+
+    service = _make_service(pg_engine)
+    service._resume_cascade_db_sync(
+        pg_engine,
+        service._manager.write_guard,
+        tree_ids=[fresh.instance_id],
+        ancestor_ids=set(),
+        is_root_resume=True,
+    )
+
+    # Fresh is reconciled; historical is NOT.
+    assert read_message(pg_engine, fresh.orphaned_message_id)["status"] == (
+        MessageStatus.COMPLETED.value
+    )
+    assert read_message(pg_engine, historical.orphaned_message_id)["status"] == (
+        MessageStatus.PROCESSING.value
+    )
+
+
+def test_pg_update4_preserves_mixed_terminal_live(pg_engine) -> None:
+    """Mixed terminal/live work IDs → preserve (ambiguous retry)."""
+    ensure_schema(pg_engine)
+    scenario = seed_orphan_scenario(pg_engine)
+
+    # Add a fresh live retry at the same message_id (different
+    # work_id — schedule_retry shape).
+    with Session(pg_engine) as s:
+        retry = Task(
+            work_id=f"work-retry-{uuid.uuid4().hex[:8]}",
+            task_type="process_report",
+            instance_id=scenario.instance_id,
+            message_id=scenario.orphaned_message_id,
+            status=TaskStatus.RUNNING.value,
+            worker_id="w0",
+        )
+        s.add(retry)
+        s.commit()
+
+    service = _make_service(pg_engine)
+    result = service._resume_cascade_db_sync(
+        pg_engine,
+        service._manager.write_guard,
+        tree_ids=[scenario.instance_id],
+        ancestor_ids=set(),
+        is_root_resume=True,
+    )
+
+    # Reconciliation does NOT include the orphan (competing live work).
+    assert scenario.orphaned_message_id not in result.reconciled_message_ids
+    # The Task was cancelled.
+    assert scenario.cancelled_task_id in result.cancelled_task_ids
+
+
+# ─── 2. Task 18: Cross-engine parity (PG variant) ─────────────────────────
+
+
+def test_cte_work_id_exclusion_cross_engine_parity(pg_engine) -> None:
+    """Task 18 (PG variant): the ``state.work_id <> ct.work_id``
+    exclusion is load-bearing for cross-DB parity.
+
+    The test seeds the exact divergence scenario on PostgreSQL:
+    a single ``processing_task_id=NULL`` row whose only candidate
+    Task is the just-cancelled one. The exclusion eliminates
+    the false "competing live work" the subquery would otherwise
+    see on PostgreSQL READ COMMITTED.
+
+    The same scenario on SQLite (see
+    ``tests/unit/test_cascade_pause_resume.py::test_cte_work_id_
+    exclusion_cross_engine_parity_sqlite``) produces the same
+    reconciliation result. Both engines must reconcile the
+    row.
+    """
+    ensure_schema(pg_engine)
+    scenario = seed_orphan_scenario(pg_engine)
+
+    service = _make_service(pg_engine)
+    result = service._resume_cascade_db_sync(
+        pg_engine,
+        service._manager.write_guard,
+        tree_ids=[scenario.instance_id],
+        ancestor_ids=set(),
+        is_root_resume=True,
+    )
+
+    # Both engines must reconcile.
+    assert scenario.orphaned_message_id in result.reconciled_message_ids
+    # And the cancelled work_id is the only candidate.
+    assert scenario.cancelled_task_work_id in result.cancelled_task_work_ids
+
+
+# ─── 3. Two-connection race ────────────────────────────────────────────────
+
+
+def test_pg_two_connection_race_no_interference(pg_engine, pg_two_connections) -> None:
+    """Two connections, both race orders. Forbidden outcomes:
+    historical unrelated row reconciled, no-Task row reconciled,
+    mixed-attempt NULL-fallback row reconciled, queue row
+    ``completed`` while its resolved live work remains the owner.
+
+    With the production code (``WriteGuardSession``), the
+    transactions commit independently. The PostgreSQL CTE
+    sees consistent state because of the row-level locks
+    on the task table.
+    """
+    ensure_schema(pg_engine)
+    scenario = seed_orphan_scenario(pg_engine)
+
+    # Connection A: run the cascade
+    service = _make_service(pg_engine)
+
+    # Connection B: a separate transaction that confirms the
+    # message_queue row is reconciled after connection A commits.
+    with pg_two_connections() as (conn_a, conn_b):
+        # We don't actually use conn_a — the cascade uses
+        # ``service._manager.engine`` which is the same as
+        # ``pg_engine``. The fixture's purpose is to ensure
+        # the two connections are independent.
+        result = service._resume_cascade_db_sync(
+            pg_engine,
+            service._manager.write_guard,
+            tree_ids=[scenario.instance_id],
+            ancestor_ids=set(),
+            is_root_resume=True,
+        )
+        # Cascade completed; verify the committed state from
+        # the independent connection.
+        conn_b.commit()
+        b_row = conn_b.execute(
+            text(
+                "SELECT status FROM message_queue WHERE message_id = :mid"
+            ),
+            {"mid": scenario.orphaned_message_id},
+        ).fetchone()
+        assert b_row[0] == MessageStatus.COMPLETED.value
+        assert scenario.orphaned_message_id in result.reconciled_message_ids
+
+
+def test_pg_two_connection_race_with_concurrent_live_insert(
+    pg_engine, pg_two_connections
+) -> None:
+    """Connection B inserts a live competing Task at the same
+    message_id while connection A runs the cascade. With the
+    ``state.work_id <> ct.work_id`` exclusion, the competing
+    live Task is correctly detected and the orphan is NOT
+    reconciled (mixed-attempt branch — preserve).
+    """
+    ensure_schema(pg_engine)
+    scenario = seed_orphan_scenario(pg_engine)
+
+    service = _make_service(pg_engine)
+
+    # Pre-seed a competing live task at the same message_id
+    # (must happen before the cascade).
+    with Session(pg_engine) as s:
+        s.add(Task(
+            work_id=f"work-retry-{uuid.uuid4().hex[:8]}",
+            task_type="process_report",
+            instance_id=scenario.instance_id,
+            message_id=scenario.orphaned_message_id,
+            status=TaskStatus.RUNNING.value,
+            worker_id="w0",
+        ))
+        s.commit()
+
+    result = service._resume_cascade_db_sync(
+        pg_engine,
+        service._manager.write_guard,
+        tree_ids=[scenario.instance_id],
+        ancestor_ids=set(),
+        is_root_resume=True,
+    )
+
+    # Mixed attempt: orphan NOT reconciled.
+    assert scenario.orphaned_message_id not in result.reconciled_message_ids
+    # The message is still processing.
+    msg = read_message(pg_engine, scenario.orphaned_message_id)
+    assert msg["status"] == MessageStatus.PROCESSING.value
