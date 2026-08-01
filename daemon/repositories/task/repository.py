@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -567,12 +568,16 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt))
 
-    def reconcile_turn_mirror(self, work_id: str) -> dict[str, Any]:
+    def reconcile_turn_mirror(
+        self, work_id: str, connection: Any | None = None
+    ) -> dict[str, Any]:
         """Reconcile one Task's cross-system turn mirrors atomically.
 
         The Task row is authoritative.  Its status and secondary link keys are
         read once, and every mutation is guarded by that snapshot so a racing
         lifecycle transition turns the reconciliation writes into no-ops.
+        When ``connection`` is supplied, reconciliation joins the caller's
+        transaction instead of opening a nested transaction.
         """
         terminal_statuses = (
             TaskStatus.COMPLETED.value,
@@ -587,7 +592,10 @@ class TaskRepository:
         updated_counts: dict[str, int] = {}
         drift_flags: dict[str, Any] = {}
 
-        with self.engine.begin() as conn:
+        transaction = (
+            nullcontext(connection) if connection is not None else self.engine.begin()
+        )
+        with transaction as conn:
             task_sql = """
                 SELECT id, status, message_id, instance_id
                 FROM task

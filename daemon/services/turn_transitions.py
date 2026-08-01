@@ -243,8 +243,8 @@ class RetryTurn(_Transition):
         #    state; child mirrors get armed (job_queue_items queued,
         #    message_queue ready, job_locks acquired, etc.).
         if self.task_repo and hasattr(self.task_repo, "reconcile_turn_mirror"):
-            self.task_repo.reconcile_turn_mirror(self.parent_work_id)
-            self.task_repo.reconcile_turn_mirror(self.child_work_id)
+            self.task_repo.reconcile_turn_mirror(self.parent_work_id, session)
+            self.task_repo.reconcile_turn_mirror(self.child_work_id, session)
 
         # 4. F6 fix: migrate watcher rows from parent to child work_id.
         #    Atomic with the parent UPDATE + child INSERT — done inside
