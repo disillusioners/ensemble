@@ -209,15 +209,35 @@ def instance_manager(mock_manager):
 
 
 class TestChildNotificationWorkerPoolPath:
-    """Test suite for WorkerPool path (child instances) in new queue flow."""
+    """Test suite for the pre-Inc-4 child enqueue path (now invalid_or_missing_handle).
+
+    Phase 4 (Increment 4, 2026-08-01): the
+    ``enqueue_message(source="cascade_resume")`` answer-gate fallback
+    and the "child instance path" WorkerPool fall-through were both
+    removed (see ``daemon/manager.py:5041-5052`` and §9.4). Tests
+    below now assert the new ``invalid_or_missing_handle`` outcome
+    for non-silent resumes that lack both an answer-gate handle and
+    a paused/cancellable turn.
+    """
 
     @pytest.mark.asyncio
     async def test_child_enqueues_via_workerpool(self, instance_manager, mock_manager):
-        """Child instance (no old_jobs) should enqueue via WorkerPool."""
+        """No handle + no paused turn + silent=False → invalid_or_missing_handle.
+
+        Pre-Inc-4 this test verified a WorkerPool enqueue
+        (``enqueue_message`` called with
+        ``source="cascade_resume"`` and
+        ``metadata["resume_mode"]=True``). The Inc 4 routing
+        rewrite removed that fallback; an absent handle is now
+        a routing error, not a routing default.
+        """
         instance_id = "child-instance-123"
 
-        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        # No paused/cancellable turn AND no answer-gate handle.
         mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
+            return_value=None
+        )
+        mock_manager._task_repo.find_suspended_turn_for_answer = MagicMock(
             return_value=None
         )
 
@@ -225,20 +245,11 @@ class TestChildNotificationWorkerPoolPath:
             instance_id, message="resume", silent=False
         )
 
-        # Child resume routes through the unified dispatcher.
-        mock_manager.enqueue_message.assert_called_once()
-        kwargs = mock_manager.enqueue_message.call_args[1]
-
-        # Verify enqueue was called with correct args
-        assert kwargs["instance_id"] == instance_id
-        assert kwargs["message"] == "resume"
-        assert kwargs["source"] == "cascade_resume"
-        assert kwargs["metadata"]["resume_mode"] is True
-
-        # Verify return
-        assert result["instance_id"] == instance_id
-        assert result["job_id"] is None
-        assert result["message_id"] is not None
+        # Inc 4: no enqueue fabrication. The router handles
+        # ``None`` and reports ``status="no_active_job"`` for the
+        # resumed id (see ``daemon/routers/instances.py:592-594``).
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_child_silent_mode_skips_enqueue(self, instance_manager, mock_manager):
@@ -269,26 +280,33 @@ class TestChildNotificationWorkerPoolPath:
 
     @pytest.mark.asyncio
     async def test_child_enqueues_message_id_from_enqueue(self, instance_manager, mock_manager):
-        """message_id should come from enqueue_message result."""
+        """No handle + no paused turn + silent=False → invalid_or_missing_handle.
+
+        Pre-Inc-4 this test verified that ``message_id`` from the
+        enqueue result was propagated through ``resume_processing_job``.
+        Inc 4 removed the enqueue fallback; the method now returns
+        ``None`` and the caller fabricates the public
+        ``message_id`` from its own queue path
+        (``daemon/routers/messages.py:228-244``).
+        """
         instance_id = "child-instance-msgid"
 
-        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        # No paused/cancellable turn AND no answer-gate handle.
         mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
             return_value=None
         )
-
-        # Configure mock to return specific message_id
-        expected_msg_id = str(uuid.uuid4())
-        mock_manager.enqueue_message = AsyncMock(
-            return_value=MockAsyncMessageResult(message_id=expected_msg_id)
+        mock_manager._task_repo.find_suspended_turn_for_answer = MagicMock(
+            return_value=None
         )
-        instance_manager.enqueue_message = mock_manager.enqueue_message
 
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
         )
 
-        assert result["message_id"] == expected_msg_id
+        # Inc 4: ``enqueue_message`` is NOT called, so no message_id
+        # to propagate. The router layer handles ``None`` itself.
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
 
 class TestChildNotificationJobQueuePath:
@@ -464,16 +482,23 @@ class TestSuspendedTurnForAnswerRouting:
     async def test_no_suspended_turn_routes_child(
         self, instance_manager, mock_manager
     ):
-        """No paused/cancellable turn → child branch.
+        """No paused/cancellable turn + no answer-gate handle → invalid_or_missing_handle.
 
-        When the pause-cascade selector returns ``None``, the
-        resume routes to the child branch via WorkerPool
-        (existing behavior, preserved).
+        Pre-Inc-4 this test verified that the resume routed to the
+        child branch via ``enqueue_message`` (status="queued"). Inc 4
+        removed that fallback; an absent handle is now a routing
+        error, and ``resume_processing_job`` returns ``None``. The
+        sibling tests in this class verify the explicit-handle
+        branches (root route via ``_resume_processing_background``).
         """
         instance_id = "ordinary-child-instance"
 
-        # No paused/cancellable turn.
+        # No paused/cancellable turn AND no answer-gate handle —
+        # routes to ``invalid_or_missing_handle`` (§9.3).
         mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
+            return_value=None
+        )
+        mock_manager._task_repo.find_suspended_turn_for_answer = MagicMock(
             return_value=None
         )
 
@@ -481,10 +506,11 @@ class TestSuspendedTurnForAnswerRouting:
             instance_id, message="resume", silent=False
         )
 
-        # Routes to child — enqueues via WorkerPool.
-        mock_manager.enqueue_message.assert_called_once()
-        assert result["status"] == "queued"
-        assert result["job_id"] is None
+        # Inc 4: do not fabricate a Task. The router handles
+        # ``None`` and reports ``status="no_active_job"`` for the
+        # resumed id (see ``daemon/routers/instances.py:592-594``).
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_paused_cancellable_turn_routes_root(

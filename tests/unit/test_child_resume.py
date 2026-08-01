@@ -366,15 +366,22 @@ class TestChildInstanceResume:
 
     @pytest.mark.asyncio
     async def test_child_resume_calls_enqueue_message(self, instance_manager, mock_manager):
-        """Scenario 8: Verify enqueue_message is called (not _process_message_with_tracking).
+        """Scenario 8: No suspended turn + no paused turn + silent=False → invalid_or_missing_handle.
 
-        This test confirms the new implementation uses the normal queue flow.
+        Phase 4 (Increment 4, 2026-08-01): the pre-Inc-4 child fallback
+        that enqueued a fresh message via ``enqueue_message(source="cascade_resume")``
+        was removed. An absent suspension handle is now a routing
+        error — ``resume_processing_job`` returns ``None`` and does NOT
+        call ``enqueue_message``. See ``daemon/manager.py:5037-5052``.
         """
         instance_id = "child-instance-token"
 
-        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
-        # (Phase 2.5 / D13 — see module docstring).
+        # No answer-gate handle and no paused/cancellable turn —
+        # routes to ``invalid_or_missing_handle`` (§9.3).
         mock_manager._task_repo.find_paused_or_cancellable_turn = MagicMock(
+            return_value=None
+        )
+        mock_manager._task_repo.find_suspended_turn_for_answer = MagicMock(
             return_value=None
         )
 
@@ -386,11 +393,9 @@ class TestChildInstanceResume:
             instance_id, message="resume", silent=False
         )
 
-        # Verify enqueue_message was called (not _process_message_with_tracking)
-        mock_manager.enqueue_message.assert_called_once()
-        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
-
-        # Verify the metadata includes resume_mode
-        assert "metadata" in call_kwargs
-        assert "resume_mode" in call_kwargs["metadata"]
+        # New Inc 4 behavior: no enqueue, no fabrication. The
+        # caller (router) handles ``None`` and reports
+        # ``status="no_active_job"`` for the resumed id.
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
