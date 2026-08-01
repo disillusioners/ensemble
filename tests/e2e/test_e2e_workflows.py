@@ -49,10 +49,30 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 import requests
+from sqlalchemy import create_engine
+from sqlmodel import Session, col, select
+
+# These daemon imports are guarded to keep the file importable on environments
+# where the daemon package is not on PYTHONPATH (e.g. CI shards that only run
+# unit tests). The E2E tests that touch DB seeding skip themselves when the
+# daemon is unreachable, so missing models don't break non-E2E collection.
+try:  # pragma: no cover - importability guard
+    from daemon.repositories.job_queue.models import (
+        AdmissionState,
+        JobItem,
+    )
+    from daemon.repositories.task.models import Task, TaskStatus, TaskType
+except ImportError:  # pragma: no cover - environment-specific
+    AdmissionState = None  # type: ignore[assignment]
+    JobItem = None  # type: ignore[assignment]
+    Task = None  # type: ignore[assignment]
+    TaskStatus = None  # type: ignore[assignment]
+    TaskType = None  # type: ignore[assignment]
 
 # --------------------------------------------------------------------------- #
 # Logging configuration (mirrors test_mcp_tools.py)
@@ -95,6 +115,74 @@ PHASE2_MESSAGE = (
 # ``completed`` is the normal end-state; ``terminated`` / ``error`` /
 # ``failed`` indicate the workflow stopped for some other reason.
 TERMINAL_STATUSES = {"completed", "terminated", "error", "failed"}
+
+
+# --------------------------------------------------------------------------- #
+# Direct PostgreSQL access (test-only, for seeding active-orphan fixtures)
+# --------------------------------------------------------------------------- #
+# These tests hit a real running daemon (HTTP API at localhost:8079) backed by
+# PostgreSQL (the project's primary DB per the v0.5.2+ default). For scenarios
+# that require constructing DB state the public API cannot produce — e.g. the
+# Bug A "active-orphan" fixture (terminal PROCESS_MESSAGE Task + matching
+# active JobItem on a PAUSED leader) — we connect to the same PostgreSQL
+# database the daemon is using and INSERT/UPDATE rows directly.
+#
+# Precedence for the DB name (most-specific wins):
+#   1. ``E2E_PG_DB`` — explicit test override. USE THIS when running
+#      against a daemon started outside the project's normal ``./dev.sh``
+#      invocation (e.g. a daemon launched by another shell with a
+#      different ``POSTGRES_DB`` env var). The override is the only
+#      reliable way to match the daemon's actual DB in cross-shell setups.
+#   2. ``POSTGRES_DB`` — matches the daemon's startup env if the test
+#      process inherits the same env as the daemon (the common case
+#      when ``./dev.sh`` sources ``.env`` before launching both).
+#   3. ``ensemble_dev`` — the DB the project's ``./dev.sh`` daemon uses
+#      by default (the E2E daemon target per the project's
+#      ``dev_env`` metadata). ``data_dev/ensemble.json`` overrides this
+#      to ``ensemble_test`` via the ``db`` field, but the daemon's
+#      ``POSTGRES_DB`` env var wins via the config loader's ENV-first
+#      precedence, so the daemon actually connects to ``ensemble_dev``.
+#   4. ``ensemble_test`` — pure fallback matching the original task spec.
+#
+# WARNING: When the test process inherits ``POSTGRES_DB`` from a shell
+# that differs from the daemon's startup env, the script's PG_URL will
+# point at a different DB than the daemon — queries return empty
+# results and the seed silently fails. Set ``E2E_PG_DB`` explicitly to
+# the daemon's actual DB in that case.
+E2E_PG_HOST = os.environ.get("E2E_PG_HOST", os.environ.get("POSTGRES_HOST", "localhost"))
+E2E_PG_PORT = int(os.environ.get("E2E_PG_PORT", os.environ.get("POSTGRES_PORT", "5432")))
+# E2E_PG_DB precedence: explicit override > ensemble_dev (the dev daemon's
+# DB). We intentionally DO NOT fall back to ``POSTGRES_DB`` — when the test
+# process inherits a different ``POSTGRES_DB`` than the daemon was launched
+# with (different shell / ``.env``), the script's PG_URL would point at the
+# wrong DB. The daemon's actual DB must be supplied explicitly via
+# ``E2E_PG_DB`` in that case. Default ``ensemble_dev`` matches the project's
+# ``./dev.sh`` invocation, which sets ``POSTGRES_DB=ensemble_dev`` in
+# ``.env`` and passes it through to the daemon's startup env.
+E2E_PG_DB = os.environ.get("E2E_PG_DB", "ensemble_dev")
+E2E_PG_USER = os.environ.get("E2E_PG_USER", os.environ.get("POSTGRES_USER", os.environ.get("USER", "ensemble")))
+E2E_PG_PASSWORD = os.environ.get("E2E_PG_PASSWORD", os.environ.get("POSTGRES_PASSWORD", ""))
+
+
+def _e2e_pg_url() -> str:
+    """Return a sync postgresql+psycopg:// URL for the E2E test DB.
+
+    Uses the psycopg v3 driver (``postgresql+psycopg://``) so SQLAlchemy
+    doesn't try to import ``psycopg2`` — the project's dev/CI venv ships
+    psycopg v3 (the v3 driver is what ``tests/e2e/test_migration_e2e.py``
+    uses for its direct ``psycopg.connect()`` probe). The daemon itself
+    uses ``postgresql+asyncpg://`` for its async engine, but our seed
+    needs a sync engine for the ORM ``Session`` write — psycopg v3 is
+    the project's authoritative sync driver.
+
+    Mirrors :func:`tests/e2e/test_migration_e2e._pg_url` so the env vars
+    documented in the migration test's module docstring also cover the
+    active-orphan seed in :func:`test_pause_during_report_turn_then_resume`.
+    """
+    return (
+        f"postgresql+psycopg://{E2E_PG_USER}:{E2E_PG_PASSWORD}"
+        f"@{E2E_PG_HOST}:{E2E_PG_PORT}/{E2E_PG_DB}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1973,6 +2061,16 @@ def test_pause_during_report_turn_then_resume():
     ``status="resuming"`` with the terminal Task's stable
     ``work_id`` as ``job_id`` (the F13 exact-ID lookup key).
 
+    The pause cascade flips the original RUNNING ``PROCESS_MESSAGE``
+    Task to ``PAUSED``; for the active-orphan fallback to fire,
+    ``find_paused_or_running_by_instance`` must return ``None`` and
+    ``find_resume_root_candidate_by_active_job`` must find a
+    terminal backing Task correlated with an active JobItem. We
+    therefore UPDATE the paused Task directly to ``COMPLETED`` (the
+    production scenario: the original turn already ended before the
+    mid-process_report pause), and INSERT a matching active JobItem
+    that mirrors its ``work_id``.
+
     NOTE: This test is a routing-layer E2E coverage. A full
     ``ask_questions`` mid-report-turn fixture is harder to make
     deterministic without an internal synchronization hook in the
@@ -1980,83 +2078,199 @@ def test_pause_during_report_turn_then_resume():
     recommends such a hook.
     """
     leader_id: str | None = None
+    seeded_job_id: str | None = None
     logger.info("=" * 60)
     logger.info("TEST 2b: Bug A active-orphan routing via resume API")
     logger.info("=" * 60)
 
+    pg_engine = None
     try:
         # Step 1: spawn leader + send a message.
         leader_id = _spawn_instance("leader")
         assert leader_id, "Failed to spawn leader instance"
         _send_message(leader_id, TEST_MESSAGE)
 
-        # Step 2: wait for terminal completion of the original turn
-        # so the original PROCESS_MESSAGE Task has reached a
-        # terminal state. This is the precondition for the Bug A
-        # scenario (original turn ended normally; only the
-        # orphaned active JobItem remains).
-        finished, final_status = _wait_for_completion(leader_id)
-        assert finished, (
-            f"Leader {leader_id[:8]}... did not reach terminal status "
-            f"after first message (last status: {final_status})"
-        )
-        logger.info(
-            f"[ASSERT] leader reached terminal status: {final_status}"
+        # Step 2: wait for the developer child to spawn (mirrors
+        # ``test_pause_after_spawn_then_resume``). At this point the
+        # leader's PROCESS_MESSAGE Task is RUNNING (worker is
+        # processing the message that triggered the spawn).
+        child_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
+        assert child_id is not None, (
+            f"Leader {leader_id[:8]}... did not spawn a developer child "
+            f"within {SPAWN_TIMEOUT}s"
         )
 
-        # Step 3: a subsequent /resume call on the now-terminal
-        # leader should NOT misroute to the child branch. Pre-fix,
-        # the resume would enqueue via WorkerPool and create a
-        # fresh Task that gets blocked by the orphaned active
-        # JobItem's lock. Post-fix, the routing either falls back
-        # to the active-orphan primitive (root) or, if no orphaned
-        # JobItem exists at this point (already finalized by the
-        # observer), treats the resume as a child / new message.
-        # Either way, the resume must NOT wedge the leader in a
-        # blocked state.
+        # Step 3: pause the leader (cascades to children). The pause
+        # cascade flips the leader's RUNNING PROCESS_MESSAGE Task to
+        # PAUSED (``_pause_cascade_db_sync`` UPDATE 2), so the leader
+        # is now PAUSED with a PAUSED Task.
+        _pause_instance(leader_id)
+
+        # Step 4: wait for the leader to reach ``paused`` status.
+        leader_paused = _wait_for_status(leader_id, "paused", timeout=30)
+        assert leader_paused, (
+            f"Leader {leader_id[:8]}... did not reach status 'paused' "
+            f"within 30s"
+        )
+
+        # Step 5: seed the active-orphan DB state via direct
+        # PostgreSQL access. The Bug A scenario: the original
+        # PROCESS_MESSAGE Task has reached COMPLETED (terminal),
+        # and an active JobItem mirrors its ``work_id`` (``job_id ==
+        # task.work_id``). The pause cascade left the original Task
+        # in PAUSED state; we transition it to COMPLETED directly so:
+        #   (a) ``find_paused_or_running_by_instance`` returns ``None``
+        #       — there is no PAUSED/RUNNING/CANCELLED PROCESS_MESSAGE
+        #       Task on the instance anymore.
+        #   (b) ``find_resume_root_candidate_by_active_job`` returns
+        #       the terminal Task — the WHERE clause matches the
+        #       active JobItem correlated via ``work_id == job_id``.
+        # The resume cascade's UPDATE 2 (``WHERE status = 'paused'``)
+        # becomes a no-op for this row once we transition it to
+        # COMPLETED, preserving the active-orphan state through the
+        # cascade resume.
+        #
+        # The message JobItem was already created by the daemon's
+        # message-dispatch path (its ``job_id`` equals the Task's
+        # ``work_id`` per the Phase 5 correlation contract). In
+        # normal operation, the feedback observer finalizes the
+        # JobItem ``active → done`` when the Task completes; the Bug A
+        # incident is precisely the case where that transition did
+        # NOT happen, leaving the JobItem active after the Task
+        # terminal. So the seed ``UPDATE``s the existing rows rather
+        # than INSERTing new ones — INSERT would collide with the
+        # existing JobItem on ``job_queue_items_pkey``. The UPDATE
+        # is idempotent: if the JobItem is already ``active``
+        # (orphan pre-state) the assignment is a no-op; if it's
+        # already ``done`` (normal completion) we re-orphan it.
+        pg_engine = create_engine(_e2e_pg_url())
+        orphan_work_id: str | None = None
+        with Session(pg_engine) as s:
+            existing_task = s.exec(
+                select(Task)
+                .where(Task.instance_id == leader_id)
+                .where(Task.task_type == TaskType.PROCESS_MESSAGE.value)
+                .order_by(col(Task.created_at).desc())
+            ).first()
+            assert existing_task is not None, (
+                f"No PROCESS_MESSAGE Task found for leader "
+                f"{leader_id[:8]}... (cannot seed orphan fixture)"
+            )
+            orphan_work_id = existing_task.work_id
+            existing_task.status = TaskStatus.COMPLETED.value
+            existing_task.completed_at = datetime.now(timezone.utc)
+            s.add(existing_task)
+
+            # Re-orphan the existing JobItem mirror — set
+            # ``admission_state='active'`` so the fallback primitive
+            # picks it up. ``deleted_at IS NULL`` is preserved (the
+            # row is not soft-deleted). The JobItem's primary key
+            # ``job_id`` equals ``task.work_id`` per the Phase 5
+            # correlation contract — this is the F13 exact-ID lookup
+            # axis that ties the orphan back to its backing Task.
+            existing_job = s.get(JobItem, orphan_work_id)
+            assert existing_job is not None, (
+                f"No JobItem found for work_id={orphan_work_id[:8]}... "
+                f"(expected the message JobItem to exist; the daemon's "
+                f"message-dispatch path should have created it with "
+                f"job_id == task.work_id)"
+            )
+            existing_job.admission_state = AdmissionState.ACTIVE.value
+            existing_job.deleted_at = None
+            existing_job.terminal_reason = None
+            s.add(existing_job)
+            seeded_job_id = existing_job.job_id
+            s.commit()
+        logger.info(
+            f"[SEED] active-orphan fixture: task={orphan_work_id[:8]}... "
+            f"status=COMPLETED, jobitem={seeded_job_id[:8]}... "
+            f"admission_state=active (re-orphaned from "
+            f"prior state if needed)"
+        )
+
+        # Step 6: call the resume API. The leader is PAUSED so the
+        # cascade resume picks it up; after the cascade, the
+        # terminal Task (orphan) makes ``find_paused_or_running_by_
+        # instance`` return ``None``, and the active-orphan fallback
+        # selects the ROOT branch via the terminal Task's
+        # ``work_id``.
         result = _resume_instance(leader_id, message="continue")
         assert result is not None, (
-            "Resume API must succeed (no deadlock) for a leader "
-            "whose original message Task is terminal"
+            f"Resume API returned None for leader {leader_id[:8]}... "
+            f"— routing layer failed (full result: {result})"
         )
 
-        # The resume should return either ``queued`` (child branch
-        # — message enqueued) or ``resuming`` (root branch — active
-        # orphan fallback OR existing Task). It MUST NOT return
-        # ``None`` (which would indicate a routing/exception bug)
-        # or stay stuck.
-        assert result.get("status") in (
-            "queued",
-            "resuming",
-            "silent_resume",
-            "already_resuming",
-        ), (
-            f"Unexpected resume status: {result.get('status')!r}. "
-            f"Resume must complete without deadlock for the "
-            f"post-terminal leader (full result: {result})"
+        # Step 7: assert on the per-instance status. The router
+        # envelope returns ``resume_results[leader_id]`` — NOT a
+        # top-level ``status`` key (Issue 2 fix). The active-orphan
+        # fallback routes to the ROOT branch with status="resuming".
+        resume_results = result.get("resume_results") or {}
+        assert leader_id in resume_results, (
+            f"Leader {leader_id[:8]}... missing from resume_results "
+            f"(full result: {result}). The resume cascade may have "
+            f"skipped the leader (instance.status != PAUSED at "
+            f"resume time)."
+        )
+        leader_resume = resume_results[leader_id]
+        assert leader_resume.get("status") == "resuming", (
+            f"Expected status='resuming' (root route via "
+            f"active-orphan fallback), got "
+            f"{leader_resume.get('status')!r}. Full result: {result}"
         )
 
-        # Step 4: the leader must reach a terminal state after
-        # the resume (no infinite wait / no orphaned Task left
-        # blocking the instance).
+        # Step 8: assert job_id equals the seeded work_id. This
+        # proves the active-orphan fallback was used (the regular
+        # child-branch route returns ``job_id=None``; a fresh
+        # enqueue-message route would have a different ``message_id``
+        # but ``job_id=None``). The terminal Task's ``work_id`` is
+        # the F13 exact-ID lookup key that ties the orphaned JobItem
+        # to its backing Task.
+        assert leader_resume.get("job_id") == orphan_work_id, (
+            f"Expected job_id={orphan_work_id[:8]}... (seeded "
+            f"active-orphan work_id), got "
+            f"{leader_resume.get('job_id')!r}. The active-orphan "
+            f"fallback did not pick up our terminal Task. Full "
+            f"result: {result}"
+        )
+        logger.info(
+            f"[ASSERT] resume routed via active-orphan fallback: "
+            f"job_id={leader_resume['job_id'][:8]}... status="
+            f"{leader_resume['status']!r}"
+        )
+
+        # Step 9: wait for the leader to reach a terminal status
+        # after the resume. The background processing drives the
+        # resume message through the graph turn; an orphaned
+        # JobItem that was NOT finalized via the F13 exact-ID path
+        # would block this step (the lock would prevent the
+        # instance from advancing).
         finished_after, final_status_after = _wait_for_completion(
             leader_id, timeout=60
         )
         assert finished_after, (
             f"Leader {leader_id[:8]}... did not reach a terminal "
-            f"status after the post-terminal resume "
-            f"(last status: {final_status_after}). "
-            f"An orphaned active JobItem is blocking the instance."
+            f"status after the active-orphan resume "
+            f"(last status: {final_status_after}). The orphaned "
+            f"JobItem may still be blocking the instance."
         )
         logger.info(
             f"[ASSERT] leader reached terminal status after "
-            f"post-terminal resume: {final_status_after}"
+            f"active-orphan resume: {final_status_after}"
         )
 
         logger.info("TEST 2b PASSED")
 
     finally:
-        # Cleanup: always terminate the leader.
+        # Cleanup: always terminate the leader. The leader's terminate
+        # cascade removes the instance + its Tasks + JobItems for the
+        # tree (see ``_terminate_instance_db_sync`` Step 4b), so we
+        # do NOT need to manually drop the re-orphaned JobItem — that
+        # would race the cascade and might also delete a JobItem
+        # that other tests reference. ``_terminate_instance`` is
+        # best-effort (no raise) so cleanup never crashes the test
+        # process.
+        if pg_engine is not None:
+            pg_engine.dispose()
         if leader_id:
             _terminate_instance(leader_id)
 
