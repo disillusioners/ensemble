@@ -366,18 +366,12 @@ class TestPauseResumeRoot:
             "WorkerPool from re-claiming and racing)"
         )
 
-        # 5. Pause-cascade selector after resume: CANCELLED is
-        # NOT in the eligible status set (the selector restricts to
-        # PAUSED/RUNNING for the named pause/cancel transitions,
-        # per §8.2). The CANCELLED task is a no-longer-cancellable
-        # marker — the resume cleanup path drives the natural
-        # recovery, not the pause cascade.
+        # 5. The consumed CANCELLED row remains routable as the resume
+        # cascade's marker so resume_processing_job can mint a fresh driver turn.
         routed_after_resume = task_repo.find_paused_or_cancellable_turn(iid)
-        assert routed_after_resume is None, (
-            "find_paused_or_cancellable_turn must return None when "
-            "the only candidate is CANCELLED (CANCELLED is not in "
-            "the pause-cascade eligible set per §8.2)"
-        )
+        assert routed_after_resume is not None
+        assert routed_after_resume.status == TaskStatus.CANCELLED.value
+        assert routed_after_resume.id == task_id
 
         # 6. Finalize WITHOUT a JobItem — the post-D13 no-JobItem path.
         # Step 1 (JobItem UPDATE) is skipped because ``job_id is None``;
@@ -757,15 +751,10 @@ class TestFindPausedOrCancellableTurn:
         task_repo = TaskRepository(engine)
         assert task_repo.find_paused_or_cancellable_turn(iid) is None
 
-    def test_cancelled_task_returns_none(
+    def test_cancelled_resume_marker_is_routable(
         self, engine, write_guard, lifecycle_service
     ):
-        """CANCELLED task → ``None``.
-
-        CANCELLED is the resume-cascade marker, not a cancellable
-        turn. The selector restricts to PAUSED/RUNNING for the
-        named pause/cancel transitions (§8.2).
-        """
+        """CANCELLED resume-cascade marker remains routable."""
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_task(
             engine,
@@ -774,7 +763,9 @@ class TestFindPausedOrCancellableTurn:
             task_type=TaskType.PROCESS_MESSAGE.value,
         )
         task_repo = TaskRepository(engine)
-        assert task_repo.find_paused_or_cancellable_turn(iid) is None
+        routed = task_repo.find_paused_or_cancellable_turn(iid)
+        assert routed is not None
+        assert routed.status == TaskStatus.CANCELLED.value
 
     def test_completed_terminal_returns_none(
         self, engine, write_guard, lifecycle_service

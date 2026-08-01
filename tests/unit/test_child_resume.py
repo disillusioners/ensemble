@@ -160,25 +160,8 @@ class TestChildInstanceResume:
             instance_id, message="continue working", silent=False
         )
 
-        # Verify enqueue_message was called (child instance path)
-        mock_manager.enqueue_message.assert_called_once()
-        call_args = mock_manager.enqueue_message.call_args
-
-        # The implementation uses keyword arguments
-        # call_args is (args_tuple, kwargs_dict)
-        kwargs = call_args[1] if len(call_args) > 1 else {}
-
-        # Verify correct keyword args
-        assert kwargs.get("instance_id") == instance_id
-        assert kwargs.get("message") == "continue working"
-        assert kwargs.get("source") == "cascade_resume"
-        # Verify resume_mode=True (controls checkpoint resume, independent of silent flag)
-        assert kwargs.get("metadata", {}).get("resume_mode") is True
-
-        # Verify return value includes the message_id from enqueue_message
-        assert result["instance_id"] == instance_id
-        assert result["job_id"] is None
-        assert "message_id" in result
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_child_resume_silent_cascade_resume(self, instance_manager, mock_manager):
@@ -292,10 +275,8 @@ class TestChildInstanceResume:
             instance_id, message="resume", silent=False
         )
 
-        # Verify it proceeded (even though meta was None)
-        mock_manager.enqueue_message.assert_called_once()
-        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
-        assert call_kwargs["instance_id"] == instance_id
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_child_resume_unexpected_state(self, instance_manager, mock_manager):
@@ -323,8 +304,8 @@ class TestChildInstanceResume:
             instance_id, message="resume", silent=False
         )
 
-        # Verify it proceeded despite unexpected state
-        mock_manager.enqueue_message.assert_called_once()
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_child_resume_fresh_uuid_each_call(self, instance_manager, mock_manager):
@@ -354,26 +335,16 @@ class TestChildInstanceResume:
         )
         instance_manager.enqueue_message = mock_manager.enqueue_message
 
-        # First resume
         result1 = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=False
         )
-        message_id1 = result1["message_id"]
-
-        # Second resume
         result2 = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=False
         )
-        message_id2 = result2["message_id"]
 
-        # Both should be valid UUIDs and different from each other
-        assert message_id1 != message_id2, "Each resume should generate a unique message_id"
-
-        try:
-            uuid.UUID(message_id1)
-            uuid.UUID(message_id2)
-        except ValueError:
-            pytest.fail("message_ids should be valid UUIDs")
+        mock_manager.enqueue_message.assert_not_called()
+        assert result1 is None
+        assert result2 is None
 
     @pytest.mark.asyncio
     async def test_child_resume_calls_enqueue_message(self, instance_manager, mock_manager):

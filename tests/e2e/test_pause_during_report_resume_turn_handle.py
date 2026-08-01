@@ -46,7 +46,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine, event, text
@@ -66,6 +66,7 @@ import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.report_injection.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 
+from daemon.manager import InstanceManager
 from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
@@ -373,22 +374,11 @@ def test_pause_during_report_records_paused_external_handle(
     ``paused_external`` on the report turn and does not fabricate an
     answer-gate handle".
 
-    The pause-cascade helper calls ``SuspendTurn`` with
-    ``reason=CancellationReason.USER_STOPPED.value`` which the
-    SuspendTurn validation accepts (only ``awaiting_answer`` requires
-    a non-null target; other reasons may omit the target, and the
-    cascade leaves it NULL — the resume cascade uses the turn's own
-    ``work_id`` as the resume target via
-    ``find_paused_or_cancellable_turn``).
-
-    Wait — that means ``resume_target_turn_id`` will be NULL after
-    pause. The §11.5 contract requires that the report turn is
-    RESUMED via its own ``work_id`` (the turn IS the resume point).
-    This is exactly the ``report_or_external_resume`` outcome in
-    manager.py:5010 — ``target_work_id=paused_turn.work_id``. So
-    ``resume_target_turn_id`` being NULL after pause is correct;
-    the manager's selector picks the report task by ``work_id``
-    directly.
+    The pause-cascade helper calls ``SuspendTurn`` with the validated
+    ``paused_external`` reason and records the report turn's own
+    ``work_id`` as ``resume_target_turn_id``. The manager's
+    ``report_or_external_resume`` route selects the same task and uses
+    its ``work_id`` as the resume point.
 
     The test asserts BOTH:
       1. The handle's ``suspension_reason`` is ``paused_external``
@@ -451,15 +441,9 @@ def test_pause_during_report_records_paused_external_handle(
         f"§11.5.4 invariant: a non-answer pause MUST NOT fabricate "
         f"an awaiting_children handle either. Got {post_handle[1]!r}."
     )
-    # The pause cascade does not set resume_target_turn_id (the
-    # target is the turn's own work_id per §9.2). The column stays
-    # NULL — this is by design and the manager reads the target
-    # from the selector result's ``work_id``, not from this column.
-    assert post_handle[2] is None, (
-        f"resume_target_turn_id must remain NULL for the pause-cascade "
-        f"reason (the manager uses the turn's own work_id); "
-        f"got {post_handle[2]!r}"
-    )
+    # The pause cascade records the turn's own work_id as the
+    # explicit resume target.
+    assert post_handle[2] == report_wid
 
     # ─── The COMPLETED message task is untouched by the pause ─────
     msg_handle = _read_handle(engine, msg_wid)
@@ -557,15 +541,14 @@ def test_resume_after_pause_during_report_consumes_handle(
         f"got {post_handle[2]!r}"
     )
 
-    # ─── Post-resume: selector returns None ───────────────────────
+    # ─── Post-resume: CANCELLED marker remains routable ───────────
     routed_post = task_repo.find_paused_or_cancellable_turn(iid)
-    assert routed_post is None, (
-        f"find_paused_or_cancellable_turn MUST return None after "
-        f"ResumeTurn consumes the handle; got {routed_post!r}. "
-        f"This is the §11.5 idempotency invariant — a duplicate "
-        f"resume must NOT see a stale handle and route onto a "
-        f"terminal task."
-    )
+    assert routed_post is not None
+    assert routed_post.status == TaskStatus.CANCELLED.value
+    assert routed_post.work_id == report_wid
+    # The answer-gate selector remains handle-based and does not match
+    # the consumed CANCELLED marker.
+    assert task_repo.find_suspended_turn_for_answer(iid) is None
 
     # ─── §11.5.7: mirror invariants are closed ───────────────────
     # The reconciler closes every orphan the resume cascade left.
@@ -746,3 +729,66 @@ def test_backfilled_legacy_paused_report_is_routable(
         f"NOT be selected by the answer-gate selector; got {answer!r}. "
         f"§8.1 filter requires ``suspension_reason='awaiting_answer'``."
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_processing_job_routes_paused_external_handle(
+    engine: Engine,
+) -> None:
+    """The real manager router selects report_or_external_resume."""
+    iid = f"inst-{uuid.uuid4().hex[:8]}"
+    work_id = f"work-{uuid.uuid4().hex[:12]}"
+    _seed_instance(engine, instance_id=iid, status=InstanceStatus.PAUSED.value)
+    _seed_turn_with_type(
+        engine,
+        work_id=work_id,
+        instance_id=iid,
+        message_id=f"msg-{uuid.uuid4().hex[:12]}",
+        status=TaskStatus.PAUSED.value,
+        task_type=TaskType.PROCESS_REPORT.value,
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE task SET suspension_reason = :reason, "
+                "resume_target_turn_id = :target WHERE work_id = :work_id"
+            ),
+            {
+                "reason": SuspensionReason.PAUSED_EXTERNAL.value,
+                "target": work_id,
+                "work_id": work_id,
+            },
+        )
+
+    manager = InstanceManager.__new__(InstanceManager)
+    manager._task_repo = TaskRepository(engine)
+    manager._schedule_explicit_handle_resume = AsyncMock(
+        return_value={"status": "resuming"}
+    )
+
+    result = await manager.resume_processing_job(iid, message="resume")
+
+    assert result == {"status": "resuming"}
+    manager._schedule_explicit_handle_resume.assert_awaited_once()
+    kwargs = manager._schedule_explicit_handle_resume.await_args.kwargs
+    assert kwargs["route_outcome"] == "report_or_external_resume"
+    assert kwargs["target_work_id"] == work_id
+    assert kwargs["handle_work_id"] == work_id
+    assert kwargs["selected_suspension_reason"] == SuspensionReason.PAUSED_EXTERNAL.value
+
+
+@pytest.mark.asyncio
+async def test_resume_processing_job_missing_handle_returns_none(
+    engine: Engine,
+) -> None:
+    """The real manager router takes invalid_or_missing_handle."""
+    manager = InstanceManager.__new__(InstanceManager)
+    manager._task_repo = TaskRepository(engine)
+    manager._schedule_explicit_handle_resume = AsyncMock()
+
+    result = await manager.resume_processing_job(
+        f"inst-{uuid.uuid4().hex[:8]}", message="resume"
+    )
+
+    assert result is None
+    manager._schedule_explicit_handle_resume.assert_not_awaited()

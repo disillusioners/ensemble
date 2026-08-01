@@ -259,7 +259,7 @@ class TestSuspendTurn:
     def test_invalid_reason_string_raises(self, engine):
         """An empty or non-string ``reason`` raises ``ValueError``."""
         work_id = _seed_running_task(engine)
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ValueError, match="not a valid SuspensionReason"):
             SuspendTurn(work_id=work_id, reason="")
 
         # DB must be untouched.

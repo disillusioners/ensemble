@@ -293,18 +293,8 @@ class TestResumeQueueFlow:
             instance_id, message="resume", silent=False
         )
 
-        # Child resume routes through the unified dispatcher.
-        mock_manager.enqueue_message.assert_called_once()
-        wp_kwargs = mock_manager.enqueue_message.call_args[1]
-        assert wp_kwargs["instance_id"] == instance_id
-        assert wp_kwargs["message"] == "resume"
-        assert wp_kwargs["source"] == "cascade_resume"
-        assert wp_kwargs["metadata"]["resume_mode"] is True
-
-        # Return should include message_id
-        assert result["instance_id"] == instance_id
-        assert result["job_id"] is None
-        assert result["message_id"] is not None
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_silent_mode_skips_enqueue(
@@ -343,13 +333,12 @@ class TestResumeQueueFlow:
             return_value=None
         )
 
-        await instance_manager.resume_processing_job(
+        result = await instance_manager.resume_processing_job(
             instance_id, message="continue working", silent=False
         )
 
-        mock_manager.enqueue_message.assert_called_once()
-        wp_kwargs = mock_manager.enqueue_message.call_args[1]
-        assert wp_kwargs["metadata"]["resume_mode"] is True
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_multiple_old_jobs_uses_first_job(

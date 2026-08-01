@@ -27,7 +27,8 @@ class TransitionResult:
     old_status: str | None
     new_status: str
     mirrors_touched: frozenset[str]
-    cross_turn_side_effects: tuple[str, ...]
+    rowcount: int = 0
+    cross_turn_side_effects: tuple[str, ...] = ()
     wakeup_payload: dict | None = None
     sse_payload: dict | None = None
     watcher_notify: tuple[str, ...] = ()
@@ -62,7 +63,14 @@ class _StatusTransition(_Transition):
     def _reconcile(self):
         if self.task_repo is not None and hasattr(self.task_repo, "reconcile_turn_mirror"):
             return self.task_repo.reconcile_turn_mirror(self.work_id)
-    def _result(self, old: str | None, new: str, touched: frozenset[str] | None = None, **kw):
+    def _result(
+        self,
+        old: str | None,
+        new: str,
+        touched: frozenset[str] | None = None,
+        rowcount: int = 0,
+        **kw,
+    ):
         # ``cross_turn_side_effects`` is a positional field on
         # ``TransitionResult`` (6th position). The concrete transitions
         # (CompleteTurn / AbortTurn / etc.) pass it as a kwarg AND we
@@ -71,7 +79,16 @@ class _StatusTransition(_Transition):
         # ``run()`` raises ``TypeError: TransitionResult.__init__()
         # got multiple values for argument 'cross_turn_side_effects'``.
         cross_turn = kw.pop("cross_turn_side_effects", ())
-        return TransitionResult(self.work_id, self.instance_id, old, new, touched or self.MIRROR_SET, cross_turn, **kw)
+        return TransitionResult(
+            work_id=self.work_id,
+            instance_id=self.instance_id,
+            old_status=old,
+            new_status=new,
+            mirrors_touched=touched or self.MIRROR_SET,
+            rowcount=rowcount,
+            cross_turn_side_effects=cross_turn,
+            **kw,
+        )
 
 class BeginTurn(_Transition):
     """BEGIN_TURN transition — Task creation path.
@@ -85,9 +102,19 @@ class BeginTurn(_Transition):
     def __init__(self, task_type: str, instance_id: str | None, message_id: str | None, work_id: str, task_repo: Any = None, **kwargs):
         self.task_type, self.instance_id, self.message_id, self.work_id, self.task_repo = task_type, instance_id, message_id, work_id, task_repo
     def run(self, session):
-        session.execute(text("INSERT INTO task (work_id, status, instance_id) VALUES (:work_id, :status, :instance_id)"), {"work_id": self.work_id, "status": "pending", "instance_id": self.instance_id})
+        result = session.execute(text("INSERT INTO task (work_id, status, instance_id) VALUES (:work_id, :status, :instance_id)"), {"work_id": self.work_id, "status": "pending", "instance_id": self.instance_id})
+        rowcount = getattr(result, "rowcount", 1)
         if self.task_repo and hasattr(self.task_repo, "reconcile_turn_mirror"): self.task_repo.reconcile_turn_mirror(self.work_id)
-        return TransitionResult(self.work_id, self.instance_id, None, "pending", self.MIRROR_SET, ("instance_running",), None, {"event":"turn_started","work_id":self.work_id}, ())
+        return TransitionResult(
+            work_id=self.work_id,
+            instance_id=self.instance_id,
+            old_status=None,
+            new_status="pending",
+            mirrors_touched=self.MIRROR_SET,
+            rowcount=rowcount,
+            cross_turn_side_effects=("instance_running",),
+            sse_payload={"event": "turn_started", "work_id": self.work_id},
+        )
 
 class ClaimTurn(_StatusTransition):
     """CLAIM_TURN transition — Worker picks up a pending Task.
@@ -99,7 +126,15 @@ class ClaimTurn(_StatusTransition):
     """
     MIRROR_SET = frozenset({"task", "job_queue_items", "job_locks"})
     def __init__(self, work_id, worker_id, task_repo=None, **kwargs): super().__init__(work_id, task_repo, kwargs.get("instance_id")); self.worker_id=worker_id
-    def run(self, session): self._write(session,"running","pending"); self._reconcile(); return self._result("pending","running", wakeup_payload={"event":"turn_claimed","work_id":self.work_id})
+    def run(self, session):
+        rowcount = self._write(session, "running", "pending")
+        self._reconcile()
+        return self._result(
+            "pending",
+            "running",
+            rowcount=rowcount,
+            wakeup_payload={"event": "turn_claimed", "work_id": self.work_id},
+        )
 
 _SUSPENSION_REASON_VALUES: frozenset[str] = frozenset({
     s.value for s in SuspensionReason
@@ -137,14 +172,8 @@ class SuspendTurn(_StatusTransition):
     Args:
         work_id: The Task being suspended (must currently be
             ``status='running'``).
-        reason: A non-empty ``suspension_reason`` value. The value
-            SHOULD be one of the ``SuspensionReason`` enum values
-            (awaiting_answer / awaiting_children / paused_external),
-            but the transition is permissive about other values
-            (the pause-cascade call site in
-            ``daemon/services/instance_lifecycle.py`` still passes
-            ``CancellationReason.USER_STOPPED.value``;
-            ``SuspensionReason`` evolves independently).
+        reason: A valid ``SuspensionReason`` enum value
+            (awaiting_answer / awaiting_children / paused_external).
         resume_target_turn_id: Optional Task ``work_id`` of the turn
             to resume onto. Required when ``reason='awaiting_answer'``.
         task_repo: TaskRepository for mirror reconciliation.
@@ -161,17 +190,12 @@ class SuspendTurn(_StatusTransition):
         **kwargs,
     ):
         super().__init__(work_id, task_repo, kwargs.get("instance_id"))
-        # Validate the reason value FIRST so the caller sees a
-        # synchronous error before we touch the database. We
-        # require a non-empty string; the specific enum values
-        # are recommended but not enforced here because the
-        # vocabulary still evolves — the pause cascade uses
-        # ``CancellationReason`` siblings that overlap with the
-        # new ``SuspensionReason`` enum but are not identical.
-        if not isinstance(reason, str) or not reason:
+        # Validate the reason value before touching the database. Only
+        # the declared SuspensionReason vocabulary is accepted.
+        if reason not in _SUSPENSION_REASON_VALUES:
             raise ValueError(
-                f"SuspendTurn(reason={reason!r}) must be a non-empty "
-                f"string."
+                f"SuspendTurn(reason={reason!r}) is not a valid SuspensionReason; "
+                f"valid values: {sorted(_SUSPENSION_REASON_VALUES)}."
             )
         # Strict invariant (§7.2): ``awaiting_answer`` requires a
         # non-null target. Other reasons may omit the target.
@@ -214,6 +238,7 @@ class SuspendTurn(_StatusTransition):
                 "suspension_reason": self.reason,
                 "resume_target_turn_id": self.resume_target_turn_id,
             },
+            rowcount=rowcount,
             # Surface the actual UPDATE rowcount so the caller can
             # detect a swallowed guard (zero rows means the Task
             # was no longer RUNNING when the transition fired — the
@@ -249,7 +274,7 @@ class ResumeTurn(_StatusTransition):
         # Phase 3: status + handle clear in one guarded UPDATE.
         # The ``status='paused'`` guard prevents racy concurrent
         # consumes from double-clearing the handle.
-        session.execute(
+        result = session.execute(
             text(
                 "UPDATE task SET status = :new_status, "
                 "suspension_reason = NULL, "
@@ -262,10 +287,12 @@ class ResumeTurn(_StatusTransition):
                 "old_status": "paused",
             },
         )
+        rowcount = getattr(result, "rowcount", 1)
         self._reconcile()
         return self._result(
             "paused",
             "cancelled",
+            rowcount=rowcount,
             cross_turn_side_effects=("instance_running", "schedule_resume_job"),
             wakeup_payload={
                 "event": "schedule_resume_job",
@@ -289,7 +316,7 @@ class CompleteTurn(_StatusTransition):
 
     def run(self, session):
         # Phase 3: status + handle clear on terminalization.
-        session.execute(
+        result = session.execute(
             text(
                 "UPDATE task SET status = :new_status, "
                 "suspension_reason = NULL, "
@@ -302,10 +329,12 @@ class CompleteTurn(_StatusTransition):
                 "old_status": "running",
             },
         )
+        rowcount = getattr(result, "rowcount", 1)
         self._reconcile()
         return self._result(
             "running",
             "completed",
+            rowcount=rowcount,
             cross_turn_side_effects=("instance_completed", "cancel_dependency_watchers"),
             wakeup_payload={"event": "turn_completed", "work_id": self.work_id},
         )
@@ -331,23 +360,26 @@ class AbortTurn(_StatusTransition):
     def run(self, session):
         new = "failed" if self.reason == "failed" else "cancelled"
         # Phase 3: status + handle clear on terminalization.
-        session.execute(
+        result = session.execute(
             text(
                 "UPDATE task SET status = :new_status, "
                 "suspension_reason = NULL, "
                 "resume_target_turn_id = NULL "
-                "WHERE work_id = :work_id AND status = :old_status"
+                "WHERE work_id = :work_id AND status IN (:old_status, :alt_old_status)"
             ),
             {
                 "new_status": new,
                 "work_id": self.work_id,
                 "old_status": "running",
+                "alt_old_status": "paused",
             },
         )
+        rowcount = getattr(result, "rowcount", 1)
         self._reconcile()
         return self._result(
             "running",
             new,
+            rowcount=rowcount,
             cross_turn_side_effects=(
                 ("instance_error" if new == "failed" else "instance_terminated"),
                 "cancel_dependency_watchers",
@@ -428,7 +460,7 @@ class RetryTurn(_Transition):
         #    None). When the wrapper passes a parent_error (force_cancel
         #    path), the error column is recorded on the parent.
         if self.parent_error is not None:
-            session.execute(
+            status_result = session.execute(
                 text(
                     "UPDATE task SET status = :cancelled, error = :error "
                     "WHERE work_id = :work_id"
@@ -440,7 +472,7 @@ class RetryTurn(_Transition):
                 },
             )
         else:
-            session.execute(
+            status_result = session.execute(
                 text("UPDATE task SET status = :cancelled WHERE work_id = :work_id"),
                 {
                     "cancelled": TaskStatus.CANCELLED.value,
@@ -495,19 +527,18 @@ class RetryTurn(_Transition):
         )
 
         return TransitionResult(
-            self.child_work_id,
-            self.instance_id,
-            "cancelled",
-            "pending",
-            self.MIRROR_SET,
-            ("migrate_job_watchers",),
-            {
+            work_id=self.child_work_id,
+            instance_id=self.instance_id,
+            old_status="cancelled",
+            new_status="pending",
+            mirrors_touched=self.MIRROR_SET,
+            rowcount=getattr(status_result, "rowcount", 1),
+            cross_turn_side_effects=("migrate_job_watchers",),
+            wakeup_payload={
                 "event": "turn_retried",
                 "parent_work_id": self.parent_work_id,
                 "child_work_id": self.child_work_id,
             },
-            None,
-            (),
         )
 
 TRANSITIONS: tuple[type[_Transition], ...] = (BeginTurn, ClaimTurn, SuspendTurn, ResumeTurn, CompleteTurn, AbortTurn, RetryTurn)

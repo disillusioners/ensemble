@@ -23,7 +23,7 @@ from ..repositories.dependency_bus.models import (
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
 from ..repositories.job_queue.models import AdmissionState
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-from ..repositories.task.models import Task, TaskStatus
+from ..repositories.task.models import SuspensionReason, Task, TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .dependency_bus import get_dependency_bus
@@ -3135,7 +3135,8 @@ status=InstanceStatus.IDLE.value,
             for row in task_rows:
                 result = SuspendTurn(
                     work_id=str(row["work_id"]),
-                    reason=CancellationReason.USER_STOPPED.value,
+                    reason=SuspensionReason.PAUSED_EXTERNAL.value,
+                    resume_target_turn_id=str(row["work_id"]),
                     task_repo=transition_task_repo,
                     instance_id=row["instance_id"],
                 ).run(session)

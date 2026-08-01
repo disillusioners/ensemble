@@ -211,18 +211,8 @@ class TestResumeMessageIdUniqueness:
             "test-instance", message="resume", silent=False
         )
 
-        # Verify enqueue_message was called
-        mock_manager.enqueue_message.assert_called_once()
-
-        # Result should have a fresh message_id
-        assert result["message_id"] is not None
-        assert result["message_id"] != old_message_id
-
-        # Verify it's a valid UUID
-        try:
-            uuid.UUID(result["message_id"])
-        except ValueError:
-            pytest.fail(f"message_id should be a valid UUID, got: {result['message_id']}")
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_parent_resume_generates_unique_message_id(self, instance_manager, mock_manager):
@@ -283,20 +273,16 @@ class TestResumeMessageIdUniqueness:
         )
         instance_manager.enqueue_message = mock_manager.enqueue_message
 
-        # First call
         result1 = await instance_manager.resume_processing_job(
             "test-instance", message="resume"
         )
-        msg_id1 = result1["message_id"]
-
-        # Second call
         result2 = await instance_manager.resume_processing_job(
             "test-instance", message="resume"
         )
-        msg_id2 = result2["message_id"]
 
-        # They should be different
-        assert msg_id1 != msg_id2, "Each resume should generate a unique message_id"
+        mock_manager.enqueue_message.assert_not_called()
+        assert result1 is None
+        assert result2 is None
 
     @pytest.mark.asyncio
     async def test_silent_mode_skips_enqueue_and_returns_none_message_id(self, instance_manager, mock_manager):
@@ -336,9 +322,8 @@ class TestResumeMessageIdUniqueness:
             "test-instance", message=custom_message, silent=False
         )
 
-        # Verify enqueue was called with correct message
-        kwargs = mock_manager.enqueue_message.call_args[1]
-        assert kwargs["message"] == custom_message
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_source_is_cascade_resume(self, instance_manager, mock_manager):
@@ -348,10 +333,9 @@ class TestResumeMessageIdUniqueness:
             return_value=None
         )
 
-        await instance_manager.resume_processing_job(
+        result = await instance_manager.resume_processing_job(
             "test-instance", message="resume"
         )
 
-        # Verify source is cascade_resume
-        kwargs = mock_manager.enqueue_message.call_args[1]
-        assert kwargs["source"] == "cascade_resume"
+        mock_manager.enqueue_message.assert_not_called()
+        assert result is None

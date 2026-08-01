@@ -347,11 +347,10 @@ class TaskRepository:
         The filter shape:
 
           * ``instance_id = :instance_id``
-          * ``status IN ('paused', 'running')``  (the named
+          * ``status IN ('paused', 'running', 'cancelled')``  (the named
             transitions may only operate on a non-terminal Task;
-            CANCELLED is deliberately EXCLUDED — the resume cascade
-            uses CANCELLED as a "resumed" marker, and CANCELLED rows
-            are no longer cancellable).
+            CANCELLED is included as the resume cascade's consumed
+            "resumed" marker so routing can mint the fresh driver turn).
           * ``task_type IN ('process_message', 'process_report')``
             (per plan §8.2: include ``PROCESS_REPORT`` where a
             report turn is the active checkpoint-bearing turn).
@@ -393,6 +392,7 @@ class TaskRepository:
                     Task.status.in_([
                         TaskStatus.PAUSED.value,
                         TaskStatus.RUNNING.value,
+                        TaskStatus.CANCELLED.value,  # Phase 3 W2: resume cascade's "resumed" marker
                     ])
                 )
                 .where(
@@ -420,6 +420,7 @@ class TaskRepository:
                     Task.status.in_([
                         TaskStatus.PAUSED.value,
                         TaskStatus.RUNNING.value,
+                        TaskStatus.CANCELLED.value,  # Phase 3 W2: resume cascade's "resumed" marker
                     ])
                 )
                 .where(
