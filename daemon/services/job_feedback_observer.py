@@ -3401,6 +3401,32 @@ class JobFeedbackObserver:
             # ─── Single commit for ALL three DB writes ───
             session.commit()
 
+        # ─── Additive reconciler pass (Site 2: finalize). Runs AFTER
+        # the WriteGuardSession commits so the Task snapshot the
+        # reconciler reads reflects the terminal state. CATCH per
+        # increment1-plan §5.1 — blocking finalization on a mirror
+        # desync would orphan the JobItem in an in-flight state; the
+        # next call site (or periodic sweep) will catch the desync.
+        # The reconciler opens its own ``engine.begin()`` transaction
+        # internally, so it does NOT share the caller's WriteGuardSession.
+        # ``job_id`` is the JobItem ID == Task.work_id by construction
+        # (virtual-job correlation); when ``job_id is None`` the
+        # post-D13 MESSAGE path has no JobItem to normalize — skip.
+        if job_id is not None:
+            task_repo = getattr(self._instance_manager, "_task_repo", None)
+            if task_repo is not None and hasattr(
+                task_repo, "reconcile_turn_mirror"
+            ):
+                try:
+                    task_repo.reconcile_turn_mirror(job_id)
+                except InvalidTransitionError as e:
+                    logger.warning(
+                        "Reconciler invariant violation after finalize "
+                        "for work_id=%s: %s",
+                        job_id,
+                        e,
+                    )
+
         logger.info(
             f"Observer: finalized job {job_id[:8] if job_id else 'no_job'}... status={terminal_status} "
             f"for instance {instance_id[:8]}... (released {released} lock(s), "

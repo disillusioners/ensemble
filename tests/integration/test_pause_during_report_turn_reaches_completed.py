@@ -51,6 +51,7 @@ from daemon.repositories.message_queue.models import (
     MessageType,
 )
 from daemon.repositories.task.models import Task, TaskStatus
+from daemon.repositories.task.repository import TaskRepository
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
 
@@ -104,6 +105,11 @@ def lifecycle_service(engine, write_guard) -> InstanceLifecycleService:
     manager = MagicMock()
     manager.engine = engine
     manager.write_guard = write_guard
+    # Turn-Reconciler migration: provide a real TaskRepository so the
+    # cascade helpers' ``self._task_repo.reconcile_turn_mirror`` call
+    # exercises the real reconciler (not a MagicMock no-op). Without
+    # this, ``reconciled_message_ids`` is always empty.
+    manager._task_repo = TaskRepository(engine=engine)
     service._manager = manager
     # Disable the post-reconcile re-fire for the basic reconciliation test —
     # the focus is on UPDATE 4 itself. The re-fire is covered separately
@@ -297,6 +303,9 @@ def test_post_reconcile_refire_self_heals_orphan(
     manager = MagicMock()
     manager.engine = engine
     manager.write_guard = write_guard
+    # Turn-Reconciler migration: provide a real TaskRepository so the
+    # reconciler actually runs (not a MagicMock no-op).
+    manager._task_repo = TaskRepository(engine=engine)
     service._manager = manager
     service._resume_cascade_db_sync(
         engine, write_guard,
@@ -466,6 +475,9 @@ def test_phase2_post_reconcile_refire_resolves_orphan_via_guard(
     manager = MagicMock()
     manager.engine = engine
     manager.write_guard = write_guard
+    # Turn-Reconciler migration: provide a real TaskRepository so the
+    # reconciler actually runs (not a MagicMock no-op).
+    manager._task_repo = TaskRepository(engine=engine)
     service._manager = manager
     service._resume_cascade_db_sync(
         engine, write_guard,

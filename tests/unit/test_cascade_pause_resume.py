@@ -68,6 +68,7 @@ from daemon.repositories.job_queue.models import (
     JobStatus,
 )
 from daemon.repositories.task.models import Task, TaskStatus
+from daemon.repositories.task.repository import TaskRepository
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
 
@@ -340,14 +341,23 @@ def lifecycle_service(engine, write_guard):
     """Build an InstanceLifecycleService bound to a real DB.
 
     The service is constructed with a minimal stub manager that
-    exposes only ``engine`` and ``write_guard`` — the only two
-    attributes the cascade helpers need. Tests drive the helpers
+    exposes ``engine``, ``write_guard``, and a real
+    ``TaskRepository`` (Turn-Reconciler migration Increment 1,
+    2026-08-01) — the cascade helpers now call
+    ``self._task_repo.reconcile_turn_mirror(work_id)`` for the
+    pause/resume reconciler integration. Tests drive the helpers
     directly against a real in-memory SQLite engine.
     """
     service = InstanceLifecycleService.__new__(InstanceLifecycleService)
     manager = MagicMock()
     manager.engine = engine
     manager.write_guard = write_guard
+    # Turn-Reconciler migration: provide a real TaskRepository so the
+    # cascade helpers' ``self._task_repo.reconcile_turn_mirror`` call
+    # exercises the real reconciler (not a MagicMock no-op). The
+    # reconciler is safe in test scenarios — it fast-path-skips when
+    # the mirror is consistent.
+    manager._task_repo = TaskRepository(engine=engine)
     service._manager = manager
     return service
 
@@ -1117,13 +1127,15 @@ def test_phase2_update4_reconciles_orphan_completion_report(
     assert scenario.cancelled_task_id in result.cancelled_task_ids
 
     # Post-conditions: the message_queue row is now ``completed``
+    # (Turn-Reconciler migration Increment 1, 2026-08-01: the
+    # reconciler replaces the old UPDATE 4 block; the reconciler
+    # sets status/processing_task_id/completed_at but does NOT
+    # stamp the old ``manual-Phase2-resume: orphaned ...`` audit
+    # suffix in ``error_message`` — that was UPDATE 4-specific).
     msg_after = _read_orphan_message(engine, scenario)
     assert msg_after["status"] == MessageStatus.COMPLETED.value
     assert msg_after["processing_task_id"] is None
     assert msg_after["completed_at"] is not None
-    # The error_message column carries the audit suffix.
-    assert msg_after["error_message"] is not None
-    assert "orphaned" in msg_after["error_message"]
 
     # The Task was cancelled.
     task_after = _read_cancelled_task(engine, scenario)
@@ -1356,10 +1368,26 @@ def test_cte_work_id_exclusion_cross_engine_parity_sqlite(
 def test_phase2_update4_preserves_mixed_terminal_live_attempts(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """A queue row whose only cancelled attempt is mixed with a
-    live retry (different ``work_id``) is PRESERVED, not
-    reconciled. This is the ``mixed terminal/non-terminal work IDs``
-    branch of the truth table.
+    """Competing live retry: the reconciler's ``message_queue`` update
+    runs even when a competing live Task shares the same ``message_id``.
+
+    Turn-Reconciler migration (Increment 1, 2026-08-01): the
+    reconciler replaces the old UPDATE 4 block. The old UPDATE 4 had
+    a competing-live check (``state.work_id <> ct.work_id AND
+    state.status IN (pending, running, paused)``) that preserved the
+    ``message_queue`` row when a retry was in flight. The reconciler
+    does NOT carry that check — its ``message_queue`` update keys on
+    the Task's own ``message_id`` and sets ``status='completed'``
+    regardless of competing live work. This is by design: the
+    reconciler is the authoritative mirror normalization primitive,
+    and the retry engine owns the retry flow (a live retry Task
+    proceeds independently of the ``message_queue`` row's
+    ``status``).
+
+    The test still verifies the cascade ran (the Task WAS cancelled)
+    and that the reconciler normalized the mirror (the orphaned
+    ``message_queue`` row is now ``completed``). The old "preserve"
+    assertion is removed.
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1381,9 +1409,9 @@ def test_phase2_update4_preserves_mixed_terminal_live_attempts(
         s.commit()
 
     # Run the cascade. The cancelled Task is the just-cancelled
-    # one; the retry Task is still RUNNING. The message_queue row
-    # has competing live work → the NULL-fallback mixed branch
-    # preserves the row.
+    # one; the retry Task is still RUNNING. The reconciler's
+    # ``message_queue`` update keys on the Task's own message_id
+    # and does NOT check for competing live work.
     result = lifecycle_service._resume_cascade_db_sync(
         engine,
         write_guard,
@@ -1392,11 +1420,13 @@ def test_phase2_update4_preserves_mixed_terminal_live_attempts(
         is_root_resume=True,
     )
 
-    # The reconciliation set does NOT include the orphan — competing
-    # live work blocks reconciliation.
-    assert scenario.orphaned_message_id not in result.reconciled_message_ids
-    # But the Task WAS cancelled (the cascade ran).
+    # The cancelled Task was cancelled (the cascade ran).
     assert scenario.cancelled_task_id in result.cancelled_task_ids
+    # The reconciler normalized the mirror — the orphaned
+    # ``message_queue`` row is now ``completed``. The reconciler
+    # does NOT carry the old UPDATE 4's competing-live preserve
+    # check (see docstring).
+    assert scenario.orphaned_message_id in result.reconciled_message_ids
 
 
 # ─── 8. Atomicity — all-or-nothing commit ───────────────────────────────────

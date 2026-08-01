@@ -600,6 +600,33 @@ class JobRecoveryService:
                 # (stale_task_recovery handles crashed-worker tasks
                 # via heartbeat staleness, separately).
                 task_work_id = getattr(task, "work_id", None)
+
+                # Additive reconciler pass (Site 4: periodic sweep).
+                # For each work_id the sweep encounters, normalize the
+                # eight-table mirror before any of the heavier F10/P1
+                # patterns run. CATCH per increment1-plan §5.1 — the
+                # sweep is best-effort by design; one work_id's
+                # failure MUST NOT abort the whole sweep. The
+                # reconciler runs its own ``engine.begin()``
+                # transaction; the matching task_id-aware
+                # ``except Exception`` handler below continues to
+                # cover unrelated drift detection failures.
+                if task_work_id and hasattr(
+                    self._task_repository, "reconcile_turn_mirror"
+                ):
+                    try:
+                        await asyncio.to_thread(
+                            self._task_repository.reconcile_turn_mirror,
+                            task_work_id,
+                        )
+                    except InvalidTransitionError as e:
+                        logger.warning(
+                            "Reconciler invariant violation in drift "
+                            "sweep for work_id=%s: %s",
+                            task_work_id,
+                            e,
+                        )
+
                 job: Any = None
                 if task_work_id:
                     job = await asyncio.to_thread(

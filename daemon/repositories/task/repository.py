@@ -12,6 +12,8 @@ from sqlalchemy import delete as sql_delete, func, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
+from daemon.services.job_state_machine import InvalidTransitionError
+
 from ..instance.models import Instance, InstanceStatus
 from ..job_queue.models import AdmissionState, JobItem, active_admission_states_sql
 from .models import Task, TaskStatus, TaskType
@@ -485,6 +487,242 @@ class TaskRepository:
                 .order_by(col(Task.created_at).asc())
             )
             return list(db_session.exec(stmt))
+
+    def reconcile_turn_mirror(self, work_id: str) -> dict[str, Any]:
+        """Reconcile one Task's cross-system turn mirrors atomically.
+
+        The Task row is authoritative.  Its status and secondary link keys are
+        read once, and every mutation is guarded by that snapshot so a racing
+        lifecycle transition turns the reconciliation writes into no-ops.
+        """
+        terminal_statuses = (
+            TaskStatus.COMPLETED.value,
+            TaskStatus.CANCELLED.value,
+            TaskStatus.FAILED.value,
+        )
+        inflight_statuses = (
+            TaskStatus.PENDING.value,
+            TaskStatus.RUNNING.value,
+            TaskStatus.PAUSED.value,
+        )
+        updated_counts: dict[str, int] = {}
+        drift_flags: dict[str, Any] = {}
+
+        with self.engine.begin() as conn:
+            task_sql = """
+                SELECT id, status, message_id, instance_id
+                FROM task
+                WHERE work_id = :work_id
+            """
+            if self.engine.dialect.name == "postgresql":
+                task_sql += " FOR UPDATE"
+            snapshot = conn.execute(text(task_sql), {"work_id": work_id}).mappings().first()
+
+            found = snapshot is not None
+            snapshot_status = snapshot["status"] if snapshot else None
+            result = {
+                "work_id": work_id,
+                "found": found,
+                "snapshot_status": snapshot_status,
+                "updated_counts": updated_counts,
+                "drift_flags": drift_flags,
+                "fast_path_skipped": False,
+            }
+
+            terminal = not found or snapshot_status in terminal_statuses
+            if found and snapshot_status not in terminal_statuses + inflight_statuses:
+                raise ValueError(
+                    f"Unknown Task status for turn mirror reconciliation: {snapshot_status}"
+                )
+            terminal_reason = snapshot_status if found else "orphaned_no_task"
+            params = {
+                "work_id": work_id,
+                "task_exists": found,
+                "snapshot_status": snapshot_status,
+                "task_status": snapshot_status,
+                "terminal": terminal,
+                "terminal_reason": terminal_reason,
+                "task_id": snapshot["id"] if snapshot else None,
+                "task_message_id": snapshot["message_id"] if snapshot else None,
+                "task_instance_id": snapshot["instance_id"] if snapshot else None,
+                "status_pending": TaskStatus.PENDING.value,
+                "status_running": TaskStatus.RUNNING.value,
+                "status_paused": TaskStatus.PAUSED.value,
+                "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
+            }
+            snapshot_guard = """
+                (:task_exists = false OR EXISTS (
+                    SELECT 1 FROM task
+                    WHERE work_id = :work_id AND status = :snapshot_status
+                ))
+            """
+
+            updated_counts["job_queue_items"] = conn.execute(
+                text(f"""
+                    UPDATE job_queue_items
+                    SET admission_state = CASE
+                            WHEN :terminal AND NOT EXISTS (
+                                SELECT 1 FROM instances i
+                                WHERE i.instance_id = :task_instance_id
+                                  AND i.status = :status_waiting_children
+                            ) THEN 'done'
+                            ELSE 'active'
+                        END,
+                        terminal_reason = CASE
+                            WHEN :terminal AND NOT EXISTS (
+                                SELECT 1 FROM instances i
+                                WHERE i.instance_id = :task_instance_id
+                                  AND i.status = :status_waiting_children
+                            ) THEN :terminal_reason
+                            ELSE terminal_reason
+                        END,
+                        failed_at = CASE
+                            WHEN :task_status IN ('failed', 'cancelled')
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM instances i
+                                     WHERE i.instance_id = :task_instance_id
+                                       AND i.status = :status_waiting_children
+                                 )
+                            THEN COALESCE(failed_at, CAST(CURRENT_TIMESTAMP AS TEXT))
+                            ELSE failed_at
+                        END
+                    WHERE job_id = :work_id AND {snapshot_guard}
+                """),
+                params,
+            ).rowcount
+
+            updated_counts["job_locks"] = conn.execute(
+                text(f"""
+                    DELETE FROM job_locks
+                    WHERE job_id = :work_id
+                      AND :terminal
+                      AND {snapshot_guard}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM instances i
+                          WHERE i.instance_id = :task_instance_id
+                            AND i.status = :status_waiting_children
+                      )
+                """),
+                params,
+            ).rowcount
+
+            updated_counts["message_queue"] = conn.execute(
+                text(f"""
+                    UPDATE message_queue
+                    SET status = 'completed',
+                        processing_task_id = NULL,
+                        completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+                    WHERE message_id = :task_message_id
+                      AND :terminal
+                      AND {snapshot_guard}
+                """),
+                params,
+            ).rowcount
+
+            updated_counts["dependency_watchers"] = conn.execute(
+                text(f"""
+                    UPDATE dependency_watchers
+                    SET state = 'CANCELLED'
+                    WHERE source_task_id = CAST(:task_id AS TEXT)
+                      AND state = 'PENDING'
+                      AND :terminal
+                      AND {snapshot_guard}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM task AS target_task
+                          WHERE target_task.instance_id = dependency_watchers.target_instance_id
+                            AND target_task.status IN (
+                                :status_pending, :status_running, :status_paused
+                            )
+                      )
+                """),
+                params,
+            ).rowcount
+
+            updated_counts["report_injections"] = conn.execute(
+                text(f"""
+                    UPDATE report_injections
+                    SET state = 'TASK_DELIVERED',
+                        delivered_at = COALESCE(
+                            delivered_at, CAST(CURRENT_TIMESTAMP AS TEXT)
+                        )
+                    WHERE report_message_id = :task_message_id
+                      AND state = 'PENDING'
+                      AND :terminal
+                      AND {snapshot_guard}
+                """),
+                params,
+            ).rowcount
+
+            if found:
+                instance_row = conn.execute(
+                    text("""
+                        SELECT i.status,
+                               EXISTS (
+                                   SELECT 1 FROM task t
+                                   WHERE t.instance_id = :task_instance_id
+                                     AND t.status IN (
+                                         :status_pending, :status_running, :status_paused
+                                     )
+                               ) AS has_inflight
+                        FROM instances i
+                        WHERE i.instance_id = :task_instance_id
+                    """),
+                    params,
+                ).mappings().first()
+                if (
+                    instance_row
+                    and instance_row["status"] == InstanceStatus.RUNNING.value
+                    and not bool(instance_row["has_inflight"])
+                ):
+                    drift_flags["instance_running_without_inflight_task"] = {
+                        "instance_id": params["task_instance_id"],
+                        "status": instance_row["status"],
+                    }
+                    logger.warning(
+                        "Turn mirror drift: instance %s is running without in-flight tasks "
+                        "(work_id=%s)",
+                        params["task_instance_id"],
+                        work_id,
+                    )
+
+            updated_counts["job_watchers"] = conn.execute(
+                text("""
+                    DELETE FROM job_watchers
+                    WHERE job_id = :work_id
+                      AND NOT EXISTS (
+                          SELECT 1 FROM task WHERE work_id = :work_id
+                      )
+                """),
+                params,
+            ).rowcount
+
+            invariant = conn.execute(
+                text("""
+                    SELECT admission_state,
+                           (admission_state = 'active') AS is_active,
+                           EXISTS (
+                               SELECT 1 FROM job_locks jl
+                               WHERE jl.job_id = job_queue_items.job_id
+                           ) AS has_lock
+                    FROM job_queue_items
+                    WHERE job_id = :work_id
+                """),
+                {"work_id": work_id},
+            ).mappings().first()
+            if invariant and bool(invariant["is_active"]) != bool(invariant["has_lock"]):
+                error = InvalidTransitionError(
+                    work_id,
+                    invariant["admission_state"],
+                    "active_with_lock",
+                )
+                error.args = (
+                    f"Turn mirror invariant failed for work_id={work_id}: "
+                    f"admission_state={invariant['admission_state']}, "
+                    f"has_lock={bool(invariant['has_lock'])}",
+                )
+                raise error
+
+            return result
 
     # --------------------------------------------------------
     # CLAIM (Atomic)
@@ -989,7 +1227,32 @@ class TaskRepository:
             if row is None:
                 return None
 
-            return self._row_to_task(row)
+            claimed_task = self._row_to_task(row)
+
+        # Additive reconciler pass (Site 1: claim). Runs AFTER the claim
+        # commits so the Task snapshot the reconciler reads reflects the
+        # newly-claimed row. CATCH per increment1-plan §5.1 — blocking the
+        # claim on a mirror desync would deadlock the worker pool, because
+        # the claim path is the only path that can eventually retry the
+        # reconciliation. The reconciler's writes already ran (or
+        # correctly no-op'd); the exception is diagnostic. Log at WARNING
+        # with ``work_id`` so desyncs are diagnosable in production
+        # telemetry.
+        # Claim-time reconciliation is defense-in-depth; the primary orphan
+        # prevention is via cascade + periodic sweep (reconcile_drift_states).
+        # If an orphaned JobItem blocks the claim query, the reconciler never
+        # fires here — but the periodic sweep catches any orphans the
+        # event-driven paths miss.
+        try:
+            self.reconcile_turn_mirror(claimed_task.work_id)
+        except InvalidTransitionError as e:
+            logger.warning(
+                "Reconciler invariant violation after claim for work_id=%s: %s",
+                claimed_task.work_id,
+                e,
+            )
+
+        return claimed_task
 
     def _json_extract_text_sql(self, column: str, key: str) -> str:
         """Return a dialect-aware SQL fragment that extracts ``key`` from

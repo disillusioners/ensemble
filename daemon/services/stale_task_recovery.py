@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Callable, TYPE_CHECKING
 
 from daemon.repositories.task.models import TaskStatus
+from daemon.services.job_state_machine import InvalidTransitionError
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,38 @@ class StaleTaskRecovery:
                         backoff_base=self._retry_backoff_base,
                         backoff_max=self._retry_backoff_max,
                     )
+
+                    # Additive reconciler pass (Site 3: timeout). Runs
+                    # AFTER ``force_cancel_and_schedule_retry`` for each
+                    # stale task in RUNNING status. CATCH per
+                    # increment1-plan §5.1 — blocking recovery on a
+                    # mirror desync would leave the task stuck (worker
+                    # is presumed dead). The reconciler opens its own
+                    # ``engine.begin()`` transaction internally so it
+                    # does not share the recovery's session. The
+                    # cancelled task's ``work_id`` is preserved by the
+                    # atomic UPDATE — that's the correlation axis for
+                    # the eight-table mirror sweep.
+                    #
+                    # DEFENSIVE: guard with ``getattr`` so legacy
+                    # ``MockTaskRepository`` fixtures (no
+                    # ``reconcile_turn_mirror``) still recover cleanly.
+                    # Production ``TaskRepository`` always has the
+                    # method (added in increment 1 of the turn-reconciler
+                    # migration, before this call-site integration).
+                    reconcile_method = getattr(
+                        self._task_repo, "reconcile_turn_mirror", None
+                    )
+                    if reconcile_method is not None:
+                        try:
+                            reconcile_method(task.work_id)
+                        except InvalidTransitionError as e:
+                            logger.warning(
+                                "Reconciler invariant violation after "
+                                "force-cancel for work_id=%s: %s",
+                                task.work_id,
+                                e,
+                            )
 
                     if retry_task:
                         logger.info(
