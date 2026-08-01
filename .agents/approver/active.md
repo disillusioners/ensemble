@@ -1,5 +1,6 @@
-Current Plan: Fix Pause-During-Report-Turn Orphan JobItem
-Tracking File: fix-pause-report-turn-orphan-tracking.md
-Iteration: 002
+Current Plan: Turn-Reconciler Named Transitions Migration
+Slug: turn-reconciler-migration
+Tracking File: turn-reconciler-migration-tracking.md
+Iteration: 003
 Status: APPROVED
-Last Updated: 2026-08-01 10:20
+Last Updated: 2026-08-01 14:05
