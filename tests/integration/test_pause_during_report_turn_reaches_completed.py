@@ -333,3 +333,158 @@ def test_post_reconcile_refire_self_heals_orphan(
     # Post-reconcile: no rows in base status filter (the orphan
     # is now completed).
     assert pending_count == 0
+
+
+def _seed_two_orphans_at_waiting_children_state(
+    engine: Engine,
+) -> tuple[str, str, str]:
+    """Seed the production state for the re-fire test: a root
+    instance at ``WAITING_CHILDREN`` (the stuck state the re-fire
+    is designed to fix) with two ``processing``
+    ``completion_report`` rows backed by ``PAUSED`` Tasks that
+    the resume cascade will cancel.
+
+    Difference from ``_seed_two_orphans_at_completed_processing_state``
+    (line 114): the instance is at ``WAITING_CHILDREN`` (root, no
+    parent) instead of ``PAUSED``. The Tasks are at ``PAUSED``
+    (NOT ``CANCELLED``) so that the cascade's UPDATE 2 actually
+    cancels them and UPDATE 4 has work to reconcile. If the Tasks
+    were pre-cancelled, UPDATE 2 would not move them and UPDATE 4
+    would have no candidates (the ``cancelled_task_ids`` returned
+    by UPDATE 2 is the only source of eligibility for UPDATE 4).
+
+    Returns:
+        (instance_id, msg_id_1, msg_id_2)
+    """
+    iid = f"inst-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+    with Session(engine) as s:
+        from daemon.repositories.instance.models import (
+            Instance,
+            InstanceStatus,
+        )
+        s.add(Instance(
+            instance_id=iid, agent_id="dev", agent_dir="/tmp",
+            agent_name="dev", project_id="test",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            created_at=now.isoformat(),
+        ))
+        msg_ids: list[str] = []
+        for i in range(2):
+            wid = f"work-{i}-{uuid.uuid4().hex[:8]}"
+            mid = f"msg-{i}-{uuid.uuid4().hex[:12]}"
+            msg_ids.append(mid)
+            t = Task(
+                work_id=wid, task_type="process_report",
+                instance_id=iid, message_id=mid,
+                status=TaskStatus.PAUSED.value, worker_id="w0",
+                cancel_requested=True,
+                cancel_requested_at=now.isoformat(),
+            )
+            s.add(t)
+            s.commit()
+            s.refresh(t)
+            s.add(MessageQueue(
+                message_id=mid, instance_id=iid,
+                content=f"orphan-{i}",
+                type=MessageType.COMPLETION_REPORT.value,
+                source="test",
+                status=MessageStatus.PROCESSING.value,
+                enqueued_at=now, last_activity_at=now,
+                processing_task_id=None,
+            ))
+            s.commit()
+    return iid, msg_ids[0], msg_ids[1]
+
+
+def test_phase2_post_reconcile_refire_resolves_orphan_via_guard(
+    engine, write_guard, monkeypatch
+) -> None:
+    """Phase 2 A5.1: the post-reconcile re-fire resolves the
+    orphan via the parent-completion guard.
+
+    The sibling test ``test_post_reconcile_refire_self_heals_orphan``
+    (line 274 above) only verifies the precondition
+    (``pending_count == 0`` after UPDATE 4) — it does NOT verify
+    that the re-fire actually fires
+    ``_process_child_completion_db_sync`` and transitions the
+    instance. This test goes further.
+
+    Scenario:
+      * Root instance at ``WAITING_CHILDREN`` (the stuck state
+        the re-fire is designed to fix).
+      * Two ``process_report`` Tasks at ``PAUSED`` (the cascade
+        will cancel them via UPDATE 2).
+      * Two orphan ``completion_report`` rows at
+        ``status='processing'`` with ``processing_task_id=NULL``
+        (the exact production orphan shape).
+
+    Run the cascade. UPDATE 1 is a no-op (instance is not
+    ``paused``). UPDATE 2 cancels the Tasks. UPDATE 4 reconciles
+    the orphan rows. The re-fire inspects the instance's own
+    queue (``pending_count == 0`` after UPDATE 4) and calls
+    ``_process_child_completion_db_sync``. The function
+    short-circuits on terminal/paused states
+    (``child_reports.py:1212-1219``); the instance is at
+    ``WAITING_CHILDREN`` so it proceeds through the root-bus
+    gate, the pending-tasks guard, and the own-queue
+    ``pending_count`` guard, then transitions the instance to
+    ``COMPLETED``.
+
+    Verifies:
+      * UPDATE 4 reconciles both orphan rows.
+      * The re-fire fires (the instance transitions AWAY from
+        ``WAITING_CHILDREN`` — the strongest evidence the re-fire
+        actually ran).
+      * The instance reaches ``COMPLETED``.
+
+    The bus singleton is monkeypatched so the parent-completion
+    guard's ``get_dependency_bus()`` lookup returns a mock with
+    ``count_pending_for_target_sync`` returning 0; without this
+    the guard raises ``RuntimeError`` per the A8 hard error at
+    ``child_reports.py:1274-1281`` and the re-fire's try/except
+    at ``instance_lifecycle.py:3421-3430`` swallows it.
+    """
+    ensure_schema(engine)
+    iid, msg1, msg2 = _seed_two_orphans_at_waiting_children_state(
+        engine
+    )
+
+    # Stub the bus so the parent-completion guard can evaluate
+    # pending children without raising A8. The stub returns 0
+    # (no pending children), which is the production state after
+    # a clean natural completion.
+    mock_bus = MagicMock()
+    mock_bus.count_pending_for_target_sync.return_value = 0
+    monkeypatch.setattr(
+        "daemon.services.dependency_bus._dependency_bus",
+        mock_bus,
+    )
+
+    # Run the cascade.
+    service = InstanceLifecycleService.__new__(InstanceLifecycleService)
+    manager = MagicMock()
+    manager.engine = engine
+    manager.write_guard = write_guard
+    service._manager = manager
+    service._resume_cascade_db_sync(
+        engine, write_guard,
+        tree_ids=[iid],
+        ancestor_ids=set(),
+        is_root_resume=True,
+    )
+
+    # UPDATE 4 reconciled both orphan rows (the cascade's job).
+    assert read_message(engine, msg1)["status"] == MessageStatus.COMPLETED.value
+    assert read_message(engine, msg2)["status"] == MessageStatus.COMPLETED.value
+
+    # The re-fire fired AND the instance transitioned to COMPLETED.
+    # Before the re-fire, the instance was at WAITING_CHILDREN (the
+    # stuck state); after the re-fire's
+    # ``_process_child_completion_db_sync`` call, the instance is
+    # at COMPLETED. This is the strongest assertion that the
+    # re-fire actually fired the parent-completion guard — the
+    # pre-existing test at line 274 only checks the precondition.
+    instance = read_instance(engine, iid)
+    assert instance is not None
+    assert instance["status"] == "completed"

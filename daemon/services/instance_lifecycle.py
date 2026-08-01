@@ -3337,6 +3337,48 @@ status=InstanceStatus.IDLE.value,
         caller to fire the appropriate side effects on the next
         ``asyncio.to_thread`` return.
 
+        Best-Effort Nature:
+            The re-fire is intentionally best-effort. Three
+            properties follow from this:
+
+            * **May defer for root instances.** The
+              ``_process_child_completion_db_sync`` helper consults
+              the bus to count pending children. For root instances
+              whose bus watchers are not yet released (e.g. the
+              children that produced the orphan rows have not yet
+              had their watchers FIRE'd), the helper returns
+              ``deferred_waiting_children`` and the instance stays
+              at ``WAITING_CHILDREN`` — the same observable state as
+              before this re-fire ran. The next natural child
+              event (bus watcher FIRE) will re-fire the completion
+              check.
+
+            * **No SSE/bus side effects here.** This sync helper
+              only mutates DB state (instance status, message
+              queue rows). The SSE broadcasts, CompletionRegistry
+              updates, and bus ``emit_terminal_for_child_instance``
+              are fired by the async caller on the event loop AFTER
+              ``asyncio.to_thread`` returns the
+              ``_ChildCompletionDbResult`` outcome. A sync helper
+              that tried to await a coroutine from a worker thread
+              with no event loop would deadlock — this is by
+              design, not a bug.
+
+            * **Failures are swallowed per-instance.** If the
+              re-fire raises (e.g. transient DB error, missing bus
+              singleton, unexpected exception), the catch at
+              ``instance_lifecycle.py:3421-3430`` records a warning
+              and continues to the next ``tree_id`` entry. The
+              parent stays at ``WAITING_CHILDREN`` until the next
+              natural event — identical observable behavior to the
+              pre-Phase-2 state where the operator cleanup script
+              was the only recovery path. The shared
+              ``pending_count`` predicate at
+              ``child_reports.py:1459`` plus the UPDATE 4
+              reconciliation have already committed, so the queue
+              is consistent; only the parent-completion transition
+              is delayed.
+
         Args:
             engine: The SQLAlchemy engine.
             write_guard: The shared ``WritePauseGuard`` (unused here

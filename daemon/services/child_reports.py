@@ -1175,8 +1175,8 @@ Provide a concise summary:"""
     def _process_child_completion_db_sync(
         self,
         instance_id: str,
-        completed_message_id: str,
-        last_content: str,
+        completed_message_id: str | None = None,
+        last_content: str = "",
     ) -> _ChildCompletionDbResult:
         """Sync DB half of ``_process_child_completion_and_notify_parent``.
         
