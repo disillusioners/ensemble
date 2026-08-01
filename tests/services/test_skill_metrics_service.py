@@ -46,6 +46,12 @@ class FakeInstance:
         self.id = instance_id
         self.instance_id = instance_id
         self.instance_metadata = dict(metadata or {})
+        # Default to non-paused so the pipeline's ``_is_instance_paused``
+        # guard (which reads ``instance.status``) does not raise on the fake.
+        # This was added when 5 ``TestRecordMetricsWiring`` tests in
+        # ``test_process_message_metrics.py`` started calling
+        # ``message_processing_pipeline.execute`` and reached the guard.
+        self.status = "active"
 
 
 class FakeInstanceRepo:
