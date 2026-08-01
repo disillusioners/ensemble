@@ -392,6 +392,9 @@ class TestRowToTaskBackwardCompat:
                 # work_id / is_deferred are required (no fallback).
                 self.work_id = "work-id-test-1"
                 self.is_deferred = False
+                # is_background is also a required (no fallback) field —
+                # added in the same migration cycle as work_id/is_deferred.
+                self.is_background = False
                 self.status = "pending"
                 self.worker_id = None
                 self.result = None
@@ -434,6 +437,8 @@ class TestRowToTaskBackwardCompat:
                 # work_id / is_deferred are required.
                 self.work_id = "work-id-test-2"
                 self.is_deferred = True
+                # is_background is also a required (no fallback) field.
+                self.is_background = False
                 self.status = "pending"
                 self.worker_id = None
                 self.result = None
