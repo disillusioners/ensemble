@@ -547,15 +547,21 @@ class TestReportLaneGuardPG:
     def test_pg_process_message_blocked_by_cross_system_guard(
         self, pg_engine, task_repo
     ):
-        """PROCESS_MESSAGE with non-matching message_id IS blocked on PG.
+        """PROCESS_MESSAGE is blocked on PG when its work_id matches a
+        backing JobItem (cross-system guard is active for PROCESS_MESSAGE,
+        bypass is scoped to PROCESS_REPORT only).
 
-        Contrast test: proves the guard is still active for
-        PROCESS_MESSAGE on PG (the bypass is scoped to PROCESS_REPORT
-        only, not all tasks). Exercises the ``j.metadata->>'message_id'``
-        JSONB extraction path on the parent job row.
+        Post-Increment 2, the cross-system guard correlates via
+        ``task.work_id = job_queue_items.job_id`` (NOT the legacy
+        ``metadata.message_id`` JSONB extraction). The Task is therefore
+        seeded with a ``work_id`` aligned to the JobItem's ``job_id`` so
+        the guard's ``EXISTS(task where work_id=job_id AND status in
+        (pending, running, paused))`` check fires. This mirrors the
+        production admission shape under the unified dispatcher: Task
+        and backing JobItem are minted with matching identifiers.
         """
         parent_id = _seed_instance(pg_engine)
-        _seed_job(
+        jid = _seed_job(
             pg_engine,
             instance_id=parent_id,
             status=AdmissionState.ACTIVE.value,
@@ -568,11 +574,18 @@ class TestReportLaneGuardPG:
         )
         assert msg_task.status == TaskStatus.PENDING.value
 
-        # Guard fires — PROCESS_MESSAGE with non-matching message_id
-        # is blocked.
+        # Align Task.work_id to JobItem.job_id so the new guard fires.
+        with Session(pg_engine) as s:
+            t = s.get(Task, msg_task.id)
+            assert t is not None
+            t.work_id = jid
+            s.commit()
+
+        # Guard fires — PROCESS_MESSAGE with backing active JobItem
+        # (matching work_id) is blocked on PG.
         claimed = task_repo.claim_pending_task(worker_id="pg-worker-1")
         assert claimed is None, (
-            f"PROCESS_MESSAGE with non-matching message_id MUST be blocked "
+            f"PROCESS_MESSAGE with matching work_id MUST be blocked "
             f"on PG (got {claimed})"
         )
 
