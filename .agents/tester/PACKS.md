@@ -1,13 +1,14 @@
 # Test Packs
 
 ## Summary
-- Total: 225 packs
-- Unit: 176 | Integration: 17 | Mock: 8 | E2E: 13 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
+- Total: 229 packs
+- Unit: 180 | Integration: 17 | Mock: 8 | E2E: 13 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 - Context Injection Restructure: 2026-07-28 on `feature/context-injection-restructure` @ `2de4af3a` — 209 new feature tests ALL PASS, 694 core regression pass with 0 NEW failures (41 pre-existing matching baseline). See `RESULTS/2026-07-28-context-injection-restructure.md`
 - V2 Agent Validation: 2026-07-30 on `feature/v2-developer-planner` — static validation of developer[v2] + planner[v2] agent definitions (16/16 checks PASS: meta.json, file completeness, skill-set.yaml, opencode absence, mermaid syntax, registry compat). See `RESULTS/2026-07-30-v2-developer-planner-validation.md`
  - V2 Agent Validation: 2026-07-30 on `feature/tidier-v2` — static validation of tidier[v2] agent definition (26/26 checks PASS across 7 categories: structure, v2 pattern, skills, content, boundary, registration, existing tests + 2 regression packs green). See `RESULTS/2026-07-30-tidier-v2-validation.md`
 - Turn Reconciler Inc 4 (FINAL): 2026-08-01 on `latest` @ `4e82c8c9`+fixes — ~11,900 tests, 0 NEW failures (147 pre-existing baseline), 4 quick-fix commits (test code only). PG 153/0, job_queue 1463/0, msg_queue 419/0, E2E 45/45 NOT FLAKY, ensure.md 8/8 PASS. See `RESULTS/2026-08-01-inc4-turn-reconciler-full-regression.md`
+- LLM Model Load Balancing: 2026-08-01 on `feature/llm-model-load-balance` — 97/97 feature tests PASS (36 algo + 13 meta-loading + 17 integration + 31 config-override). Distribution verified 50k samples (33.38%/66.62%, ±0.05%). 0 NEW regressions (146 pre-existing). 12/12 mock structures match. 4/5 critical reqs VERIFIED, 1/5 PARTIAL (council override test gap, no bug). See `RESULTS/2026-08-01-llm-model-load-balance-feature-test.md`
 
 ## Unit Test Packs
 
@@ -585,3 +586,12 @@ VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c
 | Deadlock / concurrency integrity | concurrency_atomic_unit_test | ✅ PASS (66 pass, 19 skip) |
 | No sync DB calls on asyncio loop | concurrency_atomic_unit_test (thread-identity tests) | ✅ PASS |
 | dev.sh --timeout-graceful-shutdown 10 | static check (dev.sh:74) | ✅ PASS |
+
+## LLM Model Load Balancing Feature Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| llm_load_balance_unit_test | tests/test_llm_load_balance.py | Weighted random selection algorithm: statistical correctness (50k samples ±2%), weight clamping [1,100], allowed-models filtering, edge cases, type validation | 2 min | 2026-08-01 | ✅ PASS (36/36, feature/llm-model-load-balance) |
+| llm_load_balance_meta_loading_test | tests/test_llm_load_balance_meta_loading.py | C6 regression: llm_models field survives meta.json loading (extra='ignore' trap), real agent backward compat (governor/coder unchanged) | 2 min | 2026-08-01 | ✅ PASS (13/13, feature/llm-model-load-balance) |
+| llm_load_balance_integration_test | tests/test_llm_load_balance_integration.py | Resolution priority chain (override > llm_models > llm_model > default), persistence gating by source, single-resolution invariant, allowed-models filtering | 5 min | 2026-08-01 | ✅ PASS (17/17, feature/llm-model-load-balance) |
+| llm_config_override_unit_test | tests/unit/test_llm_config_override.py | Model config override: _build_llm_config pure config-builder, _resolve_model_override allow-list matching, restore-on-resume persistence, allowed-models CSV/JSON parsing | 2 min | 2026-08-01 | ✅ PASS (31/31, feature/llm-model-load-balance) |

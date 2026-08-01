@@ -276,6 +276,10 @@ async def create_instance(
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),
         pending_count=(await manager.get_queue_stats(instance_id)).get("pending_count"),
+        # Phase 4 / Task 5: surface the persisted model in the spawn response
+        # so callers can see the load-balanced choice. ``None`` for
+        # llm_model/default sources (re-resolved on every spawn).
+        model=instance_meta.get("metadata", {}).get("model_override"),
     )
 
 
@@ -354,6 +358,7 @@ async def list_instances(
             initiative_message=inst.get("initiative_message"),
             children=inst.get("children", []),
             mcp_tool_names=inst.get("metadata", {}).get("mcp_tool_names"),
+            model=inst.get("metadata", {}).get("model_override"),
             created_at=parse_utc_datetime(inst["created_at"]),
             updated_at=parse_utc_datetime(inst.get("updated_at")),
             project_id=inst.get("project_id"),
@@ -410,6 +415,7 @@ async def get_instance(
         initiative_message=instance_meta.get("initiative_message"),
         children=instance_meta.get("children", []),
         mcp_tool_names=instance_meta.get("metadata", {}).get("mcp_tool_names"),
+        model=instance_meta.get("metadata", {}).get("model_override"),
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),

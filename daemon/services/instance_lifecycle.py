@@ -30,6 +30,7 @@ from .dependency_bus import get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
 from .language_utils import get_language_preference, is_auto_language
+from .llm_load_balancer import _select_weighted_model
 from .project_normalizer import normalize_project_id
 from .turn_transitions import ResumeTurn, SuspendTurn, TransitionResult
 
@@ -573,22 +574,20 @@ class InstanceLifecycleService:
 
     def _build_llm_config(
         self,
-        metadata: "AgentMetadata | None" = None,
         override_model: str | None = None,
     ) -> dict:
-        """Build LLM config dict with optional per-agent and per-spawn overrides.
+        """Build LLM config dict — pure config-builder.
 
-        Priority (highest wins):
-            1. ``override_model`` (spawn_instance tool param) — caller-validated
-               against ``config.llm.allowed_models`` before being passed in.
-            2. ``metadata.llm_model`` (meta.json field) — agent-level default.
-            3. ``self._config.llm.model`` (env ``OPENAI_MODEL`` / config.yaml).
+        The model has ALREADY been resolved by the caller
+        (:meth:`spawn_instance`). This function does no resolution and no
+        RNG — it just receives the resolved model string and builds the
+        dict that becomes ``llm_config`` in :func:`build_instance_graph`.
 
         Args:
-            metadata: Optional agent metadata providing the ``llm_model`` field.
-            override_model: Optional highest-priority model override from the
-                ``spawn_instance`` tool. Should be pre-validated by
-                :meth:`_resolve_model_override` before being passed in.
+            override_model: The fully resolved model string from
+                :meth:`spawn_instance`'s resolution chain. May be
+                ``None``/empty in which case the global default
+                (``self._config.llm.model``) is used.
 
         Returns:
             The LLM config dict with the resolved ``model`` key.
@@ -601,10 +600,8 @@ class InstanceLifecycleService:
             "temperature": self._config.llm.temperature,
             "request_timeout": self._config.llm.request_timeout,
         }
-        # Priority 2: meta.json llm_model (agent-level default)
-        if metadata and metadata.llm_model and metadata.llm_model.strip():
-            llm_config["model"] = metadata.llm_model.strip()
-        # Priority 1: spawn-time override (highest — wins over meta.json + env)
+        # The caller has already done the resolution. We just slot the
+        # resolved model in. RNG never fires here.
         if override_model and override_model.strip():
             llm_config["model"] = override_model.strip()
         return llm_config
@@ -734,6 +731,27 @@ class InstanceLifecycleService:
             the TOCTOU window where the second validation could disagree
             with the first.
 
+        Note on model resolution (Phase 3, llm-model-load-balance):
+            The actual model used by the instance is resolved once in this
+            method's local scope (NOT in ``_build_llm_config``) with the
+            following priority chain (highest → lowest):
+
+                1. ``validated_model_override`` (this method's ``model`` arg)
+                   — council/governor override; load balancing is SKIPPED.
+                2. ``metadata.llm_models`` — weighted random selection.
+                   RNG fires here exactly once. If the function returns
+                   ``None`` (all candidates filtered or invalid), falls
+                   through to ``llm_model``.
+                3. ``metadata.llm_model`` (single-model field in meta.json).
+                4. ``self._config.llm.model`` (env ``OPENAI_MODEL``).
+
+            Both the ``override`` source (explicit spawn-time model) and the
+            ``llm_models`` source (load-balanced selection) are persisted to
+            the DB ``model_override`` field so they survive daemon restarts.
+            The ``llm_model`` and ``default`` sources are NOT persisted —
+            they stay dynamic (re-resolved on restore) for backward
+            compatibility.
+
         Raises:
             ValueError: If max_children_per_instance limit is exceeded,
                 if agent_id is not found, or if ``version_tag`` does not
@@ -844,12 +862,66 @@ class InstanceLifecycleService:
         # base/v1 tools.allow list.
         tools = create_instance_tools(self._manager, instance_id, resolved_agent_id, version_tag=effective_version_tag)
 
-        # Build LLM config (override_model takes HIGHEST priority over
-        # metadata.llm_model and env OPENAI_MODEL — see _build_llm_config).
-        llm_config = self._build_llm_config(
-            metadata,
-            override_model=validated_model_override,
-        )
+        # --- Resolve the final model and its source ONCE ---
+        # This block runs in spawn_instance() (NOT _build_llm_config) so the
+        # RNG fires at most once per instance. Restore paths re-read the
+        # persisted model_override from DB and skip this block entirely, so
+        # the chosen model is frozen for the instance's lifetime.
+        #
+        # Resolution priority (highest → lowest):
+        #   1. validated_model_override (spawn-time override from caller —
+        #      council, leader, explicit spawn param). If this is set,
+        #      llm_models load-balancing is SKIPPED (council/Governor path).
+        #   2. metadata.llm_models (weighted random) — fires once here.
+        #      ``None`` return from _select_weighted_model means all
+        #      candidates were filtered (e.g., none in allowed_models);
+        #      in that case we fall through to llm_model.
+        #   3. metadata.llm_model (single-model field from meta.json).
+        #   4. self._config.llm.model (global default).
+        resolved_model: str | None = None
+        resolved_source: str = "default"  # tracks WHERE the model came from
+        if validated_model_override and validated_model_override.strip():
+            # Priority 1: spawn-time override (council, leader, explicit param)
+            resolved_model = validated_model_override.strip()
+            resolved_source = "override"
+        elif metadata and metadata.llm_models:
+            # Priority 2: weighted load balancing. RNG fires here, exactly
+            # once. The function returns None when no valid candidates
+            # (empty list, all filtered, all invalid) — we then fall
+            # through to llm_model / default in the blocks below.
+            selected = _select_weighted_model(
+                metadata.llm_models,
+                getattr(self._config.llm, "allowed_models", None),
+            )
+            if selected:
+                resolved_model = selected
+                resolved_source = "llm_models"
+                logger.info(
+                    "llm_load_balance_selected: agent=%s model=%s pool_size=%d",
+                    resolved_agent_id,
+                    selected,
+                    len(metadata.llm_models),
+                )
+
+        if (
+            resolved_model is None
+            and metadata
+            and metadata.llm_model
+            and metadata.llm_model.strip()
+        ):
+            # Priority 3: single-model field from meta.json
+            resolved_model = metadata.llm_model.strip()
+            resolved_source = "llm_model"
+
+        if resolved_model is None:
+            # Priority 4: global default
+            resolved_model = self._config.llm.model
+            resolved_source = "default"
+
+        # Build LLM config. The caller (this function) has already done the
+        # full resolution chain — _build_llm_config is a pure config-builder
+        # with no RNG and no resolution logic.
+        llm_config = self._build_llm_config(override_model=resolved_model)
 
         # Build retry config from queue settings
         retry_config = {
@@ -936,13 +1008,35 @@ class InstanceLifecycleService:
         if invoked_as_tool:
             instance_metadata["invoked_as_tool"] = True
 
-        # Persist the validated spawn-time model override so
-        # ``restore_instance`` can re-apply it after a daemon restart.
-        # Stored only when an override was actually applied (validated is
-        # truthy) — prevents metadata bloat for the common no-override case.
-        if validated_model_override:
+        # Persist the resolved model so ``restore_instance`` can re-apply
+        # it after a daemon restart — the load-balanced choice is FROZEN
+        # for the instance's lifetime.
+        #
+        # Gating rules (Phase 4 of llm-model-load-balance):
+        #   - source == "override"  → persist the caller's override (existing
+        #                             behavior; council/governor path).
+        #   - source == "llm_models"→ persist the load-balanced selection
+        #                             (NEW — Phase 4). This is the only NEW
+        #                             persistence introduced by the feature.
+        #   - source == "llm_model" → DO NOT persist. Restore re-resolves
+        #                             from metadata.llm_model (backward compat).
+        #   - source == "default"   → DO NOT persist. Restore uses the
+        #                             global default (backward compat).
+        #
+        # The dual-write (override vs llm_models) is intentional: both are
+        # caller/algorithm-driven selections that should be frozen, while
+        # the agent-level and global defaults stay dynamic. This keeps the
+        # feature additive — no behavioral change for existing agents.
+        if resolved_source == "override" and validated_model_override:
             instance_metadata["model_override"] = validated_model_override
-        
+        elif resolved_source == "llm_models" and resolved_model and resolved_model.strip():
+            instance_metadata["model_override"] = resolved_model.strip()
+            logger.info(
+                "instance_model_persisted: instance=%s model=%s source=llm_models",
+                instance_id,
+                resolved_model.strip(),
+            )
+
         # Store MCP tool names for cache key consistency
         if mcp_tool_names:
             instance_metadata["mcp_tool_names"] = mcp_tool_names
@@ -2403,10 +2497,17 @@ class InstanceLifecycleService:
                 f"default model for instance {instance_id[:8]}..."
             )
         stored_override = validated_stored_override
-        llm_config = self._build_llm_config(
-            agent_meta,
-            override_model=stored_override,
-        )
+        # C1 fix: When no persisted ``model_override`` exists (``llm_model``
+        # and ``default`` sources don't persist one), restore the agent's
+        # ``llm_model`` from metadata. The Phase 3 ``_build_llm_config`` is a
+        # pure config-builder that no longer reads ``metadata.llm_model``,
+        # so we must pass it as the override. Without this, 8 agents
+        # (coder, experiencer, explorer, gaia, image-reader, kb-importer,
+        # kb-writer, worker) silently switch to the global default after
+        # daemon restart.
+        if stored_override is None and agent_meta and agent_meta.llm_model and agent_meta.llm_model.strip():
+            stored_override = agent_meta.llm_model.strip()
+        llm_config = self._build_llm_config(override_model=stored_override)
 
         # Build retry config from queue settings
         retry_config = {

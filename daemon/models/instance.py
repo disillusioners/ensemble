@@ -71,6 +71,17 @@ class InstanceInfo(BaseModel):
     icon_tag: str | None = Field(default=None, description="UI icon tag for this instance (UI-only preference)")
     pinned_at: datetime | None = Field(default=None, description="When this instance was pinned (UI-only preference)")
     agent_tag: str | None = Field(default=None, description="Agent version tag (None = base). Selects a tagged variant of the agent.")
+    model: str | None = Field(
+        default=None,
+        description=(
+            "The LLM model the instance is using. Populated from "
+            "``instance_metadata.model_override`` for load-balanced and "
+            "override-sourced instances. ``None`` for instances that "
+            "fall through to ``metadata.llm_model`` or the global default "
+            "(the API caller can resolve those by inspecting the agent's "
+            "meta.json or the daemon config)."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

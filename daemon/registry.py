@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,124 @@ class ContextInjectionConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class LLMModelWeight(BaseModel):
+    """One entry of meta.json ``llm_models`` — a model name and its selection weight.
+
+    Strict validation happens at Pydantic load time here:
+      - ``model``: stripped of whitespace; empty/whitespace-only rejected.
+      - ``weight``: bool rejected; float truncated to int; numeric string
+        coerced; values < 1 rejected.
+
+    Weight clamping to ``[1, 100]`` still happens at selection time in
+    :func:`daemon.services.llm_load_balancer._select_weighted_model`
+    (belt-and-suspenders for directly-constructed objects). Pydantic
+    ``ValidationError`` (structural or per-entry) is caught by
+    :meth:`AgentRegistry.discover` which retries without ``llm_models``.
+
+    Architectural note: ``LLMModelWeight`` is defined here (not in
+    ``daemon/services/llm_load_balancer.py``) to avoid a circular import —
+    ``daemon/services/__init__.py`` eagerly imports modules that depend on
+    ``daemon.registry``, so the registry must be the leaf of the dependency
+    graph. The algorithm module imports this class from here.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    model: str = Field(
+        ...,
+        min_length=1,
+        description="The LLM model identifier (e.g., 'gpt-4o', 'claude-sonnet-4'). Must be non-empty.",
+    )
+    weight: int | float = Field(
+        default=1,
+        description=(
+            "Selection weight, clamped to [1, 100] at selection time. "
+            "Accepts int or float; floats are truncated (50.5 → 50)."
+        ),
+    )
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _validate_model_name(cls, value: Any) -> Any:
+        """Strip whitespace; reject empty/whitespace-only model names.
+
+        W4 fix: ``min_length=1`` above passes ``"   "`` because the string
+        has length > 0. This validator strips and rejects whitespace-only
+        values, so the discover() retry path drops the whole ``llm_models``
+        list instead of silently producing a broken selection. Returns the
+        stripped value so downstream code (algorithm, persistence) gets the
+        clean name.
+        """
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("model name must not be empty or whitespace-only")
+            return stripped
+        return value
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _validate_weight(cls, value: Any) -> Any:
+        """Validate weight — reject bool, accept float (truncate) and numeric strings.
+
+        Per the per-entry type contract (Phase 2 / Issue #7):
+
+        - ``bool`` → REJECTED (``True``/``False`` would otherwise be coerced
+          to ``1``/``0`` because ``isinstance(True, int)`` is True in Python
+          and Pydantic auto-coerces).
+        - ``float`` with fractional part → COERCED to ``int`` via ``int()``
+          (truncates 50.7 → 50, matches the plan's spec).
+        - ``int`` → accepted as-is.
+        - ``str`` → coerced to ``int`` if numeric (``"50"`` → 50,
+          ``"50.5"`` → 50); rejected if non-numeric.
+        - ``None`` → defaults to ``1``.
+        - Anything else → rejected.
+
+        W3 fix: weight must be ``>= 1``. Negative or zero weights are
+        rejected at Pydantic load time. The discover() retry path catches
+        the resulting ``ValidationError`` and drops the whole ``llm_models``
+        list — making bad configs visible at load time instead of silently
+        producing broken selections. Selection-time clamping in
+        ``_select_weighted_model`` is belt-and-suspenders for directly-
+        constructed objects and is NOT changed by this.
+        """
+        if isinstance(value, bool):
+            raise ValueError(
+                "weight must be a numeric value, not a bool "
+                "(isinstance(True, int) is True but booleans are semantically invalid)"
+            )
+        if value is None:
+            coerced = 1
+        elif isinstance(value, int):
+            coerced = value
+        elif isinstance(value, float):
+            # Truncate: int(50.7) == 50, int(-0.5) == 0 (then rejected below).
+            coerced = int(value)
+        elif isinstance(value, str):
+            s = value.strip()
+            if not s:
+                coerced = 1
+            else:
+                try:
+                    coerced = int(s)
+                except ValueError:
+                    try:
+                        coerced = int(float(s))
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"weight string {value!r} is not a numeric value"
+                        )
+        else:
+            raise ValueError(
+                f"weight must be int, float, or numeric string; got {type(value).__name__}"
+            )
+        if coerced < 1:
+            raise ValueError(
+                f"weight must be >= 1 (got {coerced})"
+            )
+        return coerced
+
+
 class AgentMetadata(BaseModel):
     """Complete agent metadata."""
 
@@ -133,6 +251,17 @@ class AgentMetadata(BaseModel):
         description="Tool filtering configuration. None means all tools allowed."
     )
     llm_model: str | None = Field(default=None, description="Override the global LLM model for this agent")
+    llm_models: list[LLMModelWeight] | None = Field(
+        default=None,
+        description=(
+            "Weighted random selection of LLM models at instance creation. "
+            "When present and non-empty, ONE model is picked at instance creation "
+            "(proportional to weights, clamped to [1, 100]) and frozen for the "
+            "instance's lifetime. Higher priority than ``llm_model`` but lower than "
+            "spawn-time model override. Models not in ``config.llm.allowed_models`` "
+            "are filtered out (silent skip). Empty array = backward-compatible."
+        ),
+    )
     team_members: list[str] = Field(
         default_factory=list,
         description=(
@@ -382,6 +511,7 @@ class AgentRegistry:
                     tools=tools_filter,
                     innate_skills=meta.get("innate_skills", []),
                     llm_model=meta.get("llm_model"),
+                    llm_models=meta.get("llm_models"),
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
                     context_injection=context_injection_arg,
@@ -395,19 +525,70 @@ class AgentRegistry:
                     recursion_limit_multiplier=meta.get("recursion_limit_multiplier", 1.0),
                     recursion_limit=meta.get("recursion_limit"),
                 )
-                # Split storage: untagged → _agents, tagged → _versioned_agents.
-                # _agents keys are NEVER composite keys.
-                if version_tag is None:
-                    self._agents[base_agent_id] = agent_meta
-                else:
-                    composite_key = f"{base_agent_id}[{version_tag}]"
-                    self._versioned_agents[composite_key] = agent_meta
-                # Record this version under its base id (dedup, preserve order)
-                self._versions.setdefault(base_agent_id, [])
-                if version_tag not in self._versions[base_agent_id]:
-                    self._versions[base_agent_id].append(version_tag)
-            except Exception as e:
-                logger.warning(f"Failed to create AgentMetadata for {agent_path.name}: {e}")
+            except ValidationError as e:
+                # C6 / LLM-models pattern: don't crash discovery. Any
+                # ``ValidationError`` from ``AgentMetadata`` construction —
+                # whether structural (e.g., ``llm_models: "not a list"``) or
+                # per-entry (e.g., bool weight, negative weight, whitespace-
+                # only model name rejected by ``LLMModelWeight`` validators) —
+                # triggers this retry. We retry WITHOUT ``llm_models`` so the
+                # rest of the agent metadata still loads.
+                logger.warning(
+                    f"Failed to create AgentMetadata for {agent_path.name}: {e}. "
+                    "Retrying without llm_models (if it was the cause).",
+                    exc_info=True,
+                )
+                try:
+                    # Retry without the llm_models key — pass ``llm_models=None``
+                    # explicitly so the Pydantic field uses its default
+                    # (and any other malformed keys are still loaded).
+                    agent_meta = AgentMetadata(
+                        id=agent_id,
+                        name=meta.get("name", agent_id.title()),
+                        description=meta.get("description", ""),
+                        icon=meta.get("icon", "🤖"),
+                        color=meta.get("color", "accent-blue"),
+                        version=meta.get("version"),
+                        path=agent_path,
+                        system=meta.get("system", False),
+                        capabilities=meta.get("capabilities", []),
+                        tags=meta.get("tags", []),
+                        tools=tools_filter,
+                        innate_skills=meta.get("innate_skills", []),
+                        llm_model=meta.get("llm_model"),
+                        llm_models=None,
+                        team_members=meta.get("team_members", []) or [],
+                        skill_injection=meta.get("skill_injection", False),
+                        context_injection=context_injection_arg,
+                        inject_allowed_models=meta.get("inject_allowed_models", False),
+                        version_tag=version_tag,
+                        caller_model_overrides=(
+                            meta.get("caller_model_overrides")
+                            if isinstance(meta.get("caller_model_overrides"), dict)
+                            else {}
+                        ),
+                        recursion_limit_multiplier=meta.get("recursion_limit_multiplier", 1.0),
+                        recursion_limit=meta.get("recursion_limit"),
+                    )
+                except Exception as e2:
+                    logger.warning(
+                        f"Failed to create AgentMetadata for {agent_path.name} "
+                        f"even without llm_models: {e2}. Skipping agent.",
+                        exc_info=True,
+                    )
+                    continue
+
+            # Split storage: untagged → _agents, tagged → _versioned_agents.
+            # _agents keys are NEVER composite keys.
+            if version_tag is None:
+                self._agents[base_agent_id] = agent_meta
+            else:
+                composite_key = f"{base_agent_id}[{version_tag}]"
+                self._versioned_agents[composite_key] = agent_meta
+            # Record this version under its base id (dedup, preserve order)
+            self._versions.setdefault(base_agent_id, [])
+            if version_tag not in self._versions[base_agent_id]:
+                self._versions[base_agent_id].append(version_tag)
 
     def get(self, agent_id: str) -> AgentMetadata | None:
         """Get agent metadata by ID.

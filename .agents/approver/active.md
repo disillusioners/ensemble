@@ -1,6 +1,6 @@
-Current Plan: Turn-Reconciler Named Transitions Migration
-Slug: turn-reconciler-migration
-Tracking File: turn-reconciler-migration-tracking.md
+Current Plan: LLM Model Load Balancing Feature
+Slug: llm-model-load-balance
+Tracking File: llm-model-load-balance-tracking.md
 Iteration: 003
-Status: APPROVED
-Last Updated: 2026-08-01 14:05
+Status: IN_PROGRESS
+Last Updated: 2026-08-01 21:48

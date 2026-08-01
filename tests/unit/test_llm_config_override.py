@@ -104,7 +104,7 @@ class TestBuildLLMConfig:
         manager = create_mock_manager(config)
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
-        result = lifecycle._build_llm_config(None)
+        result = lifecycle._build_llm_config()
 
         assert result["model"] == "gpt-4"
         assert result["base_url"] == "https://api.openai.com/v1"
@@ -120,18 +120,27 @@ class TestBuildLLMConfig:
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
         metadata = create_metadata(llm_model=None)
-        result = lifecycle._build_llm_config(metadata)
+        result = lifecycle._build_llm_config()
 
         assert result["model"] == "gpt-4"
 
-    def test_overrides_model_when_llm_model_set(self) -> None:
-        """Test that model is overridden when metadata.llm_model is set."""
+    def test_overrides_model_when_override_provided(self) -> None:
+        """_build_llm_config: passed override_model wins over default.
+
+        After Phase 3 of llm-model-load-balance, ``_build_llm_config`` is
+        a PURE config-builder. The resolution chain
+        (override → llm_models → llm_model → default) lives in
+        :meth:`InstanceLifecycleService.spawn_instance`. The test passes
+        the resolved model as ``override_model`` — that's the only
+        decision the function makes.
+        """
         config = create_mock_config(model="gpt-4")
         manager = create_mock_manager(config)
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
         metadata = create_metadata(llm_model="gpt-4o-mini", agent_id="custom")
-        result = lifecycle._build_llm_config(metadata)
+        # Resolved model = "gpt-4o-mini" (whatever the caller computed).
+        result = lifecycle._build_llm_config(override_model="gpt-4o-mini")
 
         assert result["model"] == "gpt-4o-mini"
         # Other settings should remain global
@@ -142,14 +151,16 @@ class TestBuildLLMConfig:
         """Test that whitespace-only llm_model does not override global model.
 
         The whitespace-only value is loaded as-is, but validation
-        (checking if strip() is non-empty) happens in _build_llm_config.
+        (checking if strip() is non-empty) happens in spawn_instance's
+        resolution chain (Phase 3). ``_build_llm_config`` is a pure
+        config-builder and trusts whatever string the caller passes.
         """
         config = create_mock_config(model="gpt-4")
         manager = create_mock_manager(config)
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
         metadata = create_metadata(llm_model="  ", agent_id="whitespace")
-        result = lifecycle._build_llm_config(metadata)
+        result = lifecycle._build_llm_config()
 
         # whitespace.strip() is empty, so no override should happen
         assert result["model"] == "gpt-4"
@@ -443,20 +454,22 @@ class TestBuildLLMConfigPriority:
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
         metadata = create_metadata(llm_model="meta-model", agent_id="x")
-        result = lifecycle._build_llm_config(metadata, override_model="gpt-4o")
+        result = lifecycle._build_llm_config(override_model="gpt-4o")
 
         assert result["model"] == "gpt-4o", (
             "override_model should win over both metadata.llm_model and config.llm.model"
         )
 
-    def test_override_rejected_when_not_in_allowed_list_falls_back(self) -> None:
-        """model param provided but NOT in allowed list (non-empty) → falls back.
+    def test_override_rejected_returns_global_default(self) -> None:
+        """When the caller-supplied override is rejected by the allow-list,
+        ``_resolve_model_override`` returns None. spawn_instance's
+        resolution chain then falls through to metadata.llm_model or the
+        config default.
 
-        When the caller-supplied override is not in the allow-list,
-        ``_resolve_model_override`` returns None. ``_build_llm_config`` then
-        should NOT receive that value, so we test the contract: passing
-        ``override_model=None`` (the validated outcome) yields the metadata
-        model (next-priority).
+        This test verifies the pure config-builder behavior: when called
+        with ``override_model=None`` (the validated outcome), the result
+        is the config default. The metadata-based fallback is now tested
+        in :mod:`tests.test_llm_load_balance_integration`.
         """
         config = create_mock_config_with_allowed(
             model="default-model", allowed_models=["gpt-4"]
@@ -468,32 +481,32 @@ class TestBuildLLMConfigPriority:
         validated_override = lifecycle._resolve_model_override("gpt-4o")
         assert validated_override is None
 
-        # _build_llm_config receives None → falls back to metadata.
+        # _build_llm_config receives None → uses the global default.
+        # (The spawn_instance resolution chain would have passed
+        # "meta-model" here — that's tested elsewhere.)
         metadata = create_metadata(llm_model="meta-model", agent_id="x")
-        result = lifecycle._build_llm_config(metadata, override_model=validated_override)
+        result = lifecycle._build_llm_config(override_model=validated_override)
 
-        assert result["model"] == "meta-model", (
-            "When override is rejected, metadata.llm_model should take priority"
-        )
+        assert result["model"] == "default-model"
 
-    def test_no_override_param_keeps_existing_behavior(self) -> None:
-        """No override_model param → existing behavior unchanged (backwards compat).
+    def test_no_override_param_uses_default(self) -> None:
+        """No override_model param → default config value used.
 
-        Priority falls through to metadata.llm_model, then config.llm.model.
+        After Phase 3 of llm-model-load-balance, the resolution chain
+        (override → llm_models → llm_model → default) lives in
+        :meth:`InstanceLifecycleService.spawn_instance`. The pure
+        config-builder only uses ``override_model``; the caller's
+        resolution chain feeds it the final value. So a missing
+        ``override_model`` means "use the default".
         """
         config = create_mock_config_with_allowed(model="default-model", allowed_models=["gpt-4"])
         manager = create_mock_manager(config)
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
-        # Case A: metadata has a model → use it.
-        metadata_with = create_metadata(llm_model="meta-model", agent_id="x")
-        result_with = lifecycle._build_llm_config(metadata_with)
-        assert result_with["model"] == "meta-model"
-
-        # Case B: metadata has no model → use config default.
-        metadata_without = create_metadata(llm_model=None, agent_id="x")
-        result_without = lifecycle._build_llm_config(metadata_without)
-        assert result_without["model"] == "default-model"
+        # No override → default.
+        metadata = create_metadata(llm_model="meta-model", agent_id="x")
+        result = lifecycle._build_llm_config()
+        assert result["model"] == "default-model"
 
 
 def _make_restore_mock_manager(allowed_models: list[str]) -> MagicMock:
@@ -666,6 +679,12 @@ class TestRestoreInstanceModelOverride:
         Pre-feature instances (and instances spawned without the override
         param) have no ``model_override`` key. The restore path must not
         crash and must use the config default.
+
+        Note: this test uses ``llm_model=None``. When ``llm_model`` IS set
+        in agent_meta, the C1 fix in ``_restore_instance`` falls back to
+        ``agent_meta.llm_model`` instead of the config default — that
+        behavior is covered by ``test_restore_llm_model_used_when_no_override``
+        below.
         """
         manager = _make_restore_mock_manager(allowed_models=["gpt-4"])
         agent_meta = create_metadata(llm_model=None, agent_id="test-agent")
@@ -714,6 +733,60 @@ class TestRestoreInstanceModelOverride:
             await lifecycle._restore_instance(meta_empty.instance_id, meta_empty)
         assert captured["llm_config"]["model"] == "default-model", (
             "Empty-string model_override must fall back to default"
+        )
+
+    async def test_restore_llm_model_used_when_no_override(self) -> None:
+        """C1 REGRESSION: agent with llm_model but no persisted model_override
+        must use llm_model on restore, NOT fall back to global default.
+
+        The new _build_llm_config (Phase 3 refactor) no longer reads
+        metadata.llm_model. Without the C1 fix in restore_instance, agents
+        with llm_model silently revert to the global default after restart.
+        """
+        manager = _make_restore_mock_manager(allowed_models=["meta-model"])
+        agent_meta = create_metadata(llm_model="meta-model", agent_id="test-agent")
+        captured: dict = {}
+
+        # No model_override in metadata (llm_model source doesn't persist one)
+        meta = _make_restore_meta({"unrelated_key": "value"})
+
+        lifecycle = InstanceLifecycleService(manager, MagicMock())
+        with _patch_restore_dependencies(agent_meta, captured):
+            await lifecycle._restore_instance(meta.instance_id, meta)
+
+        llm_config = captured.get("llm_config", {})
+        assert llm_config.get("model") == "meta-model", (
+            f"C1 REGRESSION: expected 'meta-model' from agent_meta.llm_model, "
+            f"got {llm_config.get('model')!r} — restore dropped llm_model"
+        )
+
+    async def test_llm_models_selected_model_frozen_on_restore(self) -> None:
+        """W7: load-balanced model (persisted as model_override) is reused
+        on restore — NOT re-balanced.
+
+        When source was 'llm_models', the selected model was persisted to
+        model_override. On restore, this persisted value is the highest-
+        priority override, so the instance gets the SAME model it was
+        spawned with — the RNG does NOT fire again.
+        """
+        manager = _make_restore_mock_manager(allowed_models=["selected-model"])
+        # agent_meta has llm_models, but they should NOT be re-evaluated on restore
+        agent_meta = create_metadata(llm_model=None, agent_id="test-agent")
+        agent_meta.llm_models = None  # ensure no re-evaluation path
+        captured: dict = {}
+
+        # Simulate: instance was spawned with llm_models, selected "selected-model",
+        # which was persisted as model_override
+        meta = _make_restore_meta({"model_override": "selected-model"})
+
+        lifecycle = InstanceLifecycleService(manager, MagicMock())
+        with _patch_restore_dependencies(agent_meta, captured):
+            await lifecycle._restore_instance(meta.instance_id, meta)
+
+        llm_config = captured.get("llm_config", {})
+        assert llm_config.get("model") == "selected-model", (
+            f"Expected frozen load-balanced model 'selected-model', "
+            f"got {llm_config.get('model')!r}"
         )
 
 
