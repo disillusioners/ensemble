@@ -2468,3 +2468,658 @@ class TestVSCodeServerManager:
             f"watchdog must NOT set status='crashed' when the user "
             f"stopped mid-restart; got {manager.state.status}"
         )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ── _adopted_watchdog_loop() coverage ─────────────────────────────────
+    #
+    # The adopted watchdog monitors a PID that was adopted (not spawned by
+    # us — ``self._process is None``). It polls ``os.kill(pid, 0)`` every
+    # second. On death (ProcessLookupError) it falls through to the shared
+    # ``_run_restart_attempts`` with ``exit_code=-1``.
+    #
+    # Load-bearing: ``except ProcessLookupError`` MUST come before
+    # ``except PermissionError`` — if swapped, PermissionError (an OSError
+    # subclass) would catch ProcessLookupError too, causing false-positive
+    # crash detection.
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def test_adopted_watchdog_returns_immediately_when_pid_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No PID → immediate ``return False``, no polling, no restart."""
+        manager = make_manager(tmp_path)
+        manager.state.pid = None
+        manager._process = None  # type: ignore[assignment]
+        manager.state.status = "running"
+
+        start_called = False
+
+        async def fake_start_must_not_be_called() -> "VSCodeServerState":
+            nonlocal start_called
+            start_called = True
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_start_must_not_be_called)
+
+        result = await manager._adopted_watchdog_loop()
+
+        assert result is False
+        assert not start_called, (
+            "start() must NOT be called when pid is None"
+        )
+        assert manager.state.status == "running", (
+            "status must be unchanged when pid is None"
+        )
+
+    async def test_adopted_watchdog_keeps_polling_while_alive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Process alive (os.kill returns None) → loop keeps polling
+        indefinitely without calling ``start()``.
+
+        Uses ``asyncio.wait_for`` with a 0.5s timeout to prove the loop
+        is polling (it entered the while loop and blocked on the poll
+        sleep). A ``TimeoutError`` proves the loop is still going.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 8081
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+
+        # os.kill always succeeds → process appears alive forever.
+        monkeypatch.setattr("os.kill", lambda *a, **kw: None)
+
+        start_called = False
+
+        async def fake_start_must_not_be_called() -> "VSCodeServerState":
+            nonlocal start_called
+            start_called = True
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_start_must_not_be_called)
+
+        # The loop sleeps 1.0s per poll; wait_for cancels at 0.5s →
+        # TimeoutError proves the loop is still polling.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                manager._adopted_watchdog_loop(), timeout=0.5
+            )
+
+        assert not start_called, (
+            "start() must NOT be called while the adopted PID is alive"
+        )
+
+    async def test_adopted_watchdog_treats_permission_error_as_alive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``PermissionError`` from ``os.kill(pid, 0)`` → treated as alive
+        (process EXISTS but inaccessible). No restart attempted.
+
+        The ``except`` clause ordering is load-bearing:
+        ``ProcessLookupError`` MUST come before ``PermissionError``.
+        If swapped, ``PermissionError`` (an ``OSError`` subclass) would
+        catch ``ProcessLookupError`` too, causing false-positive crash
+        detection.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 8081
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+
+        # Every liveness probe raises PermissionError (process exists
+        # but is inaccessible — e.g. PID reused by another owner).
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise PermissionError(f"Operation not permitted: {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        start_called = False
+
+        async def fake_start_must_not_be_called() -> "VSCodeServerState":
+            nonlocal start_called
+            start_called = True
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_start_must_not_be_called)
+
+        # PermissionError is treated as alive → loop keeps polling.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                manager._adopted_watchdog_loop(), timeout=0.5
+            )
+
+        assert not start_called, (
+            "start() must NOT be called when PermissionError is raised "
+            "(process exists but is inaccessible — treated as alive)"
+        )
+
+    async def test_adopted_watchdog_auto_restarts_on_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On adopted-process death (ProcessLookupError), the watchdog
+        auto-restarts via ``start()`` and the manager ends in ``running``
+        with a fresh pid/port.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # First probe: alive. Second probe: dead.
+        probe_count = 0
+
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            nonlocal probe_count
+            if sig == 0:
+                probe_count += 1
+                if probe_count == 1:
+                    return  # alive
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        start_call_count = 0
+
+        async def fake_restart_start() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            manager.state.status = "running"
+            manager.state.pid = 99999
+            manager.state.port = 55555
+            manager.state.exit_code = None
+            manager.state.last_error = None
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_restart_start)
+
+        await manager._adopted_watchdog_loop()
+
+        assert start_call_count == 1, (
+            f"adopted watchdog must call start() exactly once when the "
+            f"first retry succeeds; got {start_call_count}"
+        )
+        assert manager.state.status == "running"
+        assert manager.state.pid == 99999
+        assert manager.state.port == 55555
+
+    async def test_adopted_watchdog_sets_exit_code_minus_one_on_death(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On death, ``state.exit_code`` is set to ``-1`` (adopted sentinel)
+        BEFORE the restart attempt — not None, not a real return code.
+
+        The sentinel ``-1`` communicates "process died but we cannot
+        recover the real exit code because we never had a subprocess
+        handle."
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Immediate death on first probe.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        # Capture exit_code at the moment start() is called — this is
+        # AFTER the watchdog sets it to -1 and BEFORE start() resets it.
+        captured_exit_code: List[Optional[int]] = []
+
+        async def fake_start_capture_exit_code() -> "VSCodeServerState":
+            captured_exit_code.append(manager.state.exit_code)
+            manager.state.status = "running"
+            manager.state.exit_code = None
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_start_capture_exit_code)
+
+        await manager._adopted_watchdog_loop()
+
+        assert len(captured_exit_code) == 1, (
+            "start() should have been called exactly once"
+        )
+        assert captured_exit_code[0] == -1, (
+            f"exit_code must be -1 (adopted sentinel) before restart; "
+            f"got {captured_exit_code[0]}"
+        )
+
+    async def test_adopted_watchdog_marks_crashed_after_max_attempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After ``VSCODE_RESTART_MAX_ATTEMPTS`` failed restarts, the
+        adopted watchdog flips ``status`` to ``"crashed"`` and records
+        the attempt count + exit code in ``last_error``.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Immediate death.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        start_call_count = 0
+
+        async def fake_start_always_fails() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            raise VSCodeServerStartError(
+                f"simulated spawn failure #{start_call_count}"
+            )
+
+        monkeypatch.setattr(manager, "start", fake_start_always_fails)
+
+        await manager._adopted_watchdog_loop()
+
+        assert start_call_count == 3, (
+            f"adopted watchdog must attempt exactly max_attempts restarts; "
+            f"got {start_call_count}, expected 3"
+        )
+        assert manager.state.status == "crashed", (
+            "adopted watchdog must mark status='crashed' after exhausting "
+            "all auto-restart attempts"
+        )
+        assert manager.state.last_error is not None
+        # Message mentions "adopted" (adopted-specific prefix).
+        assert "adopted" in manager.state.last_error.lower(), (
+            f"last_error must mention 'adopted'; got "
+            f"{manager.state.last_error!r}"
+        )
+        # Attempt count.
+        assert "3 auto-restart attempts" in manager.state.last_error, (
+            f"last_error must mention the attempt count; got "
+            f"{manager.state.last_error!r}"
+        )
+        # Exit code sentinel.
+        assert "exit_code=-1" in manager.state.last_error, (
+            f"last_error must mention exit_code=-1; got "
+            f"{manager.state.last_error!r}"
+        )
+
+    async def test_adopted_watchdog_crash_reason_surfaces_log_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On crash, ``last_error`` includes the tail of the in-memory log
+        buffer so operators can see WHY the adopted code-server died.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        known_marker = "fatal: cannot allocate memory"
+        manager.state.log_buffer.extend(
+            f"some startup noise\n{known_marker}\nanother diagnostic line\n"
+            .encode("utf-8")
+        )
+        fast_watchdog_pacing(monkeypatch, max_attempts=1)
+
+        # Immediate death.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        async def fake_start_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated spawn failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_fails)
+
+        await manager._adopted_watchdog_loop()
+
+        assert manager.state.status == "crashed"
+        assert manager.state.last_error is not None
+        assert "code-server output (tail)" in manager.state.last_error
+        assert known_marker in manager.state.last_error
+
+    async def test_adopted_watchdog_does_not_restart_when_user_stopped_on_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``user_stopped=True`` BEFORE the loop detects death, the
+        adopted watchdog MUST NOT attempt any auto-restart and MUST NOT
+        flip status to ``crashed``.
+
+        The ``user_stopped`` guard breaks out of the loop BEFORE the
+        restart block — this test pins that.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "stopping"  # stop() is driving teardown
+        manager.state.user_stopped = True
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Immediate death.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        start_call_count = 0
+
+        async def fake_start_must_not_be_called() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_start_must_not_be_called)
+
+        result = await manager._adopted_watchdog_loop()
+
+        assert result is False
+        assert start_call_count == 0, (
+            f"adopted watchdog must NOT call start() when user_stopped=True; "
+            f"got {start_call_count} calls"
+        )
+        assert manager.state.status != "crashed", (
+            f"status must NOT be 'crashed' when user stopped; got "
+            f"{manager.state.status}"
+        )
+        # Exit code IS still recorded (the death was detected).
+        assert manager.state.exit_code == -1
+
+    async def test_adopted_watchdog_aborts_when_user_stopped_during_backoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting ``user_stopped=True`` DURING the restart backoff MUST
+        abort the retry loop without further ``start()`` calls and MUST
+        NOT mark the manager ``crashed``.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Immediate death.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        start_call_count = 0
+
+        async def fake_start_fail_then_user_stop() -> "VSCodeServerState":
+            nonlocal start_call_count
+            start_call_count += 1
+            if start_call_count == 1:
+                manager.state.user_stopped = True
+                raise VSCodeServerStartError("first attempt fails")
+            raise AssertionError(
+                "start() must not be called once user_stopped=True"
+            )
+
+        monkeypatch.setattr(manager, "start", fake_start_fail_then_user_stop)
+
+        await manager._adopted_watchdog_loop()
+
+        assert start_call_count == 1, (
+            f"adopted watchdog must stop retrying once user_stopped is set; "
+            f"got {start_call_count} start() calls"
+        )
+        assert manager.state.status != "crashed", (
+            f"adopted watchdog must NOT set status='crashed' when the user "
+            f"stopped mid-restart; got {manager.state.status}"
+        )
+
+    async def test_adopted_watchdog_backoff_doubles_per_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backoff doubles each attempt: 1.0, 2.0, 4.0, 8.0, 16.0.
+
+        Mirrors ``test_watchdog_backoff_doubles_per_attempt`` but for the
+        adopted watchdog. Uses ``recording_sleep`` (NOT
+        ``fast_watchdog_pacing``) so we can capture the actual durations.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+
+        # Immediate death on first probe.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        # Recording sleep — captures positive durations.
+        backoff_calls: List[float] = []
+        real_asyncio_sleep = asyncio.sleep
+
+        async def recording_sleep(seconds: float) -> None:
+            if seconds and seconds > 0:
+                backoff_calls.append(float(seconds))
+            await real_asyncio_sleep(0)
+
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.asyncio.sleep",
+            recording_sleep,
+        )
+        # Keep VSCODE_RESTART_MAX_ATTEMPTS=5 (don't shrink).
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_RESTART_MAX_ATTEMPTS",
+            5,
+        )
+
+        async def fake_start_always_fails() -> "VSCodeServerState":
+            raise VSCodeServerStartError("simulated failure")
+
+        monkeypatch.setattr(manager, "start", fake_start_always_fails)
+
+        await manager._adopted_watchdog_loop()
+
+        # 1 initial poll + 5 backoff calls = 6 total.
+        assert len(backoff_calls) == 1 + 5, (
+            f"expected 1 poll + 5 backoffs, got {len(backoff_calls)}: "
+            f"{backoff_calls}"
+        )
+        # Slice off the initial 1.0s poll; what's left is the backoff
+        # sequence between retries.
+        restart_backoffs = backoff_calls[-5:]
+        assert restart_backoffs == [1.0, 2.0, 4.0, 8.0, 16.0], (
+            f"backoff must double each attempt; got {restart_backoffs}"
+        )
+
+    async def test_adopted_watchdog_handoff_to_subprocess_on_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On successful restart, ``_process`` is set (by ``start()``) to
+        a fresh subprocess handle and status is ``"running"`` — proving
+        the handoff from adopted-PID monitoring to subprocess monitoring.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.port = 12345
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+        fast_watchdog_pacing(monkeypatch, max_attempts=3)
+
+        # Immediate death.
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                raise ProcessLookupError(f"No process {pid}")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        # Simulate a real start() that spawns a fresh subprocess.
+        new_proc = FakeProcess(pid=99999)
+
+        async def fake_restart_start() -> "VSCodeServerState":
+            manager.state.status = "running"
+            manager.state.pid = 99999
+            manager.state.port = 55555
+            manager.state.exit_code = None
+            manager.state.last_error = None
+            manager._process = new_proc  # type: ignore[assignment]
+            return manager.state
+
+        monkeypatch.setattr(manager, "start", fake_restart_start)
+
+        result = await manager._adopted_watchdog_loop()
+
+        # _process is now a real handle (not None) — the fresh subprocess
+        # watchdog takes over from here.
+        assert manager._process is not None, (
+            "start() must set _process to a fresh subprocess handle on "
+            "successful restart"
+        )
+        assert manager._process is new_proc, (
+            "_process must be the new process, not the old None"
+        )
+        assert manager.state.status == "running"
+        assert manager.state.pid == 99999
+        assert manager.state.port == 55555
+        assert result is True, "restart succeeded → return True"
+
+    async def test_stop_kills_adopted_pid_with_sigterm_then_sigkill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``stop()`` on an adopted PID (``_process is None``) sends
+        SIGTERM, waits the grace period, probes liveness, and escalates
+        to SIGKILL if the PID is still alive.
+
+        The existing ``test_stop_uses_captured_pgid_not_getpgid`` covers
+        the subprocess path (``_process is not None``). This test covers
+        the adopted path — which signals via ``_signal_pid`` + raw
+        ``os.kill(pid, 0)`` for liveness.
+        """
+        manager = make_manager(tmp_path)
+        manager._process = None  # type: ignore[assignment]
+        manager.state.pid = 12345
+        manager.state.pgid = None  # force os.kill path in _signal_pid
+        manager.state.port = 8081
+        manager.state.status = "running"
+        manager.state.user_stopped = False
+
+        # Record all os.kill calls; liveness probe (sig==0) returns None
+        # (alive) so SIGKILL escalation is triggered.
+        recorded_signals: List[tuple] = []
+
+        def fake_kill(pid: int, sig: int, *a: Any, **kw: Any) -> None:
+            if sig == 0:
+                return  # alive — forces SIGKILL escalation
+            recorded_signals.append((pid, sig))
+
+        monkeypatch.setattr("os.kill", fake_kill)
+        monkeypatch.setattr("os.killpg", lambda *a, **kw: None)
+        # Short grace period so the test is fast.
+        monkeypatch.setattr(
+            "daemon.services.vscode_server_manager.VSCODE_STOP_GRACE_S", 0.2
+        )
+        # Best-effort: skip PID file cleanup.
+        monkeypatch.setattr(manager, "_remove_pid_file", lambda: None)
+
+        await manager.stop()
+
+        assert manager.state.status == "stopped"
+        assert manager.state.exit_code == -1
+        # SIGTERM was sent first.
+        assert any(s == signal.SIGTERM for _, s in recorded_signals), (
+            f"SIGTERM must be sent first; got {recorded_signals}"
+        )
+        # SIGKILL was sent after SIGTERM (because liveness probe said alive).
+        assert any(s == signal.SIGKILL for _, s in recorded_signals), (
+            f"SIGKILL must be sent after grace period when PID is still "
+            f"alive; got {recorded_signals}"
+        )
+        # Ordering: SIGTERM before SIGKILL.
+        sigterm_idx = next(
+            i for i, (_, s) in enumerate(recorded_signals) if s == signal.SIGTERM
+        )
+        sigkill_idx = next(
+            i for i, (_, s) in enumerate(recorded_signals) if s == signal.SIGKILL
+        )
+        assert sigterm_idx < sigkill_idx, (
+            f"SIGTERM must precede SIGKILL; got {recorded_signals}"
+        )
+
+    # ── start() guard: user_stopped / status="stopping" ──────────────────
+
+    async def test_start_skipped_when_user_stopped_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``user_stopped=True``, ``start()`` returns early without
+        spawning a subprocess. This prevents "restart → immediate teardown"
+        cycles when ``stop()`` and a watchdog restart race.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        manager.state.user_stopped = True
+        original_status = manager.state.status  # "stopped"
+
+        # If _resolve_binary or create_subprocess were called, these
+        # would raise — proving the guard short-circuited.
+        monkeypatch.setattr(
+            manager,
+            "_resolve_binary",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("_resolve_binary must not be called")
+            ),
+        )
+
+        result = await manager.start()
+
+        assert result is manager.state
+        assert manager._process is None, (
+            "no subprocess should be spawned when user_stopped=True"
+        )
+        assert manager.state.status == original_status, (
+            f"status must be unchanged; got {manager.state.status}"
+        )
+        assert manager.state.user_stopped is True
+
+    async def test_start_skipped_when_status_stopping(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``status="stopping"``, ``start()`` returns early without
+        spawning. Prevents restart during teardown.
+        """
+        manager = make_manager(tmp_path, binary_path="/usr/bin/code-server")
+        manager.state.status = "stopping"
+
+        monkeypatch.setattr(
+            manager,
+            "_resolve_binary",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("_resolve_binary must not be called")
+            ),
+        )
+
+        result = await manager.start()
+
+        assert result is manager.state
+        assert manager._process is None, (
+            "no subprocess should be spawned when status='stopping'"
+        )
+        assert manager.state.status == "stopping"

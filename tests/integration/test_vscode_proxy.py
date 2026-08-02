@@ -41,6 +41,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 from urllib.parse import unquote
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -444,6 +445,137 @@ class TestHTTPProxyGate:
             resp = client.post("/upload", content=one_over)
 
         assert resp.status_code == 413
+
+    # ── Upstream connection errors → 503 + Retry-After: 5 ─────────────────
+    #
+    # When the readiness gate passes (manager says running + port set) but
+    # the upstream code-server is unreachable, ``httpx.RequestError``
+    # subclasses are caught and converted to a clean 503 with
+    # ``Retry-After: 5`` — distinct from the readiness gate's
+    # ``Retry-After: 1``.
+    #
+    # The upstream client is created INSIDE the route handler:
+    # ``client = httpx.AsyncClient(base_url=...)`` then ``client.send(...)``.
+    # We patch ``httpx.AsyncClient`` to inject the failure.
+
+    def test_503_with_retry_after_5_when_upstream_connect_error(
+        self, monkeypatch
+    ):
+        """``httpx.ConnectError`` from the upstream client → 503 with
+        ``Retry-After: 5`` and body containing "VS Code server unavailable".
+        """
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+
+        # Patch httpx.AsyncClient so client.send raises ConnectError.
+        fake_client = MagicMock()
+
+        async def fake_send(*args, **kwargs):
+            raise httpx.ConnectError("Connection refused")
+
+        fake_client.send = fake_send
+        fake_client.build_request = MagicMock(return_value=MagicMock())
+
+        async def fake_aclose():
+            pass
+
+        fake_client.aclose = fake_aclose
+
+        def fake_async_client(*args, **kwargs):
+            return fake_client
+
+        monkeypatch.setattr(httpx.AsyncClient, "__new__", fake_async_client)
+
+        with TestClient(app) as client:
+            resp = client.get("/index.html")
+
+        assert resp.status_code == 503, resp.text
+        assert resp.headers.get("Retry-After") == "5", (
+            f"Retry-After must be '5' for upstream errors; got "
+            f"{resp.headers.get('Retry-After')}"
+        )
+        body = resp.json()
+        assert "unavailable" in str(body.get("detail", "")).lower(), (
+            f"body must mention 'unavailable'; got {body}"
+        )
+
+    def test_503_with_retry_after_5_when_upstream_remote_protocol_error(
+        self, monkeypatch
+    ):
+        """``httpx.RemoteProtocolError`` → same 503 + Retry-After: 5 path.
+
+        Both ConnectError and RemoteProtocolError are ``httpx.RequestError``
+        subclasses, so the same handler catches them.
+        """
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+
+        fake_client = MagicMock()
+
+        async def fake_send(*args, **kwargs):
+            raise httpx.RemoteProtocolError("peer closed connection")
+
+        fake_client.send = fake_send
+        fake_client.build_request = MagicMock(return_value=MagicMock())
+
+        async def fake_aclose():
+            pass
+
+        fake_client.aclose = fake_aclose
+
+        def fake_async_client(*args, **kwargs):
+            return fake_client
+
+        monkeypatch.setattr(httpx.AsyncClient, "__new__", fake_async_client)
+
+        with TestClient(app) as client:
+            resp = client.get("/healthz")
+
+        assert resp.status_code == 503, resp.text
+        assert resp.headers.get("Retry-After") == "5"
+        body = resp.json()
+        assert "unavailable" in str(body.get("detail", "")).lower()
+
+    def test_upstream_http_error_is_not_masked_to_503(self, monkeypatch):
+        """``httpx.HTTPStatusError`` (e.g. 404 from upstream) must NOT be
+        converted to 503. The proxy catches only ``httpx.RequestError``
+        (connection-level errors), NOT ``HTTPStatusError`` (HTTP-level
+        errors from a reachable upstream). This pins the design decision:
+        the error propagates as-is.
+        """
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+
+        fake_client = MagicMock()
+
+        async def fake_send(*args, **kwargs):
+            raise httpx.HTTPStatusError(
+                "Not Found",
+                request=MagicMock(),
+                response=MagicMock(status_code=404),
+            )
+
+        fake_client.send = fake_send
+        fake_client.build_request = MagicMock(return_value=MagicMock())
+
+        async def fake_aclose():
+            pass
+
+        fake_client.aclose = fake_aclose
+
+        def fake_async_client(*args, **kwargs):
+            return fake_client
+
+        monkeypatch.setattr(httpx.AsyncClient, "__new__", fake_async_client)
+
+        with TestClient(app) as client:
+            # HTTPStatusError is NOT caught by the proxy (it only catches
+            # RequestError), so it propagates as an unhandled exception.
+            # TestClient re-raises unhandled server exceptions — so we
+            # expect the HTTPStatusError to surface, proving it was NOT
+            # masked to a 503.
+            with pytest.raises(httpx.HTTPStatusError):
+                client.get("/nonexistent")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
