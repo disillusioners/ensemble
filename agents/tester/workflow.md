@@ -65,6 +65,8 @@ Skill needed: unit-test
   )
 ```
 
+> `send_message` also accepts an optional `context` dict for passing structured context (test paths, prior failures, conventions) to the worker — see `test-strategy.md` → "Passing Test Context".
+
 ### Dispatch Pattern (infrastructure task, no skill)
 
 ```

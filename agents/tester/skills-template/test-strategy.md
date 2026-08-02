@@ -1,5 +1,5 @@
 ---
-version: 1.1.0
+version: 1.2.0
 category: testing-strategy
 auto_load: true
 ---
@@ -104,6 +104,30 @@ When spawning a worker for a planned task:
 ```
 
 The `load_skill` parameter is parsed by the worker runtime so the worker loads only the skill needed for its task. The tester's own skill stack is untouched.
+
+### Passing Test Context (optional)
+
+- I may pass a `context={...}` dict on `send_message(...)` to hand a worker supplementary info beyond the task message — test-file paths, prior failure descriptions, test commands, expected behavior notes.
+- **USE when I have:**
+  - Test-file paths or specific test cases the worker should run
+  - Prior failure descriptions or error output from a previous run
+  - Expected behavior or test conventions the worker should follow
+- **SKIP when:** simple smoke tests with no prior context needed, or control messages.
+- **Suggested keys:** `files` (test file paths, list), `notes` (prior failures, expected behavior, str), `conventions` (test patterns to follow, str). Any key passes through.
+- Don't duplicate what's already in the message text — `context` is for supplementary info only.
+
+```python
+send_message(
+    instance_id=worker_id,
+    message="Run the auth token refresh tests and report results.",
+    load_skill="test-pack-execution",
+    context={
+        "files": ["tests/unit/test_auth_refresh.py"],
+        "notes": "Previous run failed on test_token_expiry — assertion was off-by-one on the 3600s boundary.",
+        "conventions": "Use the existing fixture pattern from conftest.py.",
+    },
+)
+```
 
 ### Pre-Dispatch Self-Check (dispatcher-level)
 

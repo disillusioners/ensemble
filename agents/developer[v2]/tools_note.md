@@ -10,6 +10,8 @@ This file is **tool-by-tool reference** for developer[v2]. The dispatch mechanic
 
 The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **`dev-strategy.md` → "Worker Dispatch Pattern"**; the process around them is in `workflow.md`. I always END TURN after `send_message`.
 
+> `send_message` also accepts an optional `context` dict for passing structured context (file paths, findings, plan refs) to the child — see `dev-strategy.md` → "Passing Task Context".
+
 ---
 
 ## Read-Only Allow-List (filesystem + bash)

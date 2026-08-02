@@ -53,6 +53,8 @@ send_message(
 # END TURN
 ```
 
+> `send_message` also accepts an optional `context` dict for passing structured context (file locations, research findings, plan refs) to the worker — see `planning-strategy.md` → "Passing Planning Context".
+
 > ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the channel to report — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See `workflow.md` → "Why END TURN After Dispatch".
 
 > ⚠️ **One skill per worker.** Never bundle multiple `load_skill` values into a single dispatch. Skill evolution is 1:1 with the worker that applied it.

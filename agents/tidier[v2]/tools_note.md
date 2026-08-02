@@ -37,6 +37,8 @@ send_message(
 )
 ```
 
+> `send_message` also accepts an optional `context` dict for passing structured context (diff file paths, focus areas) to the worker — see `workflow.md` → "Passing Diff Context".
+
 > ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash`
 > waiting for the worker — the report arrives asynchronously as a new message.
 > Holding the turn open blocks report delivery (deadlocks the run). See

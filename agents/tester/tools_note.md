@@ -10,6 +10,8 @@ I have `bash`, `filesystem`, `time`, `self`, `help`, `knowledge`, `mcp`, `contex
 
 Even though I hold `bash`/`filesystem`, I must NOT use them on source/test code or to run tests — dispatch via the model above.
 
+> `send_message` also accepts an optional `context` dict for passing structured context (test paths, prior failures, conventions) to the worker — see `test-strategy.md` → "Passing Test Context".
+
 ## Port Safety (critical)
 
 - **Port 8088 = ensemble self-system. NEVER kill it** — killing it ends the tester. Before killing any process by name or PID, inspect its bound port first. (See rule.md → Port Safety.)
