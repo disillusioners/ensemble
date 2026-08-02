@@ -6,6 +6,7 @@
   "color": "accent-purple",
   "version": "1.0.0",
   "llm_model": "quick",
+  "blueprint_inactive": true,
   "innate_skills": [],
   "tools": {
     "allow": ["rag_insert_text", "tool_help", "time"]

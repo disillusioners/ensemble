@@ -72,6 +72,7 @@ CONTEXT_KIND_SHARED_CONTEXT = "shared_context"
 CONTEXT_KIND_AUTO_LOAD_SKILLS = "auto_load_skills"
 CONTEXT_KIND_SKILLS = "skills"
 CONTEXT_KIND_TASK_CONTEXT = "task_context"
+CONTEXT_KIND_BLUEPRINT = "blueprint"
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -1049,6 +1050,22 @@ async def _run_skill_search(
         return (None, [])
 
 
+def _build_blueprint_block_text(matched: list) -> str:
+    """Format matched blueprints into injection message text."""
+    lines = ["Matched Project Blueprints:"]
+    for bp in matched:
+        source_tag = "core" if bp.kind == "core" else "matched"
+        lines.append(f"✓ {bp.name} (score: {bp.score:.2f}, source: {source_tag})")
+    lines.append("")  # blank line
+    for bp in matched:
+        lines.append(f"--- {bp.name} ---")
+        lines.append(bp.content)
+        if bp.file_refs:
+            lines.append(f"For more detail read: {', '.join(bp.file_refs)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 async def assemble_context_messages(
     instance_id: str,
     user_query: str,
@@ -1327,6 +1344,45 @@ async def assemble_context_messages(
         if al_msg is not None:
             persistent_msgs.append(al_msg)
 
+        # ── 3.5. Blueprint message — PERSISTENT (once-per-instance, opt-out) ──
+        # Project Blueprint: matched architectural knowledge injected once
+        # on the first user turn. Gated by:
+        #   (a) project_already_injected must be False (once-per-instance)
+        #   (b) blueprint_inactive must be False (opt-out via meta.json)
+        #   (c) manager._blueprint_matcher must exist (graceful skip if absent)
+        # matcher.match() is async — await DIRECTLY (assemble_context_messages
+        # is already async). Do NOT wrap in asyncio.to_thread(asyncio.run(...)).
+        blueprint_inactive = bool(getattr(agent_meta, "blueprint_inactive", False))
+        if not blueprint_inactive:
+            try:
+                matcher = getattr(manager, "_blueprint_matcher", None)
+                if matcher is None:
+                    matched = []
+                else:
+                    matched = await matcher.match(
+                        project_id=project_id,
+                        query=user_query,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"[ContextMessages] Blueprint matching failed for "
+                    f"project {project_id}: {exc}"
+                )
+                matched = []
+
+            if matched:
+                blueprint_text = _build_blueprint_block_text(matched)
+                persistent_msgs.append(HumanMessage(
+                    content=(
+                        f"[SYSTEM CONTEXT: Project Blueprint]\n\n"
+                        f"{blueprint_text}"
+                    ),
+                    additional_kwargs={
+                        "injected_message": True,
+                        "context_kind": CONTEXT_KIND_BLUEPRINT,
+                    },
+                ))
+
     # ── 4. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
     # Ephemeral skill injection is currently disabled. Skills are
     # persistent (checkpointed) for debugging and improvement. The
@@ -1385,6 +1441,7 @@ __all__ = [
     "CONTEXT_KIND_AUTO_LOAD_SKILLS",
     "CONTEXT_KIND_SKILLS",
     "CONTEXT_KIND_TASK_CONTEXT",
+    "CONTEXT_KIND_BLUEPRINT",
     # Pure builder functions
     "build_project_context_message",
     "build_shared_context_message",

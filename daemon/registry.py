@@ -291,6 +291,15 @@ class AgentMetadata(BaseModel):
             "``N-1`` messages."
         ),
     )
+    blueprint_inactive: bool = Field(
+        default=False,
+        description=(
+            "Opt-out flag for Project Blueprint injection. When True, "
+            "the agent receives NO blueprint messages on first turn. "
+            "Default False (active) — blueprint is opt-OUT, not opt-in. "
+            "Utility agents (kb-writer, blueprinter) set this to True."
+        ),
+    )
     context_injection: ContextInjectionConfig = Field(
         default_factory=ContextInjectionConfig,
         description=(
@@ -530,6 +539,7 @@ class AgentRegistry:
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
                     skill_search_interval=meta.get("skill_search_interval", 1),
+                    blueprint_inactive=meta.get("blueprint_inactive", False),  # NEW
                     context_injection=context_injection_arg,
                     inject_allowed_models=meta.get("inject_allowed_models", False),
                     version_tag=version_tag,
@@ -576,6 +586,7 @@ class AgentRegistry:
                         team_members=meta.get("team_members", []) or [],
                         skill_injection=meta.get("skill_injection", False),
                         skill_search_interval=meta.get("skill_search_interval", 1),
+                        blueprint_inactive=meta.get("blueprint_inactive", False),  # NEW
                         context_injection=context_injection_arg,
                         inject_allowed_models=meta.get("inject_allowed_models", False),
                         version_tag=version_tag,
