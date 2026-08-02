@@ -35,7 +35,7 @@ _MAX_TRAVERSAL_DEPTH = 256
 # Safety cap on descendants loaded per page during root-based pagination.
 # Prevents pathological trees (huge fan-out, accidental cycles) from blowing
 # up response size / DB latency. Triggers a truncation warning when hit.
-MAX_DESCENDANTS_PER_PAGE = 500
+MAX_DESCENDANTS_PER_PAGE = 1000
 
 
 def get_agent_name(agent_dir: str) -> str:

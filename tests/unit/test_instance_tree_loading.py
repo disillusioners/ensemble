@@ -349,11 +349,11 @@ class TestDescendantCap:
         )
 
     def test_descendant_cap_default_constant_value(self):
-        """Sanity check: the documented default is 500.
+        """Sanity check: the documented default is 1000.
 
         Guards against accidental value changes in a refactor.
         """
-        assert MAX_DESCENDANTS_PER_PAGE == 500
+        assert MAX_DESCENDANTS_PER_PAGE == 1000
 
 
 class TestListFlatPaginationUnchanged:
