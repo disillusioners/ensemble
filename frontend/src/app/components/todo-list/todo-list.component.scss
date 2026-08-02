@@ -89,6 +89,11 @@
 
 .todo-items {
   padding: 4px 0;
+  // Cap visible items at ~10 (~28px each incl. padding + line-height).
+  // Smooth vertical scroll only kicks in once the list overflows.
+  max-height: 300px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
   animation: fadeIn 0.3s ease;
 }
 
