@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 231 packs
-- Unit: 181 | Integration: 18 | Mock: 8 | E2E: 13 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
+- Total: 235 packs
+- Unit: 185 | Integration: 18 | Mock: 8 | E2E: 13 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 - Context Injection Restructure: 2026-07-28 on `feature/context-injection-restructure` @ `2de4af3a` — 209 new feature tests ALL PASS, 694 core regression pass with 0 NEW failures (41 pre-existing matching baseline). See `RESULTS/2026-07-28-context-injection-restructure.md`
 - V2 Agent Validation: 2026-07-30 on `feature/v2-developer-planner` — static validation of developer[v2] + planner[v2] agent definitions (16/16 checks PASS: meta.json, file completeness, skill-set.yaml, opencode absence, mermaid syntax, registry compat). See `RESULTS/2026-07-30-v2-developer-planner-validation.md`
@@ -12,11 +12,16 @@
 - Post-Self-Deadlock Fix E2E: 2026-08-02 on `latest` @ `338a72b0`+`a8cdbd89` — 107 tests, 86 pass, 20 skip, 1 pre-existing FAIL (auto-resume message loss from `cced02cc`, NOT from this fix). Self-deadlock fix verified: all task claims succeed, 3-level cascade green, turn-reconciler 13/13, concurrency 66/0. ensure.md 10/10 Core + 4/4 Release Gate PASS. See `RESULTS/2026-08-02-post-deadlock-fix-e2e-verification.md`
 - Skill Search Interval: 2026-08-02 on `feature/skill-search-interval` — 265 tests (22 new feature unit + 9 NEW integration + 234 regression), ALL PASS. Critical integration gap found and filled: unit tests replicated gate logic in helper, integration tests exercise real `_process_message_with_tracking` path. ensure.md 4/4 Critical PASS. No production bugs. See `RESULTS/2026-08-02-skill-search-interval-feature-test.md`
 - Skill Search Interval Re-Test (C1/W1/S1): 2026-08-02 on `feature/skill-search-interval` — 294 tests (33 unit + 16 C1 discovery + 11 integration + 234 regression), ALL PASS. C1 dead-config fix wired through discover(), W1 explicit-load cache isolation verified through real path (2 new integration tests @ 202d1e44), S1 hot-path preserved (interval=1 unaffected by markers). ensure.md 4/4 static checks PASS. No production bugs. See `RESULTS/2026-08-02-skill-search-interval-retest-c1w1s1.md`
+- Project Blueprint: 2026-08-02 on `feature/project-blueprint` @ `f98cfe40` — 175 tests across 4 new packs + context_messages regression (60/61 passed, 1 skip) + frontend build green. 75 blueprint unit tests (29 core + 30 tools/API + 16 injection/sidecar), 100 registry regression. Integration verified: 5/5 imports clean, 3/3 wiring attrs present, 4/4 edge cases (18 sub-cases). ensure.md 2/2 in-scope Core PASS. See `RESULTS/2026-08-02-project-blueprint-full-test.md`
 
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
+| blueprint_core_unit_test | test/packs/blueprint_core_unit_test.sh | Blueprint core: repository CRUD (15 tests), matcher BM25+vector (5 tests), rate limiter circuit breaker (9 tests) | 2 min | 2026-08-02 | ✅ PASS (29/29, feature/project-blueprint, commit 9a27484e) |
+| blueprint_tools_unit_test | test/packs/blueprint_tools_unit_test.sh | Blueprint agent tools (6 tests) + API router (24 tests): create_blueprint_tools factory, blueprint_search/get/list/create/update, cross-project access denial, matcher-None handling, CRUD REST API | 2 min | 2026-08-02 | ✅ PASS (30/30, feature/project-blueprint, commit 9a27484e) |
+| blueprint_injection_unit_test | test/packs/blueprint_injection_unit_test.sh | Blueprint injection path (7 tests) + sidecar (9 tests): first-turn injection via assemble_context_messages, blueprint_inactive skip, project_already_injected gate, [SYSTEM CONTEXT: Project Blueprint] format, BlueprintSidecar lifecycle | 2 min | 2026-08-02 | ✅ PASS (16/16, feature/project-blueprint, commit 9a27484e) |
+| blueprint_registry_unit_test | test/packs/blueprint_registry_unit_test.sh | Registry regression: full agent registry discovery suite — verifies blueprinter agent addition didn't break discovery | 2 min | 2026-08-02 | ✅ PASS (100/100, feature/project-blueprint, commit 9a27484e) |
 | devops_agent_unit_test | tests/unit/test_devops_agent.py | DevOps agent: auto-discovery, meta.json validity, prompt composition, tool config, leader integration, markdown quality | 2 min | 2026-06-14 | ✅ PASS (62/62, feature/devops-agent, commit 7800338) |
 | mcp_secret_redaction_unit_test | tests/unit/test_mcp_server_crud.py | MCP server CRUD: models, schemas, repository, router, integration + **secret redaction layer** (redact_secrets utility, [REDACTED] for KEY/TOKEN/SECRET/PASSWORD/BASE/HEADERS, deep-copy for subprocess safety, all 6 config-returning endpoints) | 2 min | 2026-07-08 | ✅ PASS (80/80, commit a66982c7, 0 failures) |
 | safe_stdout_unit_test | tests/test_safe_stdout.py | _MCPSafeStdout wrapper: text→stderr redirect, binary buffer→stdout, print() redirect, subprocess launcher (python -m daemon.mcp.safe_stdout), exception handling (KeyboardInterrupt re-raise, SystemExit int/string/None), detach/reconfigure AttributeError guard, writelines Iterable type | 2 min | 2026-07-08 | ✅ PASS (43/43, feature/stdio-safety-wrapper, commit 8966b8c6, 0 failures) |
