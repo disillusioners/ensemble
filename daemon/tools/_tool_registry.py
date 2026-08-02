@@ -259,6 +259,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "language": "daemon.tools.language_tools",
     "proc": "daemon.tools.proc_tools",
     "council": "daemon.tools.instance",  # Phase 2: spawn_councilor + clear_councilor_errors
+    "blueprint": "daemon.tools.blueprint",
 }
 
 

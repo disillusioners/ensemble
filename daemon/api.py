@@ -69,6 +69,7 @@ from daemon.routers import (
     migration_router,
     settings_router,       # /api/settings (Phase 1: user language preference)
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
+    blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -1498,6 +1499,7 @@ def create_app() -> FastAPI:
     api_router.include_router(database_router)        # /api/database
     api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
+    api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
 
     app.include_router(api_router)

@@ -177,6 +177,7 @@ from .project import create_project_tools
 from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
+from .blueprint import create_blueprint_tools
 from .chart_tools import create_chart_tools
 from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
@@ -1977,6 +1978,12 @@ Returns:
     # partition. Auto-resolves context_key from the caller via closure.
     shared_context_tool_list = create_shared_context_tools(manager, current_instance_id)
     tools.extend(shared_context_tool_list)
+
+    # ── Blueprint tools (project blueprint search/get/list, restricted create/update) ──
+    # Always available — read tools are unrestricted; write tools (create/update)
+    # are gated by runtime agent_id check (_is_writer_authorized).
+    blueprint_tool_list = create_blueprint_tools(manager, current_instance_id, agent_id)
+    tools.extend(blueprint_tool_list)
 
     # ── System tools (read-only env / config / health snapshots) ──
     # Always available — internal agents use these for fast triage of
