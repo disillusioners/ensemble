@@ -15,6 +15,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Change to script directory
 cd "$SCRIPT_DIR"
 
+# Cleanup function: kill the code-server process spawned by this daemon.
+# In --reload mode, uvicorn restarts on code changes but does NOT kill the
+# child code-server it spawned — each reload orphans the previous one
+# (PPID becomes 1). This trap ensures stale code-server processes are
+# cleaned up on script exit (normal, interrupt, or terminate).
+#
+# Strategy: prefer killing the specific PID from the PID file (written by
+# VSCodeServerManager) to avoid killing unrelated code-server instances.
+# Fall back to pkill only if the PID file is missing or the PID is stale.
+CLEANUP_DONE=0
+cleanup() {
+    [ "$CLEANUP_DONE" -eq 1 ] && return
+    CLEANUP_DONE=1
+    # Try PID file first (precise — targets only this daemon's code-server)
+    local pid_file="${DATA_DIR:-./data_dev}/vscode-server.pid"
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            return
+        fi
+    fi
+    # Fallback: kill code-server processes by launch pattern
+    pkill -f "code-server.*--bind-addr" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # Use venv if available, otherwise use system python
 if [ -f ".venv/bin/python" ]; then
     PYTHON=".venv/bin/python"

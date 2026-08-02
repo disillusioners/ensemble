@@ -23,7 +23,6 @@ Limitation:
 from __future__ import annotations
 
 import asyncio
-import errno
 import json
 import logging
 import os
@@ -51,6 +50,9 @@ from ..constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+_IS_UNIX: bool = sys.platform != "win32"
+_TAIL_HEADER: str = "\n--- code-server output (tail) ---\n"
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +193,9 @@ class VSCodeServerManager:
         """Spawn code-server if not already running. Idempotent.
 
         Returns:
-            The current state after the start attempt.
+            The current state after the start attempt. Returns the
+            unchanged state without starting if ``user_stopped`` is set
+            or ``status`` is ``"stopping"`` (teardown in progress).
 
         Raises:
             VSCodeServerNotInstalledError: binary not found.
@@ -200,6 +204,29 @@ class VSCodeServerManager:
             VSCodeServerTimeoutError: port detection timed out.
         """
         async with self._lock:
+            # Guard against restart-after-stop races: if stop() has been
+            # called (user_stopped=True) or the manager is tearing down
+            # (status="stopping"), don't spawn a new process the watchdog
+            # would then have to detect and kill. This prevents
+            # "restart → immediate teardown" cycles when stop() and a
+            # watchdog restart race.
+            #
+            # NOTE: ``status="stopped"`` alone is NOT included here — it
+            # is the initial state of a fresh manager, so blocking it
+            # would prevent the very first ``start()``. The ``user_stopped``
+            # flag (set by ``stop()``, reset by a fresh ``start()``) is
+            # the real discriminator for "stop was called."
+            if (
+                self.state.user_stopped
+                or self.state.status == "stopping"
+            ):
+                logger.info(
+                    "VSCode start() skipped: manager is stopped/tearing "
+                    "down (status=%s, user_stopped=%s)",
+                    self.state.status,
+                    self.state.user_stopped,
+                )
+                return self.state
             if self.is_running():
                 return self.state
 
@@ -218,6 +245,19 @@ class VSCodeServerManager:
                 self.data_dir, VSCODE_DEFAULT_USER_DATA_DIR
             )
             workdir = self.workdir or os.getcwd()
+            # Safety: the configured workdir may not exist (config drift,
+            # deleted project dir, etc.). code-server with a non-existent
+            # cwd fails to spawn with EACCES/ENOENT depending on the
+            # platform, and a missing workspace also produces a poor UX
+            # in the editor (404 on first navigation). Fall back to the
+            # user's home dir so the editor still boots in a guaranteed
+            # existing directory rather than failing startup.
+            if not os.path.isdir(workdir):
+                logger.warning(
+                    "VSCode workdir does not exist: %s, using home dir",
+                    workdir,
+                )
+                workdir = os.path.expanduser("~")
 
             # Ensure dirs exist
             os.makedirs(user_data_dir, exist_ok=True)
@@ -398,41 +438,24 @@ class VSCodeServerManager:
 
             process = self._process
             if process is None or process.returncode is not None:
+                # Adopted PID (no subprocess handle) — still need to kill
+                # it via os.kill if it's alive, otherwise it leaks silently.
+                if process is None and self.state.pid is not None:
+                    self._signal_pid(signal.SIGTERM)
+                    # Wait briefly for graceful exit, then SIGKILL.
+                    try:
+                        await asyncio.sleep(VSCODE_STOP_GRACE_S)
+                        os.kill(self.state.pid, 0)  # check if still alive
+                        self._signal_pid(signal.SIGKILL)
+                    except OSError:
+                        pass  # already dead — good
+                self.state.exit_code = -1 if process is None else process.returncode
                 self.state.status = "stopped"
                 self._remove_pid_file()
                 return self.state
 
-            is_unix = sys.platform != "win32"
-
-            # SIGTERM the whole process group.
-            # NOTE (S3): killpg may miss detached children that called
-            # setsid (language servers, extension hosts). Best-effort.
-            #
-            # W8: Use the pgid captured at spawn time (state.pgid), NOT
-            # ``os.getpgid(process.pid)``. By the time we signal, the PID
-            # could have been reused by an unrelated process; re-resolving
-            # the pgid at signal time would risk targeting the wrong group.
-            if is_unix:
-                if self.state.pgid is not None:
-                    try:
-                        os.killpg(self.state.pgid, signal.SIGTERM)
-                    except (OSError, ProcessLookupError):
-                        try:
-                            process.send_signal(signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
-                else:
-                    # pgid wasn't captured at spawn; fall back to the
-                    # subprocess handle's signal API (best-effort).
-                    try:
-                        process.send_signal(signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-            else:
-                try:
-                    process.send_signal(signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+            # SIGTERM the whole process group (best-effort).
+            self._signal_pid(signal.SIGTERM)
 
             # Wait for graceful exit.
             try:
@@ -445,25 +468,7 @@ class VSCodeServerManager:
                     "code-server did not exit within %ds; sending SIGKILL",
                     VSCODE_STOP_GRACE_S,
                 )
-                if is_unix:
-                    if self.state.pgid is not None:
-                        try:
-                            os.killpg(self.state.pgid, signal.SIGKILL)
-                        except (OSError, ProcessLookupError):
-                            try:
-                                process.kill()
-                            except ProcessLookupError:
-                                pass
-                    else:
-                        try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
-                else:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
+                self._signal_pid(signal.SIGKILL)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=2.0)
                 except asyncio.TimeoutError:
@@ -518,17 +523,23 @@ class VSCodeServerManager:
             # zombie/reaping races.
             try:
                 os.kill(self.state.pid, 0)
-            except (OSError, ProcessLookupError):
+            except ProcessLookupError:
                 return False
+            except PermissionError:
+                return True
             return True
 
         # C2: No subprocess handle (adopted process) — check via PID.
+        # PermissionError means the process EXISTS but is inaccessible
+        # (e.g. PID reused by another owner) — treat as alive, not dead.
         try:
             os.kill(self.state.pid, 0)
-        except (OSError, ProcessLookupError):
+        except ProcessLookupError:
             self.state.status = "crashed"
             self.state.last_error = "Adopted process no longer alive"
             return False
+        except PermissionError:
+            return True
         return True
 
     def get_status(self) -> VSCodeServerState:
@@ -626,6 +637,19 @@ class VSCodeServerManager:
             pid,
             self.state.port,
         )
+
+        # Fix 2: Spawn an adopted-process watchdog. ``self._process is
+        # None`` for adopted PIDs (we never had a subprocess handle),
+        # so the standard ``_watchdog_loop`` would return immediately at
+        # its ``if process is None: return`` guard and never detect a
+        # subsequent crash. The adopted watchdog polls the PID via
+        # ``os.kill(pid, 0)`` instead, which works against a foreign
+        # process we don't own. On death it triggers the same
+        # exponential-backoff restart policy as ``_watchdog_loop``.
+        self.state.watchdog_task = asyncio.create_task(
+            self._adopted_watchdog_loop(),
+            name="vscode-adopted-watchdog",
+        )
         return True
 
     async def cleanup(self) -> None:
@@ -657,6 +681,40 @@ class VSCodeServerManager:
         return "\n".join(lines[-tail:])
 
     # -- private helpers ---------------------------------------------------
+
+    def _signal_pid(
+        self, sig: int, *, force_process_group: bool = True
+    ) -> None:
+        """Send a signal to the managed process, best-effort.
+
+        Tries the process group first (``os.killpg``) to signal the
+        whole tree including detached children; on failure (stale
+        pgid, PID reuse) falls back to ``os.kill`` on the bare PID.
+        Teardown failures are logged at debug level, never raised.
+        """
+        if _IS_UNIX and self.state.pgid is not None and force_process_group:
+            try:
+                os.killpg(self.state.pgid, sig)
+                return
+            except OSError as exc:
+                logger.debug(
+                    "_signal_pid(killpg, %d) failed: %s; "
+                    "falling back to bare PID",
+                    sig,
+                    exc,
+                )
+        # Fallback (or primary when no pgid): signal the bare PID.
+        pid = self.state.pid
+        if pid is None:
+            return
+        try:
+            os.kill(pid, sig)
+        except OSError as exc:
+            logger.debug("_signal_pid(kill, %d) failed: %s", sig, exc)
+
+    def _format_crash_error(self, prefix: str, log_tail: str) -> str:
+        """Build a crash error message with optional log tail."""
+        return prefix + (f"{_TAIL_HEADER}{log_tail}" if log_tail else "")
 
     def _resolve_binary(self) -> str:
         """Resolve the code-server binary path.
@@ -760,14 +818,11 @@ class VSCodeServerManager:
                     log_tail or "<empty>",
                 )
 
-                msg = (
+                msg = self._format_crash_error(
                     f"code-server exited during startup "
-                    f"(code={self._process.returncode})"
+                    f"(code={self._process.returncode})",
+                    log_tail,
                 )
-                if log_tail:
-                    msg += (
-                        f"\n--- code-server output (tail) ---\n{log_tail}"
-                    )
                 raise VSCodeServerStartError(msg)
 
     async def _reader_loop(self) -> None:
@@ -929,7 +984,104 @@ class VSCodeServerManager:
             )
         return log_tail
 
-    async def _watchdog_loop(self) -> None:
+    async def _run_restart_attempts(
+        self, log_tail: str, exit_code: int = 1
+    ) -> bool:
+        """Run the exponential-backoff restart attempt loop.
+
+        Shared by both ``_watchdog_loop`` (subprocess) and
+        ``_adopted_watchdog_loop`` (PID-poll). The caller is responsible for
+        detecting process death and building the crash log tail before
+        calling this method.
+
+        Args:
+            log_tail: Pre-built crash log tail. Appended to ``last_error``
+                messages.
+            exit_code: Exit code to report; ``-1`` is the adopted-process
+                sentinel.
+
+        Returns:
+            ``True`` if restart succeeded, ``False`` if attempts were
+            exhausted or restart was skipped during teardown.
+        """
+        backoff = VSCODE_RESTART_BACKOFF_INITIAL_S
+        last_exit_code = exit_code
+        for attempt in range(1, VSCODE_RESTART_MAX_ATTEMPTS + 1):
+            if self.state.user_stopped:
+                logger.info(
+                    "code-server auto-restart aborted: "
+                    "user_stopped set during backoff (after %d/%d attempts)",
+                    attempt - 1,
+                    VSCODE_RESTART_MAX_ATTEMPTS,
+                )
+                return False
+            logger.warning(
+                "code-server auto-restart attempt %d/%d in %.1fs",
+                attempt,
+                VSCODE_RESTART_MAX_ATTEMPTS,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+            try:
+                await self.start()
+            except Exception as exc:
+                logger.warning(
+                    "code-server auto-restart attempt %d/%d failed: %s: %s",
+                    attempt,
+                    VSCODE_RESTART_MAX_ATTEMPTS,
+                    type(exc).__name__,
+                    exc,
+                )
+                if self.state.exit_code is not None:
+                    last_exit_code = self.state.exit_code
+                backoff = min(backoff * 2, VSCODE_RESTART_BACKOFF_MAX_S)
+                continue
+
+            # ``start()`` can skip when teardown wins a user-stop race.
+            if self.state.user_stopped or self.state.status != "running":
+                logger.info(
+                    "code-server auto-restart skipped: manager is "
+                    "stopping/stopped (status=%s, user_stopped=%s)",
+                    self.state.status,
+                    self.state.user_stopped,
+                )
+                return False
+            logger.info(
+                "code-server auto-restart succeeded on attempt %d/%d: "
+                "pid=%d port=%d",
+                attempt,
+                VSCODE_RESTART_MAX_ATTEMPTS,
+                self.state.pid,
+                self.state.port,
+            )
+            return True
+
+        final_log_tail = self._build_crash_log_tail()
+        self.state.status = "crashed"
+        if exit_code == -1:
+            prefix = (
+                f"adopted code-server (pid={self.state.pid}) crashed and "
+                f"{VSCODE_RESTART_MAX_ATTEMPTS} auto-restart attempts failed "
+                f"(last exit_code={last_exit_code})"
+            )
+        else:
+            prefix = (
+                f"code-server crashed and {VSCODE_RESTART_MAX_ATTEMPTS} "
+                f"auto-restart attempts failed (last exit_code={last_exit_code})"
+            )
+        self.state.last_error = self._format_crash_error(
+            prefix,
+            final_log_tail,
+        )
+        logger.error(
+            "code-server auto-restart exhausted after %d attempts; "
+            "marking crashed (last exit_code=%s)",
+            VSCODE_RESTART_MAX_ATTEMPTS,
+            last_exit_code,
+        )
+        return False
+
+    async def _watchdog_loop(self) -> bool:
         """Monitor process exit; auto-restart with backoff on unexpected exit.
 
         Polls ``process.returncode`` once per second. On unexpected exit
@@ -938,47 +1090,26 @@ class VSCodeServerManager:
         backoff, starting at :data:`VSCODE_RESTART_BACKOFF_INITIAL_S` and
         doubling each retry up to :data:`VSCODE_RESTART_BACKOFF_MAX_S`.
         On a successful restart the new ``start()`` call spawns fresh
-        reader/health/watchdog tasks, so this watchdog simply returns —
-        the new watchdog takes over.
+        reader/health/watchdog tasks, so this watchdog simply returns.
 
         If all restart attempts fail, ``status`` is set to ``"crashed"``
-        and ``last_error`` carries the attempt count and final exit code
-        so the failure is observable via ``get_status()`` / the API.
-        The ``log_buffer`` is intentionally preserved across restarts
-        for diagnostics (the new ``start()`` appends to it).
-
-        When ``user_stopped=True`` (``stop()`` driving teardown) the
-        watchdog leaves the status alone and does not attempt restart.
+        and ``last_error`` carries the attempt count and final exit code.
         """
         process = self._process
         if process is None:
-            return
-
+            return False
         try:
             while True:
                 await asyncio.sleep(1.0)
                 if process.returncode is None:
-                    continue  # still alive; keep polling
-
-                # Process exited.
+                    continue
                 self.state.exit_code = process.returncode
                 if self.state.user_stopped:
-                    # ``stop()`` is driving teardown and will set the
-                    # final status; don't clobber it here.
                     break
-
-                # Build a crash reason from the log buffer tail so the
-                # operator can see WHY it died (same extraction pattern
-                # as ``_wait_for_port``'s startup crash path).
                 log_tail = self._build_crash_log_tail()
-                self.state.last_error = (
-                    f"code-server exited unexpectedly "
-                    f"(code={process.returncode})"
-                    + (
-                        f"\n--- code-server output (tail) ---\n{log_tail}"
-                        if log_tail
-                        else ""
-                    )
+                self.state.last_error = self._format_crash_error(
+                    f"code-server exited unexpectedly (code={process.returncode})",
+                    log_tail,
                 )
                 logger.warning(
                     "code-server crashed: pid=%d exit_code=%d; "
@@ -986,105 +1117,50 @@ class VSCodeServerManager:
                     self.state.pid,
                     process.returncode,
                 )
-
-                # Cancel the (now-stale) health task; the new start()
-                # will spawn a fresh one tied to the new process.
-                if (
-                    self.state.health_task
-                    and not self.state.health_task.done()
-                ):
+                if self.state.health_task and not self.state.health_task.done():
                     self.state.health_task.cancel()
-
-                # Auto-restart loop with exponential backoff.
-                backoff = VSCODE_RESTART_BACKOFF_INITIAL_S
-                last_exit_code = process.returncode
-                restart_succeeded = False
-                for attempt in range(1, VSCODE_RESTART_MAX_ATTEMPTS + 1):
-                    # Re-check the user-stop flag between attempts: the
-                    # user may call ``stop()`` during an inter-attempt
-                    # backoff, in which case the manager is tearing down
-                    # and we must NOT keep restarting. Mirrors the outer
-                    # ``user_stopped`` guard at the top of the loop.
-                    if self.state.user_stopped:
-                        logger.info(
-                            "code-server auto-restart aborted: "
-                            "user_stopped set during backoff "
-                            "(after %d/%d attempts)",
-                            attempt - 1,
-                            VSCODE_RESTART_MAX_ATTEMPTS,
-                        )
-                        return
-                    logger.warning(
-                        "code-server auto-restart attempt %d/%d "
-                        "in %.1fs",
-                        attempt,
-                        VSCODE_RESTART_MAX_ATTEMPTS,
-                        backoff,
-                    )
-                    await asyncio.sleep(backoff)
-                    try:
-                        await self.start()
-                    except Exception as exc:
-                        logger.warning(
-                            "code-server auto-restart attempt %d/%d "
-                            "failed: %s: %s",
-                            attempt,
-                            VSCODE_RESTART_MAX_ATTEMPTS,
-                            type(exc).__name__,
-                            exc,
-                        )
-                        # Track the most recent exit code (the new
-                        # process may have died too) for the final
-                        # crash message below.
-                        if self.state.exit_code is not None:
-                            last_exit_code = self.state.exit_code
-                        backoff = min(
-                            backoff * 2, VSCODE_RESTART_BACKOFF_MAX_S
-                        )
-                        continue
-
-                    # Success: ``start()`` flipped status to "running"
-                    # and spawned a new watchdog task. The old watchdog
-                    # (this task) must just return — the new one takes
-                    # over monitoring the new process.
-                    logger.info(
-                        "code-server auto-restart succeeded on "
-                        "attempt %d/%d: pid=%d port=%d",
-                        attempt,
-                        VSCODE_RESTART_MAX_ATTEMPTS,
-                        self.state.pid,
-                        self.state.port,
-                    )
-                    restart_succeeded = True
-                    return
-
-                # All attempts exhausted: surface a permanent crash.
-                # Re-build the log tail at this final path too (per the
-                # spec: "build a log tail at the top of the restart
-                # loop AND in the all-attempts-exhausted path"). The
-                # tail at this point may differ from the initial crash
-                # tail if subsequent restart attempts logged anything.
-                final_log_tail = self._build_crash_log_tail()
-                self.state.status = "crashed"
-                self.state.last_error = (
-                    f"code-server crashed and "
-                    f"{VSCODE_RESTART_MAX_ATTEMPTS} auto-restart attempts "
-                    f"failed (last exit_code={last_exit_code})"
-                    + (
-                        f"\n--- code-server output (tail) ---\n{final_log_tail}"
-                        if final_log_tail
-                        else ""
-                    )
+                return await self._run_restart_attempts(
+                    log_tail, process.returncode
                 )
-                logger.error(
-                    "code-server auto-restart exhausted after %d "
-                    "attempts; marking crashed (last exit_code=%s)",
-                    VSCODE_RESTART_MAX_ATTEMPTS,
-                    last_exit_code,
-                )
-                return
         except asyncio.CancelledError:
             raise
+        return False
+
+    async def _adopted_watchdog_loop(self) -> bool:
+        """Monitor adopted process death via PID polling; auto-restart on crash."""
+        if self.state.pid is None:
+            return False
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                try:
+                    os.kill(self.state.pid, 0)
+                    continue
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    logger.warning(
+                        "Permission denied probing adopted PID %d; assuming alive",
+                        self.state.pid,
+                    )
+                    continue
+
+                self.state.exit_code = -1
+                if self.state.user_stopped:
+                    break
+                log_tail = self._build_crash_log_tail()
+                self.state.last_error = self._format_crash_error(
+                    f"adopted code-server (pid={self.state.pid}) exited unexpectedly",
+                    log_tail,
+                )
+                logger.warning(
+                    "adopted code-server died: pid=%d; attempting auto-restart",
+                    self.state.pid,
+                )
+                return await self._run_restart_attempts(log_tail, -1)
+        except asyncio.CancelledError:
+            raise
+        return False
 
     async def _kill_orphan(self) -> None:
         """Best-effort SIGKILL when startup fails after spawn.

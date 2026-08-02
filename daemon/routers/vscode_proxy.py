@@ -268,11 +268,26 @@ def create_vscode_proxy_app(
                 headers=_response_headers(upstream.headers),
                 media_type=None,
             )
-        except Exception:
+        except httpx.RequestError as exc:
+            # Catch upstream connection failures (RemoteProtocolError,
+            # ConnectError, etc.) and return a clean 503 instead of
+            # letting the exception bubble up as an ugly HTTP 500.
+            # RequestError is the base class for connection-level errors;
+            # HTTPStatusError (4xx/5xx from upstream) is deliberately NOT
+            # caught here so it is not masked.
             if upstream is not None:
                 await upstream.aclose()
             await client.aclose()
-            raise
+            logger.warning(
+                "VSCode proxy upstream error: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "VS Code server unavailable. It may be restarting."},
+                headers={"Retry-After": "5"},
+            )
 
     @app.websocket("/{path:path}")
     async def proxy_websocket(websocket: WebSocket, path: str) -> None:
