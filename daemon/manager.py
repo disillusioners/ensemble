@@ -651,6 +651,25 @@ class InstanceManager:
             str, tuple[str | None, list[str]] | None
         ] = {}
 
+        # NEW: per-instance user-message counter for ``skill_search_interval``
+        # gating. Mirrors ``_context_skill_results`` — same lifetime, same
+        # defensive cleanup in :meth:`_cleanup_instance_state`, the TTL sweep,
+        # and the dead-task branch. The messaging path calls
+        # :meth:`get_and_increment_skill_search_count` on every new user
+        # message to decide whether the expensive skill search should run,
+        # then :meth:`reset_skill_search_count` immediately after a real
+        # search so the next ``interval - 1`` messages can reuse the cache.
+        self._skill_search_message_counts: dict[str, int] = {}
+
+        # NEW: per-instance marker — the last ``_context_skill_results``
+        # write came from an EXPLICIT ``load_skill`` (``<meta>`` tag) path,
+        # not an auto-search. The ``skill_search_interval`` gate checks this
+        # so an explicit load does NOT feed the interval cache — the next
+        # ordinary message must run a fresh auto-search, not reuse the
+        # explicit result. Cleared in the same 3 cleanup sites as
+        # ``_context_skill_results`` and ``_skill_search_message_counts``.
+        self._explicit_skill_loaded: set[str] = set()
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -2016,6 +2035,111 @@ class InstanceManager:
         """
         return self._context_skill_results.get(instance_id)
 
+    def get_and_increment_skill_search_count(self, instance_id: str) -> int:
+        """Return the current per-instance message count, then increment.
+
+        Tracks how many user messages have been processed for
+        ``instance_id`` since the last skill-search ran. The gating
+        logic in :mod:`daemon.services.instance_messaging` calls this
+        on every new user message: if the returned (pre-increment)
+        count is below ``skill_search_interval - 1`` AND a
+        cached result exists, the search is skipped and the cached
+        result is reused; otherwise a fresh search runs.
+
+        Returns the count BEFORE incrementing, so the caller can
+        compare ``count < interval - 1`` directly. The first call for a
+        fresh instance returns ``0`` (no messages counted yet) then
+        stores ``1``.
+
+        Reset to ``0`` by :meth:`reset_skill_search_count` whenever a
+        real search runs. Cleaned up alongside ``_context_skill_results``
+        in :meth:`_cleanup_instance_state`, the TTL sweep, and the
+        dead-task branch.
+
+        Args:
+            instance_id: Target instance.
+
+        Returns:
+            The message count before this increment (``0`` for a
+            fresh instance).
+        """
+        current = self._skill_search_message_counts.get(instance_id, 0)
+        self._skill_search_message_counts[instance_id] = current + 1
+        return current
+
+    def reset_skill_search_count(self, instance_id: str) -> None:
+        """Reset the per-instance message counter to ``0``.
+
+        Called by the search-gating logic immediately AFTER a real
+        skill search runs, so the next ``interval`` messages can
+        reuse the fresh result. Idempotent and defensive — safe to
+        call when no count exists yet.
+
+        Args:
+            instance_id: Target instance.
+        """
+        self._skill_search_message_counts[instance_id] = 0
+
+    # ------------------------------------------------------------------
+    # Explicit-load marker (Phase 4b / W1 fix)
+    # ------------------------------------------------------------------
+    # The explicit ``load_skill`` (``<meta>`` tag) path writes to the
+    # same ``_context_skill_results`` cache that the auto-search path
+    # uses. If left unchecked, the interval gate would treat an
+    # explicit-load result as a valid auto-search cache hit and skip
+    # the next ordinary message's search — wrong. A separate cache
+    # dict would force dual-writes through ``assemble_context_messages``
+    # (which reads the cache for the retry/reuse contract). A marker
+    # set is the minimal correct separation: explicit-load sets it,
+    # auto-search clears it, the gate consults it.
+
+    def mark_explicit_skill_loaded(self, instance_id: str) -> None:
+        """Mark that the last skill-result cache write was an explicit load.
+
+        Called by the ``<meta>``-tag ``load_skill`` path AFTER writing to
+        ``_context_skill_results``. The ``skill_search_interval`` gate
+        reads :meth:`was_explicit_skill_loaded` so an explicit load does
+        NOT satisfy the interval cache — the next ordinary message runs
+        a fresh auto-search even if it falls within the interval window.
+
+        Idempotent — safe to call multiple times. Cleared in the same 3
+        cleanup sites alongside ``_context_skill_results`` and
+        ``_skill_search_message_counts``.
+
+        Args:
+            instance_id: Target instance.
+        """
+        self._explicit_skill_loaded.add(instance_id)
+
+    def clear_explicit_skill_loaded(self, instance_id: str) -> None:
+        """Clear the explicit-load marker for ``instance_id``.
+
+        Called by the auto-search path after a fresh search runs, so
+        the interval cache is valid again for subsequent messages.
+        Defensive — safe when the marker was never set.
+
+        Args:
+            instance_id: Target instance.
+        """
+        self._explicit_skill_loaded.discard(instance_id)
+
+    def was_explicit_skill_loaded(self, instance_id: str) -> bool:
+        """Return True if the last cache write was an explicit ``load_skill``.
+
+        Consulted by the ``skill_search_interval`` gate. When True,
+        the gate forces a fresh auto-search on the next ordinary
+        message rather than reusing the explicit-load result.
+
+        Args:
+            instance_id: Target instance.
+
+        Returns:
+            ``True`` when :meth:`mark_explicit_skill_loaded` was the
+            most recent cache writer for ``instance_id`` and the
+            marker has not been cleared.
+        """
+        return instance_id in self._explicit_skill_loaded
+
     # ------------------------------------------------------------------
     # Question pause-requested flag (Phase 1 / question tool)
     # ------------------------------------------------------------------
@@ -2278,6 +2402,22 @@ class InstanceManager:
         )
         if _ctx_skill_results is not None:
             _ctx_skill_results.pop(instance_id, None)
+        # skill_search_interval (Phase 4b): drop the per-instance
+        # message counter that gates the cached skill-search result.
+        # Mirrors the ``_context_skill_results`` cleanup above — same
+        # defensive ``getattr`` for hand-rolled test stubs.
+        _skill_search_counts = getattr(
+            self, "_skill_search_message_counts", None
+        )
+        if _skill_search_counts is not None:
+            _skill_search_counts.pop(instance_id, None)
+        # W1 fix: drop the explicit-load marker alongside the
+        # counter — same lifetime, same defensive ``getattr`` pattern.
+        _explicit_loaded = getattr(
+            self, "_explicit_skill_loaded", None
+        )
+        if _explicit_loaded is not None:
+            _explicit_loaded.discard(instance_id)
         # SSE message-tracking dicts leak fix: ``_original_timestamps``
         # and ``_emitted_message_content`` are keyed by ``{instance_id}:{...}``
         # (msg_id for normal messages, ``context:{...}`` for the persistent
@@ -2421,6 +2561,20 @@ class InstanceManager:
             )
             if _ctx_skill_results is not None:
                 _ctx_skill_results.pop(iid, None)
+            # skill_search_interval (Phase 4b): drop the per-instance
+            # message counter alongside the cached skill-search result.
+            _skill_search_counts = getattr(
+                self, "_skill_search_message_counts", None
+            )
+            if _skill_search_counts is not None:
+                _skill_search_counts.pop(iid, None)
+            # W1 fix: drop the explicit-load marker alongside the
+            # counter — same defensive ``getattr`` pattern.
+            _explicit_loaded = getattr(
+                self, "_explicit_skill_loaded", None
+            )
+            if _explicit_loaded is not None:
+                _explicit_loaded.discard(iid)
 
         if stale:
             logger.info(
@@ -4777,6 +4931,20 @@ class InstanceManager:
             )
             if _ctx_skill_results is not None:
                 _ctx_skill_results.pop(instance_id, None)
+            # skill_search_interval (Phase 4b): drop the per-instance
+            # message counter alongside the cached skill-search result.
+            _skill_search_counts = getattr(
+                self, "_skill_search_message_counts", None
+            )
+            if _skill_search_counts is not None:
+                _skill_search_counts.pop(instance_id, None)
+            # W1 fix: drop the explicit-load marker alongside the
+            # counter — same defensive ``getattr`` pattern.
+            _explicit_loaded = getattr(
+                self, "_explicit_skill_loaded", None
+            )
+            if _explicit_loaded is not None:
+                _explicit_loaded.discard(instance_id)
             return gate_cancelled
 
         if task is not None:

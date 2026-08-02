@@ -276,6 +276,21 @@ class AgentMetadata(BaseModel):
         default=False,
         description="Whether this agent should have dynamic skills injected into conversations.",
     )
+    skill_search_interval: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "How many user messages to cache skill-search results for "
+            "before re-searching. 1 (default) = search every message "
+            "(current behavior). N > 1 = search every Nth message, reuse "
+            "the cached result in between. The first message ALWAYS "
+            "searches (no cache yet). Per-agent config; only consulted "
+            "when ``skill_injection`` is true. The expensive 3-stage "
+            "search (BM25 → embedding → LLM, ~200-2000ms) runs on the "
+            "first message of each window and is skipped on the next "
+            "``N-1`` messages."
+        ),
+    )
     context_injection: ContextInjectionConfig = Field(
         default_factory=ContextInjectionConfig,
         description=(
@@ -514,6 +529,7 @@ class AgentRegistry:
                     llm_models=meta.get("llm_models"),
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
+                    skill_search_interval=meta.get("skill_search_interval", 1),
                     context_injection=context_injection_arg,
                     inject_allowed_models=meta.get("inject_allowed_models", False),
                     version_tag=version_tag,
@@ -559,6 +575,7 @@ class AgentRegistry:
                         llm_models=None,
                         team_members=meta.get("team_members", []) or [],
                         skill_injection=meta.get("skill_injection", False),
+                        skill_search_interval=meta.get("skill_search_interval", 1),
                         context_injection=context_injection_arg,
                         inject_allowed_models=meta.get("inject_allowed_models", False),
                         version_tag=version_tag,

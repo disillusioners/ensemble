@@ -2409,6 +2409,41 @@ class InstanceMessagingService:
                         if agent_meta and getattr(
                             agent_meta, "skill_injection", False
                         ):
+                            # ── skill_search_interval gate ─────────────────
+                            # Skip the expensive 3-stage search (BM25 →
+                            # embedding → LLM, ~200-2000ms) when a cached
+                            # result from a recent search still applies.
+                            # ``interval == 1`` (default) = search every
+                            # message (current behavior); ``N > 1`` =
+                            # search every Nth message, reuse cached
+                            # result in between. The first message ALWAYS
+                            # searches (no cache yet → falls to ``else``).
+                            #
+                            # S1 perf: ``interval > 1`` is checked FIRST
+                            # so ``get_context_skill_result`` and
+                            # ``was_explicit_skill_loaded`` are skipped on
+                            # the hot path (all default agents).
+                            interval = int(
+                                getattr(
+                                    agent_meta, "skill_search_interval", 1
+                                )
+                                or 1
+                            )
+                            # Counter MUST be incremented unconditionally
+                            # — even when ``interval == 1`` we want a
+                            # consistent per-message tick for observability
+                            # and for any future per-message hooks.
+                            msg_count = (
+                                self._manager
+                                .get_and_increment_skill_search_count(
+                                    instance_id
+                                )
+                            )
+                            # Resolve ``skill_project_id`` ONCE above the
+                            # gate — the same value feeds both the
+                            # ``interval > 1`` else branch and the
+                            # ``interval == 1`` hot path (no re-read of
+                            # instance metadata).
                             skill_project_id: str | None = None
                             if skill_instance_meta.instance_metadata:
                                 skill_project_id = (
@@ -2417,114 +2452,196 @@ class InstanceMessagingService:
                                     )
                                 )
 
-                            # ── Clone-on-miss (Phase 4) ──────────────────
-                            # Ensure all agent skills exist in project
-                            # scope BEFORE BM25 search runs. This makes
-                            # freshly-cloned templates discoverable to
-                            # SkillSearchService on the very first
-                            # injection. Cloning is idempotent — existing
-                            # skills are returned, not re-cloned.
-                            clone_service = getattr(
-                                self._manager,
-                                "_skill_clone_service",
-                                None,
-                            )
-                            if (
-                                clone_service is not None
-                                and skill_project_id is not None
-                            ):
-                                try:
-                                    await clone_service.ensure_all_skills_async(
-                                        agent_id=skill_instance_meta.agent_id,
-                                        project_id=skill_project_id,
-                                    )
-                                except Exception as clone_exc:
-                                    logger.warning(
-                                        f"Clone-on-miss failed for "
-                                        f"{instance_id[:8]}...: {clone_exc}"
-                                    )
+                            async def _run_search_and_cache() -> None:
+                                """Run the skill search and refresh caches.
 
-                            injection_service = getattr(
-                                self._manager,
-                                "_skill_injection_service",
-                                None,
-                            )
-                            if injection_service is not None:
-                                (
-                                    injection_text,
-                                    injected_skill_ids,
-                                ) = await injection_service.inject_skills(
-                                    message,
-                                    skill_project_id,
-                                    instance_id,
-                                    message_id,
+                                Shared body of both gate branches
+                                (``interval > 1`` miss + ``interval == 1``
+                                hot path). Performs:
+
+                                1. Clone-on-miss (Phase 4)
+                                2. ``inject_skills`` via the
+                                   ``_skill_injection_service``
+                                3. ``set_context_skill_result`` (B2/B3)
+                                4. ``track_injection`` + dedup-persist
+                                5. ``reset_skill_search_count``
+                                6. ``clear_explicit_skill_loaded`` (W1)
+
+                                Idempotent reset calls are safe on every
+                                invocation — the counter goes back to 0
+                                and the explicit-load marker is cleared so
+                                the next ordinary message can re-evaluate
+                                the gate from a clean slate.
+                                """
+                                # ── Clone-on-miss (Phase 4) ──────────────
+                                clone_service = getattr(
+                                    self._manager,
+                                    "_skill_clone_service",
+                                    None,
                                 )
-                                if injection_text:
-                                    # the metrics service queries this
-                                    # to attribute future feedback to
-                                    # the skills that were offered.
-                                    injection_service.track_injection(
+                                if (
+                                    clone_service is not None
+                                    and skill_project_id is not None
+                                ):
+                                    try:
+                                        await clone_service.ensure_all_skills_async(
+                                            agent_id=skill_instance_meta.agent_id,
+                                            project_id=skill_project_id,
+                                        )
+                                    except Exception as clone_exc:
+                                        logger.warning(
+                                            f"Clone-on-miss failed for "
+                                            f"{instance_id[:8]}...: {clone_exc}"
+                                        )
+
+                                injection_service = getattr(
+                                    self._manager,
+                                    "_skill_injection_service",
+                                    None,
+                                )
+                                if injection_service is not None:
+                                    (
+                                        injection_text,
+                                        injected_skill_ids,
+                                    ) = await injection_service.inject_skills(
+                                        message,
+                                        skill_project_id,
                                         instance_id,
                                         message_id,
-                                        injected_skill_ids,
                                     )
-                                    # Context Injection Restructure —
-                                    # Phase 3 / B2 fix: store the
-                                    # skill-search result on the manager
-                                    # so ``ContextSlot.assemble()``
-                                    # (running inside ``agent_node``)
-                                    # can reuse it on retry without
-                                    # re-running the search (B3 fix).
-                                    # Stored unconditionally — context is
-                                    # always built per-turn, so the cost
-                                    # is one extra dict entry per message.
-                                    setter = getattr(
-                                        self._manager,
-                                        "set_context_skill_result",
-                                        None,
-                                    )
-                                    if setter is not None:
-                                        setter(
+                                    if injection_text:
+                                        # the metrics service queries this
+                                        # to attribute future feedback to
+                                        # the skills that were offered.
+                                        injection_service.track_injection(
                                             instance_id,
-                                            (injection_text, injected_skill_ids),
+                                            message_id,
+                                            injected_skill_ids,
                                         )
-                                else:
-                                    # Search ran but yielded nothing.
-                                    # Still store the empty result so a
-                                    # retry of the same message does NOT
-                                    # re-run the search (per B3). ``None``
-                                    # here means "no injection text", not
-                                    # "not searched" — the latter is the
-                                    # absent-key case, which
-                                    # ``assemble_context_messages`` treats
-                                    # as "search again".
-                                    setter = getattr(
-                                        self._manager,
-                                        "set_context_skill_result",
-                                        None,
-                                    )
-                                    if setter is not None:
-                                        setter(
-                                            instance_id,
-                                            (None, list(injected_skill_ids)),
+                                        # Context Injection Restructure —
+                                        # Phase 3 / B2 fix: store the
+                                        # skill-search result on the manager
+                                        # so ``ContextSlot.assemble()``
+                                        # (running inside ``agent_node``)
+                                        # can reuse it on retry without
+                                        # re-running the search (B3 fix).
+                                        # Stored unconditionally — context is
+                                        # always built per-turn, so the cost
+                                        # is one extra dict entry per message.
+                                        setter = getattr(
+                                            self._manager,
+                                            "set_context_skill_result",
+                                            None,
                                         )
-                                    # Persist injected skill IDs to instance
-                                    # metadata so SkillMetricsService can
-                                    # read them at task-completion time.
-                                    if injected_skill_ids:
-                                        try:
-                                            await asyncio.to_thread(
-                                                _dedup_merge_skill_ids,
-                                                self._manager._instance_repository,
+                                        if setter is not None:
+                                            setter(
                                                 instance_id,
-                                                injected_skill_ids,
+                                                (injection_text, injected_skill_ids),
                                             )
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"Failed to persist "
-                                                f"{INJECTED_SKILLS_METADATA_KEY} "
-                                                f"for {instance_id[:8]}...: {e}"
+                                    else:
+                                        # Search ran but yielded nothing.
+                                        # Still store the empty result so a
+                                        # retry of the same message does NOT
+                                        # re-run the search (per B3). ``None``
+                                        # here means "no injection text", not
+                                        # "not searched" — the latter is the
+                                        # absent-key case, which
+                                        # ``assemble_context_messages`` treats
+                                        # as "search again".
+                                        setter = getattr(
+                                            self._manager,
+                                            "set_context_skill_result",
+                                            None,
+                                        )
+                                        if setter is not None:
+                                            setter(
+                                                instance_id,
+                                                (None, list(injected_skill_ids)),
                                             )
+                                        # Persist injected skill IDs to instance
+                                        # metadata so SkillMetricsService can
+                                        # read them at task-completion time.
+                                        if injected_skill_ids:
+                                            try:
+                                                await asyncio.to_thread(
+                                                    _dedup_merge_skill_ids,
+                                                    self._manager._instance_repository,
+                                                    instance_id,
+                                                    injected_skill_ids,
+                                                )
+                                            except Exception as e:
+                                                logger.warning(
+                                                    f"Failed to persist "
+                                                    f"{INJECTED_SKILLS_METADATA_KEY} "
+                                                    f"for {instance_id[:8]}...: {e}"
+                                                )
+                                # Reset the counter so the next
+                                # ``interval`` messages can reuse the
+                                # freshly-cached result. Called UNCONDITIONALLY
+                                # at the end of the search branch — when the
+                                # search throws, the message path's outer
+                                # ``try/except`` still catches it, so the next
+                                # message's gate will fall through to ``else``
+                                # again (cached is None because the search
+                                # didn't reach the ``set_context_skill_result``
+                                # line).
+                                self._manager.reset_skill_search_count(
+                                    instance_id
+                                )
+                                # W1 fix: clear the explicit-load marker
+                                # — this was a fresh AUTO-search, so the
+                                # interval cache is valid again. A stale
+                                # marker would force the next ordinary
+                                # message to skip its own cache hit.
+                                _clear_marker = getattr(
+                                    self._manager,
+                                    "clear_explicit_skill_loaded",
+                                    None,
+                                )
+                                if _clear_marker is not None:
+                                    _clear_marker(instance_id)
+
+                            if interval > 1:
+                                # Cached lookup + explicit-load check are
+                                # only worth running when there's an actual
+                                # interval to gate against.
+                                cached = self._manager.get_context_skill_result(
+                                    instance_id
+                                )
+                                if (
+                                    cached is not None
+                                    and msg_count < interval - 1
+                                    and not self._manager.was_explicit_skill_loaded(
+                                        instance_id
+                                    )
+                                ):
+                                    # Reuse cached result — skip search.
+                                    # The cached value stays in
+                                    # ``_context_skill_results`` and is picked up
+                                    # by ``assemble_context_messages`` at the
+                                    # cache-read site (so the existing
+                                    # ``skill_injection_result is not None``
+                                    # reuse branch handles it automatically).
+                                    #
+                                    # W1 guard: ``was_explicit_skill_loaded``
+                                    # forces a fresh search after an explicit
+                                    # ``<meta>``-tag load, even when the
+                                    # cache has a recent result.
+                                    logger.debug(
+                                        f"[SkillSearch] Reusing cached "
+                                        f"result for {instance_id[:8]}... "
+                                        f"(msg {msg_count + 1}, "
+                                        f"interval={interval})"
+                                    )
+                                else:
+                                    await _run_search_and_cache()
+                            else:
+                                # ``interval == 1`` (default for all agents
+                                # without an explicit ``skill_search_interval``
+                                # key in ``meta.json``). This is the hot path —
+                                # always run a fresh search, no cache reuse,
+                                # no explicit-load guard needed.
+                                await _run_search_and_cache()
                 except Exception as e:
                     logger.warning(
                         f"Skill injection failed for {instance_id[:8]}...: {e}"
@@ -2636,6 +2753,21 @@ class InstanceMessagingService:
                                     list(_meta_skill_ids),
                                 ),
                             )
+                        # W1 fix: mark this cache write as EXPLICIT
+                        # (``<meta>``-tag ``load_skill``) so the
+                        # ``skill_search_interval`` gate does NOT treat
+                        # it as an auto-search result on the next
+                        # ordinary message. Without this marker, an
+                        # explicit load would feed the interval cache
+                        # and the next ordinary message would silently
+                        # reuse the explicit result.
+                        _marker = getattr(
+                            self._manager,
+                            "mark_explicit_skill_loaded",
+                            None,
+                        )
+                        if _marker is not None:
+                            _marker(instance_id)
                         # Phase 4 metrics attribution. Same API the
                         # first-attempt block uses.
                         injection_service.track_injection(

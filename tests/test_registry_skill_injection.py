@@ -257,3 +257,90 @@ class TestAgentRegistryDiscoverSkillInjection:
         assert agent.context_injection.heuristic_match_shared_md_files is True
         # ``future_unknown_key`` must NOT appear as an attribute.
         assert not hasattr(agent.context_injection, "future_unknown_key")
+
+    # ─── skill_search_interval wiring (Review Round 1 / Fix 1) ──────────
+    #
+    # The field is declared on ``AgentMetadata`` with default ``1`` but
+    # was NEVER read from ``meta.json`` during ``discover()`` — every
+    # agent silently got ``interval=1``, dead config. The CRITICAL fix
+    # adds ``skill_search_interval=meta.get("skill_search_interval", 1)``
+    # to both ``AgentMetadata(...)`` construction sites in
+    # :meth:`AgentRegistry.discover`. These tests pin the wiring.
+
+    def test_skill_search_interval_from_meta_json(self, tmp_path: Path):
+        """CRITICAL: ``discover()`` wires ``skill_search_interval=N``
+        from ``meta.json``.
+
+        Mirrors :meth:`test_skill_injection_from_meta_json` —
+        ``_create_agent_meta`` accepts arbitrary kwargs, so passing
+        ``skill_search_interval=3`` lands in the meta.json dict and
+        ``discover()`` must read it back.
+        """
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(
+            agents_dir,
+            "interval-agent",
+            skill_injection=True,
+            skill_search_interval=3,
+        )
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        agent = registry.get("interval-agent")
+        assert agent is not None
+        assert agent.skill_search_interval == 3
+
+    def test_skill_search_interval_default_one(self, tmp_path: Path):
+        """When ``skill_search_interval`` is missing from ``meta.json``,
+        ``discover()`` must default to ``1`` (the field's declared
+        default and the documented "search every message" behavior).
+        """
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(
+            agents_dir,
+            "no-interval-agent",
+            skill_injection=True,
+            # No skill_search_interval key.
+        )
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        agent = registry.get("no-interval-agent")
+        assert agent is not None
+        assert agent.skill_search_interval == 1
+
+    def test_skill_search_interval_wired_in_both_construction_sites(
+        self, tmp_path: Path
+    ):
+        """Both ``AgentMetadata(...)`` sites in ``discover()`` (the
+        normal path and the ``llm_models``-retry fallback) must read
+        ``skill_search_interval``. Force the retry path with a
+        malformed ``llm_models`` entry (``weight=-1`` is rejected by
+        ``LLMModelWeight._validate_weight``) and verify the value
+        survives the retry.
+        """
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _create_agent_meta(
+            agents_dir,
+            "retry-path-agent",
+            skill_injection=True,
+            skill_search_interval=5,
+            # Malformed llm_models — weight < 1 triggers the
+            # ``LLMModelWeight`` validator and causes ``discover()`` to
+            # fall into the retry-without-llm_models branch.
+            llm_models=[{"model": "gpt-x", "weight": -1}],
+        )
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        agent = registry.get("retry-path-agent")
+        assert agent is not None
+        # The retry path drops ``llm_models`` but must still pick up
+        # ``skill_search_interval`` — the second construction site.
+        assert agent.skill_search_interval == 5
