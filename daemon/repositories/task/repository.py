@@ -1134,6 +1134,50 @@ class TaskRepository:
             }).fetchone()
 
             if row is None:
+                # Diagnostic observability (P5, 2026-08-02): the
+                # cross-system guard chain is pure SQL inside the
+                # atomic claim's WHERE clause — when it blocks a
+                # task there is no Python branch to log the reason.
+                # This post-hoc diagnostic runs ONLY on the
+                # "nothing claimed" path and counts PENDING tasks
+                # that are eligible by the next_retry_at gate but
+                # did not win the claim — i.e. were filtered out by
+                # the pause / per-instance / cross-system / defer /
+                # background gates. When that count is >0, log a
+                # single DEBUG line so production telemetry shows
+                # the guard pattern without polling noise (DEBUG
+                # level keeps it off the hot ops dashboard; turn
+                # it on to investigate claim starvation). The
+                # SELECT reuses the same connection's transaction
+                # (no-op commit on exit) and is wrapped in
+                # try/except so it NEVER affects the hot path —
+                # a diagnostic failure cannot fail the claim.
+                try:
+                    blocked_eligible = conn.execute(
+                        text("""
+                            SELECT COUNT(*) FROM task
+                            WHERE status = :status_pending
+                              AND (
+                                  next_retry_at IS NULL
+                                  OR next_retry_at <= :now_str
+                              )
+                        """),
+                        {
+                            "status_pending": TaskStatus.PENDING.value,
+                            "now_str": now_str,
+                        },
+                    ).scalar()
+                    if blocked_eligible and blocked_eligible > 0:
+                        logger.debug(
+                            "[GUARD] claim_pending_task returned None — "
+                            "%d eligible task(s) blocked by guard "
+                            "(pause/running/queue-admission/defer/"
+                            "background). Worker will retry.",
+                            blocked_eligible,
+                        )
+                except Exception:
+                    # Diagnostic only — never fail the claim path.
+                    pass
                 return None
 
             claimed_task = self._row_to_task(row)

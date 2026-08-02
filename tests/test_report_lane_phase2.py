@@ -720,6 +720,80 @@ class TestPauseSafety:
             f"(got {claimed})"
         )
 
+    def test_guard_blocked_claim_emits_debug_log(
+        self, engine, task_repo, caplog
+    ) -> None:
+        """P5 (2026-08-02): when the guard chain blocks a claim and an
+        eligible PENDING task exists, ``claim_pending_task`` emits a
+        DEBUG-level ``[GUARD]`` diagnostic. Pure observability — the
+        claim path must still return ``None`` and the diagnostic must
+        NEVER propagate an exception.
+
+        Captures at DEBUG so both the diagnostic emission and any
+        accidental WARNING are visible (a regression that re-raises
+        this above DEBUG would also be detected).
+        """
+        import logging
+
+        parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id=str(uuid.uuid4()),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="daemon.repositories.task.repository"):
+            claimed = task_repo.claim_pending_task(worker_id="worker-p5")
+
+        # Hard guarantees unchanged: claim still returns None when the
+        # guard blocks, and the diagnostic must not raise.
+        assert claimed is None, (
+            "Guard-blocked claim must return None "
+            f"(got {claimed})"
+        )
+
+        # The diagnostic must have emitted a DEBUG record. Capture at
+        # DEBUG captures all records >= DEBUG, so we filter explicitly.
+        guard_debug_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "DEBUG"
+            and "[GUARD]" in r.getMessage()
+            and "claim_pending_task returned None" in r.getMessage()
+        ]
+        assert guard_debug_records, (
+            "Expected a DEBUG [GUARD] diagnostic when the pause gate "
+            "blocks a claim and eligible PENDING tasks exist. "
+            f"Got records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+
+    def test_guard_blocked_claim_with_no_pending_tasks_emits_no_log(
+        self, engine, task_repo, caplog
+    ) -> None:
+        """P5 (companion): when the guard chain blocks BUT no PENDING
+        tasks exist, no ``[GUARD]`` log fires. Distinguishes the
+        "idle, nothing to do" path (silent) from the "guarded, will
+        retry" path (DEBUG diagnostic).
+        """
+        import logging
+
+        # No tasks created — engine is empty.
+
+        with caplog.at_level(logging.DEBUG, logger="daemon.repositories.task.repository"):
+            claimed = task_repo.claim_pending_task(worker_id="worker-empty")
+
+        assert claimed is None
+        guard_debug_records = [
+            r
+            for r in caplog.records
+            if "[GUARD]" in r.getMessage()
+        ]
+        assert guard_debug_records == [], (
+            "Diagnostic must be silent when there are no eligible "
+            "PENDING tasks (idle path). "
+            f"Got: {[r.getMessage() for r in guard_debug_records]}"
+        )
+
     def test_report_task_stays_pending_while_parent_paused(self, engine, task_repo):
         """(b) A child completing while parent is PAUSED creates a PENDING report Task."""
         parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
