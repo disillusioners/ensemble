@@ -90,6 +90,13 @@ from .report_injection.repository import ReportInjectionRepository
 from .instance_ui_prefs.models import InstanceUiPrefs
 from .instance_ui_prefs.repository import InstanceUiPrefsRepository
 
+# Blueprint repository (Project Blueprint system).
+# Imported here so SQLModel.metadata.create_all() registers the three
+# new tables (project_blueprints, project_blueprint_triggers,
+# project_blueprint_revisions). Brand-new tables — no _ensure_postgres_columns.
+from .blueprint.models import Blueprint, BlueprintTrigger, BlueprintRevision
+from .blueprint.repository import BlueprintRepository
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -105,6 +112,7 @@ from .factory import (
     create_infra_repository,
     create_shared_context_metadata_repository,
     create_skill_repository,
+    create_blueprint_repository,
     create_skill_lineage_repository,
     create_skill_usage_repository,
     create_skill_trigger_repository,
@@ -192,6 +200,11 @@ __all__ = [
     # Instance UI preferences (pin + color tag)
     "InstanceUiPrefs",
     "InstanceUiPrefsRepository",
+    # Blueprint (Project Blueprint system)
+    "Blueprint",
+    "BlueprintTrigger",
+    "BlueprintRevision",
+    "BlueprintRepository",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -206,6 +219,7 @@ __all__ = [
     "create_infra_repository",
     "create_shared_context_metadata_repository",
     "create_skill_repository",
+    "create_blueprint_repository",
     "create_skill_lineage_repository",
     "create_skill_usage_repository",
     "create_skill_trigger_repository",

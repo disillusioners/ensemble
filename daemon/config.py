@@ -565,6 +565,22 @@ class VSCodeConfig(BaseSettings):
     extensions: list[str] = Field(default_factory=list)  # extensions to pre-install
 
 
+class BlueprintConfig(BaseSettings):
+    """Configuration for the Project Blueprint matching system.
+
+    Defaults: bm25_weight (alpha) = 0.4, vector_weight (beta) = 0.6,
+    match_threshold = 0.30, max_results = 5. Tuned in Phase 6.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="BLUEPRINT_")
+
+    embedding_model: str | None = Field(default=None)
+    bm25_weight: float = Field(default=0.4)
+    vector_weight: float = Field(default=0.6)
+    match_threshold: float = Field(default=0.30)
+    max_results: int = Field(default=5)
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -584,6 +600,7 @@ class Config(BaseSettings):
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
     vscode: VSCodeConfig = Field(default_factory=VSCodeConfig)
+    blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
 
 
 def load_config(config_path: str | None = None) -> Config:
@@ -688,6 +705,18 @@ def load_config(config_path: str | None = None) -> Config:
         se_raw = processed_config["skill_evolution"]
         config_dict["skill_evolution"] = {
             k: v for k, v in se_raw.items() if v is not None
+        }
+    if "blueprint" in processed_config:
+        # Drop keys whose YAML value is ``null`` (None). pydantic-settings
+        # treats an explicitly-passed init kwarg — even ``None`` — as taking
+        # priority over environment variables, so a YAML ``embedding_model:
+        # null`` would shadow ``BLUEPRINT_EMBEDDING_MODEL`` and prevent the
+        # embedding service from resolving the right model. Stripping None
+        # lets the BaseSettings env-var source fill these in, matching the
+        # same contract as ``skill_evolution`` (env vars override YAML).
+        bp_raw = processed_config["blueprint"]
+        config_dict["blueprint"] = {
+            k: v for k, v in bp_raw.items() if v is not None
         }
     if "vscode" in processed_config:
         config_dict["vscode"] = processed_config["vscode"]

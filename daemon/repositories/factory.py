@@ -30,6 +30,7 @@ from .skill.repository import (
     SkillUsageRepository,
 )
 from .skill.skill_bank_repository import SkillBankRepository
+from .blueprint.repository import BlueprintRepository
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -692,6 +693,44 @@ def create_skill_repository(
         SQLModel.metadata.create_all(engine)
 
     return SkillRepository(engine)
+
+
+def create_blueprint_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> BlueprintRepository:
+    """Create a BlueprintRepository from configuration or shared engine.
+
+    Persistence layer for the Project Blueprint subsystem (Phase 1).
+    Three tables are created on first use (via
+    ``SQLModel.metadata.create_all``):
+
+    * ``project_blueprints`` — project-scoped blueprint documents.
+    * ``project_blueprint_triggers`` — trigger queries and embeddings.
+    * ``project_blueprint_revisions`` — append-only content snapshots.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`BlueprintRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return BlueprintRepository(engine)
 
 
 def create_skill_lineage_repository(

@@ -39,6 +39,7 @@ from .repositories import (
     create_infra_repository,
     create_shared_context_metadata_repository,
     create_skill_repository,
+    create_blueprint_repository,
     create_skill_lineage_repository,
     create_skill_embedding_repository,
     create_skill_usage_repository,
@@ -82,6 +83,7 @@ from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
 from .services.skill_store_service import SkillStoreService
 from .services.skill_search_service import SkillSearchService
+from .services.blueprint_matcher import BlueprintMatcher
 from .services.skill_injection_service import SkillInjectionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
@@ -752,6 +754,9 @@ class InstanceManager:
             self._skill_lineage_repo = None
             self._skill_embedding_repo = None
 
+        # Project Blueprint: blueprint repository (Phase 1 schema created via SQLModel.metadata.create_all)
+        self._blueprint_repo = create_blueprint_repository(engine=self._engine, create_tables=False)
+
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
 
@@ -919,6 +924,13 @@ class InstanceManager:
             self._skill_embedding_service = None
             self._skill_store_service = None
             self._skill_search_service = None
+
+        # Project Blueprint: matching engine (BM25 + vector fusion).
+        self._blueprint_matcher = BlueprintMatcher(
+            repository=self._blueprint_repo,
+            embedding_service=getattr(self, "_skill_embedding_service", None),
+            config=self.config.blueprint,
+        )
 
         # Skill Evolution Phase 4: Tier 0 metrics recorder + Tier 1
         # trigger engine. The four new repositories (``usage``,
