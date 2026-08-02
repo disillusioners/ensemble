@@ -1,0 +1,536 @@
+<div class="blueprint-container">
+  <!-- Header -->
+  <mat-toolbar class="blueprint-toolbar">
+    <div class="toolbar-left">
+      <mat-icon class="toolbar-icon">architecture</mat-icon>
+      <span class="toolbar-title">Project Blueprints</span>
+      <span class="toolbar-count">
+        {{ filtered().length }} of {{ blueprints().length }}
+      </span>
+    </div>
+    <div class="toolbar-actions">
+      <button mat-stroked-button (click)="onRefresh()" [disabled]="loading()">
+        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+        Refresh
+      </button>
+      <button mat-flat-button color="primary" (click)="onCreate()"
+              [disabled]="createDialogOpen()">
+        <mat-icon>add</mat-icon>
+        New Blueprint
+      </button>
+    </div>
+  </mat-toolbar>
+
+  <!-- Filter bar -->
+  <div class="filter-bar">
+    <mat-form-field appearance="outline" class="filter-field">
+      <mat-label>Kind</mat-label>
+      <mat-select [value]="kindFilter()"
+                  (selectionChange)="onKindFilterChange($event.value)">
+        <mat-option value="all">All Kinds</mat-option>
+        <mat-option value="core">Core</mat-option>
+        <mat-option value="area">Area</mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="filter-field">
+      <mat-label>Status</mat-label>
+      <mat-select [value]="statusFilter()"
+                  (selectionChange)="onStatusFilterChange($event.value)">
+        <mat-option value="all">All Statuses</mat-option>
+        <mat-option value="published">Published</mat-option>
+        <mat-option value="draft">Draft</mat-option>
+        <mat-option value="review_needed">Review Needed</mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    @if (hasActiveFilters()) {
+      <button mat-button (click)="onClearFilters()" class="clear-filters-btn">
+        <mat-icon>clear</mat-icon>
+        Clear filters
+      </button>
+    }
+  </div>
+
+  <!-- Inline create form (mat-card panel) -->
+  @if (createDialogOpen()) {
+    <mat-card class="create-card">
+      <mat-card-header>
+        <mat-card-title>Create Blueprint</mat-card-title>
+        <mat-card-subtitle>
+          Define a new project-scoped blueprint document
+        </mat-card-subtitle>
+      </mat-card-header>
+      <mat-card-content>
+        <div class="form-row">
+          <mat-form-field appearance="outline" class="form-field">
+            <mat-label>Slug</mat-label>
+            <input matInput required
+                   [value]="formSlug()"
+                   (input)="formSlug.set($any($event.target).value)"
+                   placeholder="e.g. core-architecture">
+          </mat-form-field>
+          <mat-form-field appearance="outline" class="form-field">
+            <mat-label>Name</mat-label>
+            <input matInput required
+                   [value]="formName()"
+                   (input)="formName.set($any($event.target).value)"
+                   placeholder="e.g. Core Architecture">
+          </mat-form-field>
+          <mat-form-field appearance="outline" class="form-field kind-field">
+            <mat-label>Kind</mat-label>
+            <mat-select [value]="formKind()"
+                        (selectionChange)="formKind.set($event.value)">
+              <mat-option value="core">Core</mat-option>
+              <mat-option value="area">Area</mat-option>
+            </mat-select>
+          </mat-form-field>
+        </div>
+        <mat-form-field appearance="outline" class="form-field">
+          <mat-label>Content (markdown)</mat-label>
+          <textarea matInput required rows="8"
+                    [value]="formContent()"
+                    (input)="formContent.set($any($event.target).value)"
+                    placeholder="# Blueprint Title&#10;&#10;Describe the blueprint…">
+          </textarea>
+        </mat-form-field>
+      </mat-card-content>
+      <mat-card-actions align="end">
+        <button mat-button (click)="onCancelCreate()"
+                [disabled]="formSubmitting()">Cancel</button>
+        <button mat-flat-button color="primary"
+                (click)="onCreateSubmit()"
+                [disabled]="formSubmitting()">
+          <mat-icon>save</mat-icon>
+          @if (formSubmitting()) { Creating… } @else { Create Blueprint }
+        </button>
+      </mat-card-actions>
+    </mat-card>
+  }
+
+  <!-- Two-column main area -->
+  <div class="blueprint-layout">
+    <!-- LEFT: list -->
+    <div class="list-pane">
+      <!-- Loading skeleton -->
+      @if (loading() && blueprints().length === 0) {
+        <div class="loading-container">
+          @for (i of [1, 2, 3, 4]; track i) {
+            <div class="skeleton-row">
+              <div class="skeleton-badges">
+                <div class="skeleton-badge"></div>
+                <div class="skeleton-badge small"></div>
+              </div>
+              <div class="skeleton-title"></div>
+              <div class="skeleton-meta"></div>
+            </div>
+          }
+        </div>
+      }
+
+      <!-- Error -->
+      @if (error() && blueprints().length === 0) {
+        <div class="error-container">
+          <mat-icon class="error-icon">error_outline</mat-icon>
+          <h3>Failed to load blueprints</h3>
+          <p>{{ error() }}</p>
+          <button mat-stroked-button color="primary" (click)="onRefresh()">
+            <mat-icon>refresh</mat-icon> Try Again
+          </button>
+        </div>
+      }
+
+      <!-- Empty -->
+      @if (isEmptyState()) {
+        <div class="empty-container">
+          <mat-icon class="empty-icon">architecture</mat-icon>
+          <h3>No blueprints yet</h3>
+          @if (hasActiveFilters()) {
+            <p>Try
+              <button mat-button color="primary" (click)="onClearFilters()">
+                clearing your filters
+              </button>
+              or create a new blueprint.
+            </p>
+          } @else {
+            <p>Create your first blueprint to get started.</p>
+          }
+          <button mat-flat-button color="primary" (click)="onCreate()">
+            <mat-icon>add</mat-icon> New Blueprint
+          </button>
+        </div>
+      }
+
+      <!-- Filtered empty -->
+      @if (isFilteredEmpty()) {
+        <div class="empty-container">
+          <mat-icon class="empty-icon">filter_list</mat-icon>
+          <p>No blueprints match the current filters.</p>
+          <button mat-button color="primary" (click)="onClearFilters()">
+            Clear filters
+          </button>
+        </div>
+      }
+
+      <!-- List -->
+      @if (hasItems()) {
+        <div class="blueprint-list">
+          @for (bp of filtered(); track bp.id) {
+            <button class="list-item"
+                    [class.selected]="selectedBlueprint()?.id === bp.id"
+                    (click)="onSelect(bp)">
+              <div class="list-item-header">
+                <span class="list-item-name">{{ bp.name }}</span>
+              </div>
+              <div class="list-item-badges">
+                <mat-chip class="kind-chip"
+                          [class.kind-core]="bp.kind === 'core'"
+                          [class.kind-area]="bp.kind === 'area'"
+                          [highlighted]="bp.kind === 'core'">
+                  {{ bp.kind }}
+                </mat-chip>
+                <mat-chip class="status-chip"
+                          [class.status-published]="bp.status === 'published'"
+                          [class.status-draft]="bp.status === 'draft'"
+                          [class.status-review]="bp.status === 'review_needed'">
+                  {{ bp.status }}
+                </mat-chip>
+                <span class="version-chip" matTooltip="Version">
+                  v{{ bp.version }}
+                </span>
+              </div>
+              <div class="list-item-meta">
+                <span class="meta-time">Updated {{ formatDate(bp.updated_at) }}</span>
+              </div>
+            </button>
+          }
+        </div>
+      }
+    </div>
+
+    <!-- RIGHT: detail -->
+    <div class="detail-pane">
+      @if (!selectedBlueprint()) {
+        <div class="detail-empty">
+          <mat-icon class="detail-empty-icon">architecture</mat-icon>
+          <h3>Select a blueprint</h3>
+          <p>Pick a blueprint from the list to view its content,
+             tags, file references, and revision history.</p>
+        </div>
+      } @else if (selectedBlueprint(); as bp) {
+        @if (detailLoading()) {
+          <div class="detail-loading">
+            <mat-spinner diameter="32"></mat-spinner>
+            <span>Loading…</span>
+          </div>
+        }
+
+        <!-- Detail toolbar -->
+        <mat-toolbar class="detail-toolbar">
+          <div class="detail-toolbar-left">
+            <h2 class="detail-title">{{ bp.name }}</h2>
+            <span class="detail-slug">/{{ bp.slug }}</span>
+          </div>
+          <div class="detail-toolbar-actions">
+            @if (!editing()) {
+              <button mat-stroked-button (click)="onEdit()" [disabled]="!bp.is_active">
+                <mat-icon>edit</mat-icon> Edit
+              </button>
+              <button mat-stroked-button (click)="onToggleHistory()">
+                <mat-icon>history</mat-icon>
+                {{ showHistory() ? 'Hide History' : 'View History' }}
+              </button>
+              <button mat-stroked-button color="warn"
+                      (click)="onDelete()" [disabled]="!bp.is_active">
+                <mat-icon>delete</mat-icon> Delete
+              </button>
+            } @else {
+              <button mat-button (click)="onCancelEdit()"
+                      [disabled]="editSubmitting()">Cancel</button>
+              <button mat-flat-button color="primary"
+                      (click)="onSaveEdit()"
+                      [disabled]="editSubmitting()">
+                <mat-icon>save</mat-icon>
+                @if (editSubmitting()) { Saving… } @else { Save Changes }
+              </button>
+            }
+          </div>
+        </mat-toolbar>
+
+        @if (!bp.is_active) {
+          <div class="inactive-banner">
+            <mat-icon>info</mat-icon>
+            This blueprint is inactive (soft-deleted).
+          </div>
+        }
+
+        <!-- Status selector (read mode) -->
+        @if (!editing()) {
+          <div class="status-row">
+            <span class="status-label">Status:</span>
+            <mat-form-field appearance="outline" class="status-select">
+              <mat-select [value]="bp.status"
+                          (selectionChange)="onStatusChange($event.value)">
+                <mat-option value="published">published</mat-option>
+                <mat-option value="draft">draft</mat-option>
+                <mat-option value="review_needed">review_needed</mat-option>
+              </mat-select>
+            </mat-form-field>
+          </div>
+        }
+
+        @if (editing()) {
+          <!-- Edit form -->
+          <div class="edit-form">
+            <mat-form-field appearance="outline" class="form-field">
+              <mat-label>Name</mat-label>
+              <input matInput required
+                     [value]="editName()"
+                     (input)="editName.set($any($event.target).value)">
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="form-field">
+              <mat-label>Slug (read-only)</mat-label>
+              <input matInput [value]="editSlug()" readonly disabled>
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="form-field status-edit-field">
+              <mat-label>Status</mat-label>
+              <mat-select [value]="editStatus()"
+                          (selectionChange)="editStatus.set($event.value)">
+                <mat-option value="published">published</mat-option>
+                <mat-option value="draft">draft</mat-option>
+                <mat-option value="review_needed">review_needed</mat-option>
+              </mat-select>
+            </mat-form-field>
+
+            <!-- Tags editor -->
+            <div class="editor-section">
+              <label class="editor-label">Tags</label>
+              <div class="tag-input-row">
+                <mat-form-field appearance="outline" class="tag-input">
+                  <mat-label>Category</mat-label>
+                  <input matInput
+                         [value]="newTagCategory()"
+                         (input)="newTagCategory.set($any($event.target).value)"
+                         placeholder="e.g. module">
+                </mat-form-field>
+                <mat-form-field appearance="outline" class="tag-input">
+                  <mat-label>Value</mat-label>
+                  <input matInput
+                         [value]="newTagValue()"
+                         (input)="newTagValue.set($any($event.target).value)"
+                         placeholder="e.g. auth">
+                </mat-form-field>
+                <button mat-stroked-button (click)="onAddTag()"
+                        [disabled]="!newTagCategory().trim() || !newTagValue().trim()">
+                  <mat-icon>add</mat-icon> Add
+                </button>
+              </div>
+              @if (editTags().length > 0) {
+                <mat-chip-set class="tag-chips">
+                  @for (tag of editTags(); track tag.category) {
+                    <mat-chip (removed)="onRemoveTag(tag.category)">
+                      <strong>{{ tag.category }}:</strong> {{ tag.value }}
+                      <button matChipRemove [attr.aria-label]="'remove ' + tag.category">
+                        <mat-icon>cancel</mat-icon>
+                      </button>
+                    </mat-chip>
+                  }
+                </mat-chip-set>
+              }
+            </div>
+
+            <!-- File refs editor -->
+            <div class="editor-section">
+              <label class="editor-label">File References</label>
+              <div class="file-ref-row">
+                <mat-form-field appearance="outline" class="file-ref-input">
+                  <input matInput
+                         [value]="newFileRef()"
+                         (input)="newFileRef.set($any($event.target).value)"
+                         (keydown.enter)="onAddFileRef()"
+                         placeholder="e.g. daemon/repositories/blueprint/models.py">
+                </mat-form-field>
+                <button mat-stroked-button (click)="onAddFileRef()"
+                        [disabled]="!newFileRef().trim()">
+                  <mat-icon>add</mat-icon> Add
+                </button>
+              </div>
+              @if (editFileRefs().length > 0) {
+                <ul class="file-ref-list">
+                  @for (ref of editFileRefs(); track ref) {
+                    <li class="file-ref-item">
+                      <code class="file-ref-path">{{ ref }}</code>
+                      <button mat-icon-button (click)="onRemoveFileRef(ref)"
+                              matTooltip="Remove"
+                              [attr.aria-label]="'remove ' + ref">
+                        <mat-icon>close</mat-icon>
+                      </button>
+                    </li>
+                  }
+                </ul>
+              }
+            </div>
+
+            <!-- Content editor + live preview -->
+            <div class="editor-section">
+              <label class="editor-label">Content (markdown)</label>
+              <div class="edit-split">
+                <div class="edit-pane">
+                  <div class="cm-host"
+                       appCodemirror
+                       [language]="'markdown'"
+                       [content]="editContent()"
+                       [editable]="true"
+                       (contentChange)="editContent.set($event)"></div>
+                </div>
+                <div class="preview-pane">
+                  <div class="preview-label">Preview</div>
+                  <div class="preview-body">
+                    <markdown [data]="editContent() || ''"></markdown>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        } @else {
+          <!-- Read view: rendered markdown + metadata -->
+          <div class="read-view">
+            <div class="content-body">
+              <markdown [data]="bp.content || ''"></markdown>
+            </div>
+
+            <mat-divider></mat-divider>
+
+            <div class="metadata-grid">
+              <div class="meta-block">
+                <span class="meta-key">Kind</span>
+                <span class="meta-value">{{ bp.kind }}</span>
+              </div>
+              <div class="meta-block">
+                <span class="meta-key">Source</span>
+                <span class="meta-value">{{ bp.source }}</span>
+              </div>
+              <div class="meta-block">
+                <span class="meta-key">Version</span>
+                <span class="meta-value">v{{ bp.version }}</span>
+              </div>
+              <div class="meta-block">
+                <span class="meta-key">Created</span>
+                <span class="meta-value">{{ formatDate(bp.created_at) }}</span>
+              </div>
+              <div class="meta-block">
+                <span class="meta-key">Updated</span>
+                <span class="meta-value">{{ formatDate(bp.updated_at) }}</span>
+              </div>
+              <div class="meta-block">
+                <span class="meta-key">Last Reviewed</span>
+                <span class="meta-value">{{ formatDate(bp.last_reviewed_at) }}</span>
+              </div>
+              @if (bp.embedding_model) {
+                <div class="meta-block">
+                  <span class="meta-key">Embedding Model</span>
+                  <span class="meta-value">{{ bp.embedding_model }}</span>
+                </div>
+              }
+            </div>
+
+            <mat-divider></mat-divider>
+
+            <div class="section-block">
+              <h3 class="section-title">Tags</h3>
+              @if (bp.tags.length > 0) {
+                <mat-chip-set>
+                  @for (tag of bp.tags; track tag.category + ':' + tag.value) {
+                    <mat-chip>
+                      <strong>{{ tag.category }}:</strong> {{ tag.value }}
+                    </mat-chip>
+                  }
+                </mat-chip-set>
+              } @else {
+                <p class="empty-line">No tags</p>
+              }
+            </div>
+
+            <div class="section-block">
+              <h3 class="section-title">File References</h3>
+              @if (bp.file_refs.length > 0) {
+                <ul class="file-ref-list readonly">
+                  @for (ref of bp.file_refs; track ref) {
+                    <li class="file-ref-item">
+                      <code class="file-ref-path">{{ ref }}</code>
+                    </li>
+                  }
+                </ul>
+              } @else {
+                <p class="empty-line">No file references</p>
+              }
+            </div>
+          </div>
+        }
+
+        <!-- Revision history panel (visible when toggled) -->
+        @if (showHistory() && !editing()) {
+          <div class="history-panel">
+            <mat-divider></mat-divider>
+            <h3 class="section-title">Revision History</h3>
+            @if (revisionsLoading()) {
+              <div class="history-loading">
+                <mat-spinner diameter="24"></mat-spinner>
+                <span>Loading revisions…</span>
+              </div>
+            } @else if (revisions().length === 0) {
+              <p class="empty-line">No revisions yet</p>
+            } @else {
+              <div class="history-layout">
+                <ul class="history-list">
+                  @for (rev of revisions(); track rev.id) {
+                    <li class="history-item"
+                        [class.selected]="selectedRevision()?.id === rev.id"
+                        (click)="onSelectRevision(rev)">
+                      <div class="history-item-header">
+                        <span class="history-version">v{{ rev.version }}</span>
+                        <span class="history-source"
+                              [class.source-auto]="rev.source === 'auto'"
+                              [class.source-manual]="rev.source === 'manual'">
+                          {{ rev.source }}
+                        </span>
+                      </div>
+                      <div class="history-item-time">
+                        {{ formatDate(rev.created_at) }}
+                      </div>
+                      @if (rev.reason) {
+                        <div class="history-item-summary">
+                          {{ rev.reason }}
+                        </div>
+                      }
+                    </li>
+                  }
+                </ul>
+                <div class="history-detail">
+                  @if (selectedRevision(); as rev) {
+                    <div class="history-detail-header">
+                      <h4>Snapshot v{{ rev.version }}</h4>
+                      <span class="history-detail-time">
+                        {{ formatDate(rev.created_at) }}
+                      </span>
+                    </div>
+                    <div class="history-snapshot">
+                      <markdown [data]="rev.content_snapshot || ''"></markdown>
+                    </div>
+                  } @else {
+                    <div class="history-detail-empty">
+                      <mat-icon>history_edu</mat-icon>
+                      <p>Select a revision to preview its content snapshot.</p>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+          </div>
+        }
+      }
+    </div>
+  </div>
+</div>

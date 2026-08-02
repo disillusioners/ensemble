@@ -8,6 +8,10 @@ export const routes: Routes = [
   // New project-aware route
   { path: 'projects/:projectId/instances/:instanceId', loadComponent: () => import('./pages/chat/chat.component').then(m => m.ChatComponent) },
   { path: 'projects/:projectId/workspace', loadComponent: () => import('./pages/workspace/workspace.component').then(m => m.WorkspaceComponent), title: 'Workspace Viewer' },
+  // Project Blueprint management (Phase 5) — lazy-loaded page
+  // scoped by :projectId; the component reads the project id from
+  // ActivatedRoute and hits /api/projects/{projectId}/blueprints/*.
+  { path: 'projects/:projectId/blueprints', loadComponent: () => import('./pages/blueprint/blueprint.component').then(m => m.BlueprintComponent), title: 'Project Blueprints' },
   { path: 'sources', loadComponent: () => import('./components/source-list/source-list.component').then(m => m.SourceListComponent) },
   { path: 'jobs', loadComponent: () => import('./pages/jobs/jobs.component').then(m => m.JobsComponent) },
   { path: 'settings', loadComponent: () => import('./pages/settings/settings.component').then(m => m.SettingsComponent) },

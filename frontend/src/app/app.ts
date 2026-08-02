@@ -52,6 +52,7 @@ export class App implements OnInit {
   readonly databaseMenuVisible = signal(false);
 
   readonly settingsMenuItems = signal<SettingsMenuItem[]>([
+    { label: 'Blueprints', icon: 'architecture', route: '/projects/all/blueprints' },
     { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' },
     { label: 'Settings', icon: 'language', route: '/settings' }
   ]);
