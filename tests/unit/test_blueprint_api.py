@@ -352,7 +352,7 @@ class TestListRevisions:
         repo.add_revision(blueprint_id=bp.id, version=1, content_snapshot="v1")
         repo.add_revision(
             blueprint_id=bp.id, version=2, content_snapshot="v2",
-            source="manual", revision_summary="second pass",
+            source="manual", reason="second pass",
         )
 
         r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}/revisions")
@@ -363,7 +363,7 @@ class TestListRevisions:
         assert body[0]["version"] == 2
         assert body[1]["version"] == 1
         assert body[0]["content_snapshot"] == "v2"
-        assert body[0]["revision_summary"] == "second pass"
+        assert body[0]["reason"] == "second pass"
 
     def test_revisions_missing_blueprint_returns_404(self, client):
         r = client.get("/api/projects/proj-a/blueprints/missing/revisions")

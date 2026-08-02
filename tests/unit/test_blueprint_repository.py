@@ -1,4 +1,5 @@
 import pytest
+import sqlalchemy.exc
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 from daemon.repositories.blueprint.repository import BlueprintRepository
@@ -34,3 +35,55 @@ def test_search_candidates(repo):
     c=bp(repo,slug="c",kind="core"); a=bp(repo,slug="a"); repo.add_triggers(a.id,[("x",[]) ]); assert [(x.id,len(t)) for x,t in repo.search_candidates("p")] == [(a.id,1)]
 def test_project_isolation(repo):
     bp(repo,project="a",slug="x"); bp(repo,project="b",slug="x"); assert len(repo.list_by_project("a"))==1 and repo.get_core("a") is None
+
+
+def test_trigger_queries_field(repo):
+    b = repo.create(
+        project_id="p", slug="s", name="s", kind="area", content="c",
+        trigger_queries=["how to auth", "login flow"],
+    )
+    got = repo.get_by_id(b.id)
+    assert got.trigger_queries == ["how to auth", "login flow"]
+
+
+def test_duplicate_slug_rejected(repo):
+    repo.create(project_id="p1", slug="my-bp", name="first", kind="area", content="c")
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        repo.create(project_id="p1", slug="my-bp", name="second", kind="area", content="c")
+
+
+def test_duplicate_name_rejected(repo):
+    repo.create(project_id="p1", slug="s1", name="same-name", kind="area", content="c")
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        repo.create(project_id="p1", slug="s2", name="same-name", kind="area", content="c")
+
+
+def test_revision_with_new_fields(repo):
+    b = bp(repo)
+    repo.add_revision(
+        blueprint_id=b.id,
+        version=1,
+        content_snapshot="snap",
+        file_refs=["a.py", "b.py"],
+        tags=[{"category": "x", "value": "y"}],
+        trigger_queries=["q1"],
+        reason="updated content",
+    )
+    revs = repo.list_revisions(b.id)
+    assert len(revs) == 1
+    r = revs[0]
+    assert r.file_refs == ["a.py", "b.py"]
+    assert r.tags == [{"category": "x", "value": "y"}]
+    assert r.trigger_queries == ["q1"]
+    assert r.reason == "updated content"
+    # field renamed from revision_summary -> reason
+    assert not hasattr(r, "revision_summary")
+
+
+def test_update_trigger_queries_bumps_version(repo):
+    b = bp(repo)
+    assert b.version == 1
+    repo.update(b.id, trigger_queries=["new query"])
+    got = repo.get_by_id(b.id)
+    assert got.version == 2
+    assert got.trigger_queries == ["new query"]
