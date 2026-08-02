@@ -4416,6 +4416,7 @@ class InstanceManager:
         message_source: str | None = None,  # Source of message (e.g., "internal_agent:xxx", "api", "telegram:xxx")
         images: list[str] | None = None,  # Images for multimodal messages
         silent: bool = False,  # If True, skip message injection during checkpoint resume
+        task_context: str | None = None,  # Pre-formatted task context from send_message(context=...)
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -4432,10 +4433,15 @@ class InstanceManager:
                 Used to skip project injection for internal agent messages.
             images: Optional list of base64-encoded images for multimodal messages.
             silent: If True, resume from checkpoint without injecting any message.
+            task_context: Optional pre-formatted ``[SYSTEM CONTEXT: Task Context]``
+                block propagated from the parent's ``send_message(context=...)``
+                call via ``message_metadata``. Threaded through to the
+                messaging service which injects it as a HumanMessage BEFORE
+                the task message on first attempt.
 
         Returns:
             MessageResult with response data.
-            
+
         Raises:
             OperationCancelledError: If cancellation is requested.
         """
@@ -4449,6 +4455,7 @@ class InstanceManager:
             message_source=message_source,
             images=images,
             silent=silent,
+            task_context=task_context,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:

@@ -333,6 +333,16 @@ class ProcessMessageProcessor(BaseProcessor):
             message_metadata.get("resume_mode", False)
             if message_metadata else False
         )
+        # task_context: pre-formatted ``[SYSTEM CONTEXT: Task Context]``
+        # block supplied by the parent's ``send_message(context=...)``
+        # call. Stored in message_metadata by the tool and forwarded
+        # to ``_process_message_with_tracking`` via
+        # ``ProcessingContext.task_context``. ``None`` / missing key
+        # means no context to inject (backward-compatible).
+        task_context_text = (
+            message_metadata.get("task_context")
+            if message_metadata else None
+        )
         # ``is_retry`` drives ``_process_message_with_tracking``'s
         # checkpoint-resume path. The original WP code computed it as
         # ``retry_count > 0 or resume_mode``; the pipeline maps
@@ -357,6 +367,7 @@ class ProcessMessageProcessor(BaseProcessor):
             images=message_images,
             resume_mode=is_retry,
             cancellation_token=cancellation_token,
+            task_context=task_context_text,
         )
         callbacks = self._build_callbacks(task)
 

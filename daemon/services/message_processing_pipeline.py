@@ -135,6 +135,7 @@ class ProcessingContext:
     images: list[str] | None = None
     resume_mode: bool = False
     cancellation_token: Optional["CancellationToken"] = None
+    task_context: str | None = None  # Pre-formatted [SYSTEM CONTEXT: Task Context] block from send_message(context=...)
 
 
 @dataclass
@@ -389,6 +390,7 @@ class MessageProcessingPipeline:
                 message_source=context.message_source,
                 images=context.images,
                 silent=context.silent,
+                task_context=context.task_context,
             )
 
         # ---- Stage 1.5: claim the message (READY -> PROCESSING) ----

@@ -1970,8 +1970,8 @@ class InstanceMessagingService:
         )
 
     async def _process_message_with_tracking(
-        self, 
-        instance_id: str, 
+        self,
+        instance_id: str,
         message: str,
         message_id: str,
         cancellation_token: CancellationToken | None = None,
@@ -1980,12 +1980,13 @@ class InstanceMessagingService:
         message_source: str | None = None,
         images: list[str] | None = None,
         silent: bool = False,
+        task_context: str | None = None,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
-        
+
         On retry, resumes from checkpoint instead of re-sending message
         to prevent duplicate execution.
-        
+
         Args:
             instance_id: The instance ID.
             message: The message content.
@@ -1995,10 +1996,16 @@ class InstanceMessagingService:
             message_source: Source of the message (e.g., "agent:xxx", "api", "telegram:xxx").
             images: Optional list of base64-encoded images for multimodal content.
             silent: If True, resume from checkpoint without injecting any message.
+            task_context: Optional pre-formatted ``[SYSTEM CONTEXT: Task Context]``
+                markdown block passed by the parent's ``send_message(context=...)``
+                tool call. Threaded through ``message_metadata`` →
+                ``ProcessingContext.task_context`` → this kwarg. Injected as a
+                persistent HumanMessage BEFORE the task message on first attempt
+                (skipped on retry because the message is checkpointed on turn 1).
 
         Returns:
             MessageResult with response data.
-            
+
         Raises:
             OperationCancelledError: If cancellation is requested.
         """
@@ -2991,6 +2998,26 @@ class InstanceMessagingService:
                     f"{_persist_exc} — continuing without persistent prepending"
                 )
                 persistent_context_msgs = []
+
+        # ── Task context injection (send_message `context` param) ──
+        # When a parent agent passes structured context via
+        # send_message(context={...}), it arrives here as
+        # ``task_context`` (already formatted into a
+        # ``[SYSTEM CONTEXT: Task Context]`` markdown block by the
+        # tool). Inject it as a persistent HumanMessage BEFORE the
+        # task message so the child sees context first, then the
+        # task. Only on first attempt (not retry) to avoid
+        # double-injection — the message is checkpointed on turn 1.
+        if task_context and not is_retry:
+            _task_ctx_msg = HumanMessage(
+                content=task_context,
+                id=f"task-context-{message_id}",
+                additional_kwargs={
+                    "injected_message": True,
+                    "context_kind": "task_context",
+                },
+            )
+            persistent_context_msgs.insert(0, _task_ctx_msg)
 
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:

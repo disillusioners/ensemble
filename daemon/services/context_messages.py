@@ -71,6 +71,7 @@ CONTEXT_KIND_PROJECT = "project"
 CONTEXT_KIND_SHARED_CONTEXT = "shared_context"
 CONTEXT_KIND_AUTO_LOAD_SKILLS = "auto_load_skills"
 CONTEXT_KIND_SKILLS = "skills"
+CONTEXT_KIND_TASK_CONTEXT = "task_context"
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -1383,6 +1384,7 @@ __all__ = [
     "CONTEXT_KIND_SHARED_CONTEXT",
     "CONTEXT_KIND_AUTO_LOAD_SKILLS",
     "CONTEXT_KIND_SKILLS",
+    "CONTEXT_KIND_TASK_CONTEXT",
     # Pure builder functions
     "build_project_context_message",
     "build_shared_context_message",

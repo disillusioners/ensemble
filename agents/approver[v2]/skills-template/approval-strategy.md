@@ -146,6 +146,27 @@ send_message(
 
 The `load_skill` parameter is parsed by the worker runtime so the worker loads only the skill needed for its task. The approver's own skill stack is untouched.
 
+### Passing Approval Context (optional)
+
+I may attach a `context` dict to `send_message(...)` to point the worker at the artifact to evaluate as structured fields.
+
+- **⚠️ Independence caveat (CRITICAL):** `context` may carry ONLY the artifact path and neutral metadata (e.g., approval type, focus areas). It MUST NOT carry rejection history, prior review notes, tracking-file contents, or anything that would bias a fresh-eyes evaluation. When in doubt, omit `context` and put only the artifact path in the message.
+- **When to use it:** passing the plan/decision file path + focus areas as structured fields the worker can read directly.
+- **When NOT needed:** the message already names the artifact and focus areas clearly.
+- **Suggested keys:** `files` (list — the artifact path), `notes` (str — neutral focus areas only). Other keys pass through but MUST remain neutral and satisfy the Independence caveat above; `plan_ref` is valid only when the artifact being approved IS the referenced plan.
+
+```python
+send_message(
+    instance_id=worker_id,
+    message="Verify <artifact-path> for <focus-areas>. Evaluate FRESH — no prior context, no tracking history.",
+    load_skill="plan-approval",
+    context={
+        "files": ["<artifact-path>"],
+        "notes": "<neutral focus areas>",
+    },
+)
+```
+
 ### Pre-Dispatch Self-Check (dispatcher-level)
 
 Before every `send_message` to a worker, in addition to the skill's own Pre-Execution Self-Check:
@@ -154,6 +175,7 @@ Before every `send_message` to a worker, in addition to the skill's own Pre-Exec
 - [ ] **Exactly one** `load_skill="..."` parameter on the `send_message(...)` call
 - [ ] **`approval-strategy` NOT embedded** in the worker message (approver-only planning skill)
 - [ ] **Independence preserved** — worker prompt contains NO tracking/rejection/planning history
+- [ ] **Context (if attached) respects Independence** — carries ONLY artifact path + neutral focus; NO rejection history, prior notes, or bias
 - [ ] **Skill ↔ artifact match verified** (e.g., plan artifact → `plan-approval`, not `decision-approval`)
 - [ ] **`active.md` read for identity only** — tracking file NOT read yet
 - [ ] **`todo_graph` node updated** to `in_progress` before the dispatch lands (for multi-worker approvals)

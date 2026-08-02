@@ -103,6 +103,27 @@ send_message(
 
 ---
 
+### Passing Diff Context (optional)
+
+I may attach a `context` dict to `send_message(...)` to hand a worker the diff file paths and focus areas as structured fields.
+
+- **When to use it:** when I have the list of changed files/line ranges from the diff, or specific craftsmanship categories to emphasize. This aligns with the "Path to the changed files" guidance in the Independence Discipline section below.
+- **When NOT needed:** single-file small diffs where the message already names the file.
+- **Suggested keys:** `files` (list — changed file paths or line ranges), `notes` (str — craftsmanship categories to emphasize). Other keys pass through but MUST stay within craftsmanship scope (`plan_ref` for a conventions doc the worker should consult is fine; architecture/correctness/security findings are NOT — see the Reviewer boundary below).
+- **⚠️ Reviewer boundary:** `context` carries ONLY craftsmanship-scope info (diff files + category focus). It MUST NOT carry architecture/correctness/security findings — those are deferred to the Reviewer (see Independence Discipline).
+
+```python
+send_message(
+    instance_id=w_readable,
+    message="Review <files> for readable code and code smells. Report in the severity-grouped format.",
+    load_skill="tidier-readable-code",
+    context={
+        "files": ["<changed-file-paths-or-ranges>"],
+        "notes": "<craftsmanship categories to emphasize>",
+    },
+)
+```
+
 ## Independence Discipline (Reviewer Boundary)
 
 Tidier's value comes from a **focused craftsmanship scope**. Workers MUST

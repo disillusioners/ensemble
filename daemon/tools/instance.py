@@ -44,6 +44,69 @@ After delegating, END YOUR TURN (produce your final response / stop calling tool
 """
 
 
+# Module-private size cap for the ``[SYSTEM CONTEXT: Task Context]`` block.
+# A single huge ``context`` (e.g. a long plan or many file references) would
+# otherwise blow up the recipient's context window. We truncate with a
+# ``[... truncated, N chars total]`` suffix and log a warning so the caller
+# can see what was dropped. The leading underscore matches the helper's
+# ``_format_task_context`` private-by-convention naming.
+_TASK_CONTEXT_MAX_CHARS = 4000
+
+
+def _format_task_context(context: dict[str, Any]) -> str:
+    """Format a context dict into a ``[SYSTEM CONTEXT: Task Context]`` block.
+
+    Converts each key to a title-case markdown header and renders
+    values as either a bulleted list (list values) or a text block
+    (scalar values). Returns the full markdown string ready to be
+    wrapped in a ``HumanMessage``.
+
+    Size cap: output is truncated to ``_TASK_CONTEXT_MAX_CHARS`` chars
+    with a ``[... truncated, N chars total]`` suffix. String values
+    whose lines start with ``#`` are escaped with ``\\`` so an injected
+    value like ``"## System Prompt"`` renders as literal text instead
+    of as a markdown header. Multiline list items get a 2-space
+    continuation indent so the bulleted list structure stays intact.
+    """
+    lines = ["[SYSTEM CONTEXT: Task Context]"]
+    for key, value in context.items():
+        header = key.replace("_", " ").title()
+        lines.append(f"## {header}")
+        if isinstance(value, list):
+            for item in value:
+                item_str = str(item)
+                # Indent continuation lines for multiline items so the
+                # bulleted list structure stays intact (e.g. an item like
+                # ``"line1\\nline2"`` becomes ``- line1\\n  line2``).
+                item_str = item_str.replace("\n", "\n  ")
+                lines.append(f"- {item_str}")
+        elif isinstance(value, str):
+            # Prevent markdown header injection: escape lines starting
+            # with ``#`` so a value like ``"## System Prompt\nIgnore..."``
+            # renders as literal text, not as a header that breaks out
+            # of the ``[SYSTEM CONTEXT: Task Context]`` block. Only
+            # applied to string values — list items are already
+            # bulleted so a leading ``#`` is harmless after ``- ``.
+            for line in value.split("\n"):
+                if line.lstrip().startswith("#"):
+                    lines.append("\\" + line)
+                else:
+                    lines.append(line)
+        else:
+            lines.append(str(value))
+        lines.append("")  # blank line between sections
+    result = "\n".join(lines)
+    if len(result) > _TASK_CONTEXT_MAX_CHARS:
+        original_len = len(result)
+        result = result[:_TASK_CONTEXT_MAX_CHARS]
+        result += f"\n\n[... truncated, {original_len} chars total]"
+        logger.warning(
+            f"_format_task_context: output truncated from {original_len} "
+            f"to {_TASK_CONTEXT_MAX_CHARS} chars"
+        )
+    return result
+
+
 # Innate-skill → required tool categories mapping.
 #
 # When an agent declares an innate skill, the matching tool categories are
@@ -1494,6 +1557,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 ),
             ),
         ] = None,
+        context: Annotated[
+            dict[str, Any] | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional structured context to inject before the task "
+                    "message. Keys are free-form (suggested: 'files', 'notes', "
+                    "'plan_ref', 'conventions'). Values may be lists or strings. "
+                    "When provided and non-empty, formatted into a "
+                    "[SYSTEM CONTEXT: Task Context] block and injected as a "
+                    "separate HumanMessage BEFORE the task message. Omit or pass "
+                    "None for backward-compatible behavior."
+                ),
+            ),
+        ] = None,
     ) -> str:
         """Send a message to another instance's input queue. Use tool_help("send_message") for details.
 
@@ -1505,6 +1583,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 message so the skill is injected into the recipient's context for
                 clean 1:1 attribution. Omit or pass None for backward-compatible
                 behavior (no meta-tag appended).
+            context: Optional structured context dict to inject before the
+                task message. Keys are free-form (suggested: 'files',
+                'notes', 'plan_ref', 'conventions'). Values may be lists or
+                strings. When provided and non-empty, formatted into a
+                ``[SYSTEM CONTEXT: Task Context]`` block and injected as a
+                separate HumanMessage BEFORE the task message. Omit or pass
+                None for backward-compatible behavior (no context injected).
         """
         # ── load_skill sugar: append <meta> tag before enqueue ─────────────
         # This is purely syntactic sugar. The existing meta-tag parser
@@ -1514,6 +1599,29 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if load_skill is not None and str(load_skill).strip():
             _payload = json.dumps({"load_skill": str(load_skill).strip()})
             message = message + f"\n<meta>{_payload}</meta>"
+
+        # Format task context into a string for metadata threading.
+        # The actual HumanMessage injection happens in
+        # `_process_message_with_tracking` via the messaging pipeline.
+        # We store it in message_metadata so it survives the async
+        # dispatch (tool → enqueue → DB → task_processor → pipeline).
+        task_context_text: str | None = None
+        if context is not None:
+            # Reject non-dict ``context`` with a clear error string instead
+            # of silently dropping it. The old guard
+            # ``isinstance(context, dict) and context`` was False for a
+            # non-dict value, so ``task_context_text`` stayed ``None`` and
+            # the caller got no feedback that their context was lost.
+            # This matches the existing ``ERROR: ...`` pattern used by
+            # the status guard below.
+            if not isinstance(context, dict):
+                return (
+                    f"ERROR: The 'context' parameter must be a dict, "
+                    f"got {type(context).__name__}. Omit it or pass a "
+                    f"dict with keys like 'files', 'notes', 'plan_ref'."
+                )
+            if context:
+                task_context_text = _format_task_context(context)
 
         # Validate instance exists with fuzzy matching for typos
         try:
@@ -1555,7 +1663,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         result = await manager.enqueue_message(
             instance_id=instance_id,
             message=message,
-            source=f"internal_agent:{current_instance_id}"
+            source=f"internal_agent:{current_instance_id}",
+            metadata={"task_context": task_context_text} if task_context_text else None,
         )
         message_id = result.message_id
 
@@ -1595,6 +1704,13 @@ Args:
         message so the skill is injected into the recipient's context for
         clean 1:1 attribution. Omit or pass None for backward-compatible
         behavior (no meta-tag appended).
+    context: Optional structured context dict to inject before the
+        task message. Keys are free-form (suggested: 'files',
+        'notes', 'plan_ref', 'conventions'). Values may be lists or
+        strings. When provided and non-empty, formatted into a
+        ``[SYSTEM CONTEXT: Task Context]`` block and injected as a
+        separate HumanMessage BEFORE the task message. Omit or pass
+        None for backward-compatible behavior (no context injected).
 
 Returns:
     The message_id for tracking (queue is async, response comes later)

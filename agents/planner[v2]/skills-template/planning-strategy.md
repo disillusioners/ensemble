@@ -70,6 +70,29 @@ Match the planning artifact to the worker skill. **The planner never executes th
 - **Skill must match artifact shape** — see table above. If a planning task spans multiple shapes, split into multiple workers (one skill each).
 - **Worker prompts MUST contain research findings** when research preceded dispatch — feed the explorer's summary in the prompt; don't make the worker re-research.
 
+### Passing Planning Context (optional)
+
+- I may pass a `context={...}` dict on `send_message(...)` to hand a worker supplementary info beyond the planning prompt — file locations from explorer findings, conventions, plan references, prior research notes.
+- **USE when I have:**
+  - Explorer findings or specific file locations the worker would otherwise re-research
+  - A `.agents/shared/planning/` or conventions doc to reference
+  - Plan references that anchor the worker's output location
+- **SKIP when:** the message already carries everything, simple artifact creation, or control messages.
+- **Suggested keys:** `files` (list), `notes` (str), `plan_ref` (str). Any key passes through.
+
+```python
+send_message(
+    instance_id=worker_id,
+    message="Create the structured plan for <feature>...",
+    load_skill="plan-creation",
+    context={
+        "files": ["src/auth/middleware.py", "src/auth/service.py:40-80"],
+        "notes": "Auth uses JWT with refresh-token rotation; cache invalidation is the open question.",
+        "plan_ref": ".agents/shared/planning/auth-refresh/phase1.md",
+    },
+)
+```
+
 ---
 
 ## Pre-Execution Self-Check (Dispatcher-Level)
@@ -80,6 +103,7 @@ Before every `send_message` to a worker, in addition to the worker's own Pre-Exe
 - [ ] **Exactly one** `load_skill="..."` parameter on the `send_message(...)` call
 - [ ] **`planning-strategy` NOT embedded** in the worker message (planner-only planning skill)
 - [ ] **Research findings included** when research preceded dispatch (or "no research" stated explicitly)
+- [ ] **Context attached when research preceded dispatch** — explorer findings / file locations / plan refs passed via `context={...}` so the worker doesn't re-research; omitted when the message is self-contained
 - [ ] **Output location specified** — `.agents/shared/planning/<feature>/`
 - [ ] **Skill ↔ artifact match verified** (e.g., feature artifact → `plan-creation`, not `roadmap-strategy`)
 - [ ] **`todo_graph` node updated** to `in_progress` before the dispatch lands (for multi-instance cycles)

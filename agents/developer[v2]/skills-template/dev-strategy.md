@@ -162,6 +162,30 @@ send_message(
 # END TURN — coder reports back asynchronously
 ```
 
+### Passing Task Context (optional)
+
+- I may pass a `context={...}` dict on `send_message(...)` to hand a worker or coder supplementary info beyond the task message — file paths, investigation findings, root-cause notes, plan/convention references.
+- **USE when I have:**
+  - Specific files or locations the child should focus on
+  - Findings or a root cause from my own verification
+  - A `.agents/shared/planning/` or conventions doc to reference
+- **SKIP when:** simple commit prompts, quick single-file fixes where the message already carries everything, or control messages.
+- **Suggested keys:** `files` (list), `notes` (str), `plan_ref` (str). Any key passes through.
+- Don't duplicate what's already in the message text — `context` is for supplementary info only.
+
+```python
+send_message(
+    instance_id=worker_id,
+    message="...",
+    load_skill="code-implementation",
+    context={
+        "files": ["src/middleware/auth.py:42-58"],
+        "notes": "The refresh_token rotation skips the cache invalidation.",
+        "plan_ref": ".agents/shared/planning/fix-auth/phase1.md",
+    },
+)
+```
+
 ### Pre-Dispatch Self-Check (dispatcher-level)
 
 Before every `send_message`, in addition to the skill's own Pre-Execution Self-Check:
@@ -171,6 +195,7 @@ Before every `send_message`, in addition to the skill's own Pre-Execution Self-C
 - [ ] **`dev-strategy` NOT embedded** in the worker message (developer-only planning skill)
 - [ ] **One skill per worker** — no bundling multiple skills into one dispatch
 - [ ] **Worker message includes target, constraints, expected output** — no vague "do the thing" prompts
+- [ ] **Context attached when useful** — file paths / findings / plan refs passed via `context={...}` when they'd save the child exploration time; omitted when the message already carries everything
 - [ ] **Verification planned & scoped** — one targeted test/smoke (≤2-min cap) or `code-review` diff pass over the touched code; full/regression testing noted as DEFERRED → tester (Cardinal #6)
 - [ ] **`todo_graph` node updated** to `in_progress` before the dispatch lands (for multi-instance dispatches)
 

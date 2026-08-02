@@ -134,6 +134,28 @@ send_message(
 
 The `load_skill` parameter is parsed by the worker runtime so the worker loads only the skill needed for its task. The reviewer's own skill stack is untouched.
 
+### Passing Review Context (optional)
+
+I may pass a `context` dict on `send_message(...)` to hand a review worker supplementary context beyond the review prompt itself.
+
+- **When to use** — specific files / line ranges the worker should focus on, known issues or prior findings to cross-check, or a convention doc / plan to reference.
+- **When NOT needed** — a broad "review this module" with no prior findings, or a control message.
+- **Suggested keys** — `files` (list), `notes` (str), `plan_ref` (str). Any key passes through; these are conventions, not a closed schema.
+- **Don't duplicate the review prompt** — `context` carries supplementary information; the `message` carries the actual review ask.
+
+```python
+send_message(
+    instance_id=worker_id,
+    message="Review the auth middleware for refresh-token rotation correctness.",
+    load_skill="code-review",
+    context={
+        "files": ["src/middleware/auth.py:42-58", "src/services/auth_service.py:120-145"],
+        "notes": "refresh_token rotation skips the cache invalidation step",
+        "plan_ref": ".agents/shared/planning/auth-refresh/phase1.md",
+    },
+)
+```
+
 ### Pre-Dispatch Self-Check (dispatcher-level)
 
 Before every `send_message` to a worker, in addition to the skill's own Pre-Execution Self-Check:
@@ -141,6 +163,7 @@ Before every `send_message` to a worker, in addition to the skill's own Pre-Exec
 - [ ] **Worker skill selected** from the table above (matches review type)
 - [ ] **Exactly one** `load_skill="..."` parameter on the `send_message(...)` call
 - [ ] **`review-strategy` NOT embedded** in the worker message (reviewer-only planning skill)
+- [ ] **Context attached when useful** — file paths / prior findings / convention refs passed via `context={...}` when they'd sharpen the review; omitted when the review prompt is self-contained
 - [ ] **Skill ↔ task match verified** (e.g., security audit → `security-review`, not `code-review`)
 - [ ] **Deep-Review not triggered** — if triggered, use `convene_council_with_skill` path instead
 - [ ] **todo_graph node updated** to `in_progress` before the dispatch lands (for multi-worker reviews)
