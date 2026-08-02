@@ -137,12 +137,10 @@ class JobRepository:
           ``COALESCE`` keeps the call safe when the column is NULL,
           and ``json_set`` overwrites an existing key.
 
-        Mirrors the dialect-detection pattern of
-        :meth:`TaskRepository._json_extract_text_sql` — the ``key`` is
-        interpolated as a static constant and ``param`` is interpolated
-        as a bound-parameter reference. Callers MUST pass a static
-        string for ``key`` (this method is not user-input-safe by
-        design) and bind the actual value to ``:param`` themselves.
+        The ``key`` is interpolated as a static constant and ``param``
+        is interpolated as a bound-parameter reference. Callers MUST
+        pass a static string for ``key`` (this method is not user-input-safe
+        by design) and bind the actual value to ``:param`` themselves.
 
         Args:
             column: Bare column reference (e.g. ``"metadata"``).
