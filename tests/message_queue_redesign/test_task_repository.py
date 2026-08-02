@@ -925,6 +925,211 @@ class TestTaskClaiming:
         )
         assert claimed.id == t1.id
 
+    def test_claim_succeeds_when_task_work_id_matches_own_jobitem(self, repository, engine):
+        """Cross-system guard self-deadlock fix (2026-08-02).
+
+        Production linkage contract: when a message is enqueued, a
+        ``JobItem`` (``admission_state='active'``, ``job_id='X'``) and a
+        ``Task`` (``status='pending'``, ``work_id='X'``) are created
+        together. The cross-system guard in ``claim_pending_task`` asks
+        "is there an active JobItem for this instance whose backing Task
+        is in flight?" — without the self-exclusion the guard matches
+        the candidate task's OWN backing JobItem and blocks the claim
+        forever (system-wide deadlock).
+
+        Pre-fix: ``claim_pending_task`` returned None for every
+        message-driven task. Post-fix: the claim succeeds.
+
+        Existing tests miss this because ``repository.create()`` mints a
+        random ``work_id`` that never matches the JobItem's ``job_id``.
+        This test uses the REAL linkage contract by inserting the Task
+        with a ``work_id`` that matches the JobItem.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from datetime import datetime, timezone
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Seed instance + JobItem + Task with the linkage contract:
+        # Task.work_id == JobItem.job_id == "job-LINKED-1".
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-LINKED",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            session.add(JobItem(
+                job_id="job-LINKED-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
+                job_type="message",
+                instance_id="inst-LINKED",
+                job_metadata={"message_id": "m1"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # Insert the Task DIRECTLY (do NOT use ``repository.create()`` —
+        # it mints a random ``work_id`` that breaks the linkage contract
+        # and would mask the bug). Mirror ``_create_task_with_status``
+        # helper at lines 31-60 but with an explicit ``work_id``.
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, created_at, cancel_requested,
+                                      retry_scheduled, work_id, is_deferred,
+                                      is_background)
+                    VALUES (:task_type, :instance_id, :message_id, :status,
+                            :retry_count, :created_at, :cancel_requested,
+                            :retry_scheduled, :work_id, :is_deferred,
+                            :is_background)
+                    """
+                ),
+                {
+                    "task_type": TaskType.PROCESS_MESSAGE.value,
+                    "instance_id": "inst-LINKED",
+                    "message_id": "m1",
+                    "status": TaskStatus.PENDING.value,
+                    "retry_count": 0,
+                    "created_at": datetime.now(timezone.utc),
+                    "cancel_requested": False,
+                    "retry_scheduled": False,
+                    # THE LINKAGE: Task.work_id == JobItem.job_id.
+                    "work_id": "job-LINKED-1",
+                    "is_deferred": False,
+                    "is_background": False,
+                },
+            )
+            t1_id = result.lastrowid
+
+        # Pre-fix: this returned None (self-deadlock — the guard matched
+        # the candidate's own backing JobItem and blocked the claim).
+        # Post-fix: the claim succeeds.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None, (
+            "Cross-system guard self-deadlock fix (2026-08-02): a Task "
+            "whose work_id matches its backing JobItem's job_id must be "
+            "claimable. Got None — the self-deadlock regressed."
+        )
+        assert claimed.id == t1_id
+
+        # has_pending_tasks_blocked_by_busy_instance must NOT report
+        # the instance as blocked just because its own pending task has
+        # a matching backing JobItem (same self-exclusion applies on
+        # the busy-probe path).
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
+
+    def test_claim_still_blocks_genuine_other_inflight_work(self, repository, engine):
+        """Cross-system guard self-deadlock fix — POSITIVE control.
+
+        The fix must NOT over-relax the guard: a pending task backed by
+        a JobItem that DOES NOT belong to the candidate task itself
+        (i.e. genuinely-other in-flight work for the same instance)
+        MUST still block the claim.
+
+        This proves the ``t.id != {exclude_task_alias}.id`` exclusion
+        is precise — it excludes only the candidate's own row, not all
+        rows with a matching ``work_id``.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from datetime import datetime, timezone
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Same instance has two distinct work units:
+        #   - JobItem job-A / Task A (RUNNING — backing Task is in flight)
+        #   - JobItem job-B / Task B (PENDING — the candidate)
+        # Both share the same instance, but their work_ids differ —
+        # so the candidate's self-exclusion MUST NOT make it claimable.
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-GENUINE",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            session.add(JobItem(
+                job_id="job-A",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
+                job_type="message",
+                instance_id="inst-GENUINE",
+                job_metadata={"message_id": "mA"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # Task A: RUNNING (the genuinely-other in-flight work).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, created_at, cancel_requested,
+                                      retry_scheduled, work_id, is_deferred,
+                                      is_background, worker_id, started_at)
+                    VALUES (:task_type, :instance_id, :message_id, :status,
+                            :retry_count, :created_at, :cancel_requested,
+                            :retry_scheduled, :work_id, :is_deferred,
+                            :is_background, :worker_id, :started_at)
+                    """
+                ),
+                {
+                    "task_type": TaskType.PROCESS_MESSAGE.value,
+                    "instance_id": "inst-GENUINE",
+                    "message_id": "mA",
+                    "status": TaskStatus.RUNNING.value,
+                    "retry_count": 0,
+                    "created_at": datetime.now(timezone.utc),
+                    "cancel_requested": False,
+                    "retry_scheduled": False,
+                    "work_id": "job-A",
+                    "is_deferred": False,
+                    "is_background": False,
+                    "worker_id": "worker-running-A",
+                    "started_at": datetime.now(timezone.utc),
+                },
+            )
+
+        # Task B: PENDING, with a DIFFERENT work_id from JobItem A's job_id.
+        # The candidate's own self-exclusion would only exclude Task B
+        # (by primary key), but Task A is RUNNING with work_id=='job-A' —
+        # not the candidate — so Task A still matches the EXISTS and
+        # the claim must be blocked.
+        t_b = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-GENUINE",
+            message_id="mB",
+        )
+
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is None, (
+            "Self-deadlock fix must NOT over-relax the guard: a pending "
+            "task whose sibling Task is genuinely RUNNING for the same "
+            "instance MUST remain unclaimable. Got a claim — the "
+            "exclusion is too broad."
+        )
+        # Sanity: t_b is still pending (no spurious claim).
+        assert repository.get(t_b.id).status == TaskStatus.PENDING.value
+
+        # The busy-probe must STILL report the instance as blocked.
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FIFO concurrency bypass fix (2026-07-26)

@@ -1075,7 +1075,11 @@ class TaskRepository:
                             WHERE j.admission_state IN {active_admission_states_sql()}
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
-                              AND {self._active_jobitem_with_inflight_task_sql("j")}
+                              -- Self-deadlock fix (2026-08-02): exclude the candidate task's
+                              -- own row from the in-flight check — otherwise the guard
+                              -- matches the task being claimed and blocks it forever.
+                              -- The outer candidate task's table alias is ``task``.
+                              AND {self._active_jobitem_with_inflight_task_sql("j", exclude_task_alias="task")}
                         )
                     )
                   ORDER BY created_at ASC LIMIT 1
@@ -1147,7 +1151,9 @@ class TaskRepository:
 
         return claimed_task
 
-    def _active_jobitem_with_inflight_task_sql(self, job_alias: str) -> str:
+    def _active_jobitem_with_inflight_task_sql(
+        self, job_alias: str, exclude_task_alias: str | None = None
+    ) -> str:
         """Single-source-of-truth simplified cross-system predicate.
 
         Post-Increment 2, orphan reconciliation belongs to
@@ -1155,12 +1161,43 @@ class TaskRepository:
         backing Task is in flight. The WAITING_CHILDREN exception is retained
         because those JobItems intentionally semaphore child-completion reports.
         Both claim and busy-probe gates call this helper (P1/F11 invariant).
+
+        Self-deadlock fix (2026-08-02): the guard checks for OTHER in-flight
+        work for this instance; the candidate task being claimed/inspected
+        must NOT count itself as evidence of in-flight work. Without the
+        exclusion, ``claim_pending_task`` would match the candidate task's
+        own backing JobItem (linkage contract: ``JobItem.job_id ==
+        Task.work_id``) and the claim would be blocked forever.
+
+        Args:
+            job_alias: The ``job_queue_items`` table alias used by the
+                caller (e.g. ``"j"`` in ``claim_pending_task``,
+                ``"j_running"`` in ``has_pending_tasks_blocked_by_busy_instance``).
+            exclude_task_alias: When provided, append
+                ``AND t.id != {exclude_task_alias}.id`` to the EXISTS
+                subquery so the candidate task row (correlated via its
+                primary key) is excluded from the in-flight check. Pass
+                the outer query's task-table alias (e.g. ``"task"``,
+                ``"t_pending"``).
         """
+        # Self-deadlock fix (2026-08-02): when the caller is evaluating a
+        # candidate task (claim) or a candidate pending task (busy-probe),
+        # the EXISTS subquery would otherwise match the candidate's own
+        # row — because the linkage contract guarantees
+        # ``JobItem.job_id == Task.work_id`` for the candidate. Exclude
+        # the candidate by primary key (precise — work_id could collide
+        # in edge cases; id is unique).
+        exclusion_clause = (
+            f"      AND t.id != {exclude_task_alias}.id\n"
+            if exclude_task_alias is not None
+            else ""
+        )
         return (
             f"EXISTS (\n"
             f"    SELECT 1 FROM task t\n"
             f"    WHERE t.work_id = {job_alias}.job_id\n"
             f"      AND t.status IN (:status_pending, :status_running, :status_paused)\n"
+            f"{exclusion_clause}"
             f")\n"
             f"AND (i.status IS NULL OR i.status != :status_waiting_children)"
         )
@@ -1782,7 +1819,11 @@ class TaskRepository:
                             WHERE j_running.admission_state IN {active_admission_states_sql()}
                               AND j_running.instance_id = t_pending.instance_id
                               AND j_running.deleted_at IS NULL
-                              AND {self._active_jobitem_with_inflight_task_sql("j_running")}
+                              -- Self-deadlock fix (2026-08-02): exclude the outer pending
+                              -- task's own row from the in-flight check — otherwise the
+                              -- guard matches the pending task's own backing JobItem
+                              -- and reports the instance as blocked when it isn't.
+                              AND {self._active_jobitem_with_inflight_task_sql("j_running", exclude_task_alias="t_pending")}
                         )
                     )
                 )
