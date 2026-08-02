@@ -227,6 +227,11 @@ async def send_message(
         
         # Resume processing jobs for all resumed instances
         resume_results = {}
+        # Track the fallback-enqueued message id so the response can return
+        # a real ``message_id`` when ``resume_processing_job`` returns None
+        # for the target instance. Without this, the user's message would
+        # be silently dropped (the bug being fixed here).
+        fallback_message_id: str | None = None
         for resumed_id in resume_result["resumed_ids"]:
             is_target = resumed_id == target_id
             try:
@@ -240,11 +245,73 @@ async def send_message(
                 logger.warning(f"Failed to resume processing for {resumed_id[:8]}...: {e}")
                 job_result = {"status": "error", "error": str(e)}
             if job_result is None:
-                logger.debug(f"No active PROCESSING job for instance {resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)")
-            resume_results[resumed_id] = job_result if job_result is not None else {"status": "no_active_job"}
-        
+                if is_target:
+                    # Bug fix (PAUSED auto-resume message loss): when the
+                    # instance was paused BEFORE its initial Task was claimed
+                    # (task stayed PENDING, never reached RUNNING), the pause
+                    # cascade never wrote a ``resume_target_turn_id`` handle
+                    # and the task is not in the PAUSED/RUNNING filter set.
+                    # ``resume_processing_job`` therefore routes to
+                    # ``invalid_or_missing_handle`` and returns ``None`` —
+                    # but the cascade already flipped the instance to
+                    # RUNNING, so the WorkerPool is ready to claim a fresh
+                    # Task. Fall through to ``enqueue_message_job`` to deliver
+                    # the user's message via the normal message queue. The
+                    # §9.4 answer-gate fallback (which used to live inside
+                    # ``resume_processing_job``) is intentionally NOT used
+                    # here — the bug is at the router seam, not inside the
+                    # selector. For non-target resumed instances, ``None``
+                    # remains the correct outcome (silent cascade children).
+                    logger.info(
+                        f"resume_processing_job returned None for target "
+                        f"instance {resumed_id[:8]}... — falling through "
+                        f"to enqueue_message_job to deliver user message"
+                    )
+                    try:
+                        fallback_result = await manager.enqueue_message_job(
+                            instance_id=resumed_id,
+                            message=message.content,
+                            source="api_resume_fallback",
+                            images=message.images,
+                        )
+                        fallback_message_id = fallback_result.message_id
+                        job_result = {
+                            "status": "queued",
+                            "message_id": fallback_result.message_id,
+                            "job_id": fallback_result.job_id,
+                            "instance_id": resumed_id,
+                            "route": "api_resume_fallback",
+                        }
+                    except Exception as enqueue_err:
+                        logger.error(
+                            f"Fallback enqueue_message_job failed for "
+                            f"{resumed_id[:8]}...: {enqueue_err}"
+                        )
+                        job_result = {
+                            "status": "error",
+                            "error": f"resume returned None and fallback "
+                                     f"enqueue failed: {enqueue_err}",
+                            "route": "api_resume_fallback_failed",
+                        }
+                else:
+                    logger.debug(
+                        f"No active PROCESSING job for non-target resumed "
+                        f"instance {resumed_id[:8]}... (silent cascade child) — "
+                        f"no fallback enqueue"
+                    )
+            resume_results[resumed_id] = (
+                job_result if job_result is not None
+                else {"status": "no_active_job"}
+            )
+
+        # When the fallback path delivered the message, surface its real
+        # ``message_id`` in the response. Otherwise the frontend sees
+        # ``message_id=None`` which signals a synthesized reply — not
+        # true here, the message was actually enqueued.
+        response_message_id = fallback_message_id if fallback_message_id else None
+
         return {
-            "message_id": None,  # No message queued — resume injects directly
+            "message_id": response_message_id,
             "role": "user",
             "content": message.content,
             "thinking": None,
