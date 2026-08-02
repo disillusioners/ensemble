@@ -11,8 +11,11 @@ from typing import TypeVar, Callable, Any
 
 from fastapi import HTTPException
 
-from daemon.models import ErrorCodes, ErrorResponse
-from daemon.registry import get_registry
+# NOTE: ``daemon.models`` and ``daemon.registry`` are NOT imported at module
+# top level here. They pull in the repositories → services subsystem, which
+# back-imports helpers from this module (``parse_think_tags``,
+# ``serialize_message``) — a circular import. Import them lazily inside the
+# functions that need them.
 
 # Default max edit distance for fuzzy instance matching
 DEFAULT_FUZZY_MATCH_DISTANCE: int = 7
@@ -448,7 +451,9 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     Raises:
         HTTPException: If agent is invalid or not found.
     """
+    from daemon.registry import get_registry
     registry = get_registry()
+    from daemon.models import ErrorCodes, ErrorResponse
 
     # version-independent: only reads `id` and `path`, both structural fields
     # that are identical for all versions of an agent. Validation just needs

@@ -38,7 +38,6 @@ from langchain_core.messages import (
 )
 
 from .config import CompactionConfig
-from .graph import clean_llm_config
 from .loader import estimate_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -980,7 +979,7 @@ class ContextCompactor:
         Returns:
             LLM response content as string.
         """
-        from .graph import ThinkingChatOpenAI
+        from .graph import ThinkingChatOpenAI, clean_llm_config
         
         # Use summarization model override if set, otherwise use session model
         if context.config.summarization_model:
