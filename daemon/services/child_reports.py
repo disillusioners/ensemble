@@ -1460,6 +1460,60 @@ Provide a concise summary:"""
                             parent_id=None,
                         )
 
+                # Defense-in-depth: live-children cross-check (Inc
+                # 2026-08-02 "leader completed while tester child still
+                # running"). The bus gate above trusts
+                # ``count_pending_for_target_sync == 0`` as the
+                # authoritative "all children done" signal. But the bus
+                # ``dependency_watchers`` rows can be moved out of PENDING
+                # by silent raw-SQL writers (e.g. the ``reconcile_turn_mirror``
+                # cancel guard in ``daemon/repositories/task/repository.py``),
+                # which would zero the bus count while a child instance is
+                # genuinely still working. This second gate consults the
+                # ``instances`` table directly: a root with any
+                # non-terminal child must NEVER reach COMPLETED, regardless
+                # of what the bus reports.
+                #
+                # Same-transaction guarantee: this COUNT runs on the
+                # existing ``WriteGuardSession`` / ``session`` so it shares
+                # the SAME transaction as the bus COUNT above and the
+                # ``Instance`` status UPDATE below — closing the TOCTOU
+                # window between the read and the write (mirrors the C2
+                # inline-bus-COUNT pattern at :1417-1428). A transient
+                # failure propagates to the existing W3 fail-safe path
+                # (fail-CLOSED) rather than silently passing the gate.
+                live_children_stmt = (
+                    select(func.count())
+                    .select_from(Instance)
+                    .where(Instance.parent_id == instance_id)
+                    .where(
+                        Instance.status.notin_([
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.ERROR.value,
+                            InstanceStatus.TERMINATED.value,
+                            InstanceStatus.FAILED.value,
+                        ])
+                    )
+                )
+                live_children = int(session.scalar(live_children_stmt) or 0)
+                if live_children > 0:
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    instance.updated_at = datetime.now(timezone.utc).isoformat()
+                    instance.version = (instance.version or 1) + 1
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... bus reports 0 "
+                        f"pending but {live_children} live child instance(s) "
+                        f"found, deferring completion, "
+                        f"status=WAITING_CHILDREN"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
                 # Check pending messages before completing.
                 # Exclude the just-completed message by ID (mirrors
                 # _should_send_completion_report at line 270-279) to avoid the

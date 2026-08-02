@@ -514,3 +514,101 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         with Session(engine) as session:
             inst = session.get(Instance, root_id)
             assert inst.status == InstanceStatus.WAITING_CHILDREN.value
+
+
+def _seed_child_instance(
+    engine: Engine,
+    *,
+    parent_id: str,
+    status: str = InstanceStatus.RUNNING.value,
+) -> str:
+    """Insert a child Instance row whose parent_id links it to the root."""
+    cid = f"child-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as session:
+        inst = Instance(
+            instance_id=cid,
+            agent_id="tester",
+            agent_name="tester",
+            agent_dir="/tmp/tester",
+            parent_id=parent_id,
+            status=status,
+            version=1,
+            instance_metadata={},
+        )
+        session.add(inst)
+        session.commit()
+    return cid
+
+
+class TestLiveChildrenDefenseInDepth:
+    """Regression for Inc 2026-08-02 "leader completed while tester child
+    still running".
+
+    The bus gate (``count_pending_for_target_sync == 0``) trusts the bus
+    ``dependency_watchers`` rows. A silent raw-SQL writer (the
+    ``reconcile_turn_mirror`` cancel guard) can zero the bus count while a
+    child instance is genuinely still running. This defense-in-depth gate
+    consults the ``instances`` table directly: a root with any non-terminal
+    child must NEVER reach ``COMPLETED``, even when the bus reports zero
+    pending watchers.
+    """
+
+    def test_live_child_blocks_completion_despite_empty_bus(
+        self, engine: Engine
+    ):
+        """Bus reports 0 pending watchers, but a child instance is still
+        running — the root must defer (``deferred_waiting_children``),
+        NOT complete. This is the exact incident scenario.
+        """
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        # No PENDING bus watchers — the bus would report zero pending
+        # (mirrors the post-cancel state from reconcile_turn_mirror).
+        # A live (non-terminal) child remains in the instances table.
+        _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.RUNNING.value
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        assert result.outcome == "deferred_waiting_children"
+        assert result.instance_id == root_id
+
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.WAITING_CHILDREN.value
+
+    def test_terminal_child_does_not_block_completion(
+        self, engine: Engine
+    ):
+        """A child that has reached a terminal status (completed/error/
+        terminated/failed) must NOT trip the live-children gate — the root
+        is free to complete. Confirms the gate only fires on genuinely
+        live children.
+        """
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        _seed_child_instance(
+            engine,
+            parent_id=root_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        # No pending bus watchers + no live children + no own-queue
+        # messages -> root_completed.
+        assert result.outcome == "root_completed"
+        assert result.instance_id == root_id
+
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.COMPLETED.value

@@ -255,16 +255,24 @@ def _seed_dependency_watcher(
     source_task_pk: int,
     target_instance_id: str,
     state: str = DependencyWatcherState.PENDING.value,
+    child_instance_id: str | None = None,
 ) -> str:
     watch_id = f"watch-{uuid.uuid4().hex[:12]}"
     now_iso = datetime.now(timezone.utc).isoformat()
+    if child_instance_id is not None:
+        follow_up_payload: dict = {
+            "kind": "child_complete",
+            "metadata": {"child_id": child_instance_id},
+        }
+    else:
+        follow_up_payload = {"kind": "test"}
     with Session(engine) as session:
         session.add(
             DependencyWatcher(
                 watch_id=watch_id,
                 source_task_id=str(source_task_pk),
                 target_instance_id=target_instance_id,
-                follow_up_payload={"kind": "test"},
+                follow_up_payload=follow_up_payload,
                 watcher_metadata={"kind": "test"},
                 created_at=now_iso,
                 state=state,
@@ -793,6 +801,90 @@ class TestDependencyWatchers:
         )
 
         result = repo.reconcile_turn_mirror(work_id_child)
+
+        assert result["updated_counts"]["dependency_watchers"] == 0
+        assert _read_watcher_state(engine, watcher_id) == (
+            DependencyWatcherState.PENDING.value
+        )
+
+    def test_child_instance_terminal_watcher_cancelled(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """Child-liveness guard: child terminal → watcher CANCELLED.
+
+        The watcher carries ``metadata.child_id`` (the production shape
+        stamped by ``send_message``). When the watched child instance has
+        reached a terminal status, the watcher is cancelled — the child
+        can no longer produce work this watcher is tracking.
+        """
+        parent_id = _new_id("parent")
+        child_id = _new_id("child")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, parent_id)
+        _seed_instance(engine, child_id, status=InstanceStatus.COMPLETED.value)
+        task_pk = _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=child_id,
+            message_id=message_id,
+            status=TaskStatus.RUNNING.value,
+        )
+        _seed_job_item(engine, work_id=work_id, instance_id=child_id)
+        _seed_job_lock(engine, work_id=work_id, instance_id=child_id)
+        _seed_message(engine, message_id=message_id, instance_id=child_id)
+        watcher_id = _seed_dependency_watcher(
+            engine,
+            source_task_pk=task_pk,
+            target_instance_id=parent_id,
+            child_instance_id=child_id,
+        )
+        _set_task_status(engine, work_id, TaskStatus.COMPLETED.value)
+
+        result = repo.reconcile_turn_mirror(work_id)
+
+        assert result["updated_counts"]["dependency_watchers"] >= 1
+        assert _read_watcher_state(engine, watcher_id) == (
+            DependencyWatcherState.CANCELLED.value
+        )
+
+    def test_child_instance_alive_watcher_remains_pending(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """Child-liveness guard: child still running → watcher PENDING.
+
+        Regression for Inc 2026-08-02: the leader's first-task completion
+        must NOT cancel the watcher while the child instance is still alive
+        (running/waiting_children/paused) — even though the child's backing
+        task is terminal and the parent is idle (waiting_children with zero
+        in-flight tasks). The OLD guard cancelled here; the new child-id
+        guard keeps the watcher PENDING because the child is non-terminal.
+        """
+        parent_id = _new_id("parent")
+        child_id = _new_id("child")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, parent_id, status=InstanceStatus.WAITING_CHILDREN.value)
+        _seed_instance(engine, child_id, status=InstanceStatus.RUNNING.value)
+        task_pk = _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=child_id,
+            message_id=message_id,
+            status=TaskStatus.RUNNING.value,
+        )
+        _seed_job_item(engine, work_id=work_id, instance_id=child_id)
+        _seed_job_lock(engine, work_id=work_id, instance_id=child_id)
+        _seed_message(engine, message_id=message_id, instance_id=child_id)
+        watcher_id = _seed_dependency_watcher(
+            engine,
+            source_task_pk=task_pk,
+            target_instance_id=parent_id,
+            child_instance_id=child_id,
+        )
+        _set_task_status(engine, work_id, TaskStatus.COMPLETED.value)
+
+        result = repo.reconcile_turn_mirror(work_id)
 
         assert result["updated_counts"]["dependency_watchers"] == 0
         assert _read_watcher_state(engine, watcher_id) == (

@@ -689,6 +689,71 @@ class TaskRepository:
                 params,
             ).rowcount
 
+            # Child-instance-liveness guard (Inc 2026-08-02 "leader completed
+            # while tester child still running"). The OLD guard checked the
+            # PARENT's (target_instance_id) task liveness via ``NOT EXISTS
+            # task WHERE target_task.instance_id = parent``. A parent that is
+            # ``waiting_children`` has ZERO pending/running/paused tasks BY
+            # DESIGN (it is idle, waiting for the child's report), so the guard
+            # fired on every idle-waiting parent and cancelled the still-live
+            # child's watcher the instant the child's first task completed.
+            #
+            # The correctly-keyed question is "is the CHILD instance still
+            # non-terminal?" — resolved through the watcher's
+            # ``follow_up_payload->'metadata'->>'child_id'`` (stamped by
+            # ``send_message`` at ``daemon/tools/instance.py``). A watcher is
+            # only cancelled here when the child instance has reached a
+            # terminal status (completed/error/terminated/failed). It survives
+            # while the child is running / waiting_children / paused / idle
+            # (the multi-turn gap between the child's first task completing
+            # and the child instance reaching its own terminal turn).
+            #
+            # NULL ``child_id`` fallback: production watchers always carry
+            # ``child_id`` (the sole registration site
+            # ``daemon/tools/instance.py:_register_completion_watcher`` stamps
+            # it). Legacy / test rows lacking it fall back to the OLD parent
+            # task-liveness guard, preserving prior behavior for any row that
+            # has not been migrated — no silent regression.
+            #
+            # Dialect-aware JSON access: ``->>`` is PostgreSQL JSONB; SQLite
+            # uses ``json_extract`` (``->``/``->>`` need SQLite ≥ 3.38 and are
+            # not universally bundled). Mirrors the convention in
+            # ``daemon/repositories/source/repository.py`` and
+            # ``daemon/repositories/infra/repository.py``.
+            if self.engine.dialect.name == "postgresql":
+                child_id_expr = (
+                    "dependency_watchers.follow_up_payload"
+                    "->'metadata'->>'child_id'"
+                )
+            else:
+                child_id_expr = (
+                    "CAST(json_extract("
+                    "dependency_watchers.follow_up_payload, "
+                    "'$.metadata.child_id') AS TEXT)"
+                )
+            child_liveness_guard = f"""
+                AND CASE
+                    WHEN {child_id_expr} IS NOT NULL THEN
+                        NOT EXISTS (
+                            SELECT 1 FROM instances ci
+                            WHERE ci.instance_id = {child_id_expr}
+                              AND ci.status NOT IN (
+                                  'completed', 'error',
+                                  'terminated', 'failed'
+                              )
+                        )
+                    ELSE
+                        NOT EXISTS (
+                            SELECT 1 FROM task AS target_task
+                            WHERE target_task.instance_id =
+                                  dependency_watchers.target_instance_id
+                              AND target_task.status IN (
+                                  :status_pending, :status_running,
+                                  :status_paused
+                              )
+                        )
+                END
+            """
             updated_counts["dependency_watchers"] = conn.execute(
                 text(f"""
                     UPDATE dependency_watchers
@@ -697,13 +762,7 @@ class TaskRepository:
                       AND state = 'PENDING'
                       AND :terminal
                       AND {snapshot_guard}
-                      AND NOT EXISTS (
-                          SELECT 1 FROM task AS target_task
-                          WHERE target_task.instance_id = dependency_watchers.target_instance_id
-                            AND target_task.status IN (
-                                :status_pending, :status_running, :status_paused
-                            )
-                      )
+                      {child_liveness_guard}
                 """),
                 params,
             ).rowcount
