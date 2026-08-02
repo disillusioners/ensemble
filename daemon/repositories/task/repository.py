@@ -748,7 +748,19 @@ class TaskRepository:
                         "instance_id": params["task_instance_id"],
                         "status": instance_row["status"],
                     }
-                    logger.warning(
+                    # DEBUG, not WARNING (P2 fix, 2026-08-02): this drift
+                    # is a KNOWN transient window artifact of the
+                    # pause→resume transition. The resume cascade
+                    # cancels the old Task (PAUSED→CANCELLED) and
+                    # flips the instance to RUNNING before the new
+                    # resume task is scheduled via the outbox. The
+                    # reconciler catches the gap but it self-heals
+                    # within ~1 second when the resume outbox schedules
+                    # the replacement work. Downgraded from WARNING to
+                    # avoid log noise; the drift_flags dict above is
+                    # retained as diagnostic data for any caller that
+                    # inspects the reconciler result.
+                    logger.debug(
                         "Turn mirror drift: instance %s is running without in-flight tasks "
                         "(work_id=%s)",
                         params["task_instance_id"],

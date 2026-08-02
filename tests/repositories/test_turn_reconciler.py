@@ -882,6 +882,57 @@ class TestInstancesSoftDrift:
             InstanceStatus.RUNNING.value
         )
 
+    def test_running_instance_without_inflight_drift_log_is_debug_not_warning(
+        self, engine: Engine, repo: TaskRepository, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """P2 (2026-08-02): drift must log at DEBUG, never WARNING.
+
+        This is a known transient artifact of the pause→resume
+        cascade window: the old Task is cancelled and the instance
+        flipped to RUNNING before the new resume task is scheduled.
+        The reconciler catches the gap; it self-heals within ~1s.
+        Logging at WARNING was flooding production telemetry with
+        non-actionable signal. Captured at WARNING level so any DEBUG
+        emission is filtered out by the caplog level — if a regression
+        re-raises the level, the assertion below trips.
+        """
+        instance_id = _new_id("inst")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, instance_id, InstanceStatus.RUNNING.value)
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=TaskStatus.RUNNING.value,
+        )
+        _seed_job_item(engine, work_id=work_id, instance_id=instance_id)
+        _seed_job_lock(engine, work_id=work_id, instance_id=instance_id)
+        _seed_message(engine, message_id=message_id, instance_id=instance_id)
+        _set_task_status(engine, work_id, TaskStatus.COMPLETED.value)
+
+        with caplog.at_level("WARNING"):
+            result = repo.reconcile_turn_mirror(work_id)
+
+        # Drift flag MUST still be populated (the diagnostic data
+        # is unchanged; only the log level moved).
+        assert (
+            "instance_running_without_inflight_task" in result["drift_flags"]
+        ), f"Expected drift flag, got {result['drift_flags']}"
+
+        # No WARNING-level "Turn mirror drift" message — the fix
+        # downgraded this to DEBUG (transient self-healing artifact).
+        warning_drift_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "Turn mirror drift" in r.getMessage()
+        ]
+        assert warning_drift_records == [], (
+            "Drift is a known transient artifact; must not log at WARNING. "
+            f"Got: {[r.getMessage() for r in warning_drift_records]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 7. job_watchers
