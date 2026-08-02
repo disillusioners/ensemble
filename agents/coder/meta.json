@@ -15,6 +15,9 @@
   "context_injection": {
     "heuristic_match_shared_md_files": true
   },
-  "llm_model": "coding",
-  "recursion_limit_multiplier": 5
+  "llm_models": [
+    {"model": "agentic", "weight": 25},
+    {"model": "coding", "weight": 75}
+  ],
+  "recursion_limit_multiplier": 7
 }
