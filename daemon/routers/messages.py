@@ -255,7 +255,7 @@ async def send_message(
                     # ``invalid_or_missing_handle`` and returns ``None`` —
                     # but the cascade already flipped the instance to
                     # RUNNING, so the WorkerPool is ready to claim a fresh
-                    # Task. Fall through to ``enqueue_message_job`` to deliver
+                    # Task. Fall through to ``enqueue_message`` to deliver
                     # the user's message via the normal message queue. The
                     # §9.4 answer-gate fallback (which used to live inside
                     # ``resume_processing_job``) is intentionally NOT used
@@ -265,10 +265,10 @@ async def send_message(
                     logger.info(
                         f"resume_processing_job returned None for target "
                         f"instance {resumed_id[:8]}... — falling through "
-                        f"to enqueue_message_job to deliver user message"
+                        f"to enqueue_message to deliver user message"
                     )
                     try:
-                        fallback_result = await manager.enqueue_message_job(
+                        fallback_result = await manager.enqueue_message(
                             instance_id=resumed_id,
                             message=message.content,
                             source="api_resume_fallback",
@@ -284,7 +284,7 @@ async def send_message(
                         }
                     except Exception as enqueue_err:
                         logger.error(
-                            f"Fallback enqueue_message_job failed for "
+                            f"Fallback enqueue_message failed for "
                             f"{resumed_id[:8]}...: {enqueue_err}"
                         )
                         job_result = {

@@ -23,7 +23,7 @@ message — silent data loss (P1).
 
 The fix lives in ``daemon/routers/messages.py``: when
 ``resume_processing_job`` returns ``None`` for the TARGET
-instance, the router falls through to ``enqueue_message_job``
+instance, the router falls through to ``enqueue_message``
 to deliver the user's message via the normal message queue.
 For non-target resumed instances (silent cascade children) the
 ``None`` outcome remains correct — they need no fallback.
@@ -32,12 +32,12 @@ These tests exercise that router-level fallback seam end-to-end
 through the real FastAPI ``TestClient`` mounted on a bare
 ``messages`` router (no DB, no MCP pool). The manager surface
 is mocked so we can control ``resume_processing_job``'s return
-value and verify ``enqueue_message_job`` is (or is not) called.
+value and verify ``enqueue_message`` is (or is not) called.
 
 Test scenarios:
   1. ``test_paused_target_resume_none_falls_through_to_enqueue`` —
      target paused, ``resume_processing_job`` returns ``None``,
-     ``enqueue_message_job`` is called with the user message,
+     ``enqueue_message`` is called with the user message,
      the response carries the real ``message_id``.
   2. ``test_paused_target_fallback_forwards_images`` — images
      are forwarded through the fallback path so vision messages
@@ -46,7 +46,7 @@ Test scenarios:
      non-target resumed instances (silent cascade children) get
      the ``no_active_job`` result WITHOUT fallback enqueue.
   4. ``test_paused_target_fallback_enqueue_failure_surfaces_error``
-     — when ``enqueue_message_job`` itself fails, the error
+     — when ``enqueue_message`` itself fails, the error
      surfaces in ``resume_results`` and the response still
      returns 200 (the cascade has already flipped the instance
      to RUNNING; we cannot un-resume).
@@ -90,9 +90,9 @@ def _make_paused_manager(
             Default ``[instance_id]`` (single-instance tree, no children).
         resume_processing_return: Return value of ``resume_processing_job``.
             Pass ``None`` to trigger the new fallback path.
-        enqueue_return: Return value of ``enqueue_message_job`` (the
+        enqueue_return: Return value of ``enqueue_message`` (the
             fallback path). Defaults to a realistic AsyncMessageResult.
-        enqueue_side_effect: If set, ``enqueue_message_job`` raises this
+        enqueue_side_effect: If set, ``enqueue_message`` raises this
             exception (used to verify the error-surfacing branch).
         with_vision: If ``True``, configure ``model_vision`` so the
             router's image-validation gate accepts the request.
@@ -130,9 +130,9 @@ def _make_paused_manager(
             return_value=resume_processing_return
         )
 
-    # enqueue_message_job — the fallback path.
+    # enqueue_message — the fallback path.
     if enqueue_side_effect is not None:
-        manager.enqueue_message_job = AsyncMock(side_effect=enqueue_side_effect)
+        manager.enqueue_message = AsyncMock(side_effect=enqueue_side_effect)
     else:
         if enqueue_return is None:
             enqueue_return = MagicMock(
@@ -140,7 +140,7 @@ def _make_paused_manager(
                 job_id="fallback-job-uuid",
                 queued=False,
             )
-        manager.enqueue_message_job = AsyncMock(return_value=enqueue_return)
+        manager.enqueue_message = AsyncMock(return_value=enqueue_return)
 
     return manager
 
@@ -196,7 +196,7 @@ class TestPausedAutoResumeFallback:
         """Target PAUSED, ``resume_processing_job`` returns ``None`` → fallback enqueue.
 
         The user's message must NOT be silently dropped. The router
-        must call ``enqueue_message_job`` with the original content
+        must call ``enqueue_message`` with the original content
         and surface the real ``message_id`` in the response.
         """
         client, state = client_and_state
@@ -225,8 +225,8 @@ class TestPausedAutoResumeFallback:
         assert body["message_id"] == "msg-fallback-1234"
 
         # Verify the fallback enqueue was called with the right args.
-        manager.enqueue_message_job.assert_awaited_once()
-        call_kwargs = manager.enqueue_message_job.call_args.kwargs
+        manager.enqueue_message.assert_awaited_once()
+        call_kwargs = manager.enqueue_message.call_args.kwargs
         assert call_kwargs["instance_id"] == "inst-paused"
         assert call_kwargs["message"] == "hello after pause"
         assert call_kwargs["source"] == "api_resume_fallback"
@@ -258,8 +258,8 @@ class TestPausedAutoResumeFallback:
         )
 
         assert resp.status_code == 200, resp.text
-        manager.enqueue_message_job.assert_awaited_once()
-        call_kwargs = manager.enqueue_message_job.call_args.kwargs
+        manager.enqueue_message.assert_awaited_once()
+        call_kwargs = manager.enqueue_message.call_args.kwargs
         assert call_kwargs["images"] == images
 
     def test_paused_non_target_resume_none_does_not_enqueue(self, client_and_state):
@@ -287,8 +287,8 @@ class TestPausedAutoResumeFallback:
         body = resp.json()
 
         # Exactly ONE enqueue (the target). Children are silent cascade.
-        assert manager.enqueue_message_job.await_count == 1
-        call_kwargs = manager.enqueue_message_job.call_args.kwargs
+        assert manager.enqueue_message.await_count == 1
+        call_kwargs = manager.enqueue_message.call_args.kwargs
         assert call_kwargs["instance_id"] == "inst-parent"
 
         # Children get the no_active_job marker — no fallback.
@@ -338,14 +338,14 @@ class TestPausedAutoResumeFallback:
         assert "queue is down" in target_result["error"]
         assert target_result["route"] == "api_resume_fallback_failed"
 
-        manager.enqueue_message_job.assert_awaited_once()
+        manager.enqueue_message.assert_awaited_once()
 
     def test_paused_target_resume_success_skips_fallback(self, client_and_state):
         """Regression guard: when ``resume_processing_job`` returns a normal result, fallback is NOT triggered.
 
         The fallback is ONLY for ``None`` returns. A successful resume
         (e.g. ``{status: "resumed", instance_id: ...}``) must take the
-        existing path — no extra ``enqueue_message_job`` call.
+        existing path — no extra ``enqueue_message`` call.
         """
         client, state = client_and_state
         manager = _make_paused_manager(
@@ -372,4 +372,4 @@ class TestPausedAutoResumeFallback:
         assert target_result["status"] == "resumed"
         assert "route" not in target_result
 
-        manager.enqueue_message_job.assert_not_called()
+        manager.enqueue_message.assert_not_called()
