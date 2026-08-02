@@ -86,20 +86,32 @@ Before doing anything, I check what skills are already in my context. Skills are
    - No injected skill AND task is ambiguous → Phase 4b: skill_search
    - No injected skill AND task is obvious/trivial → Phase 4c: DIY
 
-3. If searching:
+3. If the task context seems insufficient (missing file paths, architecture
+   details, or conventions), check shared context before searching:
+   - Call: list_context(context_key, query="<task topic>") to find shared
+     exploration findings from parent agents (e.g., file locations, schema,
+     conventions)
+   - If a relevant context file surfaces, read it via
+     read_context(context_key, filename) to absorb the details
+   - Shared context may resolve the ambiguity without the cost of skill_search
+   - Context found → proceed to Phase 4 with the gained knowledge
+   - Context insufficient → fall through to step 4 (skill_search)
+
+4. If searching:
    - Call: skill_search(query="<intent>", limit=10)
    - Returns { injected: [...], low_match: [...] }
    - Skill found AND matches → Phase 4a: apply
    - Skill found but partially matches → Phase 4a: adapt
    - No skill matches → Phase 4c: DIY (and consider skill_create later)
 
-4. Proceed to Phase 4
+5. Proceed to Phase 4
 ```
 
 **Why injection first:**
 - Injected skills are already in my context — zero additional cost
 - Auto-injection has a tight top-k cap; `skill_search` is broader but expensive (BM25 + embedding + LLM rerank)
 - Trust the pipeline for the obvious case; search only for ambiguous cases
+- Shared context (`list_context`) is cheaper than `skill_search` — check it first when the task needs file paths, architecture details, or conventions I don't have
 
 ---
 

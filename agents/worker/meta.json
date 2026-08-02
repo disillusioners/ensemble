@@ -28,5 +28,8 @@
       "shared_context",
       "dynamic-skill"
     ]
+  },
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
   }
 }
