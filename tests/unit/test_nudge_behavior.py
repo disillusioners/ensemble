@@ -281,6 +281,57 @@ class TestShouldContinue:
         state = self._make_state(messages)
         assert should_continue(state) == "agent"
 
+    def test_think_only_content_routes_to_agent(self):
+        """A response with content that is ONLY <think>...</think> tags
+        (no visible text) and no tool_calls should route back to 'agent'
+        so the LLM can produce the actual answer on the next call. This
+        handles models that embed reasoning as <think> tags inside the
+        content string rather than via additional_kwargs.reasoning_content.
+        """
+        messages = [
+            HumanMessage(content="Help me with auth"),
+            AIMessage(content="<think>The user wants auth help, let me think...</think>"),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "agent"
+
+    def test_think_only_content_with_whitespace_routes_to_agent(self):
+        """A response whose content is only <think> tags plus surrounding
+        whitespace (no visible text) should also re-route to agent."""
+        messages = [
+            HumanMessage(content="Help me"),
+            AIMessage(content="  \n<think>reasoning</think>\n  "),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "agent"
+
+    def test_think_then_visible_text_returns_end(self):
+        """A response like `<think>reasoning</think>Actual answer` should
+        fall through to normal routing and END — not loop re-invoking the
+        agent. The visible text after the think tags is the real answer.
+        """
+        messages = [
+            HumanMessage(content="Tell me a joke"),
+            AIMessage(content="<think>Thinking about jokes...</think>Why did the chicken cross the road?"),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "__end__"
+
+    def test_think_only_with_tool_calls_returns_tools(self):
+        """A response with only <think> content but WITH tool_calls should
+        route to 'tools' — tool_calls has higher priority than the
+        think-only check, matching the existing reasoning_content behavior.
+        """
+        messages = [
+            HumanMessage(content="Search for X"),
+            AIMessage(
+                content="<think>Need to search...</think>",
+                tool_calls=[ToolCall(id="call_1", name="search", args={"q": "X"})],
+            ),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "tools"
+
 
 class TestNudgeMessage:
     """Tests for NUDGE_MESSAGE constant."""

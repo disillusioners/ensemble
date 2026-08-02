@@ -2040,7 +2040,29 @@ def should_continue(state: MessagesState) -> str:
         if reasoning and not content and not has_tool_calls:
             logger.debug(f"[Graph] Thinking-only response, continuing...")
             return "agent"
-    
+
+    # Check for <think>-only content (models that embed reasoning in content string).
+    # Some models (e.g. via OpenAI-compatible APIs) return reasoning as
+    # <think>...</think> tags inside the content string rather than via
+    # additional_kwargs.reasoning_content. When the content is ONLY think tags
+    # with no visible text and there are no tool_calls, treat it as a
+    # thinking-only response and re-invoke the agent — otherwise the graph
+    # would terminate prematurely with a thinking-only response as its final
+    # answer. A response like `<think>...</think>Actual answer` falls through
+    # to normal routing since `cleaned` would be non-empty.
+    #
+    # Local import: the check only runs when content is a non-empty string
+    # (not on the hot path), and a lazy import keeps graph.py's module-load
+    # imports untouched.
+    content_str = getattr(last_message, 'content', '') or ''
+    has_tool_calls = bool(getattr(last_message, 'tool_calls', None))
+    if isinstance(content_str, str) and content_str.strip():
+        from .utils import parse_think_tags
+        cleaned, _thinking = parse_think_tags(content_str)
+        if not cleaned.strip() and not has_tool_calls:
+            logger.debug("[Graph] <think>-only response (content has no visible text), continuing...")
+            return "agent"
+
     # Ghost promise detection: LLM promised action but didn't emit tool_call
     # Common pattern: "Now let me write the document:" (ends with ':')
     content = getattr(last_message, 'content', '') or ''
