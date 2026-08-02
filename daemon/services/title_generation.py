@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
+from ..utils import parse_think_tags
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -125,6 +126,15 @@ Title:"""
                     title = " ".join(text_parts).strip()
                 else:
                     title = str(content).strip() if content else ""
+
+                # Strip <think> blocks — reasoning models (DeepSeek, GLM, QwQ)
+                # may emit their reasoning as <think>...</think> inside the
+                # response content. The title should be the visible text only.
+                # If the response is thinking-only, the empty-title check
+                # below gracefully skips storing a title.
+                if title:
+                    title, _thinking = parse_think_tags(title)
+                    title = title.strip()
 
                 # Validate and truncate title
                 if not title:
