@@ -162,6 +162,14 @@ def _make_manager(
     manager._skill_search_message_counts: dict[str, int] = {}
     manager._context_skill_results: dict[str, tuple[str | None, list[str]] | None] = {}
 
+    # W1 fix: per-instance marker for explicit ``load_skill`` writes.
+    # Mirrors the production ``InstanceManager`` — the messaging path
+    # calls ``mark_explicit_skill_loaded`` / ``clear_explicit_skill_loaded``
+    # and the gate consults ``was_explicit_skill_loaded``. Without these
+    # real bindings, the ``MagicMock`` auto-creates them as truthy
+    # attributes that force the gate into a perpetual search loop.
+    manager._explicit_skill_loaded: set[str] = set()
+
     def _get_and_increment(iid: str) -> int:
         current = manager._skill_search_message_counts.get(iid, 0)
         manager._skill_search_message_counts[iid] = current + 1
@@ -176,10 +184,22 @@ def _make_manager(
     def _reset(iid: str) -> None:
         manager._skill_search_message_counts[iid] = 0
 
+    def _mark_explicit(iid: str) -> None:
+        manager._explicit_skill_loaded.add(iid)
+
+    def _clear_explicit(iid: str) -> None:
+        manager._explicit_skill_loaded.discard(iid)
+
+    def _was_explicit(iid: str) -> bool:
+        return iid in manager._explicit_skill_loaded
+
     manager.get_and_increment_skill_search_count = _get_and_increment
     manager.get_context_skill_result = _get_cached
     manager.set_context_skill_result = _set_cached
     manager.reset_skill_search_count = _reset
+    manager.mark_explicit_skill_loaded = _mark_explicit
+    manager.clear_explicit_skill_loaded = _clear_explicit
+    manager.was_explicit_skill_loaded = _was_explicit
 
     manager.has_deferred_question_pause = MagicMock(return_value=False)
     manager.pause_instance_cascade = AsyncMock()
@@ -484,8 +504,136 @@ class TestLoadSkillBypass:
 
 
 # ============================================================
-# Scenario 4: cached result is correct (not stale/None)
+# Scenario 3b: W1 explicit-load cache isolation
 # ============================================================
+
+
+@pytest.mark.asyncio
+class TestW1ExplicitLoadCacheIsolation:
+    """Exercise the W1 marker through the real messaging path.
+
+    With ``interval=3``, the explicit ``load_skill`` message reuses the
+    first message's auto-search result, then writes an explicit result and
+    marks it.  The following ordinary message must therefore search again
+    instead of reusing that explicit result.
+    """
+
+    async def test_explicit_load_forces_fresh_search_on_next_message(self):
+        injection_service = _make_injection_service(
+            injection_text="[System Inject] AUTO_RESULT",
+            skill_ids=["auto-1"],
+            explicit_text="[System Inject] EXPLICIT_RESULT",
+            explicit_skill_ids=["explicit-1"],
+        )
+        agent_meta = SimpleNamespace(
+            agent_id="worker",
+            skill_injection=True,
+            skill_search_interval=3,
+            context_injection_mode="human_messages",
+        )
+        manager = _make_manager(
+            injection_service=injection_service,
+            agent_meta=agent_meta,
+        )
+        svc = _make_service(manager)
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            mock_get_registry.return_value = _apply_registry(agent_meta)
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(return_value=([], [])),
+            ):
+                # Message 1: no cache, so auto-search runs and clears the
+                # marker before the result becomes reusable.
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="ordinary-1",
+                    message_id="w1-mid-1",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+                assert injection_service.inject_skills.await_count == 1
+                assert manager.was_explicit_skill_loaded("inst-1") is False
+
+                # The explicit path reuses the auto result at the gate, then
+                # replaces the cache and marks it as explicit.
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message=(
+                        'explicit-2 <meta>{"load_skill": '
+                        '"explicit-skill"}</meta>'
+                    ),
+                    message_id="w1-mid-2",
+                    is_retry=False,
+                    message_source="internal_agent:parent-123",
+                )
+                assert injection_service.inject_skills.await_count == 1
+                injection_service.inject_explicit_skill.assert_awaited_once()
+                assert manager.was_explicit_skill_loaded("inst-1") is True
+                assert manager.get_context_skill_result("inst-1") == (
+                    "[System Inject] EXPLICIT_RESULT",
+                    ["explicit-1"],
+                )
+
+                # Message 3 is still inside the interval window, but the W1
+                # marker forces a fresh auto-search instead of a cache hit.
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="ordinary-3",
+                    message_id="w1-mid-3",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        assert injection_service.inject_skills.await_count == 2
+        assert [
+            call.args[0] for call in injection_service.inject_skills.call_args_list
+        ] == ["ordinary-1", "ordinary-3"]
+        assert manager.was_explicit_skill_loaded("inst-1") is False
+        assert manager.get_context_skill_result("inst-1") == (
+            "[System Inject] AUTO_RESULT",
+            ["auto-1"],
+        )
+
+
+# ============================================================
+# Scenario 3c: W1 marker cleanup
+# ============================================================
+
+
+class TestW1ExplicitLoadCleanup:
+    """The lifecycle cleanup must remove the W1 marker with its caches."""
+
+    def test_cleanup_removes_explicit_load_marker(self):
+        from daemon.manager import InstanceManager
+
+        instance_id = "inst-w1-cleanup"
+        mgr = InstanceManager.__new__(InstanceManager)
+        for attr in (
+            "_graph_tasks",
+            "_pending_injections",
+            "_gii_throttle",
+            "_loop_breaker_state",
+            "_context_skill_results",
+            "_skill_search_message_counts",
+            "_emitted_message_content",
+            "_original_timestamps",
+            "_last_context_usage",
+        ):
+            setattr(mgr, attr, {})
+        mgr._deferred_question_pause = set()
+        mgr._question_manager = MagicMock()
+        mgr._question_pause_requested = {}
+        mgr._explicit_skill_loaded = set()
+        mgr._skill_search_message_counts[instance_id] = 1
+        mgr._context_skill_results[instance_id] = ("explicit", ["skill"])
+        mgr.mark_explicit_skill_loaded(instance_id)
+
+        mgr._cleanup_instance_state(instance_id)
+
+        assert instance_id not in mgr._skill_search_message_counts
+        assert instance_id not in mgr._context_skill_results
+        assert instance_id not in mgr._explicit_skill_loaded
 
 
 @pytest.mark.asyncio
