@@ -92,7 +92,7 @@ class BlueprintRevisionResponse(BaseModel):
     version: int
     content_snapshot: str
     source: str
-    revision_summary: str | None = None
+    reason: str | None = None
     created_at: str
 
 
@@ -227,6 +227,56 @@ async def create_blueprint(
         file_refs=body.file_refs if body.file_refs is not None else [],
     )
     return _blueprint_to_response(created)
+
+
+# ─── Admin: external-cron blueprint scan trigger (§4.6 Option B) ──────────────
+
+
+@router.post("/scan", response_model=dict)
+async def trigger_blueprint_scan(
+    request: Request,
+    project_id: str,
+):
+    """Trigger an immediate blueprinter daily scan for a project.
+
+    Intended for external cron (e.g., systemd timer, GitHub Actions schedule).
+    Dispatches on system_background_queue. Requires that the queue exists
+    for the project (provisioned automatically on project creation).
+    """
+    manager = _get_manager(request)
+    job_service = getattr(manager, "_job_queue_service", None)
+    if job_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="JobQueueService not available",
+        )
+
+    bg_queue = await asyncio.to_thread(
+        job_service._queue_repo.get_by_name,
+        project_id,
+        "system_background_queue",
+    )
+    if bg_queue is None:
+        raise HTTPException(
+            status_code=404,
+            detail="system_background_queue not found for project",
+        )
+
+    job = await job_service.enqueue(
+        agent_id="blueprinter",
+        message=(
+            "Daily blueprint scan (external trigger).\n\n"
+            f"Project: {project_id}\n\n"
+            "Perform a full drift scan. Review core.md first, then area "
+            "blueprints. Respect the rate limit."
+        ),
+        source="admin-endpoint",
+        project_id=project_id,
+        priority=9,  # lowest priority — pure background
+        queue_id=bg_queue.queue_id,
+        metadata={"trigger": "daily-scan", "source": "admin-endpoint"},
+    )
+    return {"job_id": job.job_id, "status": "enqueued"}
 
 
 @router.put("/{blueprint_id}", response_model=BlueprintResponse)

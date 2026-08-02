@@ -96,8 +96,12 @@ def create_blueprint_tools(
         if not pid:
             return "Error: project_id not available. Ensure the agent instance has a project context set."
 
+        matcher = manager._blueprint_matcher
+        if matcher is None:
+            return "Blueprint search is not available (no embedding service configured)"
+
         try:
-            matched = await manager._blueprint_matcher.match(
+            matched = await matcher.match(
                 project_id=pid, query=query
             )
         except Exception as e:
@@ -150,6 +154,10 @@ def create_blueprint_tools(
             except Exception as e:
                 logger.warning("blueprint_get by id failed: %s", e, exc_info=True)
                 return f"Error: failed to fetch blueprint: {e}"
+            # Ownership check: blueprint must belong to the caller's project
+            pid = project_id or _get_project_id()
+            if bp is None or (pid is not None and bp.project_id != pid):
+                return "Blueprint not found."
         else:
             # slug lookup — needs project_id
             pid = project_id or _get_project_id()
@@ -318,6 +326,17 @@ def create_blueprint_tools(
             return "Error: no fields to update. Provide content and/or name."
 
         repo = manager._blueprint_repo
+        # Ownership check: verify the blueprint exists and belongs to
+        # the caller's project before updating.
+        pid = project_id or _get_project_id()
+        try:
+            existing = await asyncio.to_thread(repo.get_by_id, blueprint_id)
+        except Exception as e:
+            logger.warning("blueprint_update fetch failed: %s", e, exc_info=True)
+            return f"Error: failed to verify blueprint: {e}"
+        if existing is None or (pid is not None and existing.project_id != pid):
+            return "Blueprint not found."
+
         try:
             bp = await asyncio.to_thread(
                 repo.update, blueprint_id, **fields

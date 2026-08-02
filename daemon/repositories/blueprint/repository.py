@@ -76,7 +76,7 @@ class BlueprintRepository:
             if blueprint is None:
                 return None
 
-            if {"content", "file_refs", "tags"}.intersection(fields):
+            if {"content", "file_refs", "tags", "trigger_queries"}.intersection(fields):
                 blueprint.version += 1
             for name, value in fields.items():
                 if not hasattr(blueprint, name):

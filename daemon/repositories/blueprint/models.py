@@ -26,6 +26,11 @@ class Blueprint(SQLModel, table=True):
             "slug",
             name="uq_project_blueprints_project_slug",
         ),
+        UniqueConstraint(
+            "project_id",
+            "name",
+            name="uq_project_blueprints_project_name",
+        ),
         Index("ix_project_blueprints_project_id", "project_id"),
         Index("ix_project_blueprints_kind", "kind"),
         Index("ix_project_blueprints_status", "status"),
@@ -65,6 +70,10 @@ class Blueprint(SQLModel, table=True):
         default_factory=list,
         sa_column=Column("file_refs", JSONBType, nullable=False),
     )
+    trigger_queries: list[str] = Field(
+        default_factory=list,
+        sa_column=Column("trigger_queries", JSONBType, nullable=False),
+    )
     version: int = Field(default=1)
     embedding_model: Optional[str] = Field(default=None, max_length=128)
     source: str = Field(default="auto", max_length=16)
@@ -85,6 +94,7 @@ class Blueprint(SQLModel, table=True):
             "status": self.status,
             "tags": self.tags,
             "file_refs": self.file_refs,
+            "trigger_queries": list(self.trigger_queries) if self.trigger_queries else [],
             "version": self.version,
             "embedding_model": self.embedding_model,
             "source": self.source,
@@ -164,7 +174,19 @@ class BlueprintRevision(SQLModel, table=True):
     version: int = Field(default=1)
     content_snapshot: str = Field(sa_column=Column(Text, nullable=False))
     source: str = Field(default="auto", max_length=16)
-    revision_summary: Optional[str] = Field(default=None, max_length=512)
+    file_refs: list[str] = Field(
+        default_factory=list,
+        sa_column=Column("file_refs", JSONBType, nullable=False),
+    )
+    tags: list[dict] = Field(
+        default_factory=list,
+        sa_column=Column("tags", JSONBType, nullable=False),
+    )
+    trigger_queries: list[str] = Field(
+        default_factory=list,
+        sa_column=Column("trigger_queries", JSONBType, nullable=False),
+    )
+    reason: Optional[str] = Field(default=None, max_length=512)
     created_at: str = Field(default_factory=_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
@@ -175,6 +197,9 @@ class BlueprintRevision(SQLModel, table=True):
             "version": self.version,
             "content_snapshot": self.content_snapshot,
             "source": self.source,
-            "revision_summary": self.revision_summary,
+            "file_refs": self.file_refs,
+            "tags": self.tags,
+            "trigger_queries": self.trigger_queries,
+            "reason": self.reason,
             "created_at": self.created_at,
         }

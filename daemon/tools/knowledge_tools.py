@@ -38,6 +38,19 @@ RAG_TOOL_NAMES = frozenset({"rag_query_data", "rag_get_graph"})
 # lacks the information the caller needs (i.e. "Need Update KB").
 KB_GAP_TOOL_NAME = "read_file"
 
+# ── Blueprinter post-experience trigger keywords (§4.5) ──────────────
+# Architecture/domain keywords that indicate an experience() call may
+# contain structural drift worth a blueprint scan. Intentionally broad —
+# a no-op scan is cheaper than missing real drift.
+_BLUEPRINT_TRIGGER_KEYWORDS = frozenset({
+    "architecture", "pattern", "module", "service", "directory structure",
+    "entry point", "lifecycle", "protocol", "schema", "migration",
+    "queue", "directory", "component", "layer", "pipeline", "config",
+    "convention", "endpoint", "api", "database", "model", "repository",
+    "handler", "middleware", "decorator", "graph node", "state machine",
+    "session", "checkpoint", "context injection", "tool registry",
+})
+
 
 async def _scan_checkpoint_for_tool_match(
     checkpointer,
@@ -395,6 +408,27 @@ async def _enqueue_experience_job(
                 "text_preview": text[:100],
             },
         )
+        # ── Blueprinter post-experience trigger (filtered) ──────
+        # Sidecar: if the experience text mentions architecture-domain
+        # keywords, enqueue a blueprinter scan on system_background_queue.
+        # Fire-and-forget — same pattern as the kb-writer enqueue above.
+        # Errors logged + swallowed, never propagate.
+        try:
+            text_lower = text.lower()
+            if any(kw in text_lower for kw in _BLUEPRINT_TRIGGER_KEYWORDS):
+                await _enqueue_blueprinter_scan(
+                    manager=manager,
+                    text=text,
+                    project_id=project_id,
+                    source_instance_id=source_instance_id,
+                )
+        except Exception as sidecar_err:
+            # Fire-and-forget: sidecar failure must not affect experience()
+            logger.warning(
+                "Blueprinter sidecar enqueue failed (non-fatal): %s",
+                sidecar_err,
+            )
+        # ── End blueprinter sidecar ─────────────────────────────
         logger.debug(
             "Enqueued kb-writer job for project %s on queue %s",
             project_id, queue.queue_id,
@@ -403,6 +437,67 @@ async def _enqueue_experience_job(
     except Exception as e:
         # Fire-and-forget: don't fail the experience response if job creation fails
         logger.warning("Failed to enqueue kb-writer job: %s", e)
+
+
+async def _enqueue_blueprinter_scan(
+    manager: "InstanceManager",
+    text: str,
+    project_id: str,
+    source_instance_id: str,
+) -> None:
+    """Fire-and-forget: enqueue a blueprinter drift scan on the background queue.
+
+    Only called when the experience text matches architecture-domain keywords.
+    Designed to never raise — all errors are logged and swallowed.
+    """
+    try:
+        job_service = getattr(manager, "_job_queue_service", None)
+        if job_service is None:
+            return
+
+        bg_queue = await asyncio.to_thread(
+            job_service._queue_repo.get_by_name,
+            project_id, "system_background_queue",
+        )
+        if bg_queue is None:
+            logger.debug(
+                "No system_background_queue for project %s, skipping blueprinter scan",
+                project_id,
+            )
+            return
+
+        await job_service.enqueue(
+            agent_id="blueprinter",
+            message=(
+                "Post-experience drift signal detected.\n\n"
+                f"Experience text:\n{text[:2000]}\n\n"
+                f"Project: {project_id}\n\n"
+                "Analyze this knowledge for architectural drift. "
+                "If a blueprint area needs creation or revision, "
+                "do so. Respect the rate limit."
+            ),
+            source=f"blueprint-sidecar:{source_instance_id}",
+            project_id=project_id,
+            priority=8,  # lower than kb-writer (5); background
+            queue_id=bg_queue.queue_id,
+            idempotency_key=None,  # allow multiple signals
+            metadata={
+                "triggered_by": "post_experience_sidecar",
+                "trigger": "post-experience",
+                "source_instance_id": source_instance_id,
+                "text_preview": text[:100],
+            },
+        )
+        logger.debug(
+            "Enqueued blueprinter post-experience job for project %s",
+            project_id,
+        )
+    except Exception as sidecar_err:
+        # Fire-and-forget: sidecar failure must not affect experience()
+        logger.warning(
+            "Blueprinter sidecar enqueue failed (non-fatal): %s",
+            sidecar_err,
+        )
 
 
 def _extract_concise_section(content: str) -> str | None:

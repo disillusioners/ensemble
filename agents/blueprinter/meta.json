@@ -1,0 +1,14 @@
+{
+  "id": "blueprinter",
+  "name": "Blueprinter",
+  "description": "Automatically maintains the project blueprint corpus by detecting architectural drift and revising blueprints",
+  "icon": "📐",
+  "color": "accent-teal",
+  "version": "1.0.0",
+  "llm_model": "quick",
+  "blueprint_inactive": true,
+  "tools": {
+    "allow": ["blueprint", "knowledge", "filesystem", "time", "self", "help"]
+  },
+  "team_members": []
+}

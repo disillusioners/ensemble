@@ -84,6 +84,7 @@ from .services.skill_embedding_service import SkillEmbeddingService
 from .services.skill_store_service import SkillStoreService
 from .services.skill_search_service import SkillSearchService
 from .services.blueprint_matcher import BlueprintMatcher
+from .services.blueprint_rate_limiter import BlueprintRateLimiter
 from .services.skill_injection_service import SkillInjectionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
@@ -926,11 +927,28 @@ class InstanceManager:
             self._skill_search_service = None
 
         # Project Blueprint: matching engine (BM25 + vector fusion).
-        self._blueprint_matcher = BlueprintMatcher(
-            repository=self._blueprint_repo,
-            embedding_service=getattr(self, "_skill_embedding_service", None),
-            config=self.config.blueprint,
-        )
+        # Only construct if the embedding service is available; Phase 2
+        # injection code handles ``matcher is None`` gracefully (skips
+        # blueprint injection).
+        if self._skill_embedding_service is not None:
+            self._blueprint_matcher = BlueprintMatcher(
+                repository=self._blueprint_repo,
+                embedding_service=self._skill_embedding_service,
+                config=self.config.blueprint,
+            )
+        else:
+            self._blueprint_matcher = None
+            logger.warning(
+                "BlueprintMatcher not initialized - "
+                "no embedding service available"
+            )
+
+        # Project Blueprint Phase 4: rate limiter + circuit breaker for
+        # the blueprinter agent. Caps revisions per hour per project and
+        # trips a circuit breaker after N consecutive failures.
+        # In-process only — no persistence (state resets on restart,
+        # acceptable for a background maintenance agent).
+        self._blueprint_rate_limiter = BlueprintRateLimiter()
 
         # Skill Evolution Phase 4: Tier 0 metrics recorder + Tier 1
         # trigger engine. The four new repositories (``usage``,
