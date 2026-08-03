@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, NamedTuple
 
-from sqlalchemy import func, select, text, update as sa_update
+from sqlalchemy import exists, func, select, text, update as sa_update
 from sqlmodel import Session
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
@@ -1131,9 +1131,48 @@ Provide a concise summary:"""
             result, last_content, completed_message_id
         )
 
+    @staticmethod
+    def _ghost_child_filter():
+        """Boolean SQL expr: True when an ``Instance`` child row is a ghost.
+
+        A ghost (Inc 2026-08-03 ``tester-stuck-waiting-children-orphaned-idle-worker``)
+        is a child that was spawned but whose dispatch FAILED — it sits at
+        ``status='idle'``, ``version=1``, and has NEVER received a
+        ``message_queue`` or ``task`` row (no work was ever queued, no turn
+        ever ran). Because ``idle`` is not in ``TERMINAL_STATUSES``, both
+        completion guards count such a child as "active" forever and
+        permanently wedge its parent at ``waiting_children`` — the child
+        can never produce a completion report on its own (its dispatch
+        already failed), so the parent must not wait for it.
+
+        Excluding ghosts via this filter unblocks the wedge regardless of
+        which spawn/send failure mode produced the orphan (cold-load
+        ``None``-read, unattributed cache eviction, etc. — all left the row
+        idle/v1/empty). The filter is intentionally EMPTY-state-based so a
+        genuinely-dispatched ``idle`` child (has queued work but has not
+        started its first turn yet) is NOT treated as a ghost — its
+        ``message_queue``/``task`` rows keep it blocking as intended.
+
+        Returns the ``Instance``-scoped boolean expression; callers wrap it
+        with ``~`` (NOT) to exclude ghosts from an active-children count.
+        """
+        no_messages = ~exists(
+            select(MessageQueue.message_id).where(
+                MessageQueue.instance_id == Instance.instance_id
+            )
+        )
+        no_tasks = ~exists(
+            select(Task.id).where(Task.instance_id == Instance.instance_id)
+        )
+        return (
+            (Instance.status == InstanceStatus.IDLE.value)
+            & (Instance.version == 1)
+            & no_messages
+            & no_tasks
+        )
+
     def _count_actionable_pending_tasks(self, session: Session, instance_id: str) -> int:
         """Count PENDING tasks for an instance that will actually run a turn.
-
         Used by both completion guards (root + non-root) to decide whether
         to defer completion. A PENDING ``process_report`` task whose report
         was ALREADY delivered via the report-injection hot path
@@ -1494,6 +1533,7 @@ Provide a concise summary:"""
                             InstanceStatus.FAILED.value,
                         ])
                     )
+                    .where(~ChildReportsService._ghost_child_filter())
                 )
                 live_children = int(session.scalar(live_children_stmt) or 0)
                 if live_children > 0:
@@ -1871,6 +1911,7 @@ Provide a concise summary:"""
                 .where(
                     Instance.status.not_in(TERMINAL_STATUSES)
                 )
+                .where(~self._ghost_child_filter())
             ).scalar_one()
             # ─── Pending-task guard (TOCTOU fix, 2026-07-22) ──────────────
             # ``active_children == 0`` is necessary but NOT sufficient for

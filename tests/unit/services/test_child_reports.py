@@ -612,3 +612,191 @@ class TestLiveChildrenDefenseInDepth:
         with Session(engine) as session:
             inst = session.get(Instance, root_id)
             assert inst.status == InstanceStatus.COMPLETED.value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression: ghost-child exclusion (Inc 2026-08-03
+# tester-stuck-waiting-children-orphaned-idle-worker)
+#
+# A ghost child is one spawned but whose dispatch FAILED — it sits at
+# ``status='idle'``, ``version=1``, with ZERO ``message_queue`` and
+# ``task`` rows (no work ever queued, no turn ever ran). Because ``idle``
+# is not in ``TERMINAL_STATUSES``, both completion guards counted such a
+# child as active forever and permanently wedged the parent at
+# ``waiting_children``. The fix (``ChildReportsService._ghost_child_filter``)
+# excludes ghosts from both the root live-children gate
+# (``child_reports.py:~1531``) and the non-root active-children guard
+# (``child_reports.py:~1900``).
+#
+# Verified against production ``ensemble_prod`` (PG): the reported ghost
+# ``33477fe4`` (idle/v1/0-msgs/0-tasks) AND 8 additional stale wedges
+# (April–May, all idle/v1 developer ghosts) matched this exact fingerprint.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_child_instance_full(
+    engine: Engine,
+    *,
+    parent_id: str,
+    status: str = InstanceStatus.RUNNING.value,
+    version: int = 1,
+    seed_message: bool = False,
+    seed_task: bool = False,
+) -> str:
+    """Insert a child Instance row with fine-grained control over ghost
+    characteristics (version) + optional work rows (message_queue / task).
+
+    Used by the ghost-exclusion tests to construct (a) a true ghost
+    (idle, v1, no work rows) and (b) an idle child that HAS queued work
+    (NOT a ghost — must still block its parent).
+    """
+    cid = f"child-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as session:
+        inst = Instance(
+            instance_id=cid,
+            agent_id="worker",
+            agent_name="worker",
+            agent_dir="/tmp/worker",
+            parent_id=parent_id,
+            status=status,
+            version=version,
+            instance_metadata={},
+        )
+        session.add(inst)
+        if seed_message:
+            session.add(MessageQueue(
+                message_id=f"msg-{uuid.uuid4().hex[:8]}",
+                instance_id=cid,
+                content="queued task",
+                type=MessageType.AGENT.value,
+            ))
+        if seed_task:
+            session.add(Task(instance_id=cid))
+        session.commit()
+    return cid
+
+
+class TestGhostChildExclusion:
+    """Regression for Inc 2026-08-03
+    ``tester-stuck-waiting-children-orphaned-idle-worker``.
+
+    See the module-level docstring above for the full incident summary.
+    """
+
+    # ── Root live-children gate (child_reports.py live_children_stmt) ──
+
+    def test_root_idle_ghost_child_does_not_block_completion(self, engine: Engine):
+        """A root with ONLY an idle ghost child (v1, no msgs, no tasks)
+        must NOT defer — the ghost's dispatch already failed and it can
+        never produce a completion report, so the root is free to
+        complete. This is the exact incident scenario (leader wedged by
+        a ghost worker)."""
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        _seed_child_instance_full(
+            engine, parent_id=root_id, status=InstanceStatus.IDLE.value,
+            version=1, seed_message=False, seed_task=False,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-x",
+            last_content="assistant text",
+        )
+
+        assert result.outcome == "root_completed", (
+            f"idle ghost must not block root completion; got {result.outcome}"
+        )
+        with Session(engine) as session:
+            assert session.get(Instance, root_id).status == InstanceStatus.COMPLETED.value
+
+    def test_root_idle_child_with_queued_message_still_blocks(self, engine: Engine):
+        """An idle child that HAS a ``message_queue`` row is NOT a ghost —
+        work is genuinely queued and the child will run a turn. It must
+        still block the root (guards against blanket-excluding ``idle``)."""
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        _seed_child_instance_full(
+            engine, parent_id=root_id, status=InstanceStatus.IDLE.value,
+            version=1, seed_message=True, seed_task=False,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-x",
+            last_content="assistant text",
+        )
+
+        assert result.outcome == "deferred_waiting_children", (
+            f"idle child with queued work must block root; got {result.outcome}"
+        )
+
+    def test_root_idle_child_with_queued_task_still_blocks(self, engine: Engine):
+        """Same as above but the dispatched work is a ``task`` row rather
+        than a raw message — the ghost filter requires BOTH tables empty,
+        so a queued task keeps the idle child blocking."""
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        _seed_child_instance_full(
+            engine, parent_id=root_id, status=InstanceStatus.IDLE.value,
+            version=1, seed_message=False, seed_task=True,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-x",
+            last_content="assistant text",
+        )
+
+        assert result.outcome == "deferred_waiting_children", (
+            f"idle child with queued task must block root; got {result.outcome}"
+        )
+
+    # ── Non-root active-children guard (child_reports.py active_children) ──
+
+    def test_nonroot_idle_ghost_child_completes(self, engine: Engine):
+        """The reported incident's exact dispatch site: a non-root tester
+        with one idle ghost child (spawn failed, never dispatched) must
+        NOT defer its completion_report to the leader. Without the fix
+        this fired on every turn and permanently wedged both the tester
+        and the leader at ``waiting_children``."""
+        service = _build_child_reports_service(engine)
+        leader_id = _seed_root_instance(engine)
+        tester_id = _seed_child_instance_full(
+            engine, parent_id=leader_id, status=InstanceStatus.RUNNING.value,
+        )
+        # The ghost that wedged the tester pre-fix.
+        _seed_child_instance_full(
+            engine, parent_id=tester_id, status=InstanceStatus.IDLE.value,
+            version=1, seed_message=False, seed_task=False,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=tester_id,
+            completed_message_id="msg-current",
+            last_content="Testing Complete: all tests green",
+        )
+
+        assert result.outcome == "regular_child_completed", (
+            f"idle ghost must not defer non-root completion; got {result.outcome}"
+        )
+
+    def test_nonroot_running_child_still_defers(self, engine: Engine):
+        """Sanity: a genuinely-active (running) child still defers the
+        non-root parent — the ghost filter must not over-exclude."""
+        service = _build_child_reports_service(engine)
+        leader_id = _seed_root_instance(engine)
+        tester_id = _seed_child_instance_full(
+            engine, parent_id=leader_id, status=InstanceStatus.RUNNING.value,
+        )
+        _seed_child_instance_full(
+            engine, parent_id=tester_id, status=InstanceStatus.RUNNING.value,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=tester_id,
+            completed_message_id="msg-x",
+            last_content="...",
+        )
+
+        assert result.outcome == "child_still_running_defer"

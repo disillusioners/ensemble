@@ -603,6 +603,23 @@ async def _resolve_instance_id(
         await manager.get_instance(instance_id)
         return instance_id
     except KeyError:
+        # Exact match failed. Log authoritatively — this failure is otherwise
+        # silent: ``_resolve_instance_id`` returns a ValueError that the tool
+        # wrappers surface to the LLM as a ``ToolMessage`` string, NOT as a
+        # log line. Inc 2026-08-03 (tester-stuck-waiting-children) had ZERO
+        # log lines for the "instance not found" dispatch failure that
+        # produced the ghost; the wedge was only discoverable by decoding
+        # checkpoint_blobs. A WARNING here surfaces a just-spawned-but-
+        # unresolvable instance in real time (the typical ghost-creation
+        # signature) so operators don't need checkpoint forensics.
+        logger.warning(
+            "instance resolution failed (KeyError from get_instance): "
+            "instance_id=%s — not in cache and not in DB; "
+            "check for a failed spawn / cold-load None-read "
+            "(ghost-child risk for spawning parents)",
+            instance_id,
+            extra={"unresolved_instance_id": instance_id},
+        )
         # Exact match failed - try fuzzy matching
         near_matches = manager.find_near_instance(instance_id, max_distance=DEFAULT_FUZZY_MATCH_DISTANCE)
         if near_matches:
