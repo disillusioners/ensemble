@@ -349,11 +349,18 @@ class BlueprintMatcher:
         scored: list[tuple[float, int]] = []  # (final, candidate idx)
         for idx, (bp, triggers) in enumerate(candidates):
             # Normalize BM25 to [0,1].
-            bm25_norm = (
-                (bm25_raw[idx] - bm25_min) / span
-                if span > 0
-                else 0.0
-            )
+            if span > 0:
+                bm25_norm = (bm25_raw[idx] - bm25_min) / span
+            elif bm25_raw[idx] > 0:
+                # G6: single-candidate or all-equal edge case.
+                # A non-zero raw BM25 score means the candidate has
+                # relevant terms. With no spread to normalize
+                # against, treat it as fully relevant (1.0).
+                bm25_norm = 1.0
+            else:
+                # Genuinely zero score (no relevant terms /
+                # no candidate match).
+                bm25_norm = 0.0
 
             # Vector score = MAX cosine similarity over trigger embeddings.
             vec_score = 0.0

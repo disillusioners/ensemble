@@ -48,6 +48,47 @@ class BlueprintRepository:
                 )
             ).first()
 
+    def auto_dedup_cores(self, project_id: str) -> int:
+        """G7 pre-flight (C6): if multiple active cores exist for a project,
+        keep the most recent (highest version, latest updated_at) and
+        soft-disable the rest (``is_active = False``). Returns the count
+        of cores soft-disabled.
+
+        Run BEFORE creating the one-core-per-project partial unique
+        index. The DB-level index is the PRIMARY enforcement
+        mechanism; this app-level dedup is a one-time cleanup so the
+        index can be created against existing duplicates.
+        """
+        with Session(self.engine) as session:
+            cores = list(
+                session.exec(
+                    select(Blueprint)
+                    .where(Blueprint.project_id == project_id)
+                    .where(Blueprint.kind == "core")
+                    .where(Blueprint.is_active == True)  # noqa: E712
+                    .order_by(
+                        col(Blueprint.version).desc(),
+                        col(Blueprint.updated_at).desc(),
+                    )
+                )
+            )
+            if len(cores) <= 1:
+                return 0
+
+            kept = cores[0]
+            disabled = 0
+            for core in cores[1:]:
+                core.is_active = False
+                logger.info(
+                    "G7 auto-dedup: soft-disabling duplicate core %s for "
+                    "project %s (kept %s)",
+                    core.id, project_id, kept.id,
+                )
+                session.add(core)
+                disabled += 1
+            session.commit()
+        return disabled
+
     def list_by_project(
         self,
         project_id: str,
@@ -63,6 +104,19 @@ class BlueprintRepository:
             return list(session.exec(statement))
 
     def create(self, **fields: Any) -> Blueprint:
+        # G7 UX guard (C6): if a caller is creating a ``core``
+        # blueprint for a project that already has an active core,
+        # raise a friendly ValueError BEFORE the DB-level partial
+        # unique index fires. The DB constraint is the primary
+        # enforcement mechanism; this is convenience only.
+        if fields.get("kind") == "core":
+            existing = self.get_core(fields["project_id"])
+            if existing is not None:
+                raise ValueError(
+                    f"Project {fields['project_id']} already has a core "
+                    f"blueprint (id={existing.id}). "
+                    "Only one core per project is allowed."
+                )
         blueprint = Blueprint(**fields)
         with Session(self.engine) as session:
             session.add(blueprint)
@@ -220,7 +274,16 @@ class BlueprintRepository:
         self,
         project_id: str,
     ) -> list[tuple[Blueprint, list[BlueprintTrigger]]]:
-        """Load active area blueprints for a project with grouped triggers."""
+        """Load active area blueprints for a project with grouped triggers.
+
+        G8: only ``status == "published"`` blueprints are matchable.
+        Drafts (``status == "draft"``) are excluded from the matcher
+        load so a half-written blueprint never reaches the agent's
+        context. The hardcoded ``"published"`` filter matches the
+        :attr:`BlueprintConfig.matchable_statuses` default; the config
+        option is reserved for future flexibility (e.g. ``"review"``
+        for phased rollouts).
+        """
         with Session(self.engine) as session:
             blueprints = list(
                 session.exec(
@@ -228,6 +291,7 @@ class BlueprintRepository:
                         Blueprint.project_id == project_id,
                         Blueprint.kind == "area",
                         Blueprint.is_active == True,  # noqa: E712
+                        Blueprint.status == "published",  # G8: drafts NOT matchable
                     )
                 )
             )

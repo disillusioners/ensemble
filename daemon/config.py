@@ -719,6 +719,15 @@ class BlueprintConfig(EmbeddingConfig):
     vector_weight: float = Field(default=0.6)
     match_threshold: float = Field(default=0.30)
     max_results: int = Field(default=5)
+    # G8: statuses eligible for matcher loading. The repository's
+    # ``search_candidates`` uses a hardcoded ``"published"`` filter
+    # for now; this option is reserved for future flexibility
+    # (e.g. phased rollouts, ``"review"`` for human approval
+    # checkpoints). Drafts are excluded by default.
+    matchable_statuses: list[str] = Field(
+        default_factory=lambda: ["published"],
+        description="Blueprint statuses eligible for matching (G8). Drafts excluded by default.",
+    )
 
 
 class Config(BaseSettings):

@@ -41,6 +41,7 @@ from .repositories import (
     create_skill_repository,
     create_blueprint_repository,
     create_blueprint_embedding_repository,
+    create_blueprint_pending_repository,
     create_skill_lineage_repository,
     create_skill_embedding_repository,
     create_skill_usage_repository,
@@ -759,6 +760,25 @@ class InstanceManager:
 
         # Project Blueprint: blueprint repository (Phase 1 schema created via SQLModel.metadata.create_all)
         self._blueprint_repo = create_blueprint_repository(engine=self._engine, create_tables=False)
+        # Phase 2 / C3: pending-experience queue repository. The
+        # ``project_blueprint_pending_updates`` table is auto-created
+        # by ``SQLModel.metadata.create_all`` at line 439 because the
+        # model is registered via the import above. The repo itself
+        # is constructed regardless of any flag — the smart-scan
+        # trigger (see Item 4) checks ``get_pending_count`` on every
+        # nudge, so the repo must be available for read-only consumers
+        # even when the blueprinter is disabled.
+        self._blueprint_pending_repo = create_blueprint_pending_repository(
+            engine=self._engine, create_tables=False,
+        )
+
+        # G7 (C6): one-core-per-project DB constraint. Called here — AFTER
+        # ``self._blueprint_repo`` and ``self._project_repository`` are
+        # assigned — so the auto-dedup pre-flight can reach them. The
+        # helper itself catches and logs errors so a constraint failure
+        # cannot crash startup; the app-level UX guard in
+        # ``BlueprintRepository.create`` is the safety net.
+        self._ensure_blueprint_g7_unique_index()
 
         # ── Project Blueprint: embedding repo + service (G4 fix) ───────
         # INDEPENDENT of skill_evolution. Operates on the same
@@ -4231,6 +4251,100 @@ class InstanceManager:
             "Phase 5 column drop: seven legacy job_queue_items columns "
             "removed (or absent) on PostgreSQL"
         )
+
+    def _ensure_blueprint_g7_unique_index(self) -> None:
+        """C6 / G7: enforce one core per project via a partial unique index.
+
+        Phase 2 of the Project Blueprint subsystem. The DB-level
+        partial unique index is the PRIMARY enforcement mechanism —
+        the app-level UX guard in :meth:`BlueprintRepository.create`
+        is convenience only. The index is created via raw DDL
+        (NOT a ``.sql`` migration, which the migration runner
+        silently skips on PostgreSQL) so it works on both
+        SQLite and PostgreSQL.
+
+        Steps
+        -----
+
+        1. **Auto-dedup pre-flight** — for every project, scan for
+           duplicate active cores and soft-disable every copy except
+           the newest (``auto_dedup_cores``). This is required
+           BEFORE the unique index can be created on existing
+           databases with duplicates.
+        2. **Create the partial unique index** — ``WHERE kind =
+           'core' AND is_active``. Bare ``is_active`` is portable
+           across drivers:
+
+           * SQLite stores ``bool`` as INTEGER 0/1; bare ``is_active``
+             is a truthy check (0 is false, 1 is true).
+           * PostgreSQL uses a genuine BOOLEAN column; bare
+             ``is_active`` is a boolean expression.
+
+           Do NOT use ``is_active = 1`` — PostgreSQL has no
+           int→boolean implicit cast and will raise
+           ``operator does not exist: boolean = integer``.
+
+           ``IF NOT EXISTS`` makes the call idempotent.
+
+        Failure semantics
+        -----------------
+
+        Wrapped in ``try/except Exception`` so that a constraint
+        failure (e.g. driver inconsistency, dead rows) does not
+        crash startup. The app-level UX guard in
+        :meth:`BlueprintRepository.create` still catches the
+        double-core case at the API boundary; the DB index is the
+        belt-and-braces enforcement.
+        """
+        try:
+            # Step 1: Auto-dedup pre-flight (LEADER DECISION #2).
+            # ``_blueprint_repo`` is constructed earlier in __init__.
+            if self._blueprint_repo is not None:
+                project_repo = getattr(self, "_project_repository", None)
+                if project_repo is not None:
+                    try:
+                        projects = project_repo.list_projects(limit=10000)
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.debug(
+                            "G7 auto-dedup: project list unavailable, "
+                            "skipping pre-flight: %s", exc,
+                        )
+                        projects = []
+                    for project in projects:
+                        try:
+                            self._blueprint_repo.auto_dedup_cores(
+                                project.id
+                            )
+                        except Exception as exc:  # noqa: BLE001 — per-project scope
+                            logger.warning(
+                                "G7 auto-dedup failed for project %s: %s",
+                                project.id, exc,
+                            )
+
+            # Step 2: Create the partial unique index.
+            # SQLite stores booleans as INTEGER (0/1); bare ``is_active``
+            # is truthy. PostgreSQL uses genuine BOOLEAN; bare
+            # ``is_active`` is a boolean expression. Both drivers
+            # evaluate ``WHERE is_active`` correctly. Do NOT use
+            # ``= 1`` — PostgreSQL has no int→boolean implicit cast
+            # and will raise ``operator does not exist: boolean = integer``.
+            ddl = (
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_blueprint_one_core "
+                "ON project_blueprints (project_id) "
+                "WHERE kind = 'core' AND is_active"
+            )
+            with self._engine.begin() as conn:
+                conn.execute(text(ddl))
+            logger.info(
+                "G7: created partial unique index ux_blueprint_one_core "
+                "(one core per project, active rows)"
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash startup
+            logger.error(
+                "G7 partial unique index creation failed: %s. "
+                "App-level UX guard in create() is still active.",
+                exc, exc_info=True,
+            )
 
     def setup_worker_pool(
         self,

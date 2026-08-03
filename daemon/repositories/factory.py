@@ -35,6 +35,10 @@ from .blueprint.embedding_repository import (
     BlueprintEmbeddingRepository,
     create_blueprint_embedding_repository as _create_blueprint_embedding_repository,
 )
+from .blueprint.pending_repository import (
+    BlueprintPendingRepository,
+    create_blueprint_pending_repository as _create_blueprint_pending_repository,
+)
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -765,6 +769,41 @@ def create_blueprint_embedding_repository(
         SQLModel.metadata.create_all(engine)
 
     return _create_blueprint_embedding_repository(engine)
+
+
+def create_blueprint_pending_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> BlueprintPendingRepository:
+    """Create a BlueprintPendingRepository from configuration or shared engine.
+
+    Persistence layer for the C3 pending-experience queue
+    (``project_blueprint_pending_updates``). The table is created on
+    first use via ``SQLModel.metadata.create_all`` (matching the
+    convention of the surrounding factory functions).
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`BlueprintPendingRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return _create_blueprint_pending_repository(engine)
 
 
 def create_skill_lineage_repository(

@@ -523,8 +523,12 @@ class BlueprintWriteService:
                         reason="rollback after trigger storage failure",
                         **_pre_state,
                     )
-                except Exception:
-                    pass  # C8: log + swallow; operator inspects DB
+                except Exception as rollback_err:
+                    logger.error(
+                        "Rollback update failed for blueprint %s "
+                        "(trigger store failure: %s): %s",
+                        blueprint_id, e, rollback_err, exc_info=True,
+                    )
                 await self._record_rate_result(success=False)
                 raise BlueprintPublishError(
                     f"Trigger replace failed; update rolled back: {e}"

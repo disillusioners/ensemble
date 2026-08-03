@@ -1,9 +1,15 @@
 """Lint test: all blueprint writes route through BlueprintWriteService.
 
 Verifies that no file outside ``blueprint_write_service.py`` calls
-``BlueprintRepository.create`` / ``update`` / ``soft_delete`` directly.
-This enforces the canonical write boundary (C5 fix / G1): all writes
-must go through :class:`~daemon.services.blueprint_write_service.BlueprintWriteService`.
+``BlueprintRepository.create`` / ``update`` / ``soft_delete`` /
+``replace_triggers`` directly. This enforces the canonical write
+boundary (C5 fix / G1): all writes must go through
+:class:`~daemon.services.blueprint_write_service.BlueprintWriteService`.
+
+Note: ``replace_triggers`` lives on :class:`BlueprintEmbeddingRepository`
+(not on the core repo), but the grep pattern guards both call shapes
+because the canonical write service is the only place that should
+invoke trigger replacement on either repo.
 """
 
 from __future__ import annotations
@@ -14,12 +20,12 @@ from pathlib import Path
 
 def test_no_direct_blueprint_writes() -> None:
     """No file outside blueprint_write_service.py may call
-    BlueprintRepository.(create|update|soft_delete) directly."""
+    BlueprintRepository.(create|update|soft_delete|replace_triggers) directly."""
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
         [
             "grep", "-rnE",
-            r"_blueprint_repo\.(create|update|soft_delete)\b",
+            r"_blueprint_repo\.(create|update|soft_delete|replace_triggers)\b",
             str(root / "daemon"),
             "--include=*.py",
         ],
