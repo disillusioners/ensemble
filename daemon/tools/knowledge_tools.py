@@ -408,27 +408,30 @@ async def _enqueue_experience_job(
                 "text_preview": text[:100],
             },
         )
-        # ── Blueprinter post-experience trigger (filtered) ──────
-        # Sidecar: if the experience text mentions architecture-domain
-        # keywords, enqueue a blueprinter scan on system_background_queue.
-        # Fire-and-forget — same pattern as the kb-writer enqueue above.
-        # Errors logged + swallowed, never propagate.
-        try:
-            text_lower = text.lower()
-            if any(kw in text_lower for kw in _BLUEPRINT_TRIGGER_KEYWORDS):
-                await _enqueue_blueprinter_scan(
-                    manager=manager,
-                    text=text,
-                    project_id=project_id,
-                    source_instance_id=source_instance_id,
-                )
-        except Exception as sidecar_err:
-            # Fire-and-forget: sidecar failure must not affect experience()
-            logger.warning(
-                "Blueprinter sidecar enqueue failed (non-fatal): %s",
-                sidecar_err,
-            )
-        # ── End blueprinter sidecar ─────────────────────────────
+        # Disabled: blueprinter job on experience — hot fix to prevent queue flooding.
+        # The lines below are commented out; the _enqueue_blueprinter_scan helper
+        # itself is left intact so this can be re-enabled later.
+        # # ── Blueprinter post-experience trigger (filtered) ──────
+        # # Sidecar: if the experience text mentions architecture-domain
+        # # keywords, enqueue a blueprinter scan on system_background_queue.
+        # # Fire-and-forget — same pattern as the kb-writer enqueue above.
+        # # Errors logged + swallowed, never propagate.
+        # try:
+        #     text_lower = text.lower()
+        #     if any(kw in text_lower for kw in _BLUEPRINT_TRIGGER_KEYWORDS):
+        #         await _enqueue_blueprinter_scan(
+        #             manager=manager,
+        #             text=text,
+        #             project_id=project_id,
+        #             source_instance_id=source_instance_id,
+        #         )
+        # except Exception as sidecar_err:
+        #     # Fire-and-forget: sidecar failure must not affect experience()
+        #     logger.warning(
+        #         "Blueprinter sidecar enqueue failed (non-fatal): %s",
+        #         sidecar_err,
+        #     )
+        # # ── End blueprinter sidecar ─────────────────────────────
         logger.debug(
             "Enqueued kb-writer job for project %s on queue %s",
             project_id, queue.queue_id,
