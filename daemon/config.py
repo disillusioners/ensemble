@@ -537,32 +537,66 @@ class EmbeddingConfig(BaseSettings):
         * ``1536`` for ``embedding_dimensions`` (never ``None``)
 
         See class docstring for the full precedence rules and rationale.
+
+        NOTE on pydantic-settings behavior: when the subclass sets its own
+        ``env_prefix`` (e.g. ``SKILL_EVOLUTION_``), pydantic-settings does
+        NOT look up unprefixed ``EMBEDDING_*`` env vars. So ``values`` may
+        arrive here as an empty dict — the subclass default has not been
+        merged yet. We therefore must consult the SUBCLASS's own field
+        defaults (``cls.model_fields[field].default``) to decide whether
+        the shared fallback should apply.
         """
         if not isinstance(values, dict):
             return values
 
-        # Optional fields: fallback only when value is None (preserves
-        # subclass non-None defaults like SkillEvolutionConfig.embedding_model).
+        # Resolve the EFFECTIVE default for each field on the current class
+        # (which may be a subclass that re-declared the field with a non-None
+        # default). Pydantic-settings doesn't merge subclass defaults into
+        # ``values`` before this validator runs, so we must read them
+        # ourselves.
+        effective_defaults = {
+            name: cls.model_fields[name].default
+            for name in ("embedding_model", "embedding_dimensions",
+                         "embedding_base_url", "embedding_api_key")
+            if name in cls.model_fields
+        }
+
+        # Optional fields: fallback only when the field is absent from
+        # ``values`` AND the subclass default is None. This preserves
+        # subclass non-None defaults like
+        # ``SkillEvolutionConfig.embedding_model = "text-embedding-3-small"``
+        # while still resolving shared ``EMBEDDING_*`` for subclasses (like
+        # ``BlueprintConfig``) that default to None.
         for field_key, env_key in (
             ("embedding_model", "EMBEDDING_MODEL"),
             ("embedding_base_url", "EMBEDDING_BASE_URL"),
             ("embedding_api_key", "EMBEDDING_API_KEY"),
         ):
-            if values.get(field_key) is None:
-                shared = os.environ.get(env_key)
-                if shared:
-                    values[field_key] = shared
+            if field_key in values:
+                # Prefix-specific env var already populated this field;
+                # it wins over the shared fallback.
+                continue
+            if effective_defaults.get(field_key) is not None:
+                # Subclass has a non-None default — respect it; the operator
+                # who wants the shared value must set the prefix-specific
+                # var explicitly.
+                continue
+            shared = os.environ.get(env_key)
+            if shared:
+                values[field_key] = shared
 
         # embedding_dimensions defaults to 1536 (int, never None) — fallback
-        # when value is still the default. Malformed env vars are silently
-        # ignored (the field default stands).
-        if values.get("embedding_dimensions") == 1536:
-            shared = os.environ.get("EMBEDDING_DIMENSIONS")
-            if shared:
-                try:
-                    values["embedding_dimensions"] = int(shared)
-                except ValueError:
-                    pass
+        # when value is still the default AND the subclass hasn't overridden
+        # it. Malformed env vars are silently ignored (the field default
+        # stands).
+        if "embedding_dimensions" not in values:
+            if effective_defaults.get("embedding_dimensions") == 1536:
+                shared = os.environ.get("EMBEDDING_DIMENSIONS")
+                if shared:
+                    try:
+                        values["embedding_dimensions"] = int(shared)
+                    except ValueError:
+                        pass
 
         return values
 
