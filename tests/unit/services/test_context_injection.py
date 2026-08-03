@@ -1639,3 +1639,349 @@ class TestEdgeCaseFilenames:
             contents = read_context_file("unicode", filename)
         assert contents is not None
         assert "unicode body" in contents
+
+
+# ─── TestDebugMode ────────────────────────────────────────────────────────────
+
+
+class TestDebugMode:
+    """Tests for the HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG env var.
+
+    When the debug env var is set to a truthy value AND no file scores
+    above ``MATCH_THRESHOLD``, ``get_shared_context`` returns a debug
+    notice (a markdown table of all candidate files and their scores)
+    instead of the normal below-threshold fallback injection.
+
+    The debug string is non-empty and free of the ``"There is no context
+    yet."`` sentinel so it flows through ``build_shared_context_message``
+    into a proper ``[SYSTEM CONTEXT: Shared Context]`` HumanMessage.
+
+    Four scenarios are covered:
+      1. Debug OFF + no match  → normal fallback injection (no ``[Debug]``).
+      2. Debug ON  + no match  → debug notice with ``[Debug]`` + table.
+      3. Debug ON  + match     → normal injection (no ``[Debug]``).
+      4. Debug OFF + match     → normal injection (no ``[Debug]``).
+    """
+
+    def test_debug_off_no_match_returns_normal_fallback(self, tmp_path):
+        """Debug OFF + no threshold match → existing fallback behavior.
+
+        The highest-scoring below-threshold file is pre-loaded as Match 1.
+        No ``[Debug]`` string is present anywhere in the output.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-off-no-match"
+        context_dir.mkdir(parents=True)
+
+        # A file whose slug won't match the query at all (0% score).
+        (context_dir / "unrelated-topic_20260601_120000.md").write_text(
+            "## Answer\nSome unrelated content.\n"
+        )
+        # A second file for a richer debug table.
+        (context_dir / "another-unrelated_20260601_120001.md").write_text(
+            "## Answer\nMore unrelated content.\n"
+        )
+
+        monkeypatcher = pytest.MonkeyPatch()
+        monkeypatcher.delenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", raising=False)
+        try:
+            with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+                result = get_shared_context("debug-off-no-match", "zzzzz yyyyy")
+        finally:
+            monkeypatcher.undo()
+
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
+        # Normal fallback: highest-scoring file pre-loaded as Match 1.
+        assert "## unrelated-topic_20260601_120000.md (0% match)" in result or \
+               "## another-unrelated_20260601_120001.md (0% match)" in result
+        # No debug notice.
+        assert "[Debug]" not in result
+
+    def test_debug_on_no_match_returns_debug_table(self, tmp_path, monkeypatch):
+        """Debug ON + no threshold match → debug notice with all candidates.
+
+        The returned string contains ``[Debug]`` and a markdown table
+        listing every candidate file with its score. All below-threshold
+        files appear in the table. The output does NOT contain the
+        ``"There is no context yet."`` sentinel.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-on-no-match"
+        context_dir.mkdir(parents=True)
+
+        file_a = context_dir / "unrelated-topic_20260601_120000.md"
+        file_a.write_text("## Answer\nSome unrelated content.\n")
+        file_b = context_dir / "another-unrelated_20260601_120001.md"
+        file_b.write_text("## Answer\nMore unrelated content.\n")
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "true")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-on-no-match", "zzzzz yyyyy")
+
+        assert result is not None
+        # Debug marker present.
+        assert "[Debug]" in result
+        # Threshold mentioned.
+        threshold_pct = int(MATCH_THRESHOLD * 100)
+        assert f"({threshold_pct}%)" in result
+        # Markdown table header present.
+        assert "| File | Match Score |" in result
+        assert "|------|-------------|" in result
+        # Both candidate files appear in the table.
+        assert file_a.name in result
+        assert file_b.name in result
+        # Both scores shown (0% since query doesn't match any slug).
+        assert "0%" in result
+        # Must NOT contain the sentinel string.
+        assert "There is no context yet." not in result
+        # Must NOT contain the normal pre-loaded block.
+        assert "# Pre-loaded Context (auto-matched)" not in result
+
+    def test_debug_on_with_match_returns_normal_injection(self, tmp_path, monkeypatch):
+        """Debug ON + file DOES match → normal injection, no debug noise.
+
+        When a file scores above the threshold, the debug env var has no
+        effect — the matched file is injected normally and no ``[Debug]``
+        string appears.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-on-match"
+        context_dir.mkdir(parents=True)
+
+        auth_file = context_dir / "auth-module_20260601_120000.md"
+        auth_file.write_text(
+            "## Answer\nThis is about auth modules.\n"
+        )
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "1")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-on-match", "auth module")
+
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
+        assert "auth-module" in result
+        # No debug notice — files matched over threshold.
+        assert "[Debug]" not in result
+
+    def test_debug_off_with_match_returns_normal_injection(self, tmp_path, monkeypatch):
+        """Debug OFF + file DOES match → normal injection, no debug noise.
+
+        This is the baseline: debug env var unset, files match, everything
+        works as before.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-off-match"
+        context_dir.mkdir(parents=True)
+
+        auth_file = context_dir / "auth-module_20260601_120000.md"
+        auth_file.write_text(
+            "## Answer\nThis is about auth modules.\n"
+        )
+
+        monkeypatch.delenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", raising=False)
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-off-match", "auth module")
+
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
+        assert "auth-module" in result
+        # No debug notice.
+        assert "[Debug]" not in result
+
+    def test_debug_table_sorted_by_score_descending(self, tmp_path, monkeypatch):
+        """Debug table lists candidates sorted by score (highest first).
+
+        A file that partially matches (low score, still under threshold)
+        must appear before a file that doesn't match at all (0%).
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-sort"
+        context_dir.mkdir(parents=True)
+
+        # File that partially matches: slug "auth-real" shares "auth".
+        (context_dir / "auth-real_20260601_120000.md").write_text(
+            "## Answer\nAuth content.\n"
+        )
+        # File with zero overlap.
+        (context_dir / "zzzzz-noise_20260601_120001.md").write_text(
+            "## Answer\nNoise content.\n"
+        )
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "yes")
+
+        # Query with 11 tokens: "auth" matches auth-real → 1/11 ≈ 0.09 < 0.10.
+        # zzzzz-noise scores 0%.
+        query = "auth alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-sort", query)
+
+        assert result is not None
+        assert "[Debug]" in result
+
+        # The higher-scoring file (auth-real, ~9%) must appear BEFORE the
+        # zero-scoring file (zzzzz-noise, 0%) in the table.
+        pos_auth = result.find("auth-real_20260601_120000.md")
+        pos_noise = result.find("zzzzz-noise_20260601_120001.md")
+        assert pos_auth != -1, "auth-real file missing from debug table"
+        assert pos_noise != -1, "zzzzz-noise file missing from debug table"
+        assert pos_auth < pos_noise, "debug table not sorted by score descending"
+
+    def test_debug_table_shows_partial_score(self, tmp_path, monkeypatch):
+        """Debug table shows the actual (non-zero) score for a partial match.
+
+        Ensures the table isn't just listing 0% everywhere — a file with a
+        small but non-zero below-threshold score shows that score.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-partial"
+        context_dir.mkdir(parents=True)
+
+        # File that will partially match: slug "auth-real" shares "auth" with query.
+        (context_dir / "auth-real_20260601_120000.md").write_text(
+            "## Answer\nAuth content.\n"
+        )
+        # File with zero overlap.
+        (context_dir / "zzzzz-noise_20260601_120001.md").write_text(
+            "## Answer\nNoise content.\n"
+        )
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "yes")
+
+        # Query: "auth alpha bravo charlie delta echo foxtrot golf hotel india"
+        # = 10 tokens. "auth" matches auth-real → score = 1/10 = 0.10.
+        # At exactly 0.10, score < MATCH_THRESHOLD (0.10) is False, so it
+        # WOULD be treated as above threshold. Use 11 tokens → 1/11 ≈ 0.09.
+        query = "auth alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-partial", query)
+
+        assert result is not None
+        assert "[Debug]" in result
+        # The partially-matching file must show a non-zero score (9%).
+        assert "auth-real_20260601_120000.md" in result
+        # 1/11 ≈ 9.09% → int(9.09) = 9%.
+        assert "9%" in result
+        # The zero-match file shows 0%.
+        assert "zzzzz-noise_20260601_120001.md" in result
+        assert "0%" in result
+
+    def test_debug_mode_empty_directory(self, tmp_path, monkeypatch):
+        """Edge case 1: directory exists but has no .md files, debug ON.
+
+        With debug ON but nothing to score, ``get_shared_context`` must
+        NOT crash and must NOT emit the ``[Debug]`` notice — there are no
+        candidates to list. Behavior should be identical to debug OFF:
+        the standard "There is no context yet." payload.
+        """
+        # Create the context dir but leave it empty (no .md files).
+        context_dir = tmp_path / "ensemble" / "context" / "debug-empty-dir"
+        context_dir.mkdir(parents=True)
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "true")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-empty-dir", "anything")
+
+        # Should not crash; should produce the empty-context payload.
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "There is no context yet." in result
+        # No debug notice — no candidates to list.
+        assert "[Debug]" not in result
+
+    def test_debug_mode_missing_directory(self, tmp_path, monkeypatch):
+        """Edge case 2: shared context directory doesn't exist, debug ON.
+
+        When the resolved context path is absent (e.g. a fresh context
+        key that has never been written to), ``get_shared_context`` must
+        return the empty-context payload regardless of debug mode — the
+        early-return on ``not context_dir.exists()`` happens BEFORE the
+        debug path, so debug ON has no effect.
+        """
+        # Do NOT create any ensemble/context/<key> directory under tmp_path.
+        # Only the top-level tmpdir exists (it always does via the fixture).
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "true")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-missing-dir", "anything")
+
+        # Should not crash; should produce the empty-context payload.
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "There is no context yet." in result
+        # No debug notice — the debug branch is unreachable when the
+        # dir does not exist (early return on `not context_dir.exists()`).
+        assert "[Debug]" not in result
+
+    def test_debug_mode_caps_table_at_50_files(self, tmp_path, monkeypatch):
+        """Edge case 3: large number of files + debug ON is bounded.
+
+        ``_score_context_files`` caps the file scan at 50 entries
+        (sorted by mtime, most-recent first). The debug table therefore
+        must contain at most 50 rows even when the directory holds many
+        more — protects the system-prompt budget from runaway sizes.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-many-files"
+        context_dir.mkdir(parents=True)
+
+        # Create 60 .md files with slugs that share no tokens with the query.
+        # All will score 0% so the entire table will be "| 0% |" rows.
+        for i in range(60):
+            (context_dir / f"zzzzz-noise-{i:03d}_20260601_120000.md").write_text(
+                "## Answer\nNoise content.\n"
+            )
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "yes")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-many-files", "alpha beta gamma")
+
+        assert result is not None
+        # Debug notice must appear (no file clears the threshold).
+        assert "[Debug]" in result
+        # The debug table iterates over `scored`, which is capped at 50
+        # entries inside _score_context_files. Count "| 0% |" rows to
+        # confirm the cap holds — 60 files in, at most 50 rows out.
+        zero_rows = result.count("| 0% |")
+        assert zero_rows == 50, (
+            f"debug table should be capped at 50 rows, got {zero_rows}"
+        )
+
+    def test_debug_mode_boundary_score_equals_threshold(self, tmp_path, monkeypatch):
+        """Edge case 4: score exactly equal to MATCH_THRESHOLD is a match.
+
+        The matcher uses a strict less-than comparison
+        (``score < MATCH_THRESHOLD``), so a file scoring exactly at the
+        threshold counts as a match and the debug table is NOT emitted
+        even when debug is ON. This boundary case is the easy-to-get-wrong
+        off-by-one that the existing partial-score test deliberately
+        avoids (it uses 11 tokens to land at ~0.09). This test pins down
+        the >= side of the boundary explicitly.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "debug-boundary"
+        context_dir.mkdir(parents=True)
+
+        # Single-token slug "auth".
+        (context_dir / "auth_20260601_120000.md").write_text(
+            "## Answer\nAbout auth.\n"
+        )
+
+        monkeypatch.setenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", "true")
+
+        # 10-token query, 1 token matches the slug → 1/10 = 0.10 = threshold.
+        # At exactly the threshold, `score < MATCH_THRESHOLD` is False,
+        # so the file is treated as a match and the debug path is skipped.
+        query = "auth alpha bravo charlie delta echo foxtrot golf hotel india"
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("debug-boundary", query)
+
+        assert result is not None
+        # Normal injection runs — file is treated as a match.
+        assert "# Shared Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
+        # The boundary file appears with its 10% score in the injection.
+        assert "auth_20260601_120000.md (10% match)" in result
+        # Crucially: NO debug notice, because score was not strictly below
+        # the threshold. The >= comparison is what makes 0.10 a match.
+        assert "[Debug]" not in result
