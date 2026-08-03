@@ -1,5 +1,6 @@
 import {
   Component,
+  DestroyRef,
   signal,
   computed,
   inject,
@@ -94,6 +95,7 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly destroyRef = inject(DestroyRef);
 
   // ── Project-scoped state ─────────────────────────────────────────────
   // Project list + selected id are now driven by a dropdown above the
@@ -202,7 +204,7 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     this.projectsLoading.set(true);
     this.projectService
       .listProjects()
-      .pipe(takeUntilDestroyed())
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (response) => {
           this.projects.set(response.projects);
@@ -232,7 +234,7 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     // is unchanged (the initial snapshot already handled that case)
     // and skips the ``null`` param emitted during teardown.
     this.route.paramMap
-      .pipe(takeUntilDestroyed())
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((params) => {
         const id = params.get('projectId');
         if (id && id !== this.selectedProjectId()) {
