@@ -5,8 +5,10 @@ The new ``context`` parameter on ``send_message`` formats a parent-provided
 dict into a ``[SYSTEM CONTEXT: Task Context]`` markdown block. At the
 service level, that text arrives as the ``task_context`` kwarg of
 ``_process_message_with_tracking`` and is injected as a
-:class:`langchain_core.messages.HumanMessage` BEFORE the persistent
-context block (project / shared-context / skills) on the first attempt.
+:class:`langchain_core.messages.HumanMessage` AFTER the stable context
+blocks (project / shared-context / skills) but before the task message
+(so stable blocks stay at the top for prompt cache efficiency) on the
+first attempt.
 The retry path is intentionally excluded — the message is checkpointed
 on turn 1, so re-emitting it on a retry would double-inject.
 
@@ -24,15 +26,15 @@ capturing-graph pattern from
 * invoke ``_process_message_with_tracking`` with various combinations
   of ``task_context`` and ``is_retry``
 * assert on ``captured["graph_input"]["messages"]`` — the persistent
-  block sits BEFORE the user message in the list, so the
-  ``task_context`` HumanMessage lands at index 0 (or somewhere in the
-  persistent block if other context messages exist)
+  block sits BEFORE the user message in the list, and the
+  ``task_context`` HumanMessage is appended at the END of the
+  persistent block (after the stable context blocks)
 
 Each test class exercises one slice of the contract:
 
 * :class:`TestTaskContextHumanMessageInjection` — basic shape
-  (``task_context`` set, ``is_retry=False``), position (index 0),
-  guards (``None`` / empty / retry).
+  (``task_context`` set, ``is_retry=False``), position (appended after
+  stable context blocks), guards (``None`` / empty / retry).
 * :class:`TestTaskContextAdditionalKwargs` — ``additional_kwargs`` carry
   ``injected_message=True`` and the canonical ``context_kind`` value.
 * :class:`TestTaskContextWithOtherContextBlocks` — interaction with the
@@ -104,8 +106,9 @@ def _make_manager(
     the persistent block ends up holding only what
     :func:`assemble_context_messages` returns (driven by the tests
     through ``patch``). With no skill-injection side effects the
-    ``task_context`` HumanMessage lands at index 0 of
-    ``persistent_context_msgs`` deterministically.
+    ``task_context`` HumanMessage is appended at the END of
+    ``persistent_context_msgs`` deterministically (after the stable
+    blocks returned by ``assemble_context_messages``).
     """
     instance_meta = SimpleNamespace(
         instance_id="inst-1",
@@ -195,9 +198,11 @@ class TestTaskContextHumanMessageInjection:
     :meth:`InstanceMessagingService._process_message_with_tracking`.
 
     The message is built at
-    ``daemon/services/instance_messaging.py:3011-3020`` and inserted
-    at index 0 of ``persistent_context_msgs`` so the LangGraph
-    ``add_messages`` reducer checkpoints it BEFORE the task message.
+    ``daemon/services/instance_messaging.py:3011-3020`` and appended
+    at the end of ``persistent_context_msgs`` (after the stable
+    context blocks) so the LangGraph ``add_messages`` reducer
+    checkpoints it before the task message but after the stable
+    context blocks.
     """
 
     async def test_task_context_injects_humanmessage_with_expected_fields(self):
@@ -419,23 +424,31 @@ class TestTaskContextHumanMessageInjection:
             f"got {task_msg!r}"
         )
 
-    async def test_task_context_at_index_zero_of_persistent_block(self):
-        """The task_context HumanMessage MUST sit at index 0 of
-        ``persistent_context_msgs`` so it appears BEFORE the project /
-        shared-context / skills blocks.
+    async def test_task_context_appended_after_stable_context_blocks(self):
+        """The task_context HumanMessage MUST sit AFTER the project /
+        shared-context / skills stable context blocks — at the END of
+        ``persistent_context_msgs``, right before the task message.
 
-        The hook in ``instance_messaging.py:3011-3020`` does
-        ``persistent_context_msgs.insert(0, _task_ctx_msg)`` after
-        ``assemble_context_messages`` populates the list — the
-        position is critical because LangGraph's ``add_messages``
-        reducer preserves the supplied order, so ``task_context``
-        will sit at the very start of the resulting
-        ``state['messages']`` for every subsequent turn.
+        The stable context blocks are identical across runs, so
+        keeping them at the top of the persistent block maximises
+        prompt-cache hit rate. Task context is dynamic (varies per
+        message), so it is appended at the end of the persistent
+        block, just before the user message.
+
+        The hook in ``instance_messaging.py`` does
+        ``persistent_context_msgs.append(_task_ctx_msg)`` after
+        ``assemble_context_messages`` populates the list with the
+        stable blocks — the position is critical because LangGraph's
+        ``add_messages`` reducer preserves the supplied order, so the
+        stable blocks will sit at the very start of the resulting
+        ``state['messages']`` for every subsequent turn and the
+        ``task_context`` will sit right before the task message.
         """
         from langchain_core.messages import HumanMessage as _HM
 
         # Two persistent context messages to be returned by the
-        # orchestrator — placed AFTER the task_context by the hook.
+        # orchestrator — they come FIRST, the task_context is appended
+        # after them by the hook.
         ctx_project = _HM(
             content="[SYSTEM CONTEXT: Project]\nProject X.",
             id="ctx-project-1",
@@ -486,29 +499,37 @@ class TestTaskContextHumanMessageInjection:
 
         assert captured.get("graph_input") is not None
         messages = captured["graph_input"]["messages"]
-        # messages layout: [task_ctx, ctx_project, ctx_shared, user_message]
+        # messages layout: [ctx_project, ctx_shared, task_ctx, user_message]
         assert len(messages) == 4, (
-            f"expected 4 messages (task_ctx + 2 persistent + user), got {len(messages)}: "
+            f"expected 4 messages (2 persistent + task_ctx + user), got {len(messages)}: "
             f"{messages!r}"
         )
 
-        # Index 0 is the task_context.
-        first = messages[0]
-        first_kwargs = getattr(first, "additional_kwargs", None) or {}
-        assert first_kwargs.get("context_kind") == "task_context", (
-            f"index 0 must be the task_context HumanMessage — got "
-            f"id={first.id!r} kwargs={first_kwargs!r}"
+        # Index 0 is the project context block (stable, first for cache).
+        assert (getattr(messages[0], "additional_kwargs", None) or {}).get(
+            "context_kind"
+        ) == "project", (
+            f"index 0 must be the project context block — got "
+            f"{messages[0]!r}"
         )
-        assert first.content == task_context
 
-        # Index 1 and 2 are the project / shared-context blocks in
-        # the order produced by ``assemble_context_messages``.
+        # Index 1 is the shared-context block.
         assert (getattr(messages[1], "additional_kwargs", None) or {}).get(
             "context_kind"
-        ) == "project"
-        assert (getattr(messages[2], "additional_kwargs", None) or {}).get(
-            "context_kind"
-        ) == "shared_context"
+        ) == "shared_context", (
+            f"index 1 must be the shared_context block — got "
+            f"{messages[1]!r}"
+        )
+
+        # Index 2 is the task_context HumanMessage (dynamic, appended
+        # after the stable blocks, before the user message).
+        third = messages[2]
+        third_kwargs = getattr(third, "additional_kwargs", None) or {}
+        assert third_kwargs.get("context_kind") == "task_context", (
+            f"index 2 must be the task_context HumanMessage — got "
+            f"id={third.id!r} kwargs={third_kwargs!r}"
+        )
+        assert third.content == task_context
 
         # Index 3 is the user message (carries message_id).
         user_kwargs = getattr(messages[3], "additional_kwargs", None) or {}
@@ -725,23 +746,24 @@ class TestTaskContextWithOtherContextBlocks:
     and the persistent context block produced by
     :func:`daemon.services.context_messages.assemble_context_messages`.
 
-    The new message MUST sit BEFORE every other persistent context
-    message (project / shared-context / skills) so the child
-    agent sees it as the first thing in the conversation — this is
-    the documented contract for the new ``context`` param on
-    ``send_message``: the structured context is the *most specific*
-    signal and must lead the conversation, followed by the
-    broader persistent block.
+    The stable context blocks (project / shared-context / skills) MUST
+    sit BEFORE the task_context HumanMessage — at the top of the
+    persistent block — because they are identical across runs and thus
+    maximise prompt-cache hit rate. The task_context is dynamic (varies
+    per message), so it is appended at the END of the persistent block,
+    right before the task message.
     """
 
-    async def test_task_context_before_shared_context(self):
+    async def test_task_context_after_shared_context(self):
         """With task_context AND a shared_context block from
-        ``assemble_context_messages`` the task_context MUST be at
-        index 0 and the shared_context at index 1.
+        ``assemble_context_messages``, the shared_context block sits
+        at index 0 (stable block at the top for prompt-cache
+        efficiency) and the task_context follows at index 1,
+        appended after the stable block but before the user message.
 
-        This mirrors the production layout the agent_node will
-        see on every subsequent turn: the task context leads,
-        followed by the broader project / shared-context blocks.
+        This mirrors the production layout the agent_node will see on
+        every subsequent turn: the stable shared_context block leads,
+        followed by the dynamic task_context, then the user message.
         """
         from langchain_core.messages import HumanMessage as _HM
 
@@ -789,20 +811,20 @@ class TestTaskContextWithOtherContextBlocks:
 
         assert captured.get("graph_input") is not None
         messages = captured["graph_input"]["messages"]
-        # Layout: [task_ctx, shared_context, user_message]
+        # Layout: [shared_context, task_ctx, user_message]
         assert len(messages) == 3, (
-            f"expected 3 messages (task_ctx + shared_context + user), got "
+            f"expected 3 messages (shared_context + task_ctx + user), got "
             f"{len(messages)}: {messages!r}"
         )
 
-        # Index 0 is task_context.
+        # Index 0 is shared_context (stable block, first for cache).
         assert (
             getattr(messages[0], "additional_kwargs", None) or {}
-        ).get("context_kind") == "task_context"
-        # Index 1 is shared_context.
+        ).get("context_kind") == "shared_context"
+        # Index 1 is task_context (appended after stable blocks).
         assert (
             getattr(messages[1], "additional_kwargs", None) or {}
-        ).get("context_kind") == "shared_context"
+        ).get("context_kind") == "task_context"
         # Index 2 is the user message.
         assert (
             getattr(messages[2], "additional_kwargs", None) or {}
@@ -810,14 +832,15 @@ class TestTaskContextWithOtherContextBlocks:
         assert messages[2].id == "msg-1"
 
     async def test_task_context_with_skill_block(self):
-        """With task_context AND a skills block, the task_context
-        sits at index 0 and the skills block follows (index 1).
+        """With task_context AND a skills block, the skills block sits
+        at index 0 (stable block at the top) and the task_context
+        follows (index 1), appended after the stable blocks.
 
-        Regression: the new ``insert(0, _task_ctx_msg)`` call had
-        to be placed AFTER ``assemble_context_messages`` returns
-        (so the orchestrator-supplied list is the "base" for the
-        insert). This test pins the relative order across the
-        skills path.
+        Regression: the ``append(_task_ctx_msg)`` call had to be
+        placed AFTER ``assemble_context_messages`` returns (so the
+        orchestrator-supplied list is the "base" and task_context
+        goes at the end). This test pins the relative order across
+        the skills path.
         """
         from langchain_core.messages import HumanMessage as _HM
 
@@ -862,20 +885,22 @@ class TestTaskContextWithOtherContextBlocks:
 
         assert captured.get("graph_input") is not None
         messages = captured["graph_input"]["messages"]
-        # Layout: [task_ctx, skills, user_message]
+        # Layout: [skills, task_ctx, user_message]
         assert len(messages) == 3, (
-            f"expected 3 messages (task_ctx + skills + user), got {len(messages)}: "
+            f"expected 3 messages (skills + task_ctx + user), got {len(messages)}: "
             f"{messages!r}"
         )
+        # Index 0 is skills (stable block, first for cache).
         assert (
             getattr(messages[0], "additional_kwargs", None) or {}
-        ).get("context_kind") == "task_context", (
-            f"index 0 must be task_context — got {messages[0]!r}"
+        ).get("context_kind") == "skills", (
+            f"index 0 must be skills — got {messages[0]!r}"
         )
+        # Index 1 is task_context (appended after stable blocks).
         assert (
             getattr(messages[1], "additional_kwargs", None) or {}
-        ).get("context_kind") == "skills", (
-            f"index 1 must be skills — got {messages[1]!r}"
+        ).get("context_kind") == "task_context", (
+            f"index 1 must be task_context — got {messages[1]!r}"
         )
         assert (
             getattr(messages[2], "additional_kwargs", None) or {}

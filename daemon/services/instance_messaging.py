@@ -3136,10 +3136,16 @@ class InstanceMessagingService:
         # send_message(context={...}), it arrives here as
         # ``task_context`` (already formatted into a
         # ``[SYSTEM CONTEXT: Task Context]`` markdown block by the
-        # tool). Inject it as a persistent HumanMessage BEFORE the
-        # task message so the child sees context first, then the
-        # task. Only on first attempt (not retry) to avoid
-        # double-injection — the message is checkpointed on turn 1.
+        # tool). The stable context blocks (project / shared-context /
+        # skills) MUST stay at the top of ``persistent_context_msgs``
+        # for prompt-cache efficiency — they are identical across runs,
+        # so keeping them at the front maximises cache hit rate. Task
+        # context is dynamic (varies per message), so it goes at the
+        # END of the persistent block, just before the task message.
+        # ``append`` (not ``insert(0, ...)``) keeps the task context
+        # after the stable blocks but before the user message.
+        # Only on first attempt (not retry) to avoid double-injection —
+        # the message is checkpointed on turn 1.
         if task_context and not is_retry:
             _task_ctx_msg = HumanMessage(
                 content=task_context,
@@ -3149,7 +3155,7 @@ class InstanceMessagingService:
                     "context_kind": "task_context",
                 },
             )
-            persistent_context_msgs.insert(0, _task_ctx_msg)
+            persistent_context_msgs.append(_task_ctx_msg)
 
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
