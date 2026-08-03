@@ -1,6 +1,6 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, tap, catchError, of, finalize, map } from 'rxjs';
+import { Observable, tap, catchError, of, finalize, map, throwError } from 'rxjs';
 import {
   Blueprint,
   BlueprintCreateRequest,
@@ -171,6 +171,38 @@ export class BlueprintService {
         catchError((err) => {
           this.error.set(err?.message || 'Failed to create blueprint');
           throw err;
+        }),
+      );
+  }
+
+  /**
+   * POST /api/projects/{project_id}/blueprints/initialize
+   *
+   * Triggers blueprint initialization on the backend (spawns a
+   * blueprinter agent on the background queue). The request returns
+   * immediately with 202 Accepted — the actual work runs asynchronously.
+   *
+   * A 409 response means blueprints are already initialized; the error
+   * is surfaced as a thrown Error with a clear message so the caller
+   * can render a distinct snackbar.
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *
+   * Returns:
+   *     Observable<void> — re-thrown on error (including 409).
+   */
+  initialize(projectId: string): Observable<void> {
+    return this.http
+      .post<void>(`${this.baseUrl(projectId)}/initialize`, {})
+      .pipe(
+        catchError((err) => {
+          if (err?.status === 409) {
+            this.error.set('Blueprints already initialized');
+            return throwError(() => new Error('Blueprints already initialized'));
+          }
+          this.error.set(err?.message || 'Failed to initialize blueprints');
+          return throwError(() => err);
         }),
       );
   }

@@ -126,6 +126,9 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   readonly formContent = signal('');
   readonly formSubmitting = signal(false);
 
+  // Initialize state
+  readonly initializing = signal(false);
+
   // Kind enum re-exported for template binding.
   protected readonly BlueprintKind = {
     core: 'core' as const,
@@ -151,6 +154,10 @@ export class BlueprintComponent implements OnInit, OnDestroy {
 
   readonly hasItems = computed(() => this.filtered().length > 0);
   readonly isEmptyState = computed(
+    () => !this.loading() && this.blueprints().length === 0 && !this.error(),
+  );
+  /** Show the Initialize button when there are no blueprints at all. */
+  readonly canInitialize = computed(
     () => !this.loading() && this.blueprints().length === 0 && !this.error(),
   );
   readonly isFilteredEmpty = computed(
@@ -274,6 +281,39 @@ export class BlueprintComponent implements OnInit, OnDestroy {
           this.showMutationError(err, 'create');
         },
       });
+  }
+
+  // ── Initialize ───────────────────────────────────────────────────────
+
+  protected onInitialize(): void {
+    const confirmed = window.confirm(
+      'This will scan the project and create initial blueprints. ' +
+        'This runs in the background and may take a few minutes. Continue?',
+    );
+    if (!confirmed) return;
+    this.initializing.set(true);
+    this.service.initialize(this.projectId).subscribe({
+      next: () => {
+        this.initializing.set(false);
+        this.snackBar.open(
+          'Blueprint initialization queued. Check back in a few minutes.',
+          'Close',
+          { duration: 5000, panelClass: 'success-snackbar' },
+        );
+      },
+      error: (err: Error & { status?: number }) => {
+        this.initializing.set(false);
+        const status = err?.status;
+        let message = err?.message || 'Failed to initialize blueprints';
+        if (status === 409) {
+          message = 'Blueprints already exist. Use refresh to update them.';
+        }
+        this.snackBar.open(message, 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
   }
 
   // ── Edit / save ──────────────────────────────────────────────────────

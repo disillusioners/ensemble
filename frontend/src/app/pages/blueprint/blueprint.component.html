@@ -9,6 +9,13 @@
       </span>
     </div>
     <div class="toolbar-actions">
+      <button mat-stroked-button color="accent"
+              (click)="onInitialize()"
+              [disabled]="initializing() || loading()"
+              matTooltip="Scan the project and generate initial blueprints">
+        <mat-icon [class.spinning]="initializing()">auto_awesome</mat-icon>
+        @if (initializing()) { Initializing… } @else { Initialize Blueprint }
+      </button>
       <button mat-stroked-button (click)="onRefresh()" [disabled]="loading()">
         <mat-icon [class.spinning]="loading()">refresh</mat-icon>
         Refresh
@@ -153,11 +160,19 @@
               or create a new blueprint.
             </p>
           } @else {
-            <p>Create your first blueprint to get started.</p>
+            <p>Initialize blueprints automatically from the project structure,
+               or create one manually to get started.</p>
           }
-          <button mat-flat-button color="primary" (click)="onCreate()">
-            <mat-icon>add</mat-icon> New Blueprint
-          </button>
+          <div class="empty-actions">
+            <button mat-flat-button color="accent" (click)="onInitialize()"
+                    [disabled]="initializing()">
+              <mat-icon [class.spinning]="initializing()">auto_awesome</mat-icon>
+              Initialize Project Blueprint
+            </button>
+            <button mat-stroked-button (click)="onCreate()">
+              <mat-icon>add</mat-icon> New Blueprint
+            </button>
+          </div>
         </div>
       }
 

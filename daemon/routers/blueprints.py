@@ -229,6 +229,77 @@ async def create_blueprint(
     return _blueprint_to_response(created)
 
 
+# ─── Admin: blueprint initialization trigger ──────────────────────────────────
+
+
+@router.post("/initialize", response_model=dict, status_code=202)
+async def initialize_project_blueprints(
+    request: Request,
+    project_id: str,
+):
+    """Trigger blueprint initialization for a project.
+
+    Spawns a blueprinter agent on the system_background_queue to bootstrap
+    the blueprint corpus (core.md + area blueprints). Returns 409 if a
+    core.md blueprint already exists. The initialization runs asynchronously
+    — this endpoint returns immediately with 202 Accepted.
+    """
+    manager = _get_manager(request)
+
+    # Guard: refuse to re-initialize when a core blueprint already exists.
+    existing_core = await asyncio.to_thread(
+        manager._blueprint_repo.get_core, project_id
+    )
+    if existing_core is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Blueprints already initialized",
+        )
+
+    job_service = getattr(manager, "_job_queue_service", None)
+    if job_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="JobQueueService not available",
+        )
+
+    bg_queue = await asyncio.to_thread(
+        job_service._queue_repo.get_by_name,
+        project_id,
+        "system_background_queue",
+    )
+    if bg_queue is None:
+        raise HTTPException(
+            status_code=404,
+            detail="system_background_queue not found for project",
+        )
+
+    job = await job_service.enqueue(
+        agent_id="blueprinter",
+        message=(
+            f"Initialize project blueprints for project {project_id}.\n\n"
+            "Steps:\n"
+            "1. Create a `core` blueprint from the project's critical notes, "
+            "context.md, and project metadata\n"
+            "2. Scan the project directory structure and identify major modules\n"
+            "3. For each major module, create an `area` blueprint with overview-level "
+            "content and file references\n"
+            "4. Generate trigger queries for each blueprint\n"
+            "5. Rate-limit yourself: if you hit the rate limit, schedule the "
+            "remaining work for later\n\n"
+            "Use the blueprint_create tool to create each blueprint. Use filesystem "
+            "tools to read project structure. You may spawn worker agents for deep "
+            "codebase analysis if needed."
+        ),
+        source="admin-endpoint",
+        project_id=project_id,
+        priority=9,  # lowest priority — pure background
+        queue_id=bg_queue.queue_id,
+        metadata={"trigger": "initialize", "source": "admin-endpoint"},
+    )
+    return {"job_id": job.job_id, "status": "enqueued"}
+
+
 # ─── Admin: external-cron blueprint scan trigger (§4.6 Option B) ──────────────
 
 

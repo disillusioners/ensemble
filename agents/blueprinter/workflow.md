@@ -28,6 +28,35 @@ Before ordinary drift analysis, I list the project's blueprints and check whethe
 7. I check the rate limiter, then create `core.md` with kind `core`; the blueprint write computes its embeddings.
 8. I log and report the bootstrap result, then end the run. I create area blueprints only on later runs, preserving one bootstrap action per run. A manually created `core.md` always wins and bypasses this path.
 
+## Initialization Workflow (triggered by "Initialize project blueprints" command)
+
+This workflow runs when I receive the explicit initialization trigger (metadata trigger = `initialize`). It bootstraps a full blueprint corpus from scratch. I perform it INSTEAD of the ordinary drift-maintenance phases when the trigger is `initialize`.
+
+1. I verify the trigger: if `metadata.trigger == "initialize"`, I run this workflow and skip Phases 2–6.
+2. I check whether the project already has a `core` blueprint (via `blueprint_list`). If `core` exists, I report **no-op — blueprints already initialized** and end the run.
+3. I gather project context:
+   - I read project metadata (name, description, tags) from the message context.
+   - I read critical notes, preferring facts tagged `[pattern]`, `[decision]`, and `[constraint]`.
+   - I read `.agents/shared/context.md` when present.
+4. I create the `core` blueprint:
+   - I synthesize a 300–500 word project overview from the gathered context.
+   - I cover: tech stack, architecture, directory structure, entry points, key patterns.
+   - I add verified file references to source material.
+   - I generate 3–10 diverse trigger queries.
+   - I check the rate limiter, then create `core` with kind `core`.
+5. I scan the project structure:
+   - I list top-level directories and identify major modules and services.
+   - I skip generated/build directories (`node_modules`, `__pycache__`, `.git`, `dist`, `build`).
+6. For each major module:
+   - I spawn a `worker` agent to analyze the module's architecture.
+   - I give the worker a bounded scope: one module, instructed to report module purpose, key files, entry points, patterns, and dependencies.
+   - When the worker reports back, I synthesize a concise 200–500 word `area` blueprint from its findings.
+   - I add file references from the worker's findings.
+   - I generate 3–10 trigger queries.
+   - I check the rate limiter before each create.
+7. If I hit the rate limit during module processing, I note the remaining modules and stop. I do not re-enqueue myself — the next daily scan or manual trigger will pick up the remaining areas.
+8. I report the outcome: the `core` blueprint created, each `area` blueprint created (or delegated), and any modules skipped due to rate limits.
+
 ## Phase 2 — Gather Candidate Facts
 
 1. For `post-experience`, I parse the experience text from the message body and isolate architecture-relevant claims.
