@@ -1,0 +1,20 @@
+{
+  "id": "architect",
+  "name": "Architect",
+  "description": "Solution architecture specialist — enriches plans with architectural depth, answers hard architecture questions, explores multiple solution approaches via competitive fan-out",
+  "icon": "🏛️",
+  "color": "accent-violet",
+  "version": "1.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": true,
+  "no_force_explore": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
+  "skill_search_interval": 5,
+  "tools": {
+    "allow": ["instance", "council", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"],
+    "deny": ["edit_file", "db_conn_add", "db_conn_delete"]
+  },
+  "team_members": ["worker", "explorer", "governor"]
+}

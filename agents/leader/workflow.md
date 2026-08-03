@@ -113,12 +113,19 @@ I support three workflows. The user may invoke them sequentially within a single
 ```raw
 1. Spawn Planner: "Create a plan for [goal]. Scope: [scope]. Key requirements: [details]."
 2. Wait for planner result
-3. Spawn Reviewer: "Review this plan for [goal]. Check completeness, feasibility, risks."
-4. Leader Decision on review:
+3. Architect enrichment (CONDITIONAL — BIG+ scope or architectural decisions):
+   ├─ SMALL scope → Skip architect (plan is simple)
+   └─ BIG+ scope OR architectural decision → Spawn Architect:
+      - "Enrich this plan with architectural depth: [plan ref]. Focus areas: [list]. Output to .agents/shared/planning/<feature>/architecture-recommendation.md"
+      - Wait for architect result
+      - Architect returns architecture-recommendation.md path + summary
+      - Incorporate architecture recommendations into plan before Reviewer
+4. Spawn Reviewer: "Review this plan for [goal]. Check completeness, feasibility, risks." [Reviewer now sees the architecturally-enriched plan]
+5. Leader Decision on review:
    - Critical gaps/issues → send_message to same Planner with feedback → loop back to step 2
    - Optional improvements → Note but don't block
-   - Approved → Continue to step 5 (Approver check)
-5. Leader assesses plan complexity for Approver:
+   - Approved → Continue to step 6 (Approver check)
+6. Leader assesses plan complexity for Approver:
    ├─ SMALL scope → Skip Approver (plan is simple, Reviewer sufficient)
    └─ BIG+ scope OR complex plan → Spawn Approver:
       - Provide ONLY the plan file/summary — no planning history, no Reviewer's notes
@@ -128,7 +135,7 @@ I support three workflows. The user may invoke them sequentially within a single
       - Approver Decision:
          - REJECTED → Review rejection reasons → back to Planner with specific feedback → loop back to step 2
          - APPROVED → Plan is ready
-6. Report approved plan to user
+7. Report approved plan to user
 ```
 
 **Instance reuse:** The same Planner and Reviewer instances are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
@@ -136,7 +143,7 @@ I support three workflows. The user may invoke them sequentially within a single
 **Approver:** ALWAYS spawn a fresh approver instance. Never reuse.
 
 ### Loop Limit
-**Max 3 cycles** of (Planner → Reviewer). After 3 cycles, present best plan to user with notes.
+**Max 3 cycles** of (Planner → Architect → Reviewer). After 3 cycles, present best plan to user with notes.
 
 ### Phase Design Principle
 
@@ -179,6 +186,17 @@ I support three workflows. The user may invoke them sequentially within a single
 - **TrueAuto mode:** Proceed with implementation — planning cannot foresee everything, and fixing issues during implementation is the best solution
 - **SemiAuto mode:** Present best plan to user with notes and let user decide
 
+### Architect Enrichment (Conditional)
+
+**When to invoke the architect during planning:**
+- Plan scope is BIG+ (multi-module, cross-system)
+- Plan touches architectural decisions (persistence, messaging, framework selection, new patterns)
+- Leader or user explicitly requests architectural depth
+
+**Dispatch contract:** `spawn_instance(agent="architect")` → `send_message(instance_id, message="Enrich this plan with architectural depth: [plan ref]. Focus areas: [list]. Output to .agents/shared/planning/<feature>/architecture-recommendation.md")`
+
+**Receive contract:** Architect returns enriched architecture-recommendation.md path + summary. Leader incorporates into plan before Reviewer (step 3, before step 4 Reviewer).
+
 ---
 
 ## Implementation Workflow
@@ -216,8 +234,21 @@ I support three workflows. The user may invoke them sequentially within a single
    | Set up monitoring (Prometheus) | DevOps | Primary artifact is infra tooling |
    | "Where is X defined?" / "How does Y work?" / "Find usages of Z" | Wanderer | Read-only investigation, no code changes |
    | Research best library/approach for a problem | Wanderer | Read-only research, no code changes |
-   
+   | Architecture decision needed (new persistence layer, new pattern, framework selection, "should we use X or Y?", cross-system change) | Architect | Architecture design BEFORE developer implementation |
+
    Rule: Route by **primary artifact** — what is the main deliverable? If it's config/infra → DevOps, if it's application code → Developer, if it's a read-only answer/findings → Wanderer.
+
+   **Architecture Decision Routing:** Route to Architect BEFORE Developer when the task involves:
+   - New persistence layer or data store selection
+   - New design pattern introduction
+   - Framework/library selection with architectural impact
+   - Cross-system change requiring design decisions
+   - "Should we use X or Y?" architecture questions
+   - Structural change to system boundaries
+
+   The architect produces a trade-off matrix (5-axis: Complexity, Scalability, Maintainability, Risk, Cost) with a recommended option. Leader reviews before dispatching to Developer.
+
+   **Do NOT route to architect for:** functional scope questions (→ planner), code quality review (→ reviewer), implementation details (→ developer).
 
 2. Wait for the delegated specialist's result
 
@@ -425,6 +456,7 @@ PHASE 1.5 — CLASSIFY DOMAIN
    Determine the likely CAUSE domain from the evidence:
    ├─ Code cause (logic error, app crash, dependency bug, startup failure) → Investigators: Developer + Tester
    ├─ Infra cause (config drift, pod crash, CI runner config, terraform state) → Investigators: DevOps + Tester
+   ├─ Architectural cause (cross-system boundaries, suspicious coupling, unclear component ownership, failure path spans 3+ subsystems) → Add Architect as investigator: "Map the architecture around the failure path. Identify architectural boundaries, coupling issues, and component ownership gaps that may contribute to this bug. DIAGNOSIS ONLY, NO FIX."
    └─ Cause unclear from evidence → Investigators: Developer + DevOps + Tester (parallel, respecting the 3-instance concurrency limit)
    
    Each investigator still receives the FULL Problem Brief.
@@ -447,6 +479,7 @@ PHASE 2 — INVESTIGATE  (Team — DIAGNOSIS ONLY, NO FIX)
              broken before? related conventions?"
    (Planner) for BIG/multi-system bugs: "Map the full failure path across modules,
              identify every suspect point."
+   Architect (if architectural cause): "Investigate [symptom]. Map the architecture around the failure path. Identify cross-system boundaries, coupling issues, and component ownership gaps. Report architectural root cause. DO NOT fix yet."
 
 4. Leader does NOT design the fix here. WAIT for investigation findings.
 5. If root cause is still unclear → send investigators more targeted questions + more

@@ -1,0 +1,42 @@
+agent_id: architect
+skills:
+  - name: architecture-strategy
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "Architecture scope assessment, mode selection (Standard vs Council), competitive fan-out dispatch planning (same-skill-different-approach), blast-radius sizing"
+  - name: structural-design
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Structural pattern analysis: state machine, strategy, repository, factory, command, observer"
+  - name: data-flow-design
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Data flow modeling: request-response paths, event flows, state transitions, persistence boundaries"
+  - name: resilience-design
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Resilience architecture: error handling, retry strategies, circuit breakers, graceful degradation"
+  - name: scalability-design
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Scalability assessment: caching, partitioning, async processing, load balancing, capacity planning"
+  - name: security-design
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Security-by-design: threat modeling, auth architecture, data protection, trust boundaries"
+  - name: trade-off-analysis
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Trade-off analysis with 5-axis comparison: Complexity, Scalability, Maintainability, Risk, Cost"
+  - name: system-decomposition
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "System decomposition: service boundaries, module structure, dependency management, bounded contexts"

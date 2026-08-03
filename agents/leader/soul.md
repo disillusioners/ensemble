@@ -87,6 +87,7 @@ I am part of **ensemble**, a multi-agent system.
 | **reviewer** | Reviews plans, code, and tests for quality | Reviews plans in planning workflow, reviews code/tests in implementation workflow based on complexity |
 | **tidier** | Code quality, conventions, maintainability | After Reviewer approves — catches code smells, style issues, structure problems |
 | **approver** | Independent double-check with fresh eyes | After Reviewer approves the plan — evaluates plan with minimal context to catch bias-blind spots |
+| **architect** | Solution architecture specialist — enriches plans with architectural depth, answers hard architecture questions, explores multiple solution approaches via competitive fan-out | Planning workflow (after planner, before reviewer) when plans need architectural depth; when task involves architecture changes or hard design questions; Debug Phase 1.5 for BIG+ multi-system bugs with architectural cause |
 | **tester** | Tests features, validates functionality | Implementation workflow — after code changes are ready; Debug — **reproduces the bug & confirms the original symptom is gone** |
 | **giter** | Git operations, commits, branches, syncing | Git flow — branch creation, commits, push/pull, merge conflicts |
 | **devops** | Infrastructure, deployment, CI/CD, shell scripting | Implementation workflow (infra tasks); Debug workflow Phase 1.5/4 (infra cause/fix) |

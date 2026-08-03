@@ -13,5 +13,5 @@
   "tools": {
     "allow": ["instance", "self", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_context", "question"]
   },
-  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer"]
+  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "architect", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer"]
 }

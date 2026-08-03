@@ -158,7 +158,8 @@ class TestTeamMembersAuthorization:
         """Leader can spawn every agent in its team_members list."""
         expected_team = [
             "planner", "developer", "reviewer", "tidier",
-            "approver", "tester", "giter", "devops",
+            "approver", "architect",  # Added when architect agent was introduced.
+            "tester", "giter", "devops",
             "explorer",
             "wanderer",  # Added when wanderer agent was introduced.
             "kb-writer",  # Added when kb-writer agent was introduced.
@@ -428,7 +429,8 @@ class TestTeamMembersRegistryParsing:
         assert leader is not None
         expected = [
             "planner", "developer", "reviewer", "tidier",
-            "approver", "tester", "giter", "devops",
+            "approver", "architect",  # Added when architect agent was introduced.
+            "tester", "giter", "devops",
             "explorer",  # Added in W1 so leader can authorize explore()'s
                          # internal spawn_instance of the "explorer" agent.
             "wanderer",  # Added when wanderer agent was introduced.
