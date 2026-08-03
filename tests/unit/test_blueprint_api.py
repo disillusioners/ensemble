@@ -34,8 +34,13 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 from starlette.testclient import TestClient
 
+from daemon.repositories.blueprint.embedding_repository import (
+    BlueprintEmbeddingRepository,
+)
 from daemon.repositories.blueprint.repository import BlueprintRepository
 from daemon.routers.blueprints import router as blueprints_router
+from daemon.services.blueprint_rate_limiter import BlueprintRateLimiter
+from daemon.services.blueprint_write_service import BlueprintWriteService
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -44,31 +49,65 @@ from daemon.routers.blueprints import router as blueprints_router
 
 
 @pytest.fixture
-def repo():
-    """A fresh BlueprintRepository over an in-memory SQLite engine.
+def engine():
+    """A fresh in-memory SQLite engine with all tables created.
 
-    Uses ``StaticPool`` + ``check_same_thread=False`` so the same connection
-    (and its schema) is shared across threads. The router bridges sync repo
-    calls via ``asyncio.to_thread``, so a default pool would open a new
-    in-memory DB per worker thread and lose the tables.
+    Uses ``StaticPool`` + ``check_same_thread=False`` so the same
+    connection (and its schema) is shared across threads. The router
+    bridges sync repo calls via ``asyncio.to_thread``, so a default pool
+    would open a new in-memory DB per worker thread and lose the tables.
     """
-    engine = create_engine(
+    eng = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.create_all(eng)
+    return eng
+
+
+@pytest.fixture
+def repo(engine):
+    """A fresh BlueprintRepository over an in-memory SQLite engine."""
     return BlueprintRepository(engine)
 
 
 @pytest.fixture
-def app(repo: BlueprintRepository):
-    """A FastAPI app with the blueprints router and a stub manager."""
+def embedding_repo(engine):
+    """A BlueprintEmbeddingRepository over the same engine."""
+    return BlueprintEmbeddingRepository(engine)
+
+
+@pytest.fixture
+def app(
+    engine,
+    repo: BlueprintRepository,
+    embedding_repo: BlueprintEmbeddingRepository,
+):
+    """A FastAPI app with the blueprints router and a stub manager.
+
+    The manager stub wires ``get_blueprint_write_service`` to return a
+    real ``BlueprintWriteService`` backed by the in-memory engine, so
+    the router's create/update/delete calls exercise the full canonical
+    write boundary (revision capture, trigger replace, etc.) without an
+    embedding service (``embedding_service=None`` → triggers skipped).
+    """
     manager = MagicMock()
     manager._blueprint_repo = repo
-    # MagicMock returns truthy child mocks by default — pin these explicitly
-    # so the ``is_write_paused`` check evaluates to False.
     manager.is_write_paused = False
+
+    def _get_write_service(project_id: str) -> BlueprintWriteService:
+        return BlueprintWriteService(
+            repository=repo,
+            embedding_repository=embedding_repo,
+            embedding_service=None,  # no embedding API in tests
+            rate_limiter=None,  # no rate limiting in most API tests
+            config=MagicMock(),
+            project_id=project_id,
+            manager=manager,
+        )
+
+    manager.get_blueprint_write_service = _get_write_service
 
     app = FastAPI()
     app.include_router(blueprints_router, prefix="/api")
@@ -90,7 +129,7 @@ def bp_factory(repo: BlueprintRepository):
     """
 
     def _make(
-        project: str = "proj-a",
+        project: str = "00000000-0000-0000-0000-000000000001",
         slug: str = "slug",
         kind: str = "area",
         content: str = "body",
@@ -117,7 +156,7 @@ class TestCreateBlueprint:
 
     def test_create_returns_201_with_expected_fields(self, client):
         r = client.post(
-            "/api/projects/proj-a/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
             json={
                 "slug": "core",
                 "name": "Core Doc",
@@ -129,7 +168,7 @@ class TestCreateBlueprint:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["project_id"] == "proj-a"
+        assert body["project_id"] == "00000000-0000-0000-0000-000000000001"
         assert body["slug"] == "core"
         assert body["name"] == "Core Doc"
         assert body["kind"] == "core"
@@ -144,15 +183,15 @@ class TestCreateBlueprint:
     def test_create_uses_path_project_id_not_body(self, client):
         """The body has no project_id; the path param wins."""
         r = client.post(
-            "/api/projects/path-proj/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000003/blueprints",
             json={"slug": "s", "name": "n", "content": "c"},
         )
         assert r.status_code == 201
-        assert r.json()["project_id"] == "path-proj"
+        assert r.json()["project_id"] == "00000000-0000-0000-0000-000000000003"
 
     def test_create_defaults_kind_to_area(self, client):
         r = client.post(
-            "/api/projects/proj-a/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
             json={"slug": "s", "name": "n", "content": "c"},
         )
         assert r.status_code == 201
@@ -160,7 +199,7 @@ class TestCreateBlueprint:
 
     def test_create_rejects_empty_content(self, client):
         r = client.post(
-            "/api/projects/proj-a/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
             json={"slug": "s", "name": "n", "content": ""},
         )
         assert r.status_code == 422
@@ -169,12 +208,15 @@ class TestCreateBlueprint:
         manager = MagicMock()
         manager._blueprint_repo = repo
         manager.is_write_paused = True
+        # The write service factory must exist, but it should never be
+        # called because the paused check fires first.
+        manager.get_blueprint_write_service = MagicMock()
         app = FastAPI()
         app.include_router(blueprints_router, prefix="/api")
         app.state.manager = manager
         with TestClient(app) as c:
             r = c.post(
-                "/api/projects/proj-a/blueprints",
+                "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
                 json={"slug": "s", "name": "n", "content": "c"},
             )
         assert r.status_code == 503
@@ -190,15 +232,15 @@ class TestGetBlueprint:
 
     def test_get_returns_blueprint(self, client, bp_factory):
         bp = bp_factory(slug="alpha")
-        r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}")
         assert r.status_code == 200
         body = r.json()
         assert body["id"] == bp.id
         assert body["slug"] == "alpha"
-        assert body["project_id"] == "proj-a"
+        assert body["project_id"] == "00000000-0000-0000-0000-000000000001"
 
     def test_get_missing_returns_404(self, client):
-        r = client.get("/api/projects/proj-a/blueprints/does-not-exist")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints/does-not-exist")
         assert r.status_code == 404
 
 
@@ -213,9 +255,9 @@ class TestListBlueprints:
     def test_list_returns_all_active_for_project(self, client, bp_factory):
         bp_factory(slug="a")
         bp_factory(slug="b")
-        bp_factory(project="proj-b", slug="other")  # cross-project: must be excluded
+        bp_factory(project="00000000-0000-0000-0000-000000000002", slug="other")  # cross-project: must be excluded
 
-        r = client.get("/api/projects/proj-a/blueprints")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints")
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 2
@@ -226,7 +268,7 @@ class TestListBlueprints:
         bp_factory(slug="core-doc", kind="core")
         bp_factory(slug="area-doc", kind="area")
 
-        r = client.get("/api/projects/proj-a/blueprints?kind=core")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints?kind=core")
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 1
@@ -238,7 +280,7 @@ class TestListBlueprints:
         bp_factory(slug="pub")  # default status="published"
         # Create a draft one via direct repo (the router cannot set status yet)
         repo.create(
-            project_id="proj-a",
+            project_id="00000000-0000-0000-0000-000000000001",
             slug="draft",
             name="draft",
             kind="area",
@@ -246,13 +288,13 @@ class TestListBlueprints:
             status="draft",
         )
 
-        r = client.get("/api/projects/proj-a/blueprints?status=published")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints?status=published")
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 1
         assert body["items"][0]["slug"] == "pub"
 
-        r = client.get("/api/projects/proj-a/blueprints?status=draft")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints?status=draft")
         body = r.json()
         assert body["total"] == 1
         assert body["items"][0]["slug"] == "draft"
@@ -262,7 +304,7 @@ class TestListBlueprints:
         bp_factory(slug="doomed")
         repo.soft_delete(b.id)
 
-        r = client.get("/api/projects/proj-a/blueprints")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints")
         body = r.json()
         slugs = {item["slug"] for item in body["items"]}
         assert slugs == {"doomed"}
@@ -279,7 +321,7 @@ class TestUpdateBlueprint:
     def test_update_name_and_content(self, client, repo, bp_factory):
         bp = bp_factory(slug="s", content="v1")
         r = client.put(
-            f"/api/projects/proj-a/blueprints/{bp.id}",
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}",
             json={"name": "renamed", "content": "v2"},
         )
         assert r.status_code == 200, r.text
@@ -294,7 +336,7 @@ class TestUpdateBlueprint:
     ):
         bp = bp_factory(slug="s")
         r = client.put(
-            f"/api/projects/proj-a/blueprints/{bp.id}",
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}",
             json={"name": "renamed"},
         )
         assert r.status_code == 200
@@ -304,16 +346,47 @@ class TestUpdateBlueprint:
     def test_update_empty_body_returns_400(self, client, bp_factory):
         bp = bp_factory(slug="s")
         r = client.put(
-            f"/api/projects/proj-a/blueprints/{bp.id}", json={}
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}", json={}
         )
         assert r.status_code == 400
 
     def test_update_missing_returns_404(self, client):
         r = client.put(
-            "/api/projects/proj-a/blueprints/missing",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/missing",
             json={"name": "x"},
         )
         assert r.status_code == 404
+
+    def test_update_with_status_field(self, client, repo, bp_factory):
+        """C1 fix: status-only PUT does not crash; status is applied."""
+        bp = bp_factory(slug="s")
+        r = client.put(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}",
+            json={"status": "draft"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "draft"
+        # status is NOT a version-incrementing field → version unchanged.
+        assert body["version"] == 1
+
+
+# ─── C2(e)/C7: UUID validation ─────────────────────────────────────────────
+
+
+class TestProjectIdValidation:
+    """Invalid project_id (non-UUID) returns 400 (C2 fix e / C7)."""
+
+    def test_invalid_project_id_returns_400_on_list(self, client):
+        r = client.get("/api/projects/not-a-uuid/blueprints")
+        assert r.status_code == 400
+
+    def test_invalid_project_id_returns_400_on_create(self, client):
+        r = client.post(
+            "/api/projects/not-a-uuid/blueprints",
+            json={"slug": "s", "name": "n", "content": "c"},
+        )
+        assert r.status_code == 400
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,14 +399,14 @@ class TestDeleteBlueprint:
 
     def test_delete_sets_inactive(self, client, repo, bp_factory):
         bp = bp_factory(slug="s")
-        r = client.delete(f"/api/projects/proj-a/blueprints/{bp.id}")
+        r = client.delete(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}")
         assert r.status_code == 200
         assert r.json() == {"deleted": True}
         # The repo still finds the row (soft delete) but is_active is False.
         assert repo.get_by_id(bp.id).is_active is False
 
     def test_delete_missing_returns_404(self, client):
-        r = client.delete("/api/projects/proj-a/blueprints/missing")
+        r = client.delete("/api/projects/00000000-0000-0000-0000-000000000001/blueprints/missing")
         assert r.status_code == 404
 
 
@@ -355,7 +428,7 @@ class TestListRevisions:
             source="manual", reason="second pass",
         )
 
-        r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}/revisions")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/revisions")
         assert r.status_code == 200
         body = r.json()
         assert len(body) == 2
@@ -366,12 +439,12 @@ class TestListRevisions:
         assert body[0]["reason"] == "second pass"
 
     def test_revisions_missing_blueprint_returns_404(self, client):
-        r = client.get("/api/projects/proj-a/blueprints/missing/revisions")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints/missing/revisions")
         assert r.status_code == 404
 
     def test_revisions_empty_returns_empty_list(self, client, bp_factory):
         bp = bp_factory(slug="s")
-        r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}/revisions")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/revisions")
         assert r.status_code == 200
         assert r.json() == []
 
@@ -385,27 +458,27 @@ class TestProjectScoping:
     """A blueprint in project A must be invisible (404) from project B."""
 
     def test_get_other_project_returns_404(self, client, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
-        r = client.get(f"/api/projects/proj-b/blueprints/{bp.id}")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}")
         assert r.status_code == 404
 
     def test_update_other_project_returns_404(self, client, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
         r = client.put(
-            f"/api/projects/proj-b/blueprints/{bp.id}",
+            f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}",
             json={"name": "hijack"},
         )
         assert r.status_code == 404
         assert r.json()["detail"].startswith("Blueprint not found")
 
     def test_delete_other_project_returns_404(self, client, repo, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
-        r = client.delete(f"/api/projects/proj-b/blueprints/{bp.id}")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
+        r = client.delete(f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}")
         assert r.status_code == 404
         # The blueprint is still active in its own project.
         assert repo.get_by_id(bp.id).is_active is True
 
     def test_revisions_other_project_returns_404(self, client, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
-        r = client.get(f"/api/projects/proj-b/blueprints/{bp.id}/revisions")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}/revisions")
         assert r.status_code == 404

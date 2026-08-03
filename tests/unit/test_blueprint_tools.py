@@ -28,6 +28,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from daemon.services.blueprint_write_service import (
+    BlueprintNotFoundError,
+    BlueprintWriteService,
+)
 from daemon.tools.blueprint import create_blueprint_tools
 
 
@@ -69,13 +73,52 @@ class _FakeRepo:
     def get_by_id(self, bp_id: str) -> _FakeBlueprint | None:
         return self._store.get(bp_id)
 
-    def update(self, bp_id: str, **fields: Any) -> _FakeBlueprint | None:
+    def update(self, bp_id: str, reason: str | None = None, **fields: Any) -> _FakeBlueprint | None:
         bp = self._store.get(bp_id)
         if bp is None:
             return None
         for k, v in fields.items():
             setattr(bp, k, v)
         return bp
+
+    def create(self, **fields: Any) -> _FakeBlueprint:
+        bp = _FakeBlueprint(
+            id=fields.get("id", "bp-new"),
+            project_id=fields["project_id"],
+            name=fields.get("name", "new"),
+            content=fields.get("content", ""),
+            kind=fields.get("kind", "area"),
+        )
+        self._store[bp.id] = bp
+        return bp
+
+
+class _FakeWriteService:
+    """Lightweight async stand-in for BlueprintWriteService.
+
+    Delegates create/update/disable to the _FakeRepo so the tool tests
+    exercise the real service→repo call path without an embedding API.
+    """
+
+    def __init__(self, repo: _FakeRepo, project_id: str) -> None:
+        self._repo = repo
+        self.project_id = project_id
+
+    async def create_blueprint(self, **kwargs: Any) -> _FakeBlueprint:
+        kwargs.setdefault("project_id", self.project_id)
+        return self._repo.create(**kwargs)
+
+    async def update_blueprint(self, bp_id: str, reason: str | None = None, **kwargs: Any) -> _FakeBlueprint:
+        result = self._repo.update(bp_id, reason=reason, **kwargs)
+        if result is None:
+            raise BlueprintNotFoundError(bp_id)
+        return result
+
+    async def disable_blueprint(self, bp_id: str, reason: str | None = None) -> bool:
+        bp = self._repo.get_by_id(bp_id)
+        if bp is None:
+            raise BlueprintNotFoundError(bp_id)
+        return True
 
 
 def _make_manager(
@@ -85,8 +128,12 @@ def _make_manager(
 ) -> MagicMock:
     """Build a MagicMock manager with the blueprint attributes the tools touch."""
     m = MagicMock()
-    m._blueprint_repo = repo or _FakeRepo()
+    repo = repo or _FakeRepo()
+    m._blueprint_repo = repo
     m._blueprint_matcher = matcher
+    # ``get_blueprint_write_service`` returns a _FakeWriteService bound to
+    # the same repo so create/update go through the service→repo path.
+    m.get_blueprint_write_service = lambda pid: _FakeWriteService(repo, pid)
     # ``_get_project_id()`` reads the instance repo; mock it to return an
     # instance carrying the requested project_id.
     inst = MagicMock()

@@ -1,29 +1,35 @@
 """REST API router for Project Blueprints — user-facing CRUD.
 
-Mounted under /api/projects/{project_id}/blueprints. Per the architecture
-review (B2 fix): ALL endpoints consume ``manager._blueprint_repo`` for
-CRUD operations. The ``manager._blueprint_matcher`` is MATCH-ONLY and is
-NOT consumed by this router — do not add CRUD methods to it, do not call
-it from here.
+Mounted under /api/projects/{project_id}/blueprints. Per the Phase 1
+canonical write boundary (C5 fix): ALL write endpoints (POST/PUT/DELETE)
+route through ``manager.get_blueprint_write_service(project_id)``, which
+enforces the five invariants (rate-limit, embed-before-commit, revision
+capture, atomic publish unit, rate-limit record). Read endpoints (GET)
+consume ``manager._blueprint_repo`` directly — reads don't mutate state.
 
-No service layer — the router accesses ``manager._blueprint_repo``
-directly, matching the ``daemon/routers/skill_bank.py`` pattern.
-Input validation is handled by Pydantic ``Field(min_length=1)`` on the
-request schemas; the ``is_write_paused`` manager check is applied to
-every write endpoint (POST, PUT, DELETE).
+The ``manager._blueprint_matcher`` is MATCH-ONLY and is NOT consumed by
+this router.
 
-DI pattern: ``_get_manager(request) → manager._blueprint_repo``,
-sync calls bridged with ``asyncio.to_thread``. All endpoints are
-scoped by ``project_id`` path param — a security requirement. A
-blueprint belonging to project A is invisible (404) to project B.
+DI pattern: ``_get_manager(request) → manager.get_blueprint_write_service(project_id)``
+for writes, ``manager._blueprint_repo`` for reads; sync calls bridged
+with ``asyncio.to_thread``. All endpoints are scoped by ``project_id``
+path param — a security requirement. A blueprint belonging to project A
+is invisible (404) to project B.
 """
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
+from daemon.services.blueprint_write_service import (
+    BlueprintNotFoundError,
+    BlueprintPublishError,
+    BlueprintRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +51,27 @@ class BlueprintCreate(BaseModel):
     content: str = Field(min_length=1, description="Blueprint body content")
     tags: list[dict] | None = None
     file_refs: list[str] | None = None
+    trigger_queries: list[str] | None = Field(
+        default=None,
+        description="Trigger queries to embed (vector matching). None = no triggers.",
+    )
 
 
 class BlueprintUpdate(BaseModel):
-    """Update request — all fields optional. Only non-None fields are applied."""
+    """Update request — all fields optional. Only non-None fields are applied.
+
+    ``trigger_queries`` semantics (C4 fix 2):
+      - ``None`` (omitted) → leave triggers unchanged
+      - ``[]`` (empty list) → clear ALL triggers explicitly
+      - ``[a, b, ...]`` → replace triggers with new embeddings
+    """
 
     name: str | None = Field(default=None, min_length=1)
     content: str | None = Field(default=None, min_length=1)
     tags: list[dict] | None = None
     file_refs: list[str] | None = None
     status: str | None = None
+    trigger_queries: list[str] | None = None
 
 
 class BlueprintResponse(BaseModel):
@@ -109,6 +126,27 @@ class BlueprintListResponse(BaseModel):
 def _get_manager(request: Request) -> Any:
     """Get the InstanceManager from app state."""
     return request.app.state.manager
+
+
+def _validate_project_id(project_id: str) -> None:
+    """Validate that the path param is UUID-shaped (C2 fix e / C7).
+
+    Prevents attacker-controlled arbitrary strings from reaching the
+    rate limiter (which keys state by project_id). Returns 400 on an
+    invalid UUID. ``project_id`` must be a valid UUID string.
+
+    Threat model: without this check, an attacker flooding unique
+    random strings as ``project_id`` grows the limiter's ``_state``
+    dict without bound (C2/C7). The limiter now has an LRU cap, but
+    UUID validation at the boundary is defense-in-depth.
+    """
+    try:
+        uuid.UUID(project_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail="project_id must be a valid UUID",
+        )
 
 
 def _blueprint_to_response(bp: Any) -> BlueprintResponse | None:
@@ -170,6 +208,7 @@ async def list_blueprints(
     ``active_only``. ``active_only`` is hardcoded to True (soft-deleted
     blueprints are invisible here).
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     repo = manager._blueprint_repo
     items = await asyncio.to_thread(
@@ -194,6 +233,7 @@ async def get_blueprint(
     Returns 404 if the blueprint does not exist OR belongs to a different
     project — never leaks cross-project existence.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     repo = manager._blueprint_repo
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
@@ -209,23 +249,30 @@ async def create_blueprint(
 ):
     """Create a new blueprint.
 
-    Validation: slug, name, content must be non-empty (Pydantic
-    ``Field(min_length=1)`` → 422 on empty string). ``project_id``
-    comes from the URL path, NOT the body.
+    Routes through the canonical write service (C5), which enforces
+    rate-limiting, embeds trigger queries BEFORE commit (C4 fix 1), and
+    records a revision. Validation: slug, name, content must be
+    non-empty (Pydantic ``Field(min_length=1)`` → 422 on empty string).
+    ``project_id`` comes from the URL path, NOT the body.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     _check_write_paused(manager)
-    repo = manager._blueprint_repo
-    created = await asyncio.to_thread(
-        repo.create,
-        project_id=project_id,
-        slug=body.slug,
-        name=body.name,
-        kind=body.kind,
-        content=body.content,
-        tags=body.tags if body.tags is not None else [],
-        file_refs=body.file_refs if body.file_refs is not None else [],
-    )
+    service = manager.get_blueprint_write_service(project_id)
+    try:
+        created = await service.create_blueprint(
+            slug=body.slug,
+            name=body.name,
+            kind=body.kind,
+            content=body.content,
+            tags=body.tags if body.tags is not None else [],
+            file_refs=body.file_refs if body.file_refs is not None else [],
+            trigger_queries=body.trigger_queries,
+        )
+    except BlueprintRateLimitError:
+        raise HTTPException(status_code=429, detail="Blueprint write rate-limited")
+    except BlueprintPublishError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     return _blueprint_to_response(created)
 
 
@@ -244,6 +291,7 @@ async def initialize_project_blueprints(
     core.md blueprint already exists. The initialization runs asynchronously
     — this endpoint returns immediately with 202 Accepted.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
 
     # Guard: refuse to re-initialize when a core blueprint already exists.
@@ -314,6 +362,7 @@ async def trigger_blueprint_scan(
     Dispatches on system_background_queue. Requires that the queue exists
     for the project (provisioned automatically on project creation).
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     job_service = getattr(manager, "_job_queue_service", None)
     if job_service is None:
@@ -357,23 +406,49 @@ async def update_blueprint(
     blueprint_id: str,
     body: BlueprintUpdate,
 ):
-    """Update a blueprint. Only non-None fields are applied.
+    """Update a blueprint via the canonical write service (C5).
 
-    Fetches the blueprint first to verify it belongs to ``project_id``
-    (security). The repo's ``update`` auto-bumps the version when
-    ``content``, ``file_refs``, or ``tags`` change.
+    Only non-None fields are applied. Fetches the blueprint first to
+    verify it belongs to ``project_id`` (security). ``status`` is passed
+    through to the repo (not a version-incrementing field).
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     _check_write_paused(manager)
     repo = manager._blueprint_repo
     # Verify ownership BEFORE mutating.
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
     _check_project_ownership(bp, project_id)
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not fields:
+
+    # Build kwargs from non-None values. trigger_queries has special
+    # semantics: None = unchanged, [] = clear all (C4 fix 2).
+    kwargs: dict[str, Any] = {}
+    if body.name is not None:
+        kwargs["name"] = body.name
+    if body.content is not None:
+        kwargs["content"] = body.content
+    if body.tags is not None:
+        kwargs["tags"] = body.tags
+    if body.file_refs is not None:
+        kwargs["file_refs"] = body.file_refs
+    if body.status is not None:
+        kwargs["status"] = body.status
+    # trigger_queries: pass through as-is (None OR [] OR list). The
+    # service distinguishes None (no-op) from [] (clear).
+    if body.trigger_queries is not None:
+        kwargs["trigger_queries"] = body.trigger_queries
+
+    if not kwargs:
         raise HTTPException(status_code=400, detail="No fields to update")
-    updated = await asyncio.to_thread(repo.update, blueprint_id, **fields)
-    if updated is None:
+
+    service = manager.get_blueprint_write_service(project_id)
+    try:
+        updated = await service.update_blueprint(blueprint_id, **kwargs)
+    except BlueprintRateLimitError:
+        raise HTTPException(status_code=429, detail="Blueprint write rate-limited")
+    except BlueprintPublishError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except BlueprintNotFoundError:
         raise HTTPException(status_code=404, detail="Blueprint not found")
     return _blueprint_to_response(updated)
 
@@ -384,18 +459,25 @@ async def delete_blueprint(
     project_id: str,
     blueprint_id: str,
 ):
-    """Soft-delete a blueprint (sets ``is_active=False``).
+    """Soft-delete a blueprint via the canonical write service (C5).
 
-    Fetches the blueprint first to verify it belongs to ``project_id``.
+    The service soft-deletes (sets ``is_active=False``) and records a
+    final revision (``version=-1, source="disable"``). Fetches the
+    blueprint first to verify it belongs to ``project_id``.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     _check_write_paused(manager)
     repo = manager._blueprint_repo
     # Verify ownership BEFORE deleting.
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
     _check_project_ownership(bp, project_id)
-    deleted = await asyncio.to_thread(repo.soft_delete, blueprint_id)
-    if not deleted:
+    service = manager.get_blueprint_write_service(project_id)
+    try:
+        await service.disable_blueprint(blueprint_id)
+    except BlueprintRateLimitError:
+        raise HTTPException(status_code=429, detail="Blueprint write rate-limited")
+    except BlueprintNotFoundError:
         raise HTTPException(status_code=404, detail="Blueprint not found")
     return {"deleted": True}
 
@@ -413,6 +495,7 @@ async def list_blueprint_revisions(
 
     Verifies the blueprint belongs to ``project_id`` first.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     repo = manager._blueprint_repo
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)

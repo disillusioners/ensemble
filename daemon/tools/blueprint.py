@@ -249,10 +249,16 @@ def create_blueprint_tools(
         kind: str,
         content: str,
         project_id: str = None,
+        tags: list = None,
+        file_refs: list = None,
+        trigger_queries: list = None,
+        reason: str = None,
     ) -> str:
         """Create a new blueprint. RESTRICTED to the blueprinter agent.
 
-        Only the 'blueprinter' agent can create blueprints.
+        Only the 'blueprinter' agent can create blueprints. Routes
+        through the canonical write service so trigger embeddings,
+        rate-limiting, and revision capture all run.
 
         Args:
             slug: URL-safe unique slug within the project.
@@ -260,6 +266,11 @@ def create_blueprint_tools(
             kind: Blueprint kind ('core' or 'area').
             content: The blueprint markdown content.
             project_id: Optional project ID. Auto-detected from context if not provided.
+            tags: Optional list of tag dicts.
+            file_refs: Optional list of file reference strings.
+            trigger_queries: Optional list of trigger query strings to embed.
+                None = no triggers stored.
+            reason: Optional reason for the revision log.
 
         Returns:
             Success message with the new blueprint ID, or an authorization error.
@@ -271,15 +282,17 @@ def create_blueprint_tools(
         if not pid:
             return "Error: project_id not available. Ensure the agent instance has a project context set."
 
-        repo = manager._blueprint_repo
+        service = manager.get_blueprint_write_service(pid)
         try:
-            bp = await asyncio.to_thread(
-                repo.create,
-                project_id=pid,
+            bp = await service.create_blueprint(
                 slug=slug,
                 name=name,
                 kind=kind,
                 content=content,
+                tags=tags or [],
+                file_refs=file_refs or [],
+                trigger_queries=trigger_queries,
+                reason=reason,
             )
         except Exception as e:
             logger.warning("blueprint_create failed: %s", e, exc_info=True)
@@ -298,16 +311,26 @@ def create_blueprint_tools(
         content: str = None,
         name: str = None,
         project_id: str = None,
+        tags: list = None,
+        file_refs: list = None,
+        trigger_queries: list = None,
+        reason: str = None,
     ) -> str:
         """Update a blueprint. RESTRICTED to the blueprinter agent.
 
-        Only the 'blueprinter' agent can update blueprints.
+        Only the 'blueprinter' agent can update blueprints. Routes
+        through the canonical write service.
 
         Args:
             blueprint_id: The blueprint's primary key.
             content: Optional new content. Omitted fields are left unchanged.
             name: Optional new name.
             project_id: Optional project ID (unused by update but accepted for API symmetry).
+            tags: Optional new tags list.
+            file_refs: Optional new file references list.
+            trigger_queries: Optional trigger queries. None = leave
+                unchanged; [] = clear all triggers; [a,b] = replace.
+            reason: Optional reason for the revision log.
 
         Returns:
             Success message, or an authorization / error message.
@@ -315,15 +338,24 @@ def create_blueprint_tools(
         if not _is_writer_authorized(agent_id):
             return "ERROR: Only the blueprinter agent can update blueprints."
 
-        # Build fields dict from non-None values
-        fields: dict = {}
+        # Build kwargs dict from non-None values
+        kwargs: dict = {}
         if content is not None:
-            fields["content"] = content
+            kwargs["content"] = content
         if name is not None:
-            fields["name"] = name
+            kwargs["name"] = name
+        if tags is not None:
+            kwargs["tags"] = tags
+        if file_refs is not None:
+            kwargs["file_refs"] = file_refs
+        # trigger_queries: pass through as-is (None OR [] OR list).
+        if trigger_queries is not None:
+            kwargs["trigger_queries"] = trigger_queries
+        if reason is not None:
+            kwargs["reason"] = reason
 
-        if not fields:
-            return "Error: no fields to update. Provide content and/or name."
+        if not kwargs:
+            return "Error: no fields to update. Provide content, name, tags, file_refs, trigger_queries, or reason."
 
         repo = manager._blueprint_repo
         # Ownership check: verify the blueprint exists and belongs to
@@ -337,10 +369,9 @@ def create_blueprint_tools(
         if existing is None or (pid is not None and existing.project_id != pid):
             return "Blueprint not found."
 
+        service = manager.get_blueprint_write_service(pid)
         try:
-            bp = await asyncio.to_thread(
-                repo.update, blueprint_id, **fields
-            )
+            bp = await service.update_blueprint(blueprint_id, **kwargs)
         except Exception as e:
             logger.warning("blueprint_update failed: %s", e, exc_info=True)
             return f"Error: failed to update blueprint: {e}"

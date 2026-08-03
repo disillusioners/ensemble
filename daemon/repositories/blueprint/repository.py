@@ -70,14 +70,49 @@ class BlueprintRepository:
             session.refresh(blueprint)
         return blueprint
 
-    def update(self, blueprint_id: str, **fields: Any) -> Optional[Blueprint]:
+    def update(
+        self,
+        blueprint_id: str,
+        reason: str | None = None,
+        **fields: Any,
+    ) -> Optional[Blueprint]:
+        """Update a blueprint; capture a revision snapshot post-commit.
+
+        C4 fix 3 (G2): ``reason`` is a revision metadata field, NOT a
+        ``Blueprint`` field. It is extracted from kwargs BEFORE the
+        setattr loop so the setattr validation does not raise
+        ``ValueError: Unknown Blueprint field: reason``.
+
+        C4 fix 2: ``trigger_queries=[]`` is a valid clear-all signal and
+        is passed through to the setattr loop. The caller
+        (:class:`~daemon.services.blueprint_write_service.BlueprintWriteService`)
+        has already distinguished ``[]`` (clear) from ``None`` (no-op).
+
+        G2: after the update session commits, an append-only revision
+        snapshot is captured in its OWN session (post-commit).
+
+        W1: Revision capture runs POST-COMMIT in a SEPARATE session.
+        A crash between the content commit and the revision INSERT
+        leaves a version bump without a corresponding audit row. This
+        is an accepted trade-off (C8: revision failure must never roll
+        back the update). Same-transaction capture would require a
+        schema migration to share the session and is deferred to a
+        future phase. Only capture when the version actually incremented
+        (content/file_refs/tags/trigger_queries changed) so metadata-only
+        updates don't grow the audit table.
+        """
+        # Pop reason FIRST so it is not in ``fields`` when we setattr.
+        reason = fields.pop("reason", None) if reason is None else reason
+
         with Session(self.engine) as session:
             blueprint = session.get(Blueprint, blueprint_id)
             if blueprint is None:
                 return None
 
+            version_incremented = False
             if {"content", "file_refs", "tags", "trigger_queries"}.intersection(fields):
                 blueprint.version += 1
+                version_incremented = True
             for name, value in fields.items():
                 if not hasattr(blueprint, name):
                     raise ValueError(f"Unknown Blueprint field: {name}")
@@ -86,6 +121,29 @@ class BlueprintRepository:
             session.add(blueprint)
             session.commit()
             session.refresh(blueprint)
+
+        # Capture revision snapshot OUTSIDE the update session (C8: never
+        # roll back the update on revision failure). Only capture when the
+        # version actually incremented (content/file_refs/tags/trigger_queries
+        # changed) so metadata-only updates don't grow the audit table.
+        if version_incremented:
+            try:
+                self.add_revision(
+                    blueprint_id=blueprint.id,
+                    version=blueprint.version,
+                    content_snapshot=blueprint.content,
+                    source=blueprint.source,
+                    file_refs=list(blueprint.file_refs or []),
+                    tags=list(blueprint.tags or []),
+                    trigger_queries=list(blueprint.trigger_queries or []),
+                    reason=reason,
+                )
+            except Exception as e:
+                logger.error(
+                    "add_revision failed for blueprint %s v%d: %s",
+                    blueprint_id, blueprint.version, e, exc_info=True,
+                )
+
         return blueprint
 
     def soft_delete(self, blueprint_id: str) -> bool:
@@ -99,23 +157,6 @@ class BlueprintRepository:
             session.commit()
         return True
 
-    def add_triggers(
-        self,
-        blueprint_id: str,
-        items: list[tuple[str, list[float]]],
-    ) -> int:
-        with Session(self.engine) as session:
-            for query_text, embedding in items:
-                session.add(
-                    BlueprintTrigger(
-                        blueprint_id=blueprint_id,
-                        query_text=query_text,
-                        embedding=list(embedding),
-                    )
-                )
-            session.commit()
-        return len(items)
-
     def get_triggers_by_blueprint(
         self,
         blueprint_id: str,
@@ -128,17 +169,6 @@ class BlueprintRepository:
                     )
                 )
             )
-
-    def delete_triggers_by_blueprint(self, blueprint_id: str) -> int:
-        with Session(self.engine) as session:
-            result = session.execute(
-                text(
-                    "DELETE FROM project_blueprint_triggers WHERE blueprint_id = :bid"
-                ),
-                {"bid": blueprint_id},
-            )
-            session.commit()
-            return result.rowcount
 
     def replace_triggers(
         self,

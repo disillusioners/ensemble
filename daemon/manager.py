@@ -40,6 +40,7 @@ from .repositories import (
     create_shared_context_metadata_repository,
     create_skill_repository,
     create_blueprint_repository,
+    create_blueprint_embedding_repository,
     create_skill_lineage_repository,
     create_skill_embedding_repository,
     create_skill_usage_repository,
@@ -85,6 +86,7 @@ from .services.skill_store_service import SkillStoreService
 from .services.skill_search_service import SkillSearchService
 from .services.blueprint_matcher import BlueprintMatcher
 from .services.blueprint_rate_limiter import BlueprintRateLimiter
+from .services.blueprint_write_service import BlueprintWriteService
 from .services.skill_injection_service import SkillInjectionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
@@ -758,6 +760,39 @@ class InstanceManager:
         # Project Blueprint: blueprint repository (Phase 1 schema created via SQLModel.metadata.create_all)
         self._blueprint_repo = create_blueprint_repository(engine=self._engine, create_tables=False)
 
+        # ── Project Blueprint: embedding repo + service (G4 fix) ───────
+        # INDEPENDENT of skill_evolution. Operates on the same
+        # ``project_blueprint_triggers`` table, but is constructed
+        # whenever a blueprint embedding model is configured.
+        # skill_evolution is NOT a prerequisite.
+        _blueprint_embedding_configured = (
+            getattr(self.config.blueprint, "embedding_model", None) is not None
+        )
+        if _blueprint_embedding_configured:
+            self._blueprint_embedding_repo = create_blueprint_embedding_repository(
+                engine=self._engine, create_tables=False,
+            )
+            blueprint_llm_config: dict[str, Any] = {
+                "base_url": self.config.llm.base_url,
+                "api_key": self.config.llm.api_key,
+                "model": self.config.llm.model,
+                "model_vision": self.config.llm.model_vision,
+                "temperature": self.config.llm.temperature,
+                "request_timeout": self.config.llm.request_timeout,
+            }
+            self._blueprint_embedding_service = SkillEmbeddingService(
+                config=self.config.blueprint,  # BlueprintConfig, NOT skill_evolution
+                embedding_repo=self._blueprint_embedding_repo,
+                llm_config=blueprint_llm_config,
+            )
+        else:
+            self._blueprint_embedding_repo = None
+            self._blueprint_embedding_service = None
+        # NOTE: ``BlueprintMatcher`` construction is deferred to after the
+        # skill_evolution block below (it lives there historically); we
+        # just gate it on the blueprint embedding service, not the skill
+        # service. See the ``BlueprintMatcher`` block ~line 940.
+
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
 
@@ -927,20 +962,22 @@ class InstanceManager:
             self._skill_search_service = None
 
         # Project Blueprint: matching engine (BM25 + vector fusion).
-        # Only construct if the embedding service is available; Phase 2
-        # injection code handles ``matcher is None`` gracefully (skips
-        # blueprint injection).
-        if self._skill_embedding_service is not None:
+        # G4 fix: construct whenever the BLUEPRINT embedding service is
+        # available, REGARDLESS of whether skill_evolution is configured.
+        # ``self._blueprint_matcher`` is no longer gated on
+        # ``self._skill_embedding_service is not None`` (rev 1 mistake —
+        # it coupled blueprints to skill_evolution).
+        if self._blueprint_embedding_service is not None:
             self._blueprint_matcher = BlueprintMatcher(
                 repository=self._blueprint_repo,
-                embedding_service=self._skill_embedding_service,
+                embedding_service=self._blueprint_embedding_service,
                 config=self.config.blueprint,
             )
         else:
             self._blueprint_matcher = None
-            logger.warning(
-                "BlueprintMatcher not initialized - "
-                "no embedding service available"
+            logger.info(
+                "BlueprintMatcher not initialized — "
+                "BLUEPRINT_EMBEDDING_MODEL not set"
             )
 
         # Project Blueprint Phase 4: rate limiter + circuit breaker for
@@ -1123,6 +1160,30 @@ class InstanceManager:
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
+
+    def get_blueprint_write_service(
+        self,
+        project_id: str,
+    ) -> BlueprintWriteService:
+        """Factory for the canonical write boundary (C5).
+
+        Returns a :class:`BlueprintWriteService` bound to ``project_id``
+        and the manager's blueprint subsystem. Used by the REST router,
+        the blueprinter tools, and (in Phase 3) the admission
+        coordinator. ALL blueprint writes route through this service so
+        the five invariants (rate-limit, embed-before-commit, revision
+        capture, atomic publish unit, rate-limit record) are enforced on
+        every path.
+        """
+        return BlueprintWriteService(
+            repository=self._blueprint_repo,
+            embedding_repository=self._blueprint_embedding_repo,
+            embedding_service=self._blueprint_embedding_service,
+            rate_limiter=self._blueprint_rate_limiter,
+            config=self.config.blueprint,
+            project_id=project_id,
+            manager=self,  # for save-plan metadata + future history hooks
+        )
 
     def _bootstrap_builtin_servers(self) -> None:
         """Bootstrap built-in MCP servers on daemon startup.

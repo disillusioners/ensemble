@@ -74,6 +74,10 @@ class Blueprint(SQLModel, table=True):
         default_factory=list,
         sa_column=Column("trigger_queries", JSONBType, nullable=False),
     )
+    # C5 fix: Denormalized cache — the ``project_blueprint_triggers`` table
+    # is the AUTHORITATIVE source for matching. This field mirrors the query
+    # strings for UI display. On rollback, restore it from the authoritative
+    # table state (the write service clears the trigger table on rollback).
     version: int = Field(default=1)
     embedding_model: Optional[str] = Field(default=None, max_length=128)
     source: str = Field(default="auto", max_length=16)

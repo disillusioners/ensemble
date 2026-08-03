@@ -35,5 +35,5 @@ async def test_max_results_and_fields(setup):
     assert len(out)<=3 and all(set(x.__dict__) == {'id','name','kind','version','content','file_refs','score'} for x in out)
 @pytest.mark.asyncio
 async def test_vector_matching(setup):
-    a=setup.create(project_id="p",slug="a",name="a",content="nothing"); setup.add_triggers(a.id,[("other",[1.,1.])])
+    a=setup.create(project_id="p",slug="a",name="a",content="nothing"); setup.replace_triggers(a.id,[("other",[1.,1.])])
     out=await BlueprintMatcher(setup,Embed(),BlueprintConfig(bm25_weight=0,vector_weight=1,match_threshold=.3)).match("p","other"); assert out[1].id==a.id
