@@ -9,5 +9,8 @@
   "team_members": ["coder"],
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance", "blueprint"]
+  },
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
   }
 }

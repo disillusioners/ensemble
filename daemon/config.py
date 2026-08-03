@@ -470,16 +470,117 @@ class McpPoolConfig(BaseSettings):
     )
 
 
-class SkillEvolutionConfig(BaseSettings):
+class EmbeddingConfig(BaseSettings):
+    """Shared embedding configuration for all subsystems (skills, blueprints, future).
+
+    Subclasses set their own ``env_prefix`` (e.g. ``SKILL_EVOLUTION_``) and may
+    override individual field defaults. The ``_shared_embedding_fallback``
+    validator applies the shared ``EMBEDDING_*`` environment variables as a
+    fallback when no prefix-specific env var was set and the field still equals
+    its base default (``None`` for optional fields, ``1536`` for
+    ``embedding_dimensions``).
+
+    Precedence (highest → lowest):
+
+    1. ``{SUBSYSTEM_PREFIX}_EMBEDDING_*`` env var
+       (e.g. ``SKILL_EVOLUTION_EMBEDDING_MODEL``)
+    2. Shared ``EMBEDDING_*`` env var
+    3. Field default
+
+    Subclass non-None defaults (e.g. ``SkillEvolutionConfig.embedding_model =
+    "text-embedding-3-small"``) are preserved — the operator who wants the
+    shared value must set the prefix-specific var. Rationale: a subclass that
+    picks a concrete default is asserting a deliberate choice; silently
+    shadowing it with ``EMBEDDING_*`` would be surprising.
+    """
+
+    embedding_model: str | None = Field(
+        default=None,
+        description=(
+            "Embedding model name. Subclasses may override the default "
+            "(e.g. SkillEvolutionConfig uses 'text-embedding-3-small')."
+        ),
+    )
+    embedding_dimensions: int = Field(
+        default=1536,
+        description=(
+            "Embedding vector dimensions. OpenAI text-embedding-3-* uses 1536; "
+            "older models (text-embedding-ada-002) also 1536."
+        ),
+    )
+    embedding_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Override the embeddings API base URL. When unset, embedding calls "
+            "fall back to LLMConfig.base_url."
+        ),
+    )
+    embedding_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Override the embeddings API key. When unset, embedding calls "
+            "fall back to LLMConfig.api_key."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shared_embedding_fallback(cls, values: Any) -> Any:
+        """Apply shared ``EMBEDDING_*`` env vars as fallback.
+
+        Runs after pydantic-settings has merged prefix-specific env vars and
+        field defaults into ``values``. We inject the shared ``EMBEDDING_*``
+        env var only when the field still matches its BASE default:
+
+        * ``None`` for optional fields (``embedding_model``,
+          ``embedding_base_url``, ``embedding_api_key``)
+        * ``1536`` for ``embedding_dimensions`` (never ``None``)
+
+        See class docstring for the full precedence rules and rationale.
+        """
+        if not isinstance(values, dict):
+            return values
+
+        # Optional fields: fallback only when value is None (preserves
+        # subclass non-None defaults like SkillEvolutionConfig.embedding_model).
+        for field_key, env_key in (
+            ("embedding_model", "EMBEDDING_MODEL"),
+            ("embedding_base_url", "EMBEDDING_BASE_URL"),
+            ("embedding_api_key", "EMBEDDING_API_KEY"),
+        ):
+            if values.get(field_key) is None:
+                shared = os.environ.get(env_key)
+                if shared:
+                    values[field_key] = shared
+
+        # embedding_dimensions defaults to 1536 (int, never None) — fallback
+        # when value is still the default. Malformed env vars are silently
+        # ignored (the field default stands).
+        if values.get("embedding_dimensions") == 1536:
+            shared = os.environ.get("EMBEDDING_DIMENSIONS")
+            if shared:
+                try:
+                    values["embedding_dimensions"] = int(shared)
+                except ValueError:
+                    pass
+
+        return values
+
+
+class SkillEvolutionConfig(EmbeddingConfig):
     """Configuration for the skill evolution system."""
 
     model_config = SettingsConfigDict(env_prefix="SKILL_EVOLUTION_")
 
-    # Embedding
+    # Embedding fields are inherited from EmbeddingConfig. The
+    # ``embedding_model`` default is re-declared here to preserve the
+    # existing string default + non-optional type (the test at
+    # tests/test_skill_evolution_config.py:35 pins this to
+    # "text-embedding-3-small"). ``embedding_dimensions``,
+    # ``embedding_base_url``, and ``embedding_api_key`` use the base
+    # defaults (1536, None, None) — unchanged from the pre-refactor
+    # behavior.
     embedding_model: str = Field(default="text-embedding-3-small")
-    embedding_dimensions: int = Field(default=1536)
-    embedding_base_url: str | None = Field(default=None)  # Falls back to LLMConfig.base_url
-    embedding_api_key: str | None = Field(default=None)  # Falls back to LLMConfig.api_key
 
     # Evolution models
     evolution_model: str | None = Field(default=None)  # Falls back to main model
@@ -565,16 +666,21 @@ class VSCodeConfig(BaseSettings):
     extensions: list[str] = Field(default_factory=list)  # extensions to pre-install
 
 
-class BlueprintConfig(BaseSettings):
+class BlueprintConfig(EmbeddingConfig):
     """Configuration for the Project Blueprint matching system.
 
     Defaults: bm25_weight (alpha) = 0.4, vector_weight (beta) = 0.6,
     match_threshold = 0.30, max_results = 5. Tuned in Phase 6.
+
+    Embedding fields are inherited from :class:`EmbeddingConfig` and
+    default to ``None`` / ``1536`` — matching the pre-refactor behavior.
+    The ``_shared_embedding_fallback`` validator resolves shared
+    ``EMBEDDING_*`` env vars when the prefix-specific ``BLUEPRINT_EMBEDDING_*``
+    is unset.
     """
 
     model_config = SettingsConfigDict(env_prefix="BLUEPRINT_")
 
-    embedding_model: str | None = Field(default=None)
     bm25_weight: float = Field(default=0.4)
     vector_weight: float = Field(default=0.6)
     match_threshold: float = Field(default=0.30)

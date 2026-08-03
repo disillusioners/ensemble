@@ -4,6 +4,7 @@ Matches queries against shared context files and returns top-2 injection text.
 """
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,12 @@ INJECTION_TOKEN_CAP = 2000
 
 # Minimum score threshold for a file to appear in the file index
 MATCH_THRESHOLD = 0.10
+
+# Debug env var: when set to a truthy value ("1", "true", "yes"), the
+# heuristic matcher surfaces a debug table of all candidate files and
+# their scores when NO file matches above MATCH_THRESHOLD. When the env
+# var is unset (default), behavior is completely unchanged.
+DEBUG_ENV_VAR = "HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG"
 
 _STOP_WORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
@@ -249,6 +256,123 @@ def _build_matched_file(file_path: Path, score: float) -> MatchedFile | None:
         return None
 
 
+def _score_context_files(query: str, context_dir: Path) -> list[tuple[float, Path]]:
+    """Score every ``.md`` file in ``context_dir`` against ``query``.
+
+    This is the shared scoring primitive used by both
+    :func:`_match_context_files` (normal injection) and the debug path in
+    :func:`get_shared_context`. It performs the exact same glob + tokenize +
+    score work so debug output reflects the real scores the matcher sees.
+
+    Args:
+        query: Query string to match against.
+        context_dir: Directory containing context files.
+
+    Returns:
+        List of ``(score, file_path)`` tuples in mtime order (most recent
+        first). Empty when the dir is missing, has no readable ``.md``
+        files, or no file produced a score.
+    """
+    logger.debug("[Explorer] _score_context_files: context_dir=%s", context_dir)
+
+    if not context_dir.is_dir():
+        logger.debug("[Explorer] _score_context_files: context_dir is not a directory")
+        return []
+
+    query_tokens = _tokenize_query(query)
+    logger.debug("[Explorer] _score_context_files: query_tokens=%s", query_tokens)
+
+    # Get all .md files sorted by mtime (most recent first), cap at 50
+    try:
+        md_files = sorted(
+            context_dir.glob("*.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )[:50]
+    except OSError as e:
+        logger.debug(f"Failed to list context files: {e}")
+        return []
+
+    logger.info("[Explorer] _score_context_files: found %d .md files", len(md_files))
+
+    if not md_files:
+        return []
+
+    scored: list[tuple[float, Path]] = []
+    for file_path in md_files:
+        try:
+            slug = _extract_slug_from_filename(file_path.name)
+            slug_tokens = _tokenize_slug(slug)
+            if not slug_tokens:
+                logger.debug("[Explorer] _score_context_files: file %s has no slug tokens", file_path.name)
+                continue
+
+            if query_tokens:
+                score = _match_score(query_tokens, slug_tokens)
+            else:
+                # No usable query tokens — score is 0 but we still want
+                # the most recent file pre-loaded.
+                score = 0.0
+            scored.append((score, file_path))
+            logger.debug(
+                "[Explorer] _score_context_files: file %s score=%.2f (threshold=%.2f)",
+                file_path.name, score, MATCH_THRESHOLD,
+            )
+        except Exception as e:
+            logger.debug(f"[Explorer] _score_context_files: Error scoring {file_path.name}: {e}")
+            continue
+
+    return scored
+
+
+def _build_debug_injection(
+    scored: list[tuple[float, Path]],
+    context_key: str,
+) -> str:
+    """Build the debug notice injected when no file clears the threshold.
+
+    Used only when :data:`DEBUG_ENV_VAR` is set AND no candidate scored
+    above :data:`MATCH_THRESHOLD`. The returned string is a plain
+    markdown block (no ``# Shared Context`` wrapper) that flows through
+    ``build_shared_context_message`` into a ``[SYSTEM CONTEXT: Shared
+    Context]`` HumanMessage naturally — it is non-empty and does not
+    contain any ``_NO_CONTEXT_SENTINELS`` entry.
+
+    The table is sorted by score descending so the highest-scoring
+    candidate appears first, matching the normal match-order convention.
+
+    Args:
+        scored: The full ``(score, file_path)`` list from
+            :func:`_score_context_files`.
+        context_key: The context key (tree-root instance id), surfaced
+            for traceability.
+
+    Returns:
+        Debug notice string. Empty only when ``scored`` is empty (caller
+        guards against this case).
+    """
+    if not scored:
+        return ""
+
+    # Sort by score descending; ties keep mtime order (most recent first)
+    # because ``scored`` is already in mtime order and Python's sort is
+    # stable.
+    ranked = sorted(scored, key=lambda sp: sp[0], reverse=True)
+
+    threshold_pct = int(MATCH_THRESHOLD * 100)
+    lines = [
+        f"[Debug] No file matched over the required threshold ({threshold_pct}%). "
+        f"Below is the list of candidate files for debug only:\n",
+        f"context_key: {context_key}\n",
+        "| File | Match Score |",
+        "|------|-------------|",
+    ]
+    for score, file_path in ranked:
+        lines.append(f"| {file_path.name} | {int(score * 100)}% |")
+
+    return "\n".join(lines) + "\n"
+
+
 def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
     """Find and score context files matching the query.
 
@@ -272,65 +396,12 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
         least one entry when the dir has any readable ``.md`` files; empty
         only when the dir is missing or empty.
     """
-    logger.debug("[Explorer] _match_context_files: context_dir=%s", context_dir)
-
-    if not context_dir.is_dir():
-        logger.debug("[Explorer] _match_context_files: context_dir is not a directory")
-        return []
-
-    query_tokens = _tokenize_query(query)
-    logger.debug("[Explorer] _match_context_files: query_tokens=%s", query_tokens)
-
-    # Get all .md files sorted by mtime (most recent first), cap at 50
-    try:
-        md_files = sorted(
-            context_dir.glob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )[:50]
-    except OSError as e:
-        logger.debug(f"Failed to list context files: {e}")
-        return []
-
-    logger.info("[Explorer] _match_context_files: found %d .md files", len(md_files))
-
-    if not md_files:
-        return []
-
-    # Score every file. Track all candidates so we can fall back to the
-    # highest-scoring one when nothing passes the threshold — this keeps
-    # the pre-loaded block non-empty whenever the dir has files.
-    scored: list[tuple[float, Path]] = []
-    above_threshold: list[MatchedFile] = []
-    best_below: tuple[float, Path] | None = None
-
-    for file_path in md_files:
-        try:
-            slug = _extract_slug_from_filename(file_path.name)
-            slug_tokens = _tokenize_slug(slug)
-            if not slug_tokens:
-                logger.debug("[Explorer] _match_context_files: file %s has no slug tokens", file_path.name)
-                continue
-
-            if query_tokens:
-                score = _match_score(query_tokens, slug_tokens)
-            else:
-                # No usable query tokens — score is 0 but we still want
-                # the most recent file pre-loaded.
-                score = 0.0
-            scored.append((score, file_path))
-            logger.debug(
-                "[Explorer] _match_context_files: file %s score=%.2f (threshold=%.2f)",
-                file_path.name, score, MATCH_THRESHOLD,
-            )
-        except Exception as e:
-            logger.debug(f"[Explorer] _match_context_files: Error scoring {file_path.name}: {e}")
-            continue
-
+    scored = _score_context_files(query, context_dir)
     if not scored:
         return []
 
     # Build MatchedFile objects for everything above the threshold.
+    above_threshold: list[MatchedFile] = []
     for score, file_path in scored:
         if score < MATCH_THRESHOLD:
             continue
@@ -818,6 +889,31 @@ def get_shared_context(
 
         matched = _match_context_files(query, context_dir)
         logger.info("[Explorer] _match_context_files returned %d matches", len(matched))
+
+        # Debug mode: when the debug env var is set AND the matcher fell back
+        # to a below-threshold file (matched non-empty but the top score is
+        # under MATCH_THRESHOLD), surface a debug table of ALL candidate files
+        # and their scores instead of the normal fallback injection. When
+        # files DO match over threshold, or when debug is off, behavior is
+        # unchanged.
+        debug_mode = os.environ.get(DEBUG_ENV_VAR, "").lower() in ("1", "true", "yes")
+        if (
+            debug_mode
+            and matched
+            and matched[0].score < MATCH_THRESHOLD
+        ):
+            logger.info(
+                "[Explorer] debug mode active: no file above threshold "
+                "(best score %.2f), surfacing debug table",
+                matched[0].score,
+            )
+            scored = _score_context_files(query, context_dir)
+            debug_text = _build_debug_injection(scored, context_key)
+            if debug_text:
+                return debug_text
+            # Edge case: scoring returned nothing on the second pass (e.g.
+            # all files were deleted between the two calls). Fall through to
+            # the normal path so we never return an empty string silently.
 
         # Always call _format_injection — even with zero matches — because
         # the "Available Context Files" index is built from the directory
