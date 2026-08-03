@@ -30,6 +30,31 @@
 
   <!-- Filter bar -->
   <div class="filter-bar">
+    <!-- Project selector — first field; visually scopes the rest
+         of the filters. Auto-redirects to the first project when the
+         route is /projects/all/blueprints. -->
+    <mat-form-field appearance="outline"
+                    class="filter-field project-select-field">
+      <mat-label>Project</mat-label>
+      <mat-select [value]="selectedProjectId()"
+                  (selectionChange)="onProjectChange($event.value)"
+                  [disabled]="projectsLoading()">
+        @if (projectsLoading()) {
+          <mat-option [value]="null" disabled>
+            Loading projects…
+          </mat-option>
+        } @else {
+          @for (proj of projects(); track proj.project_id) {
+            <mat-option [value]="proj.project_id">
+              {{ proj.name }}
+            </mat-option>
+          }
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <span class="filter-divider" aria-hidden="true"></span>
+
     <mat-form-field appearance="outline" class="filter-field">
       <mat-label>Kind</mat-label>
       <mat-select [value]="kindFilter()"
@@ -115,7 +140,14 @@
     </mat-card>
   }
 
-  <!-- Two-column main area -->
+  <!-- Two-column main area (only when a project is selected) -->
+  @if (!hasSelectedProject()) {
+    <div class="no-project-state">
+      <mat-icon class="empty-icon">folder_off</mat-icon>
+      <h3>Select a project</h3>
+      <p>Choose a project from the dropdown above to view its blueprints.</p>
+    </div>
+  } @else {
   <div class="blueprint-layout">
     <!-- LEFT: list -->
     <div class="list-pane">
@@ -548,4 +580,5 @@
       }
     </div>
   </div>
+  }
 </div>

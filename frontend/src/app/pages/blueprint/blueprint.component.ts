@@ -6,9 +6,10 @@ import {
   OnInit,
   OnDestroy,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -24,6 +25,7 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MarkdownModule } from 'ngx-markdown';
 import { BlueprintService } from '../../services/blueprint.service';
+import { ProjectService } from '../../services/project.service';
 import { CodemirrorDirective } from '../../components/code-viewer/codemirror.directive';
 import {
   Blueprint,
@@ -32,6 +34,7 @@ import {
   BlueprintRevision,
   BlueprintTag,
 } from '../../models/blueprint.model';
+import { Project } from '../../models/project.model';
 
 /**
  * List / CRUD page for the Project Blueprint surface (Phase 5).
@@ -51,8 +54,14 @@ import {
  * off-page.
  *
  * Project scoping: `projectId` is read from `ActivatedRoute.snapshot`
- * once on init. The service method calls rebuild the URL per
- * request — see BlueprintService.baseUrl.
+ * and resolved against the project catalogue fetched from
+ * ``ProjectService.listProjects()`` during ``ngOnInit``. If the route
+ * param is ``"all"`` (or empty) and projects exist, the first project
+ * is auto-selected and the URL is rewritten so deep-link / reload
+ * pick up the real selection. Switching projects via the dropdown
+ * (``onProjectChange``) keeps the URL in sync via ``router.navigate``.
+ * The service method calls rebuild the URL per request — see
+ * BlueprintService.baseUrl.
  */
 @Component({
   selector: 'app-blueprint',
@@ -81,11 +90,27 @@ import {
 })
 export class BlueprintComponent implements OnInit, OnDestroy {
   private readonly service = inject(BlueprintService);
+  private readonly projectService = inject(ProjectService);
   private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
   private readonly snackBar = inject(MatSnackBar);
 
-  // Project id from the route — set once on init.
-  private projectId: string = '';
+  // ── Project-scoped state ─────────────────────────────────────────────
+  // Project list + selected id are now driven by a dropdown above the
+  // content filters (Phase 6). The list of projects is fetched once on
+  // init from ProjectService (signal-cached) so switching between
+  // projects doesn't refetch the catalogue. `selectedProjectId` is the
+  // single source of truth — every CRUD method reads it (see the
+  // service calls below) and `onProjectChange` keeps the URL in sync
+  // via ``router.navigate`` so reload / deep-link still works.
+  readonly projects = signal<Project[]>([]);
+  readonly projectsLoading = signal(false);
+  readonly selectedProjectId = signal<string | null>(null);
+  /** True when a real project is selected (not the "all" / empty
+   * landing state). Drives the empty-state placeholder. */
+  readonly hasSelectedProject = computed(
+    () => this.selectedProjectId() !== null,
+  );
 
   // Service-provided signals (blueprints is populated by service.list).
   readonly blueprints = this.service.blueprints;
@@ -171,9 +196,104 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   );
 
   ngOnInit(): void {
-    this.projectId =
-      this.route.snapshot.paramMap.get('projectId') ?? '';
-    this.loadList();
+    // Load the catalogue of projects (ProjectService populates its
+    // own `projects` signal too, but we keep a local copy so the
+    // dropdown doesn't re-render on unrelated service mutations).
+    this.projectsLoading.set(true);
+    this.projectService
+      .listProjects()
+      .pipe(takeUntilDestroyed())
+      .subscribe({
+        next: (response) => {
+          this.projects.set(response.projects);
+          this.projectsLoading.set(false);
+          // Initial resolution uses the snapshot value so the very
+          // first navigation picks the right project immediately.
+          this.resolveInitialProject(
+            this.route.snapshot.paramMap.get('projectId'),
+          );
+        },
+        error: () => {
+          this.projectsLoading.set(false);
+          // Even on failure, resolve so the empty-state placeholder
+          // shows instead of a blank page.
+          this.resolveInitialProject(
+            this.route.snapshot.paramMap.get('projectId'),
+          );
+        },
+      });
+
+    // React to deep-link / external-link navigations that reuse this
+    // component instance with a different ``projectId`` param.
+    // ``ngOnInit`` only runs once per component lifetime, so without
+    // this subscription ``selectedProjectId`` would stay stale when the
+    // user pastes a different ``/projects/{id}/blueprints`` URL. The
+    // equality guard prevents re-running the resolution when the param
+    // is unchanged (the initial snapshot already handled that case)
+    // and skips the ``null`` param emitted during teardown.
+    this.route.paramMap
+      .pipe(takeUntilDestroyed())
+      .subscribe((params) => {
+        const id = params.get('projectId');
+        if (id && id !== this.selectedProjectId()) {
+          this.resolveInitialProject(id);
+        }
+      });
+  }
+
+  /**
+   * Resolve the initial ``selectedProjectId`` after the project
+   * catalogue has loaded.
+   *
+   * Three cases handled (in priority order):
+   *
+   * 1. ``projectId`` is a real project id present in the catalogue →
+   *    select it as-is.
+   * 2. ``projectId`` is ``'all'`` or empty AND projects exist → select
+   *    the first project and rewrite the URL to
+   *    ``/projects/{id}/blueprints`` so deep-link / reload pick up the
+   *    real selection.
+   * 3. No projects exist → leave selection null; the empty-state
+   *    placeholder is rendered.
+   *
+   * When a project ends up selected, the blueprint list is fetched via
+   * ``loadList()``. When the param id is already a real, valid project
+   * (case 1) the URL is left untouched — no rewrite.
+   *
+   * ``projectId`` is taken as an argument (rather than read from
+   * ``route.snapshot.paramMap``) so this method can also be reused by
+   * the ``paramMap`` subscription for deep-link-driven re-resolution.
+   */
+  private resolveInitialProject(projectId: string | null): void {
+    const routeProjectId = projectId ?? '';
+    const all = this.projects();
+    const isAllOrEmpty = routeProjectId === '' || routeProjectId === 'all';
+    const knownProject =
+      !isAllOrEmpty && all.some((p) => p.project_id === routeProjectId);
+
+    if (knownProject) {
+      this.selectedProjectId.set(routeProjectId);
+    } else if (isAllOrEmpty && all.length > 0) {
+      const first = all[0];
+      this.selectedProjectId.set(first.project_id);
+      // Rewrite the URL so the browser address reflects the actual
+      // selection — keeps deep-link / reload behaviour intuitive. Use
+      // ``replaceUrl: true`` so this auto-redirect doesn't pollute the
+      // back-button history (a back press should not bounce between
+      // ``/projects/all/blueprints`` and the rewritten URL).
+      void this.router.navigate(
+        ['/projects', first.project_id, 'blueprints'],
+        { replaceUrl: true },
+      );
+    } else {
+      // No projects available (empty list OR route id was unknown).
+      // Leave selection null; the empty-state placeholder covers it.
+      this.selectedProjectId.set(null);
+    }
+
+    if (this.selectedProjectId() !== null) {
+      this.loadList();
+    }
   }
 
   ngOnDestroy(): void {
@@ -183,8 +303,9 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   // ── List loading ─────────────────────────────────────────────────────
 
   private loadList(): void {
-    if (!this.projectId) return;
-    this.service.list(this.projectId).subscribe({
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
+    this.service.list(projectId).subscribe({
       error: (err: Error) => {
         this.showMutationError(err, 'load');
       },
@@ -192,6 +313,35 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   }
 
   protected onRefresh(): void {
+    this.loadList();
+  }
+
+  /**
+   * Handler for the project-selector dropdown. Resets every
+   * selection-dependent piece of state (detail, edit, history), keeps
+   * the URL in sync via ``router.navigate``, and triggers a list reload
+   * for the new project.
+   */
+  protected onProjectChange(projectId: string): void {
+    this.selectedProjectId.set(projectId);
+    // Reset detail/edit state — the previously selected blueprint /
+    // revision / edit form belong to the old project.
+    this.selectedBlueprint.set(null);
+    this.editing.set(false);
+    this.showHistory.set(false);
+    this.revisions.set([]);
+    this.selectedRevision.set(null);
+    // Also reset the inline create form — if the user had opened it
+    // before switching projects, the form fields would otherwise stay
+    // populated and a subsequent submit would POST to the wrong
+    // (new) project. ``formKind`` is left at its default 'area' since
+    // it's a fresh, project-agnostic choice.
+    this.createDialogOpen.set(false);
+    this.formName.set('');
+    this.formSlug.set('');
+    this.formContent.set('');
+    // Keep the URL so reload / share-link work.
+    void this.router.navigate(['/projects', projectId, 'blueprints']);
     this.loadList();
   }
 
@@ -211,6 +361,8 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   // ── Select / detail ─────────────────────────────────────────────────
 
   protected onSelect(bp: Blueprint): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     // Optimistic select from the cached list — avoid an extra GET.
     this.selectedBlueprint.set(bp);
     this.editing.set(false);
@@ -220,7 +372,7 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     // Then fetch the fresh full row (in case the cached copy is stale
     // — the list endpoint may project a subset in the future).
     this.detailLoading.set(true);
-    this.service.get(this.projectId, bp.id).subscribe({
+    this.service.get(projectId, bp.id).subscribe({
       next: (fresh) => {
         this.selectedBlueprint.set(fresh);
         this.detailLoading.set(false);
@@ -247,6 +399,8 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   }
 
   protected onCreateSubmit(): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     const name = this.formName().trim();
     const slug = this.formSlug().trim();
     const content = this.formContent().trim();
@@ -260,7 +414,7 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     }
     this.formSubmitting.set(true);
     this.service
-      .create(this.projectId, {
+      .create(projectId, {
         name,
         slug,
         kind: this.formKind(),
@@ -286,13 +440,15 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   // ── Initialize ───────────────────────────────────────────────────────
 
   protected onInitialize(): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     const confirmed = window.confirm(
       'This will scan the project and create initial blueprints. ' +
         'This runs in the background and may take a few minutes. Continue?',
     );
     if (!confirmed) return;
     this.initializing.set(true);
-    this.service.initialize(this.projectId).subscribe({
+    this.service.initialize(projectId).subscribe({
       next: () => {
         this.initializing.set(false);
         this.snackBar.open(
@@ -338,6 +494,8 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   }
 
   protected onSaveEdit(): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     const bp = this.selectedBlueprint();
     if (!bp) return;
     const name = this.editName().trim();
@@ -350,7 +508,7 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     }
     this.editSubmitting.set(true);
     this.service
-      .update(this.projectId, bp.id, {
+      .update(projectId, bp.id, {
         name,
         content: this.editContent(),
         tags: this.editTags(),
@@ -377,10 +535,12 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   // ── Status quick-change (read mode) ─────────────────────────────────
 
   protected onStatusChange(status: BlueprintStatus): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     const bp = this.selectedBlueprint();
     if (!bp || bp.status === status) return;
     this.service
-      .update(this.projectId, bp.id, { status })
+      .update(projectId, bp.id, { status })
       .subscribe({
         next: (updated) => {
           this.selectedBlueprint.set(updated);
@@ -397,13 +557,15 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   // ── Delete ───────────────────────────────────────────────────────────
 
   protected onDelete(): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     const bp = this.selectedBlueprint();
     if (!bp) return;
     const confirmed = window.confirm(
       `Delete blueprint "${bp.name}"? This cannot be undone.`,
     );
     if (!confirmed) return;
-    this.service.delete(this.projectId, bp.id).subscribe({
+    this.service.delete(projectId, bp.id).subscribe({
       next: () => {
         this.snackBar.open(`Blueprint "${bp.name}" deleted`, 'Close', {
           duration: 3000,
@@ -427,12 +589,14 @@ export class BlueprintComponent implements OnInit, OnDestroy {
       this.showHistory.set(false);
       return;
     }
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
     const bp = this.selectedBlueprint();
     if (!bp) return;
     this.showHistory.set(true);
     this.revisionsLoading.set(true);
     this.selectedRevision.set(null);
-    this.service.getRevisions(this.projectId, bp.id).subscribe({
+    this.service.getRevisions(projectId, bp.id).subscribe({
       next: (revs) => {
         this.revisions.set(revs);
         this.revisionsLoading.set(false);
