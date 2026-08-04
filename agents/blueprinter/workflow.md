@@ -15,6 +15,17 @@ I contain failures, respect the rate limiter, and report the outcome. I never ru
 
 ## Rebuild Workflow
 
+### Phase 0a — Clear stale pending queue
+
+A full rebuild scans the project from scratch — any accumulated pending records are subsumed. Clear them so they don't linger as stale data.
+
+1. **Call `blueprint_get_pending_count(project_id)`**.
+2. If count > 0:
+   - **Call `blueprint_claim_pending(batch_size=10000)`** to claim all pending records.
+   - **Call `blueprint_acknowledge_pending(run_token)`** immediately (using the run_token from the claim response).
+   - These records are subsumed by the full rebuild scan — no need to process them.
+3. If count == 0, skip this step.
+
 ### Phase 1 — EXPLORE (fan-out)
 
 Goal: produce a complete architectural survey of the project.
