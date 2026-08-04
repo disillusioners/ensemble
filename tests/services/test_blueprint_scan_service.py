@@ -2,7 +2,7 @@
 
 Covers the daemon-side daily scan's smart trigger logic:
 
-* Disabled by the ``auto_rebuild_enabled`` flag (default OFF).
+* Gated by the ``auto_rebuild_enabled`` flag (default ON since Phase 6).
 * Empty corpus → enqueue ``rebuild`` via the coordinator.
 * Existing blueprints + pending updates → enqueue ``incremental``.
 * Existing blueprints + no pending → skip (no coordinator call).
@@ -95,7 +95,7 @@ def _make_config(enabled: bool) -> Any:
 
 
 def test_scan_disabled_by_flag(blueprint_repo, pending_repo, coordinator, project_repo):
-    """``auto_rebuild_enabled=False`` (the default) → no coordinator calls."""
+    """``auto_rebuild_enabled=False`` → no coordinator calls."""
     svc = BlueprintScanService(
         blueprint_repo=blueprint_repo,
         pending_repo=pending_repo,

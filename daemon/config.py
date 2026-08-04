@@ -729,13 +729,13 @@ class BlueprintConfig(EmbeddingConfig):
         description="Blueprint statuses eligible for matching (G8). Drafts excluded by default.",
     )
     # C7 / Phase 3: gate for automated blueprint triggers (daily scan,
-    # post-experience sidecars). Manual triggers always work. Default OFF
-    # for safety — flip to True via BLUEPRINT_AUTO_REBUILD_ENABLED=true.
+    # post-experience sidecars). Manual triggers always work. Default ON —
+    # set BLUEPRINT_AUTO_REBUILD_ENABLED=false to disable.
     auto_rebuild_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Gate for automated blueprint triggers (daily scan, "
                     "post-experience). Manual triggers always work. "
-                    "Default OFF for safety.",
+                    "Default ON — set BLUEPRINT_AUTO_REBUILD_ENABLED=false to disable.",
     )
 
 class Config(BaseSettings):
