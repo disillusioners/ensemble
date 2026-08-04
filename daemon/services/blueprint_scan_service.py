@@ -50,6 +50,11 @@ class BlueprintScanService:
             can flip it without restarting the daemon.
         project_repository: :class:`SQLModelProjectRepository` for
             ``list_projects`` (used to discover active projects).
+        job_queue_service: Optional :class:`JobQueueService`. When
+            ``None`` at construction (the common path — the service is
+            not yet built), wire it lazily via
+            :meth:`set_job_queue_service`. The scan service needs it to
+            actually enqueue blueprinter jobs after a coordinator claim.
     """
 
     def __init__(
@@ -59,12 +64,24 @@ class BlueprintScanService:
         coordinator: Any,
         config: Any,
         project_repository: Any,
+        job_queue_service: Any = None,
     ) -> None:
         self._blueprint_repo = blueprint_repo
         self._pending_repo = pending_repo
         self._coordinator = coordinator
         self._config = config
         self._project_repository = project_repository
+        self._job_queue_service = job_queue_service
+
+    def set_job_queue_service(self, service: Any) -> None:
+        """Wire the JobQueueService (called lazily after construction).
+
+        The manager constructs the scan service during ``__init__``
+        before the JobQueueService exists; it calls this method from
+        its own ``set_job_queue_service`` once the queue service is
+        available.
+        """
+        self._job_queue_service = service
 
     # ── Public surface ────────────────────────────────────────────────
 
@@ -148,11 +165,16 @@ class BlueprintScanService:
             )
 
     async def _trigger(self, project_id: str, mode: str) -> None:
-        """Route through the coordinator.
+        """Route through the coordinator AND enqueue the blueprinter job.
 
         The coordinator decides whether to claim (and which ``job_id``
         wins), coalesce onto an in-flight same-mode build, or surface
-        a cross-mode conflict. We just observe and log.
+        a cross-mode conflict. On a fresh claim we must enqueue the
+        blueprinter job on the background queue — a claim without an
+        enqueue leaks the lease and produces no work.
+
+        On enqueue failure we release the lease so the next scan pass
+        (or a manual ``/rebuild``) can retry.
         """
         job_id = str(uuid.uuid4())
         try:
@@ -166,11 +188,40 @@ class BlueprintScanService:
             return
 
         if result.claimed:
-            logger.info(
-                "BlueprintScanService: triggered %s for project %s "
-                "(job_id=%s, token=%s)",
-                mode, project_id, job_id, result.run_token,
-            )
+            # Enqueue the blueprinter job — the claim is useless without it.
+            message = self._build_message(mode)
+            try:
+                from .blueprint_job_helper import enqueue_blueprinter_job
+
+                await enqueue_blueprinter_job(
+                    job_queue_service=self._job_queue_service,
+                    project_id=project_id,
+                    trigger_type=mode,
+                    message=message,
+                    run_token=result.run_token,
+                    job_id=job_id,
+                    source="auto-scan",
+                )
+            except Exception:
+                # Enqueue failed — release the lease so it can be retried
+                # on the next scan or a manual trigger. Swallow release
+                # errors; there's nothing useful to do with them here.
+                try:
+                    await self._coordinator.release(project_id, result.run_token)
+                except Exception:
+                    pass
+                logger.error(
+                    "BlueprintScanService: enqueue failed for project %s "
+                    "mode %s, lease released",
+                    project_id, mode,
+                    exc_info=True,
+                )
+            else:
+                logger.info(
+                    "BlueprintScanService: enqueued %s for project %s "
+                    "(job_id=%s, token=%s)",
+                    mode, project_id, job_id, result.run_token,
+                )
         elif result.coalesced:
             logger.debug(
                 "BlueprintScanService: %s already in progress for project %s "
@@ -183,6 +234,26 @@ class BlueprintScanService:
                 "different-mode build (mode=%s) in flight",
                 mode, project_id, result.conflict_mode,
             )
+
+    def _build_message(self, mode: str) -> str:
+        """Build the blueprinter dispatch message for the given mode.
+
+        Mirrors the message bodies the REST ``/rebuild`` and ``/update``
+        endpoints send so the blueprinter agent behaves the same whether
+        triggered by the daily scan or a manual admin click.
+        """
+        if mode == MODE_REBUILD:
+            return (
+                "Rebuild all project blueprints.\n\n"
+                "Perform a full rebuild: create the core blueprint and all "
+                "area blueprints from scratch. Generate trigger queries for "
+                "each. Respect the rate limit."
+            )
+        return (
+            "Incremental blueprint update.\n\n"
+            "Process accumulated pending-experience changes. Review existing "
+            "blueprints for drift. Respect the rate limit."
+        )
 
 
 __all__ = ["BlueprintScanService", "MODE_REBUILD", "MODE_INCREMENTAL"]

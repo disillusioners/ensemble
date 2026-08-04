@@ -25,6 +25,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from daemon.services.blueprint_job_helper import (
+    BlueprintEnqueueError,
+    enqueue_blueprinter_job,
+)
 from daemon.services.blueprint_trigger_coordinator import ClaimResult
 from daemon.services.blueprint_write_service import (
     BlueprintNotFoundError,
@@ -196,11 +200,11 @@ async def _enqueue_blueprinter_job(
 ) -> str:
     """Look up the background queue and enqueue a blueprinter job.
 
-    Shared by ``/initialize`` (legacy), ``/scan``, ``/rebuild``, and
-    ``/update``. Returns the ``job_id`` of the enqueued job. Raises
-    ``HTTPException`` with the appropriate status code when the queue
-    lookup or enqueue fails — callers should treat those as terminal
-    and release any coordinator lease the caller is holding.
+    Thin router wrapper — delegates the real work to
+    :func:`daemon.services.blueprint_job_helper.enqueue_blueprinter_job`
+    and converts :class:`BlueprintEnqueueError` to the right
+    :class:`HTTPException`. Shared by ``/initialize`` (legacy), ``/scan``,
+    ``/rebuild``, and ``/update``.
 
     Args:
         manager: The InstanceManager (provides ``_job_queue_service``).
@@ -223,39 +227,22 @@ async def _enqueue_blueprinter_job(
     Returns:
         The ``job_id`` string of the enqueued job.
     """
-    job_service = getattr(manager, "_job_queue_service", None)
-    if job_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="JobQueueService not available",
+    try:
+        return await enqueue_blueprinter_job(
+            job_queue_service=getattr(manager, "_job_queue_service", None),
+            project_id=project_id,
+            trigger_type=trigger_type,
+            message=message,
+            run_token=run_token,
+            job_id=job_id,
+            source="admin-endpoint",
         )
-
-    bg_queue = await asyncio.to_thread(
-        job_service._queue_repo.get_by_name,
-        project_id,
-        "system_background_queue",
-    )
-    if bg_queue is None:
-        raise HTTPException(
-            status_code=404,
-            detail="system_background_queue not found for project",
-        )
-
-    metadata: dict[str, Any] = {"trigger": trigger_type, "source": "admin-endpoint"}
-    if run_token:
-        metadata["run_token"] = run_token
-
-    job = await job_service.enqueue(
-        agent_id="blueprinter",
-        message=message,
-        source="admin-endpoint",
-        project_id=project_id,
-        priority=9,  # lowest priority — pure background
-        queue_id=bg_queue.queue_id,
-        metadata=metadata,
-        job_id=job_id,  # forward so lease and queue agree (no-op when None)
-    )
-    return job.job_id
+    except BlueprintEnqueueError as e:
+        # Map to HTTP status: "not available" = 503 (service missing),
+        # everything else (missing queue, enqueue failure) = 404.
+        if "not available" in str(e):
+            raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────────

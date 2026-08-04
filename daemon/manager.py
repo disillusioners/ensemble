@@ -3181,6 +3181,14 @@ class InstanceManager:
             except Exception:
                 logger.warning("Blueprint lease reconcile scheduling failed", exc_info=True)
 
+        # Wire the BlueprintScanService so it can enqueue blueprinter jobs
+        # after a coordinator claim. Defensive getattr: the scan service is
+        # only constructed when blueprint auto-rebuild is configured, so test
+        # doubles that bypass __init__ may not have the attribute.
+        scan_service = getattr(self, "_blueprint_scan_service", None)
+        if scan_service is not None and service is not None:
+            scan_service.set_job_queue_service(service)
+
         logger.info("JobQueueService connected to SessionManager")
 
     def set_job_feedback_observer(self, observer: Any) -> None:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -69,14 +69,34 @@ def coordinator():
     returns a successful ClaimResult by default. Tests can override
     the AsyncMock's ``return_value`` / ``side_effect`` per case."""
     coord = MagicMock()
-    coord.try_claim = MagicMock()
+    coord.try_claim = AsyncMock()
     coord.try_claim.return_value = ClaimResult(claimed=True, run_token="tok")
+    coord.release = AsyncMock()
     return coord
 
 
+@pytest.fixture
+def job_queue_service():
+    """Minimal stand-in for ``JobQueueService`` used by the scan service.
+
+    Mirrors the ``_FakeJobService`` in the API tests:
+      * ``_queue_repo.get_by_name`` (sync) → returns a fake queue
+      * ``enqueue`` (async) → returns a fake job
+    """
+    svc = MagicMock()
+    fake_queue = MagicMock()
+    fake_queue.queue_id = "bg-queue-123"
+    svc._queue_repo = MagicMock()
+    svc._queue_repo.get_by_name = MagicMock(return_value=fake_queue)
+    fake_job = MagicMock()
+    fake_job.job_id = "enqueued-job-456"
+    svc.enqueue = AsyncMock(return_value=fake_job)
+    return svc
+
+
 def _set_claim_result(coord: Any, result: ClaimResult) -> None:
-    """Re-bind ``coord.try_claim`` to an awaitable returning ``result``."""
-    coord.try_claim = MagicMock()
+    """Re-bind ``coord.try_claim`` to an AsyncMock returning ``result``."""
+    coord.try_claim = AsyncMock()
     coord.try_claim.return_value = result
 
 
@@ -109,8 +129,8 @@ def test_scan_disabled_by_flag(blueprint_repo, pending_repo, coordinator, projec
     pending_repo.get_pending_count.assert_not_called()
 
 
-def test_scan_enabled_flag_runs(blueprint_repo, pending_repo, coordinator, project_repo):
-    """``auto_rebuild_enabled=True`` → the scan fires."""
+def test_scan_enabled_flag_runs(blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service):
+    """``auto_rebuild_enabled=True`` → the scan fires and enqueues."""
     # Empty corpus for both projects.
     blueprint_repo.list_by_project = MagicMock(return_value=[])
     pending_repo.get_pending_count = MagicMock(return_value=0)
@@ -121,18 +141,21 @@ def test_scan_enabled_flag_runs(blueprint_repo, pending_repo, coordinator, proje
         coordinator=coordinator,
         config=_make_config(enabled=True),
         project_repository=project_repo,
+        job_queue_service=job_queue_service,
     )
     _run(svc.execute())
     # Two projects, two rebuilds enqueued.
     assert coordinator.try_claim.call_count == 2
     for call in coordinator.try_claim.call_args_list:
         assert call.args[1] == MODE_REBUILD
+    # Both claims resulted in enqueue calls.
+    assert job_queue_service.enqueue.call_count == 2
 
 
 # ── Smart trigger logic ────────────────────────────────────────────────
 
 
-def test_scan_empty_corpus_triggers_rebuild(blueprint_repo, pending_repo, coordinator, project_repo):
+def test_scan_empty_corpus_triggers_rebuild(blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service):
     blueprint_repo.list_by_project = MagicMock(return_value=[])
     pending_repo.get_pending_count = MagicMock(return_value=0)
     svc = BlueprintScanService(
@@ -141,6 +164,7 @@ def test_scan_empty_corpus_triggers_rebuild(blueprint_repo, pending_repo, coordi
         coordinator=coordinator,
         config=_make_config(enabled=True),
         project_repository=project_repo,
+        job_queue_service=job_queue_service,
     )
     _run(svc.execute())
     # Each project has no blueprints → both get a "rebuild" claim.
@@ -148,7 +172,7 @@ def test_scan_empty_corpus_triggers_rebuild(blueprint_repo, pending_repo, coordi
     assert modes == [MODE_REBUILD, MODE_REBUILD]
 
 
-def test_scan_pending_triggers_incremental(blueprint_repo, pending_repo, coordinator, project_repo):
+def test_scan_pending_triggers_incremental(blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service):
     # Project 1: has blueprints + pending → incremental.
     # Project 2: has blueprints + no pending → skip.
     by_project = {
@@ -165,6 +189,7 @@ def test_scan_pending_triggers_incremental(blueprint_repo, pending_repo, coordin
         coordinator=coordinator,
         config=_make_config(enabled=True),
         project_repository=project_repo,
+        job_queue_service=job_queue_service,
     )
     _run(svc.execute())
     # Only one coordinator call: incremental for proj-1.
@@ -237,10 +262,118 @@ def test_scan_conflict_is_observed_not_retried(blueprint_repo, pending_repo, pro
     assert coord.try_claim.call_count == 2
 
 
+# ── Enqueue after claim ───────────────────────────────────────────────
+
+
+def test_trigger_enqueues_after_claim(
+    blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service,
+):
+    """A successful coordinator claim MUST be followed by an enqueue call."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+    # Coordinator claims for both projects.
+    coordinator.try_claim.return_value = ClaimResult(
+        claimed=True, run_token="tok-abc",
+    )
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+        job_queue_service=job_queue_service,
+    )
+    _run(svc.execute())
+
+    # Two projects → two enqueues.
+    assert job_queue_service.enqueue.call_count == 2
+    # Verify the enqueue params for the first call.
+    first_call = job_queue_service.enqueue.call_args_list[0]
+    assert first_call.kwargs["agent_id"] == "blueprinter"
+    assert first_call.kwargs["project_id"] == "proj-1"
+    # trigger_type is mapped into the metadata dict, not an enqueue kwarg.
+    assert first_call.kwargs["metadata"]["trigger"] == MODE_REBUILD
+    assert first_call.kwargs["metadata"]["source"] == "auto-scan"
+    assert first_call.kwargs["metadata"]["run_token"] == "tok-abc"
+    assert first_call.kwargs["source"] == "auto-scan"
+    assert first_call.kwargs["priority"] == 9
+    # job_id must be forwarded so lease and queue agree.
+    assert first_call.kwargs["job_id"] is not None
+
+
+def test_trigger_enqueue_failure_releases_lease(
+    blueprint_repo, pending_repo, project_repo,
+):
+    """When enqueue raises, the coordinator lease must be released."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    coord = MagicMock()
+    coord.try_claim = AsyncMock(
+        return_value=ClaimResult(claimed=True, run_token="lease-xyz"),
+    )
+    coord.release = AsyncMock()
+
+    # job_queue_service.enqueue raises → enqueue_blueprinter_job wraps it
+    # in BlueprintEnqueueError → scan service catches and releases.
+    bad_svc = MagicMock()
+    bad_svc._queue_repo = MagicMock()
+    bad_svc._queue_repo.get_by_name = MagicMock(
+        return_value=MagicMock(queue_id="q1"),
+    )
+    bad_svc.enqueue = AsyncMock(side_effect=RuntimeError("DB down"))
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coord,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+        job_queue_service=bad_svc,
+    )
+    _run(svc.execute())
+
+    # Both projects claimed → both released on enqueue failure.
+    assert coord.try_claim.call_count == 2
+    assert coord.release.call_count == 2
+    # release(project_id, run_token) per call.
+    for call in coord.release.call_args_list:
+        assert call.args[1] == "lease-xyz"
+
+
+def test_trigger_no_job_service_does_not_leak(
+    blueprint_repo, pending_repo, project_repo,
+):
+    """When _job_queue_service is None, a claim must be released (no leak)."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    coord = MagicMock()
+    coord.try_claim = AsyncMock(
+        return_value=ClaimResult(claimed=True, run_token="tok-no-svc"),
+    )
+    coord.release = AsyncMock()
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coord,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+        # job_queue_service intentionally NOT wired (None).
+    )
+    _run(svc.execute())
+
+    # Claims happened, but enqueue failed → leases released.
+    assert coord.try_claim.call_count == 2
+    assert coord.release.call_count == 2
+
+
 # ── Per-project failure isolation ─────────────────────────────────────
 
 
-def test_scan_per_project_failure_does_not_abort_sweep(blueprint_repo, pending_repo, project_repo):
+def test_scan_per_project_failure_does_not_abort_sweep(blueprint_repo, pending_repo, project_repo, job_queue_service):
     """One project's exception must NOT stop subsequent projects from being scanned."""
     # list_by_project raises on proj-1 but returns [] on proj-2.
     def _list(pid):
@@ -259,6 +392,7 @@ def test_scan_per_project_failure_does_not_abort_sweep(blueprint_repo, pending_r
         coordinator=coord,
         config=_make_config(enabled=True),
         project_repository=project_repo,
+        job_queue_service=job_queue_service,
     )
     # Must not raise.
     _run(svc.execute())
@@ -319,11 +453,12 @@ def test_scan_calls_list_projects_with_limit_keyword():
     mock_repo.list_projects.assert_called_once_with(limit=10_000)
 
 
-def test_scan_bare_core_only_triggers_rebuild(blueprint_repo, pending_repo, coordinator, project_repo):
+def test_scan_bare_core_only_triggers_rebuild(blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service):
     """C3 regression: a core-only corpus needs a rebuild."""
     blueprint_repo.list_by_project = MagicMock(return_value=[MagicMock(kind="core")])
     pending_repo.get_pending_count = MagicMock(return_value=0)
     svc = BlueprintScanService(blueprint_repo, pending_repo, coordinator,
-                               _make_config(True), project_repo)
+                               _make_config(True), project_repo,
+                               job_queue_service=job_queue_service)
     _run(svc.execute())
     assert [call.args[1] for call in coordinator.try_claim.call_args_list] == [MODE_REBUILD, MODE_REBUILD]
