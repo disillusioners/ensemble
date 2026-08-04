@@ -792,6 +792,8 @@ class InstanceManager:
         # cannot crash startup; the app-level UX guard in
         # ``BlueprintRepository.create`` is the safety net.
         self._ensure_blueprint_g7_unique_index()
+        # Backfill: opt in existing projects that already have blueprints
+        self._backfill_blueprint_active()
 
         # ── Project Blueprint: embedding repo + service (G4 fix) ───────
         # INDEPENDENT of skill_evolution. Operates on the same
@@ -4405,6 +4407,65 @@ class InstanceManager:
                 "G7 partial unique index creation failed: %s. "
                 "App-level UX guard in create() is still active.",
                 exc, exc_info=True,
+            )
+
+    def _backfill_blueprint_active(self) -> None:
+        """One-time startup backfill: opt in projects that already have blueprints.
+
+        When the per-project ``blueprint_active`` gate was introduced, existing
+        projects with blueprints would have been silently disabled (default =
+        absent = false). This backfill runs on every startup and sets
+        ``blueprint_active=true`` for any project that has at least one active
+        blueprint row but no metadata key yet.
+
+        Idempotent: if the key already exists (true or false), it is NOT
+        overwritten — the operator's explicit choice is respected.
+        """
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        try:
+            bp_repo = getattr(self, "_blueprint_repo", None)
+            project_repo = getattr(self, "_project_repository", None)
+            if bp_repo is None or project_repo is None:
+                return
+
+            projects = project_repo.list_projects(limit=10_000)
+            backfilled = 0
+            for project in projects:
+                pid = getattr(project, "project_id", None) or getattr(project, "id", None)
+                if not pid:
+                    continue
+                # Skip the system default project
+                if getattr(project, "name", None) == "__system_default__":
+                    continue
+                try:
+                    # Check if project already has the metadata key
+                    existing = project_repo.get_metadata(pid, BLUEPRINT_ACTIVE_METADATA_KEY)
+                    if existing is not None:
+                        continue  # Key exists — respect the operator's choice
+                    # Check if project has any active blueprints
+                    blueprints = bp_repo.list_by_project(pid, active_only=True)
+                    if blueprints:
+                        project_repo.set_metadata(pid, BLUEPRINT_ACTIVE_METADATA_KEY, True)
+                        backfilled += 1
+                        logger.info(
+                            "Blueprint backfill: opted in project %s "
+                            "(has %d active blueprint(s))",
+                            pid, len(blueprints),
+                        )
+                except Exception as exc:  # noqa: BLE001 — per-project isolation
+                    logger.warning(
+                        "Blueprint backfill: failed for project %s: %s",
+                        pid, exc,
+                    )
+            if backfilled > 0:
+                logger.info(
+                    "Blueprint backfill: opted in %d project(s) with existing blueprints",
+                    backfilled,
+                )
+        except Exception as exc:  # noqa: BLE001 — never crash startup
+            logger.warning(
+                "Blueprint backfill: startup scan failed: %s", exc, exc_info=True,
             )
 
     def setup_worker_pool(

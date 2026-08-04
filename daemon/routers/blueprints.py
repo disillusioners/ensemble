@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.services.blueprint_job_helper import (
     BlueprintEnqueueError,
     enqueue_blueprinter_job,
@@ -211,6 +211,39 @@ async def _check_default_project_blocked(manager: Any, project_id: str) -> None:
         raise HTTPException(
             status_code=400,
             detail="Blueprints cannot be created for the system default project",
+        )
+
+
+async def _check_blueprint_active(manager: Any, project_id: str) -> None:
+    """400 if the project has not opted in to the blueprint system.
+
+    Per-project opt-in (default: false). Stored in
+    ``project_metadata_records`` under ``BLUEPRINT_ACTIVE_METADATA_KEY``;
+    absent = inactive. A metadata lookup failure must NOT harden the
+    check (treat the project as inactive so the user gets a clear
+    error instead of an ambiguous 5xx).
+
+    NOT applied to ``/initialize`` (deprecated, backward-compat) or
+    ``/scan`` (read-only diagnostic).
+    """
+    project_repo = getattr(manager, "_project_repository", None)
+    if project_repo is None:
+        return
+    try:
+        val = await asyncio.to_thread(
+            project_repo.get_metadata,
+            project_id,
+            BLUEPRINT_ACTIVE_METADATA_KEY,
+        )
+    except Exception:
+        val = None
+    if not bool(val):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Blueprint system not active for this project. "
+                "Enable it in project settings first."
+            ),
         )
 
 
@@ -460,6 +493,7 @@ async def rebuild_project_blueprints(
     _validate_project_id(project_id)
     manager = _get_manager(request)
     await _check_default_project_blocked(manager, project_id)
+    await _check_blueprint_active(manager, project_id)
 
     coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
     if coordinator is None:
@@ -543,6 +577,7 @@ async def update_project_blueprints(
     _validate_project_id(project_id)
     manager = _get_manager(request)
     await _check_default_project_blocked(manager, project_id)
+    await _check_blueprint_active(manager, project_id)
 
     coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
     if coordinator is None:

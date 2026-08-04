@@ -88,6 +88,13 @@ OBSERVER_HEALTH_CHECK_INTERVAL_S: int = 300  # Observer health check interval (5
 SYSTEM_DEFAULT_PROJECT_NAME = "__system_default__"
 SYSTEM_DEFAULT_PROJECT_ID: str | None = None  # Set at startup by ensure_system_default_project()
 
+# ── Per-Project Blueprint Opt-In ────────────────────────────────────────────────
+# Two-tier model: ``auto_rebuild_enabled`` (config.yaml) gates the system-wide
+# feature; ``BLUEPRINT_ACTIVE_METADATA_KEY`` (``project_metadata_records``) is
+# the per-project opt-in defaulting to False — a project must explicitly enable
+# the blueprint system. Both gates must be true for any automated activity.
+BLUEPRINT_ACTIVE_METADATA_KEY = "blueprint_active"
+
 # ============================================================
 # Scheduler
 # ============================================================

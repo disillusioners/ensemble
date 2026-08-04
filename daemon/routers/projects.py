@@ -487,6 +487,38 @@ async def set_queue_status(
     return _project_to_response(updated, recent_history=recent_history, critical_notes=critical_notes)
 
 
+@router.put(
+    "/{project_id}/metadata/{key}",
+    response_model=dict,
+    responses={
+        200: {"description": "Metadata key set"},
+        500: {"description": "Repository error"},
+    },
+)
+async def set_project_metadata(
+    project_id: str,
+    key: str,
+    body: dict,
+    request: Request,
+):
+    """Set a single metadata key for a project.
+
+    Generic metadata endpoint the frontend uses for per-project flags
+    (e.g. ``blueprint_active``). Body: ``{"value": <any JSON-serializable>}``.
+
+    The repository's ``set_metadata`` is sync SQLAlchemy — wrap in
+    ``asyncio.to_thread`` per ADR-12. A repository error surfaces as a
+    500 so the caller can render a distinct snackbar / retry.
+    """
+    manager = _get_manager(request)
+    repo = manager._project_repository
+    try:
+        await asyncio.to_thread(repo.set_metadata, project_id, key, body.get("value"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True}
+
+
 @router.post(
     "/{project_id}/pause-queue",
     response_model=ProjectResponse,

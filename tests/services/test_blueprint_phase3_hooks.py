@@ -37,9 +37,25 @@ def _make_pending_repo() -> MagicMock:
 
 
 def _make_manager_with_repo(pending_repo: MagicMock) -> MagicMock:
-    """Build a manager stub exposing ``_blueprint_pending_repo``."""
+    """Build a manager stub exposing ``_blueprint_pending_repo``.
+
+    The project repository's ``get_metadata`` returns ``True`` for
+    ``BLUEPRINT_ACTIVE_METADATA_KEY`` so the per-project opt-in gate
+    passes — the existing hook tests are exercising the active path
+    (the post-condition is "did the pending row get enqueued?"). Tests
+    that need to exercise the inactive path override
+    ``_project_repository.get_metadata`` per-case.
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
     mgr = MagicMock()
     mgr._blueprint_pending_repo = pending_repo
+    # Opt the test project in by default.
+    mgr._project_repository = MagicMock()
+    mgr._project_repository.get_metadata = MagicMock(
+        side_effect=lambda pid, key: (
+            True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+        ),
+    )
     # The project store is what the history tools call for validation.
     project = MagicMock()
     project.project_id = "proj-1"
@@ -61,6 +77,22 @@ def _make_manager_with_repo(pending_repo: MagicMock) -> MagicMock:
 # ── experience() ───────────────────────────────────────────────────────
 
 
+def _opt_in_project(mgr: MagicMock) -> None:
+    """Wire ``mgr._project_repository.get_metadata`` to opt the project in.
+
+    Helper for the experience-hook tests — the per-project opt-in
+    gate (Phase 7) requires explicit opt-in. Mirrors the
+    ``_make_manager_with_repo`` behaviour for the history hooks.
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+    mgr._project_repository = MagicMock()
+    mgr._project_repository.get_metadata = MagicMock(
+        side_effect=lambda pid, key: (
+            True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+        ),
+    )
+
+
 def test_experience_enqueues_pending_row(monkeypatch):
     """experience() drops a row in the pending queue with source_type='experience'."""
     monkeypatch.setenv("LIGHTRAG_HOST", "http://localhost:8724")
@@ -70,6 +102,7 @@ def test_experience_enqueues_pending_row(monkeypatch):
     pending_repo = _make_pending_repo()
     mgr = MagicMock()
     mgr._blueprint_pending_repo = pending_repo
+    _opt_in_project(mgr)
 
     # Mock the instance metadata to return a project_id.
     inst = MagicMock()
@@ -152,6 +185,7 @@ def test_experience_pending_repo_failure_logged_at_warning(monkeypatch, caplog):
     pending_repo.enqueue = MagicMock(side_effect=RuntimeError("queue down"))
     mgr = MagicMock()
     mgr._blueprint_pending_repo = pending_repo
+    _opt_in_project(mgr)
 
     inst = MagicMock()
     inst.project_id = "proj-1"
@@ -390,3 +424,126 @@ def test_history_add_skips_default_project():
     assert mgr.project_store.add_history_entry.called
     # …but no pending-queue row was enqueued.
     pending_repo.enqueue.assert_not_called()
+
+
+# ── Per-project opt-in gate (Phase 7) ────────────────────────────────
+
+
+def test_history_add_skipped_when_not_active():
+    """``blueprint_active`` absent → the pending-queue hook is
+    skipped, even for an entry_type that would normally enqueue.
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+    pending_repo = _make_pending_repo()
+    mgr = _make_manager_with_repo(pending_repo)
+    # Override: the project has NOT opted in.
+    mgr._project_repository.get_metadata = MagicMock(
+        side_effect=lambda pid, key: None,
+    )
+
+    tool = _make_history_tool(mgr)
+    tool.invoke({
+        "project_id": "proj-1",
+        "entry_type": "feature",  # would normally enqueue
+        "summary": "Added foo",
+    })
+    # The history write still happened…
+    assert mgr.project_store.add_history_entry.called
+    # …but the pending-queue hook was skipped.
+    pending_repo.enqueue.assert_not_called()
+
+
+def test_history_add_enqueues_when_active():
+    """``blueprint_active=true`` → the hook fires (regression for the
+    new gate; the active path must keep working).
+    """
+    pending_repo = _make_pending_repo()
+    mgr = _make_manager_with_repo(pending_repo)  # already opted in
+    tool = _make_history_tool(mgr)
+    tool.invoke({
+        "project_id": "proj-1",
+        "entry_type": "feature",
+        "summary": "Added foo",
+    })
+    assert pending_repo.enqueue.call_count == 1
+
+
+def test_experience_skipped_when_not_active(monkeypatch):
+    """``blueprint_active`` absent → experience() does NOT enqueue a
+    pending row, even for a non-default project.
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+    monkeypatch.setenv("LIGHTRAG_HOST", "http://localhost:8724")
+    monkeypatch.setenv("LIGHTRAG_API_KEY", "test-key")
+    monkeypatch.setenv("LIGHTRAG_WORKSPACE", "ws")
+
+    pending_repo = _make_pending_repo()
+    mgr = MagicMock()
+    mgr._blueprint_pending_repo = pending_repo
+    # Project repo: NOT opted in.
+    mgr._project_repository = MagicMock()
+    mgr._project_repository.get_metadata = MagicMock(return_value=None)
+
+    inst = MagicMock()
+    inst.project_id = "proj-1"
+    inst.instance_metadata = {"project_id": "proj-1"}
+    mgr._instance_repository = MagicMock()
+    mgr._instance_repository.get = MagicMock(return_value=inst)
+    mgr._instance_repository.get_tree_root_id = MagicMock(return_value="root")
+    mgr._job_queue_service = MagicMock()
+    q = MagicMock(); q.queue_id = "q"
+    mgr._job_queue_service._queue_repo.get_by_name = MagicMock(return_value=q)
+
+    from daemon.tools import knowledge_tools
+    async def _noop(*_a, **_kw): return None
+    monkeypatch.setattr(knowledge_tools, "_enqueue_experience_job", _noop)
+    def _noop_sync(*_a, **_kw): return None
+    monkeypatch.setattr(knowledge_tools, "_save_experience_result", _noop_sync)
+
+    from daemon.tools.knowledge_tools import create_knowledge_tools
+    tools = create_knowledge_tools(mgr, "parent-iid", "agent")
+    exp_tool = next(t for t in tools if t.name == "experience")
+
+    result = asyncio.run(exp_tool.ainvoke({"text": "Some knowledge."}))
+    assert "Knowledge recording started" in result
+    # The pending-queue hook was skipped (the gate failed).
+    pending_repo.enqueue.assert_not_called()
+
+
+def test_experience_enqueues_when_active(monkeypatch):
+    """``blueprint_active=true`` → experience() enqueues (regression
+    for the new gate; the active path must keep working).
+    """
+    monkeypatch.setenv("LIGHTRAG_HOST", "http://localhost:8724")
+    monkeypatch.setenv("LIGHTRAG_API_KEY", "test-key")
+    monkeypatch.setenv("LIGHTRAG_WORKSPACE", "ws")
+
+    pending_repo = _make_pending_repo()
+    mgr = MagicMock()
+    mgr._blueprint_pending_repo = pending_repo
+    _opt_in_project(mgr)  # opt in
+
+    inst = MagicMock()
+    inst.project_id = "proj-1"
+    inst.instance_metadata = {"project_id": "proj-1"}
+    mgr._instance_repository = MagicMock()
+    mgr._instance_repository.get = MagicMock(return_value=inst)
+    mgr._instance_repository.get_tree_root_id = MagicMock(return_value="root")
+    mgr._job_queue_service = MagicMock()
+    q = MagicMock(); q.queue_id = "q"
+    mgr._job_queue_service._queue_repo.get_by_name = MagicMock(return_value=q)
+
+    from daemon.tools import knowledge_tools
+    async def _noop(*_a, **_kw): return None
+    monkeypatch.setattr(knowledge_tools, "_enqueue_experience_job", _noop)
+    def _noop_sync(*_a, **_kw): return None
+    monkeypatch.setattr(knowledge_tools, "_save_experience_result", _noop_sync)
+
+    from daemon.tools.knowledge_tools import create_knowledge_tools
+    tools = create_knowledge_tools(mgr, "parent-iid", "agent")
+    exp_tool = next(t for t in tools if t.name == "experience")
+
+    asyncio.run(exp_tool.ainvoke({"text": "Some knowledge."}))
+    assert pending_repo.enqueue.call_count == 1

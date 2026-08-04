@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import HumanMessage
 
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
 from daemon.registry import ContextInjectionConfig
 from daemon.services.blueprint_matcher import MatchedBlueprint
 from daemon.services.context_messages import (
@@ -90,6 +91,14 @@ def _make_manager(
     project_repo.get.return_value = project
     project_repo.list_critical_notes.return_value = []
     project_repo.get_recent_history.return_value = []
+    # Opt the test project in to the blueprint system by default
+    # (Phase 7 opt-in gate — absent = inactive). Tests that need to
+    # exercise the inactive path override ``get_metadata`` per-case.
+    project_repo.get_metadata = MagicMock(
+        side_effect=lambda pid, key: (
+            True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+        ),
+    )
 
     kv_repo = MagicMock()
     kv_repo.get_all_as_dict.return_value = {}
@@ -430,3 +439,107 @@ class TestC10BlueprintInjectionGaps:
         assert matched[0].id == core.id
         assert matched[0].kind == "core"
         assert matched[0].score >= 1.0
+
+
+# ─── Phase 7: per-project opt-in gate ────────────────────────────────────
+
+
+class TestPerProjectOptInGate:
+    """Two-tier gate (Phase 7): a project must opt in to the
+    blueprint system before its context-injection fires.
+
+    * ``blueprint_active`` metadata absent → matcher is never called,
+      no blueprint message lands.
+    * ``blueprint_active=true`` → matcher is called, message lands
+      as before.
+    * Metadata lookup failure is treated as INACTIVE (the safer
+      default; the orchestrator must not abort on a transient DB error).
+    """
+
+    def test_injection_skipped_when_project_not_active(self) -> None:
+        """Default: absent metadata → no blueprint injection."""
+        matcher = MagicMock()
+        matcher.match = AsyncMock(return_value=[_make_matched_blueprint()])
+
+        manager, instance_repo, agent_meta = _make_manager(matcher=matcher)
+        # Project has NOT opted in (absent metadata).
+        manager._project_repository.get_metadata = MagicMock(return_value=None)
+
+        persistent, _ = asyncio.run(
+            assemble_context_messages(
+                instance_id="inst-phase7-inactive",
+                user_query="what conventions apply?",
+                project_id="proj-phase7-inactive",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+
+        # No blueprint message — gate failed.
+        assert _blueprint_messages(persistent) == []
+        # Matcher was never called (cheaper than the gate trip).
+        matcher.match.assert_not_called()
+        # The gate queried the right key.
+        meta_calls = manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[0] == "proj-phase7-inactive"
+            and call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY
+            for call in meta_calls
+        ), meta_calls
+
+    def test_injection_works_when_project_active(self) -> None:
+        """Regression: opted-in project keeps the pre-Phase-7 behaviour."""
+        matcher = MagicMock()
+        matcher.match = AsyncMock(return_value=[_make_matched_blueprint()])
+
+        manager, instance_repo, agent_meta = _make_manager(matcher=matcher)
+        # Project opted in (the fixture already opts in by default; assert it).
+        manager._project_repository.get_metadata = MagicMock(
+            side_effect=lambda pid, key: (
+                True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+            ),
+        )
+
+        persistent, _ = asyncio.run(
+            assemble_context_messages(
+                instance_id="inst-phase7-active",
+                user_query="what conventions apply?",
+                project_id="proj-phase7-active",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+
+        # Blueprint message lands.
+        assert len(_blueprint_messages(persistent)) == 1
+        matcher.match.assert_awaited_once()
+
+    def test_injection_skipped_on_metadata_lookup_failure(self) -> None:
+        """A transient metadata failure must NOT crash the orchestrator
+        — treat the project as inactive and silently skip injection.
+        """
+        matcher = MagicMock()
+        matcher.match = AsyncMock(return_value=[_make_matched_blueprint()])
+
+        manager, instance_repo, agent_meta = _make_manager(matcher=matcher)
+        # Metadata lookup fails (e.g. transient DB error).
+        manager._project_repository.get_metadata = MagicMock(
+            side_effect=RuntimeError("DB hiccup"),
+        )
+
+        persistent, _ = asyncio.run(
+            assemble_context_messages(
+                instance_id="inst-phase7-err",
+                user_query="hi",
+                project_id="proj-phase7-err",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+
+        # No blueprint message — gate treated the failure as inactive.
+        assert _blueprint_messages(persistent) == []
+        matcher.match.assert_not_called()

@@ -11,7 +11,7 @@ import logging
 from langchain_core.tools import tool
 
 from ..repositories.project.models import HistoryEntryType
-from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -178,22 +178,42 @@ def create_project_history_tools(
             # built for the virtual bookkeeping project.
             and project.name != SYSTEM_DEFAULT_PROJECT_NAME
         ):
-            try:
-                pending_repo.enqueue(
-                    project_id=project_id,
-                    source_type="history",
-                    source_payload={
-                        "entry_type": entry_type,
-                        "summary": summary,
-                        "details": details[:_MAX_DETAILS_LEN] if details else None,
-                    },
-                )
-            except Exception as bp_err:
-                logger.warning(
-                    "Blueprint pending-queue INSERT failed for history event "
-                    "(non-fatal): %s",
-                    bp_err,
-                )
+            # Per-project opt-in gate (default: false = no enqueue).
+            # Stored in project metadata KV under
+            # ``BLUEPRINT_ACTIVE_METADATA_KEY``; absent = inactive.
+            # ``project_history_add`` is a sync ``@tool`` wrapper, so
+            # ``get_metadata`` (also sync SQLAlchemy) is called inline
+            # — no ``asyncio.to_thread`` needed. A metadata lookup
+            # failure must NOT abort the history write that just
+            # succeeded; treat the project as inactive (safer default).
+            project_blueprint_active = False
+            if manager is not None:
+                proj_repo = getattr(manager, "_project_repository", None)
+                if proj_repo is not None:
+                    try:
+                        val = proj_repo.get_metadata(
+                            project_id, BLUEPRINT_ACTIVE_METADATA_KEY,
+                        )
+                        project_blueprint_active = bool(val)
+                    except Exception:
+                        project_blueprint_active = False
+            if project_blueprint_active:
+                try:
+                    pending_repo.enqueue(
+                        project_id=project_id,
+                        source_type="history",
+                        source_payload={
+                            "entry_type": entry_type,
+                            "summary": summary,
+                            "details": details[:_MAX_DETAILS_LEN] if details else None,
+                        },
+                    )
+                except Exception as bp_err:
+                    logger.warning(
+                        "Blueprint pending-queue INSERT failed for history event "
+                        "(non-fatal): %s",
+                        bp_err,
+                    )
 
         return entry
     project_history_add._full_doc_ = _FULL_DOCS["project_history_add"]

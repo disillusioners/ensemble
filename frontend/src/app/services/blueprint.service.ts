@@ -456,6 +456,54 @@ export class BlueprintService {
   clearError(): void {
     this.error.set(null);
   }
+
+  // ── Per-project opt-in toggle (Phase 7) ──────────────────────────────
+  //
+  // Blueprint usage is a per-project opt-in: the system flag
+  // (``auto_rebuild_enabled``) controls whether the feature exists at
+  // all; this ``setBlueprintActive`` controls whether the current
+  // project participates. The metadata key lives in
+  // ``project_metadata_records`` under ``blueprint_active``; absent
+  // from the KV = inactive. The frontend defaults to "inactive" so a
+  // project must explicitly enable the blueprint system.
+  //
+  // We use the generic ``PUT /api/projects/{id}/metadata/{key}``
+  // endpoint (added alongside the gate) rather than a blueprint-
+  // specific one — the same path serves any per-project metadata
+  // toggle we add later.
+
+  /**
+   * PUT /api/projects/{id}/metadata/blueprint_active
+   *
+   * Flips the per-project blueprint opt-in. Returns ``void`` so the
+   * caller can subscribe without inspecting the response body — the
+   * backend responds with ``{"ok": true}`` on success.
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *     active: ``true`` to enable, ``false`` to disable.
+   *
+   * Returns:
+   *     ``Observable<void>`` — re-thrown on error so the caller can
+   *     render a snackbar.
+   */
+  setBlueprintActive(projectId: string, active: boolean): Observable<void> {
+    // The metadata endpoint lives under ``/api/projects/{id}`` — the
+    // service is mounted at ``/api/projects/{id}/blueprints`` so we
+    // strip the trailing ``/blueprints`` segment to derive the base.
+    const base = this.baseUrl(projectId).replace(/\/blueprints$/, '');
+    const url = `${base}/metadata/blueprint_active`;
+    return this.http
+      .put<void>(url, { value: active })
+      .pipe(
+        catchError((err) => {
+          this.error.set(
+            err?.message || `Failed to ${active ? 'enable' : 'disable'} blueprint`,
+          );
+          throw err;
+        }),
+      );
+  }
 }
 
 /**

@@ -21,7 +21,7 @@ import logging
 import uuid
 from typing import Any
 
-from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -128,17 +128,40 @@ class BlueprintScanService:
         The system default project (``__system_default__``) is a
         virtual bookkeeping project — no blueprints should ever be
         built for it, so we exclude it from the scan entirely.
+
+        Per-project opt-in gate: each project must have the
+        ``BLUEPRINT_ACTIVE_METADATA_KEY`` metadata key set to a truthy
+        value (``True``/``"true"``/etc.). Absent = inactive (skip).
+        ``get_metadata`` is sync SQLAlchemy; wrap in
+        ``asyncio.to_thread`` per ADR-12.
         """
         # list_projects is sync SQLAlchemy; push it to a thread so we
         # never block the event loop on disk I/O.
         projects = await asyncio.to_thread(
             self._project_repository.list_projects, limit=10_000,
         )
-        return [
-            p.project_id for p in projects
-            if getattr(p, "project_id", None)
-            and getattr(p, "name", None) != SYSTEM_DEFAULT_PROJECT_NAME
-        ]
+        result: list[str] = []
+        for p in projects:
+            pid = getattr(p, "project_id", None)
+            if not pid:
+                continue
+            if getattr(p, "name", None) == SYSTEM_DEFAULT_PROJECT_NAME:
+                continue
+            # Per-project opt-in gate (default: false = skip). Failure
+            # to read the metadata must NOT hard-abort the whole scan
+            # — treat the project as inactive (the safer default).
+            try:
+                active = await asyncio.to_thread(
+                    self._project_repository.get_metadata,
+                    pid,
+                    BLUEPRINT_ACTIVE_METADATA_KEY,
+                )
+            except Exception:
+                active = None
+            if not bool(active):
+                continue
+            result.append(pid)
+        return result
 
     async def _scan_project(self, project_id: str) -> None:
         """Smart trigger logic for one project.

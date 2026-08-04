@@ -218,7 +218,23 @@ def coordinator_app(engine, repo: BlueprintRepository):
     the corpus-existence guard (``/update`` with empty corpus) exercises
     the real SQL path. Coordinator + job service are mocks so each
     test controls the outcome.
+
+    The project repository mock is wired so the two-tier opt-in gate
+    (``_check_default_project_blocked`` + ``_check_blueprint_active``)
+    passes for the default project id used by the test corpus
+    (``00000000-0000-0000-0000-000000000001``):
+
+    * ``_project_repository.get`` returns a project with a non-default
+      name (so the default-project guard does NOT trip).
+    * ``_project_repository.get_metadata`` returns ``True`` for
+      ``blueprint_active`` (so the per-project opt-in passes).
+
+    Tests that need to exercise the guards themselves override these
+    mocks per-case (see ``test_rebuild_rejects_default_project`` and
+    the new opt-in tests).
     """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
     manager = MagicMock()
     manager._blueprint_repo = repo
     manager.is_write_paused = False
@@ -227,6 +243,21 @@ def coordinator_app(engine, repo: BlueprintRepository):
     # Write-service factory is not used by trigger endpoints but is
     # referenced by other endpoints sharing the same router.
     manager.get_blueprint_write_service = MagicMock()
+
+    # Wire the project repository mock so the trigger-endpoint guards
+    # pass for the canonical test project id. The project has a benign
+    # name (not ``__system_default__``) and is opted in to blueprints.
+    project_repo = MagicMock()
+    benign_project = MagicMock()
+    benign_project.project_id = "00000000-0000-0000-0000-000000000001"
+    benign_project.name = "Test Project"
+    project_repo.get = MagicMock(return_value=benign_project)
+    project_repo.get_metadata = MagicMock(
+        side_effect=lambda pid, key: (
+            True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+        ),
+    )
+    manager._project_repository = project_repo
 
     app = FastAPI()
     app.include_router(blueprints_router, prefix="/api")
@@ -755,6 +786,84 @@ class TestRebuildEndpoint:
             "a JobItem that doesn't exist."
         )
 
+    def test_rebuild_rejects_inactive_project(self, coordinator_client, coordinator_app):
+        """The per-project ``blueprint_active`` opt-in is enforced.
+
+        A project without the metadata key (default: inactive) must be
+        rejected with 400 BEFORE the coordinator claim — the gate is a
+        cheaper check than the lease and must not be skipped.
+        """
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        # Make ``get_metadata`` return None (the absent-from-KV default).
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=None)
+        )
+
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        # The coordinator must never be reached.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        # And no enqueue happens.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+        # The gate must have queried the right key on the right project.
+        meta_calls = coordinator_app.state.manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[0] == "00000000-0000-0000-0000-000000000001"
+            and call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY
+            for call in meta_calls
+        ), meta_calls
+
+    def test_rebuild_works_for_active_project(self, coordinator_client, coordinator_app):
+        """Regression: a project with ``blueprint_active=true`` is NOT
+        rejected by the new gate. The full coordinator path still
+        runs as before.
+        """
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        # The fixture already opts the test project in; no override needed.
+
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["mode"] == "rebuild"
+
+    def test_rebuild_inactive_falsy_value(self, coordinator_client, coordinator_app):
+        """A truthy check — even ``False`` (explicitly inactive) trips the gate.
+
+        Defends against a future refactor that uses ``is not None`` instead
+        of ``bool()``.
+        """
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=False)
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
+    def test_rebuild_inactive_metadata_lookup_failure(self, coordinator_client, coordinator_app):
+        """A metadata lookup failure must be treated as INACTIVE (400), not
+        passed through. A 5xx here would leak the underlying DB error
+        and confuse the user."""
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(side_effect=RuntimeError("DB down"))
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
 
 class TestUpdateEndpoint:
     """POST /api/projects/{project_id}/blueprints/update.
@@ -911,6 +1020,30 @@ class TestUpdateEndpoint:
         # Nothing reached the coordinator or the job queue.
         coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
         coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_update_rejects_inactive_project(self, coordinator_client, coordinator_app):
+        """The per-project ``blueprint_active`` opt-in is enforced on
+        ``/update`` too. Mirrors the ``/rebuild`` test.
+        """
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        # Make ``get_metadata`` return None (the absent-from-KV default).
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=None)
+        )
+
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+        # Sanity: the gate queried the right key.
+        meta_calls = coordinator_app.state.manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY for call in meta_calls
+        ), meta_calls
 
 
 class TestInitializeDeprecation:

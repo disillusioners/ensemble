@@ -45,11 +45,21 @@ def engine():
 
 @pytest.fixture
 def project_repo(engine):
+    """Default fixture: two active projects, both opted in to the
+    blueprint system (so existing scan tests still exercise the
+    per-project scan path). The opt-in tests build their own project
+    repo with ``get_metadata`` side effects to flip individual
+    projects on/off."""
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
     repo = MagicMock()
-    # Two active projects + one project that raises on lookup.
     p1 = MagicMock(); p1.project_id = "proj-1"
     p2 = MagicMock(); p2.project_id = "proj-2"
     repo.list_projects = MagicMock(return_value=[p1, p2])
+    # Opt both projects in by default. Tests that want to exercise
+    # the inactive-by-default path override ``get_metadata`` per project.
+    repo.get_metadata = MagicMock(
+        side_effect=lambda pid, key: True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None,
+    )
     return repo
 
 
@@ -509,3 +519,83 @@ def test_scan_skips_default_project(
     assert "71931ae0-0f25-5fbf-853b-2a78cc978d7e" not in list_call_ids
     pending_call_ids = {call.args[0] for call in pending_repo.get_pending_count.call_args_list}
     assert "71931ae0-0f25-5fbf-853b-2a78cc978d7e" not in pending_call_ids
+
+
+# ── Per-project opt-in gate (Phase 7) ─────────────────────────────────
+
+
+def test_scan_skips_project_not_opted_in(
+    blueprint_repo, pending_repo, coordinator, job_queue_service,
+):
+    """A project without ``blueprint_active=true`` metadata is skipped
+    (default: false). The scan must NEVER invoke the coordinator or
+    even the per-project repo methods for it.
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+    # Two projects: proj-1 opted in, proj-2 not opted in.
+    repo = MagicMock()
+    p1 = MagicMock(); p1.project_id = "proj-1"; p1.name = "Alice"
+    p2 = MagicMock(); p2.project_id = "proj-2"; p2.name = "Bob"
+    repo.list_projects = MagicMock(return_value=[p1, p2])
+    repo.get_metadata = MagicMock(side_effect=lambda pid, key: (
+        True if pid == "proj-1" and key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+    ))
+
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+        job_queue_service=job_queue_service,
+    )
+    _run(svc.execute())
+
+    # Only the opted-in project reached the coordinator.
+    assert coordinator.try_claim.call_count == 1
+    assert coordinator.try_claim.call_args.args[0] == "proj-1"
+    # The per-project repo methods must also never see proj-2.
+    list_call_ids = {call.args[0] for call in blueprint_repo.list_by_project.call_args_list}
+    assert "proj-2" not in list_call_ids
+    pending_call_ids = {call.args[0] for call in pending_repo.get_pending_count.call_args_list}
+    assert "proj-2" not in pending_call_ids
+
+
+def test_scan_includes_project_opted_in(
+    blueprint_repo, pending_repo, coordinator, job_queue_service,
+):
+    """A project with ``blueprint_active=true`` metadata is included
+    in the scan (regression for the new gate).
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+    # Both projects opted in.
+    repo = MagicMock()
+    p1 = MagicMock(); p1.project_id = "proj-1"; p1.name = "Alice"
+    p2 = MagicMock(); p2.project_id = "proj-2"; p2.name = "Bob"
+    repo.list_projects = MagicMock(return_value=[p1, p2])
+    repo.get_metadata = MagicMock(side_effect=lambda pid, key: (
+        True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+    ))
+
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+        job_queue_service=job_queue_service,
+    )
+    _run(svc.execute())
+
+    # Both projects reached the coordinator (rebuild mode — empty corpus).
+    assert coordinator.try_claim.call_count == 2
+    claimed_ids = {call.args[0] for call in coordinator.try_claim.call_args_list}
+    assert claimed_ids == {"proj-1", "proj-2"}

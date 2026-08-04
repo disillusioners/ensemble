@@ -40,6 +40,19 @@
         <mat-icon>add</mat-icon>
         New Blueprint
       </button>
+      <!-- Phase 7: per-project opt-in toggle. Shows only when the
+           system is active (project opted in). Clicking flips the
+           flag via PUT /api/projects/{id}/metadata/blueprint_active
+           and the local computed signal re-evaluates from the
+           project list. -->
+      @if (blueprintActive()) {
+        <button mat-icon-button
+                (click)="toggleBlueprintActive()"
+                [disabled]="togglingActive()"
+                matTooltip="Disable blueprint for this project">
+          <mat-icon>toggle_on</mat-icon>
+        </button>
+      }
     </div>
   </mat-toolbar>
 
@@ -188,6 +201,25 @@
       <mat-icon class="empty-icon">folder_off</mat-icon>
       <h3>Select a project</h3>
       <p>Choose a project from the dropdown above to view its blueprints.</p>
+    </div>
+  } @else if (!blueprintActive()) {
+    <!-- Phase 7: per-project opt-in. Default is inactive — show a
+         banner with an "Enable" button so the user can opt in
+         without leaving the page. -->
+    <div class="blueprint-inactive-banner">
+      <mat-icon class="banner-icon">info</mat-icon>
+      <div class="banner-text">
+        <h3>Blueprint system is not active for this project.</h3>
+        <p>Enable the blueprint system to auto-generate architectural
+           knowledge from project files. The system default project
+           does not participate.</p>
+      </div>
+      <button mat-raised-button color="primary"
+              (click)="toggleBlueprintActive()"
+              [disabled]="togglingActive()">
+        <mat-icon [class.spinning]="togglingActive()">toggle_off</mat-icon>
+        @if (togglingActive()) { Enabling… } @else { Enable Blueprint }
+      </button>
     </div>
   } @else {
   <div class="blueprint-layout">

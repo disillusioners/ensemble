@@ -167,6 +167,23 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   /** Holds the active poll subscription so we can tear it down on
    * destroy / project switch. */
   private rebuildPollingSub?: Subscription;
+  // ── Per-project blueprint opt-in (Phase 7) ───────────────────────────
+  /**
+   * Whether the currently selected project has opted in to the
+   * blueprint system. Read from the project metadata already loaded
+   * by :class:`ProjectService` (no extra round-trip needed).
+   * ``metadata.blueprint_active`` truthy = active; absent or falsy
+   * = inactive (the default).
+   */
+  readonly blueprintActive = computed<boolean>(() => {
+    const id = this.selectedProjectId();
+    if (!id) return false;
+    const proj = this.projects().find((p) => p.project_id === id);
+    if (!proj) return false;
+    return Boolean(proj.metadata?.['blueprint_active']);
+  });
+  /** Drives the disabled state on the enable / disable button. */
+  readonly togglingActive = signal(false);
   /**
    * Show the "Rebuild Blueprints" button — only when the project is
    * empty (no blueprints yet) AND no rebuild is running AND a project
@@ -406,6 +423,46 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   protected onClearFilters(): void {
     this.kindFilter.set('all');
     this.statusFilter.set('all');
+  }
+
+  // ── Blueprint opt-in toggle (Phase 7) ────────────────────────────────
+  /**
+   * Flip the per-project ``blueprint_active`` flag. Optimistic: the
+   * local project row's metadata is updated immediately so the UI
+   * re-renders without a server round-trip; on failure we revert and
+   * surface a snackbar.
+   */
+  protected toggleBlueprintActive(): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
+    const newValue = !this.blueprintActive();
+    this.togglingActive.set(true);
+    this.service.setBlueprintActive(projectId, newValue).subscribe({
+      next: () => {
+        // Patch the local project row so the computed `blueprintActive`
+        // signal re-evaluates without a re-fetch.
+        this.projects.update((items) =>
+          items.map((p) =>
+            p.project_id === projectId
+              ? {
+                  ...p,
+                  metadata: { ...(p.metadata || {}), blueprint_active: newValue },
+                }
+              : p,
+          ),
+        );
+        this.togglingActive.set(false);
+        this.snackBar.open(
+          newValue ? 'Blueprint enabled for this project' : 'Blueprint disabled for this project',
+          'Close',
+          { duration: 3000 },
+        );
+      },
+      error: (err: Error) => {
+        this.togglingActive.set(false);
+        this.showMutationError(err, newValue ? 'enable blueprint' : 'disable blueprint');
+      },
+    });
   }
 
   // ── Select / detail ─────────────────────────────────────────────────

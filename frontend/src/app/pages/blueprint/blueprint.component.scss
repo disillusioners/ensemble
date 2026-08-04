@@ -136,6 +136,32 @@
   }
 }
 
+// ── Inactive-banner (Phase 7) ──────────────────────────────────────────
+// Shown when a project is selected but the per-project
+// ``blueprint_active`` opt-in is False. Replaces the two-column
+// layout until the user enables the system.
+.blueprint-inactive-banner {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 32px 48px;
+  background: var(--surface-color, #252526);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 6px;
+  margin: 24px;
+  .banner-icon {
+    font-size: 40px; width: 40px; height: 40px;
+    color: var(--primary-color, #64b5f6); flex-shrink: 0;
+  }
+  .banner-text {
+    flex: 1;
+    h3 { margin: 0 0 6px; color: var(--text-color, #e0e0e0); font-weight: 500; }
+    p { margin: 0; color: var(--text-secondary, #9e9e9e); line-height: 1.5; max-width: 540px; }
+  }
+  .spinning { animation: spin 1s linear infinite; }
+}
+
 // ── Inline create card ───────────────────────────────────────────────
 .create-card {
   margin: 16px 24px 0;
