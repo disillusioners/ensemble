@@ -4376,12 +4376,12 @@ class InstanceManager:
                     for project in projects:
                         try:
                             self._blueprint_repo.auto_dedup_cores(
-                                project.id
+                                project.project_id
                             )
                         except Exception as exc:  # noqa: BLE001 — per-project scope
                             logger.warning(
                                 "G7 auto-dedup failed for project %s: %s",
-                                project.id, exc,
+                                project.project_id, exc,
                             )
 
             # Step 2: Create the partial unique index.
