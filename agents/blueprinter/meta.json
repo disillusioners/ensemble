@@ -1,1 +1,34 @@
-{"id": "blueprinter", "name": "Blueprinter", "description": "Skill-driven blueprint maintenance agent with rebuild and incremental workflows. Coordinates worker fan-out/fan-in to keep the project blueprint corpus aligned with actual architecture.", "icon": "📐", "color": "accent-teal", "version": "2.0.0", "llm_model": "balanced", "blueprint_inactive": true, "skill_injection": true, "tools": {"allow": ["blueprint", "knowledge", "filesystem", "time", "self", "help", "instance"]}, "team_members": ["worker"]}
+{
+    "id": "blueprinter",
+    "name": "Blueprinter",
+    "description": "Skill-driven blueprint maintenance agent with rebuild and incremental workflows. Coordinates worker fan-out/fan-in to keep the project blueprint corpus aligned with actual architecture.",
+    "icon": "📐",
+    "color": "accent-teal",
+    "version": "2.0.0",
+    "llm_models": [
+        {
+            "model": "agentic",
+            "weight": 50
+        },
+        {
+            "model": "coding",
+            "weight": 50
+        }
+    ],
+    "blueprint_inactive": true,
+    "skill_injection": true,
+    "tools": {
+        "allow": [
+            "blueprint",
+            "knowledge",
+            "filesystem",
+            "time",
+            "self",
+            "help",
+            "instance"
+        ]
+    },
+    "team_members": [
+        "worker"
+    ]
+}
