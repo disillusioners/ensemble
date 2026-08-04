@@ -728,6 +728,21 @@ class BlueprintConfig(EmbeddingConfig):
         default_factory=lambda: ["published"],
         description="Blueprint statuses eligible for matching (G8). Drafts excluded by default.",
     )
+    # C7 / Phase 3: gate for automated blueprint triggers (daily scan,
+    # post-experience sidecars). Manual triggers always work. Default OFF
+    # for safety — flip to True via BLUEPRINT_AUTO_REBUILD_ENABLED=true.
+    auto_rebuild_enabled: bool = Field(
+        default=False,
+        description="Gate for automated blueprint triggers (daily scan, "
+                    "post-experience). Manual triggers always work. "
+                    "Default OFF for safety.",
+    )
+    daily_scan_hour: int = Field(
+        default=2,
+        description="UTC hour for daily blueprint scan (0-23). Default 2 AM.",
+        ge=0,
+        le=23,
+    )
 
 
 class Config(BaseSettings):

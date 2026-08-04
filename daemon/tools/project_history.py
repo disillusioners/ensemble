@@ -6,10 +6,14 @@ that provide a chronological record of what happened in a project.
 
 from __future__ import annotations
 
+import logging
+
 from langchain_core.tools import tool
 
 from ..repositories.project.models import HistoryEntryType
 from ._tool_registry import register_tool_category
+
+logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "project_history"
 CATEGORY_DOC = """Manage project history entries — record milestones, commits, phase completions,
@@ -91,10 +95,29 @@ def _is_valid_entry_type(entry_type: str) -> bool:
     return entry_type in HistoryEntryType._value2member_map_
 
 
+# History entry types whose addition implies a structural project change
+# worth feeding the Blueprint pending-queue (C8). Bugfixes, notes,
+# commits, etc. are intentionally excluded — only "shape changed" events
+# land in the queue.
+_PENDING_QUEUE_ENTRY_TYPES = frozenset({"feature", "milestone"})
+
+
 def create_project_history_tools(
-    store, current_instance_id: str = "", agent_id: str = ""
+    store, current_instance_id: str = "", agent_id: str = "",
+    manager=None,
 ) -> list:
-    """Create project history tools bound to a project store."""
+    """Create project history tools bound to a project store.
+
+    Args:
+        store: The project store.
+        current_instance_id: The ID of the current instance.
+        agent_id: The ``agent_id`` of the calling instance.
+        manager: Optional :class:`InstanceManager` reference. When
+            provided, the ``project_history_add`` tool feeds the
+            Blueprint pending-queue (Phase 3 / C8) for ``feature`` and
+            ``milestone`` entries. Passing ``None`` (or omitting) skips
+            the pending-queue hook — the legacy behaviour.
+    """
 
     @register_tool_category(CATEGORY_NAME)
     @tool
@@ -135,6 +158,35 @@ def create_project_history_tools(
             source_instance_id=current_instance_id,
             entry_metadata=entry_metadata,
         )
+
+        # ── C8: Blueprint pending-queue hook for history events ──
+        # Feature / milestone entries indicate structural project
+        # changes worth a Blueprint incremental update. Fire-and-forget
+        # INSERT into the pending queue; a failure must not break the
+        # history write that just succeeded (logged at WARNING so
+        # operators can spot sustained queue issues).
+        pending_repo = (
+            getattr(manager, "_blueprint_pending_repo", None)
+            if manager is not None
+            else None
+        )
+        if pending_repo is not None and entry_type in _PENDING_QUEUE_ENTRY_TYPES:
+            try:
+                pending_repo.enqueue(
+                    project_id=project_id,
+                    source_type="history",
+                    source_payload={
+                        "entry_type": entry_type,
+                        "summary": summary,
+                        "details": details[:_MAX_DETAILS_LEN] if details else None,
+                    },
+                )
+            except Exception as bp_err:
+                logger.warning(
+                    "Blueprint pending-queue INSERT failed for history event "
+                    "(non-fatal): %s",
+                    bp_err,
+                )
 
         return entry
     project_history_add._full_doc_ = _FULL_DOCS["project_history_add"]

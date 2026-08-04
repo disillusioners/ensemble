@@ -772,6 +772,19 @@ class InstanceManager:
             engine=self._engine, create_tables=False,
         )
 
+        # C7 (Phase 3): BlueprintTriggerCoordinator — the single
+        # chokepoint for ALL blueprint build enqueuing. Lease is
+        # persisted as project metadata. ``_job_queue_service`` is
+        # late-bound via ``set_job_queue_service()`` below because it
+        # is not constructed yet at this point in the init sequence.
+        from .services.blueprint_trigger_coordinator import (
+            BlueprintTriggerCoordinator,
+        )
+        self._blueprint_trigger_coordinator = BlueprintTriggerCoordinator(
+            project_repository=self._project_repository,
+            job_queue_service=None,
+        )
+
         # G7 (C6): one-core-per-project DB constraint. Called here — AFTER
         # ``self._blueprint_repo`` and ``self._project_repository`` are
         # assigned — so the auto-dedup pre-flight can reach them. The
@@ -1843,7 +1856,58 @@ class InstanceManager:
                 self._run_skill_orphan_sweep,
             )
 
+        # ── Project Blueprint Phase 3: daily scan + lease sweeper ───
+        # The daily scan is the daemon-side counterpart to manual
+        # ``/rebuild`` / ``/update`` triggers — same chokepoint
+        # (BlueprintTriggerCoordinator) — but driven by the system
+        # clock and gated by the ``auto_rebuild_enabled`` feature flag
+        # (default OFF). The lease sweep is a safety net for blueprinter
+        # jobs that crashed mid-flight without releasing their lease.
+        if (
+            self._blueprint_repo is not None
+            and self._blueprint_pending_repo is not None
+            and getattr(self, "_blueprint_trigger_coordinator", None) is not None
+        ):
+            from .services.blueprint_scan_service import BlueprintScanService
+            self._blueprint_scan_service = BlueprintScanService(
+                blueprint_repo=self._blueprint_repo,
+                pending_repo=self._blueprint_pending_repo,
+                coordinator=self._blueprint_trigger_coordinator,
+                config=self.config.blueprint,
+                project_repository=self._project_repository,
+            )
+            self._maintenance_service.register(
+                "blueprint_daily_scan",
+                min_interval_hours=24.0,
+                execute_fn=self._blueprint_scan_service.execute,
+            )
+            self._maintenance_service.register(
+                "blueprint_lease_sweep",
+                min_interval_hours=0.5,  # every 30 min
+                execute_fn=self._blueprint_trigger_coordinator._sweep_expired_leases,
+            )
+
         await self._maintenance_service.start()
+
+        # C7 (Phase 3): reconcile any leases left behind by a previous
+        # crashed run. Best-effort — a failure here logs WARNING and
+        # continues so a single bad row cannot stall startup. The
+        # 30-minute periodic sweep will eventually clean up anything
+        # the startup pass missed.
+        coordinator = getattr(self, "_blueprint_trigger_coordinator", None)
+        if coordinator is not None:
+            try:
+                released = await coordinator.reconcile_on_startup()
+                if released > 0:
+                    logger.info(
+                        "C7: Released %d orphaned blueprint build lease(s) on startup",
+                        released,
+                    )
+            except Exception as reconcile_exc:
+                logger.warning(
+                    "C7: Lease reconciliation on startup failed: %s",
+                    reconcile_exc,
+                )
 
         # ── Skill Bank seeding (Phase 3: versioned templates) ──────────
         # Scans agents/*/skill-set.yaml (legacy .md fallback) +
@@ -3128,6 +3192,15 @@ class InstanceManager:
         metrics = getattr(self, "_skill_metrics_service", None)
         if metrics is not None and self._skill_job_dispatcher is not None:
             metrics.set_job_dispatcher(self._skill_job_dispatcher)
+
+        # Wire the BlueprintTriggerCoordinator (C7) so it can probe
+        # job status during startup reconciliation. Defensive getattr
+        # because the coordinator may not exist on test doubles that
+        # bypass the normal __init__ flow.
+        coordinator = getattr(self, "_blueprint_trigger_coordinator", None)
+        if coordinator is not None and service is not None:
+            coordinator.set_job_queue_service(service)
+
         logger.info("JobQueueService connected to SessionManager")
 
     def set_job_feedback_observer(self, observer: Any) -> None:

@@ -251,7 +251,9 @@ Append-only history of every revision for the management UI's revision history e
 
 ### 4.4 Indexing and search support
 
-The matching engine relies on standard PostgreSQL extensions for BM25-style scoring and pgvector (or equivalent) for vector similarity. The actual extension choice is an implementation detail; at the design level, the system requires:
+> **Implementation note (updated 2026-08-02):** The production codebase does **not** use pgvector or PostgreSQL full-text search (tsvector/GIN). Embeddings are stored as **JSONB arrays of `float`** (`list[float]` via `JSONBType`), and BM25 is implemented in **pure Python** (in-memory corpus scoring). Blueprint follows the same approach as the existing skill system — see `phase01-implementation.md` §P1.3 and §P1.6. The original design below (pgvector/tsvector) is superseded by this implementation constraint.
+
+~~The matching engine relies on standard PostgreSQL extensions for BM25-style scoring and pgvector (or equivalent) for vector similarity.~~ The matching engine uses **pure-Python BM25** (reused from `skill_search_service`) + **cosine similarity over JSONB-stored embeddings** (reused from `SkillEmbeddingService`). At the design level, the system requires:
 
 - Fast lexical scoring over `content` + `tags` + `trigger_queries` + `name`
 - Vector similarity over the `embedding` column (single vector per blueprint, averaging / pooling its trigger-query embeddings)
@@ -294,10 +296,31 @@ This is the section that locks Blueprint into the parent→child delegation flow
 
 **Query source for matching:**
 
-- **Primary:** task message text (the message body that the child agent receives)
-- **Enrichment (optional):** the parent agent's `context` parameter (the structured parent-to-child context field added in the recent Tier 2A feature)
+The blueprint query is built from THREE signals:
 
-When the parent provides `context`, it is concatenated with or prepended to the task message for matching purposes. When absent, only the message text is used.
+- **Primary:** task message text (the message body that the child agent receives)
+- **Enrichment 1 (optional):** the parent agent's `context` parameter (the structured parent-to-child context field added in the recent Tier 2A feature)
+- **Enrichment 2 (optional):** the dispatched skill content (when the parent dispatches with `load_skill`, the skill body carries domain-specific vocabulary highly relevant to blueprint matching)
+
+When enrichment signals are present, they are concatenated with the task message for matching purposes. When absent, only the message text is used.
+
+### 5.3.1 Multi-source query construction
+
+The blueprint query is built from THREE signals, not two:
+
+```python
+def build_blueprint_query(task_message: str, task_context: str | None, skill_content: str | None) -> str:
+    parts = [task_message]
+    if task_context and task_context.strip():
+        parts.append(task_context)
+    if skill_content and skill_content.strip():
+        parts.append(skill_content[:2000])
+    return "\n\n".join(parts)
+```
+
+**Third signal — skill content:** When a parent dispatches with `load_skill`, the skill content contains domain-specific vocabulary highly relevant to blueprint matching. Include in query capped at 2K chars. This gives the matcher access to the skill's domain framing (e.g., a `plan-creation` skill signals architecture/feature planning, improving blueprint recall for architecture/planning blueprints).
+
+**Note:** The `task_context` parameter is already capped at 4000 chars by `_format_task_context()` (`daemon/tools/instance.py:53`) before it reaches the blueprint query builder. No re-truncation needed for task_context. The skill_content cap (2K chars) is applied at the query builder since skill content has no upstream cap.
 
 **Threshold gate:** Blueprints that score below a calibrated confidence threshold are dropped — we prefer 1–2 high-confidence matches over 4 low-confidence ones. This prevents injecting noise into a small token budget.
 
@@ -318,6 +341,31 @@ Matching runs **at first-message receipt**, not at spawn time. This is consisten
 - The persistent message is checkpointed with the session state
 
 **Immutability for instance lifetime:** Subsequent turns read the checkpointed persistent messages directly. No re-matching, no drift, no surprise re-injection. This mirrors the existing skill injection checkpoint behavior.
+
+### 5.4.1 Structured query logging — from v1
+
+Blueprint matching must include structured logging from v1 (not deferred). Since matching is one-shot, immutable, and persistent, observability is critical for calibration.
+
+Log at the match hook:
+
+```python
+logger.info("blueprint_match", extra={
+    "instance_id": instance_id,
+    "query_source": "task_only" | "task+context" | "task+context+skill",
+    "query_length": len(query),
+    "matched_count": len(matched),
+    "matched_ids": [b["blueprint_id"] for b in matched[:5]],
+    "top_score": matched[0]["score"] if matched else 0.0,
+})
+```
+
+This enables:
+- A/B comparison of query source quality (does adding context/skill improve match relevance?)
+- Degenerate query detection (empty/oversized queries)
+- Telemetry on how often context/skill signals are present
+- Calibration data for Phase 6 threshold tuning
+
+Do NOT defer this to a later phase. It is cheap (one log line per match) and the match is one-shot so there is no second chance to instrument it.
 
 ### 5.5 Worker reuse — documented invariant
 
@@ -381,6 +429,19 @@ Messages are appended in slot order (core first, then matches by score). The ful
 ```
 
 Empty slots are simply absent. No padding with low-quality matches.
+
+### 6.5 Token budget breakdown — first-turn persistent block
+
+| Layer | Source | Est. Tokens |
+|-------|--------|-------------|
+| Task context | Tier 2A context param | ~500–2000 |
+| Skills | Skill injection | ~500–2000 |
+| Shared context RAG | Heuristic match | ~500–2000 |
+| Blueprint | Blueprint match | ~500–2500 (5 × ~500) |
+| Project metadata | Project JSON + notes + history | ~500–1000 |
+| **Total** | **First-turn persistent block** | **2.5K–9.5K** |
+
+This is within acceptable bounds. A per-blueprint character cap (2K chars ≈ ~500 tokens) is recommended to bound the worst case. Monitor total context window as conversation grows — the persistent block is fixed at checkpoint time, so it does not grow with turns.
 
 ---
 

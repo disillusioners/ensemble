@@ -1869,8 +1869,13 @@ Returns:
     tools.extend(cn_tools)
 
     # Project history tools (chronological project event tracking)
+    # C8: thread ``manager`` so the ``project_history_add`` hook can
+    # feed the Blueprint pending-queue for ``feature``/``milestone``
+    # entries. The factory itself still works with manager=None — this
+    # only enables the Blueprint sidecar when a manager is reachable.
     history_tools = create_project_history_tools(
-        manager.project_store, current_instance_id, agent_id
+        manager.project_store, current_instance_id, agent_id,
+        manager=manager,
     )
     tools.extend(history_tools)
     

@@ -1,14 +1,1 @@
-{
-  "id": "blueprinter",
-  "name": "Blueprinter",
-  "description": "Automatically maintains the project blueprint corpus by detecting architectural drift and revising blueprints",
-  "icon": "📐",
-  "color": "accent-teal",
-  "version": "1.1.0",
-  "llm_model": "quick",
-  "blueprint_inactive": true,
-  "tools": {
-    "allow": ["blueprint", "knowledge", "filesystem", "time", "self", "help", "instance"]
-  },
-  "team_members": ["worker"]
-}
+{"id": "blueprinter", "name": "Blueprinter", "description": "Skill-driven blueprint maintenance agent with rebuild and incremental workflows. Coordinates worker fan-out/fan-in to keep the project blueprint corpus aligned with actual architecture.", "icon": "📐", "color": "accent-teal", "version": "2.0.0", "llm_model": "balanced", "blueprint_inactive": true, "skill_injection": true, "tools": {"allow": ["blueprint", "knowledge", "filesystem", "time", "self", "help", "instance"]}, "team_members": ["worker"]}

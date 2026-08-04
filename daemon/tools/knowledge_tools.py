@@ -1040,6 +1040,28 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         except Exception as e:
             logger.warning("Failed to schedule kb-writer job: %s", e)
 
+        # ── Blueprint pending-queue hook for experience events ──
+        # C8 / Phase 3: every experience() call (no keyword filter
+        # anymore — filtering moves into the blueprinter's
+        # ``explore-for-incremental`` skill) drops a row in the
+        # pending-experience queue. The blueprinter picks it up via
+        # ``claim_batch``. Failure here is non-fatal — we never want
+        # to break the kb-writer path on a Blueprint queue hiccup.
+        pending_repo = getattr(manager, "_blueprint_pending_repo", None)
+        if pending_repo is not None:
+            try:
+                pending_repo.enqueue(
+                    project_id=pid,
+                    source_type="experience",
+                    source_payload={"text": text[:10_000]},
+                )
+            except Exception as bp_err:
+                logger.warning(
+                    "Blueprint pending-queue INSERT failed for experience "
+                    "(non-fatal): %s",
+                    bp_err,
+                )
+
         return "Knowledge recording started."
 
     return [explore, experience]

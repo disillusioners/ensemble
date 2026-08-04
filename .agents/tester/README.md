@@ -19,8 +19,8 @@
 
 ## ensure.md
 - Status: ✅ ACTIVE — `.agents/tester/rules/ensure.md` exists with Core + Release Gate requirements
-- E2E Release Gate (4 tests): last run **2026-07-28 on `feature/context-injection-restructure`** → ✅ PASS (4/4). happy_path 68s, pause+resume 44s, terminate+revive 50s, 3-level cascade 115s. No regressions. See `RESULTS/2026-07-28-e2e-workflows-release-gate.md`.
-- Previous run: 2026-07-26 on `feature/queue-dispatch-option-b` w/ queued-race-fix → ✅ PASS (4/4).
+- E2E Release Gate (4 tests): last run **2026-08-02 on `latest` @ `70a22d62`** → ✅ PASS (4/4). happy_path 51s, pause+resume 42s, terminate+revive 45s, 3-level cascade 111s. Validates premature root COMPLETED fix — no premature completion at any level in the 3-level cascade. See `RESULTS/2026-08-02-premature-completion-fix-e2e.md`.
+- Previous run: 2026-07-28 on `feature/context-injection-restructure` → ✅ PASS (4/4). happy_path 68s, pause+resume 44s, terminate+revive 50s, 3-level cascade 115s. See `RESULTS/2026-07-28-e2e-workflows-release-gate.md`.
 - Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)
 - **Note:** dev mode (`./dev.sh`) logs to stdout (no `.log` file) — use the process buffer for log grep, not `tail -f daemon.log`.
 - **Context Injection Gate Fix E2E:** 2026-07-28 on `latest` @ `78338bb4` → ✅ PASS. Verified fix `df0a603c` (gate on injection mode, not legacy boolean). 4/4 instances that started graph execution (developer×3, reviewer×1) received `[SYSTEM CONTEXT: Related Project]` with `context_kind=project, is_synthetic=True`. 5/9 instances stalled in job queue (concurrency bottleneck, not context issue). See `RESULTS/2026-07-28-context-injection-fix-e2e-verify.md`.

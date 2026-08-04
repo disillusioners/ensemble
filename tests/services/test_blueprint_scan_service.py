@@ -1,0 +1,305 @@
+"""Tests for :class:`BlueprintScanService` (G5, Phase 3).
+
+Covers the daemon-side daily scan's smart trigger logic:
+
+* Disabled by the ``auto_rebuild_enabled`` flag (default OFF).
+* Empty corpus → enqueue ``rebuild`` via the coordinator.
+* Existing blueprints + pending updates → enqueue ``incremental``.
+* Existing blueprints + no pending → skip (no coordinator call).
+* Per-project failures are isolated (one bad project does not
+  break the sweep).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel
+
+from daemon.services.blueprint_scan_service import (
+    MODE_INCREMENTAL,
+    MODE_REBUILD,
+    BlueprintScanService,
+)
+from daemon.services.blueprint_trigger_coordinator import ClaimResult
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def engine():
+    e = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(e)
+    return e
+
+
+@pytest.fixture
+def project_repo(engine):
+    repo = MagicMock()
+    # Two active projects + one project that raises on lookup.
+    p1 = MagicMock(); p1.project_id = "proj-1"
+    p2 = MagicMock(); p2.project_id = "proj-2"
+    repo.list_projects = MagicMock(return_value=[p1, p2])
+    return repo
+
+
+@pytest.fixture
+def blueprint_repo():
+    return MagicMock()
+
+
+@pytest.fixture
+def pending_repo():
+    return MagicMock()
+
+
+@pytest.fixture
+def coordinator():
+    """MagicMock coordinator whose ``try_claim`` is an AsyncMock that
+    returns a successful ClaimResult by default. Tests can override
+    the AsyncMock's ``return_value`` / ``side_effect`` per case."""
+    coord = MagicMock()
+    coord.try_claim = MagicMock()
+    coord.try_claim.return_value = ClaimResult(claimed=True, run_token="tok")
+    return coord
+
+
+def _set_claim_result(coord: Any, result: ClaimResult) -> None:
+    """Re-bind ``coord.try_claim`` to an awaitable returning ``result``."""
+    coord.try_claim = MagicMock()
+    coord.try_claim.return_value = result
+
+
+def _run(coro: Any) -> Any:
+    return asyncio.run(coro)
+
+
+def _make_config(enabled: bool) -> Any:
+    cfg = MagicMock()
+    cfg.auto_rebuild_enabled = enabled
+    cfg.daily_scan_hour = 2
+    return cfg
+
+
+# ── Flag gate ──────────────────────────────────────────────────────────
+
+
+def test_scan_disabled_by_flag(blueprint_repo, pending_repo, coordinator, project_repo):
+    """``auto_rebuild_enabled=False`` (the default) → no coordinator calls."""
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=False),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    coordinator.try_claim.assert_not_called()
+    blueprint_repo.list_by_project.assert_not_called()
+    pending_repo.get_pending_count.assert_not_called()
+
+
+def test_scan_enabled_flag_runs(blueprint_repo, pending_repo, coordinator, project_repo):
+    """``auto_rebuild_enabled=True`` → the scan fires."""
+    # Empty corpus for both projects.
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    # Two projects, two rebuilds enqueued.
+    assert coordinator.try_claim.call_count == 2
+    for call in coordinator.try_claim.call_args_list:
+        assert call.args[1] == MODE_REBUILD
+
+
+# ── Smart trigger logic ────────────────────────────────────────────────
+
+
+def test_scan_empty_corpus_triggers_rebuild(blueprint_repo, pending_repo, coordinator, project_repo):
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    # Each project has no blueprints → both get a "rebuild" claim.
+    modes = [call.args[1] for call in coordinator.try_claim.call_args_list]
+    assert modes == [MODE_REBUILD, MODE_REBUILD]
+
+
+def test_scan_pending_triggers_incremental(blueprint_repo, pending_repo, coordinator, project_repo):
+    # Project 1: has blueprints + pending → incremental.
+    # Project 2: has blueprints + no pending → skip.
+    by_project = {
+        "proj-1": [MagicMock(id="bp1")],
+        "proj-2": [MagicMock(id="bp2")],
+    }
+    pending_by_project = {"proj-1": 5, "proj-2": 0}
+    blueprint_repo.list_by_project = MagicMock(side_effect=lambda pid: by_project[pid])
+    pending_repo.get_pending_count = MagicMock(side_effect=lambda pid: pending_by_project[pid])
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    # Only one coordinator call: incremental for proj-1.
+    assert coordinator.try_claim.call_count == 1
+    call = coordinator.try_claim.call_args
+    assert call.args[0] == "proj-1"
+    assert call.args[1] == MODE_INCREMENTAL
+
+
+def test_scan_no_pending_skips(blueprint_repo, pending_repo, coordinator, project_repo):
+    """Has blueprints + no pending → coordinator NOT called at all."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[MagicMock(id="bp1")])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    coordinator.try_claim.assert_not_called()
+
+
+# ── Coordinator outcomes ──────────────────────────────────────────────
+
+
+def test_scan_coalesce_does_not_double_enqueue(blueprint_repo, pending_repo, project_repo):
+    """When the coordinator returns coalesced=True, we still don't re-enqueue."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    coord = MagicMock()
+    _set_claim_result(
+        coord, ClaimResult(claimed=False, coalesced=True, job_id="other-job"),
+    )
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coord,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    # We just observe; the coordinator is the one true enqueue point.
+    # Each project still gets one try_claim call.
+    assert coord.try_claim.call_count == 2
+
+
+def test_scan_conflict_is_observed_not_retried(blueprint_repo, pending_repo, project_repo):
+    """When the coordinator returns conflict_mode, we surface it; no retry."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    coord = MagicMock()
+    _set_claim_result(
+        coord, ClaimResult(claimed=False, conflict_mode="incremental"),
+    )
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coord,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    # Exactly one attempt per project; the scan never retries on conflict.
+    assert coord.try_claim.call_count == 2
+
+
+# ── Per-project failure isolation ─────────────────────────────────────
+
+
+def test_scan_per_project_failure_does_not_abort_sweep(blueprint_repo, pending_repo, project_repo):
+    """One project's exception must NOT stop subsequent projects from being scanned."""
+    # list_by_project raises on proj-1 but returns [] on proj-2.
+    def _list(pid):
+        if pid == "proj-1":
+            raise RuntimeError("simulated DB error")
+        return []
+    blueprint_repo.list_by_project = MagicMock(side_effect=_list)
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    coord = MagicMock()
+    _set_claim_result(coord, ClaimResult(claimed=True, run_token="tok"))
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coord,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    # Must not raise.
+    _run(svc.execute())
+    # Only proj-2 successfully reached the coordinator.
+    assert coord.try_claim.call_count == 1
+    assert coord.try_claim.call_args.args[0] == "proj-2"
+
+
+def test_scan_coordinator_raises_swallowed(blueprint_repo, pending_repo, project_repo):
+    """A coordinator exception is logged + swallowed per project."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    coord = MagicMock()
+    coord.try_claim = MagicMock()
+    coord.try_claim.side_effect = RuntimeError("coordinator down")
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coord,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    # Must not raise out of execute().
+    _run(svc.execute())
+    # Both projects attempted (no early abort).
+    assert coord.try_claim.call_count == 2
+
+
+def test_scan_project_list_failure_swallowed(blueprint_repo, pending_repo, coordinator):
+    """A top-level list_projects failure logs + returns without re-raise."""
+    project_repo = MagicMock()
+    project_repo.list_projects = MagicMock(side_effect=RuntimeError("list down"))
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+    coordinator.try_claim.assert_not_called()
