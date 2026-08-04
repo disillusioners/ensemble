@@ -88,25 +88,14 @@
     <!-- Project selector — first field; visually scopes the rest
          of the filters. Auto-redirects to the first project when the
          route is /projects/all/blueprints. -->
-    <mat-form-field appearance="outline"
-                    class="filter-field project-select-field">
-      <mat-label>Project</mat-label>
-      <mat-select [value]="selectedProjectId()"
-                  (selectionChange)="onProjectChange($event.value)"
-                  [disabled]="projectsLoading()">
-        @if (projectsLoading()) {
-          <mat-option [value]="null" disabled>
-            Loading projects…
-          </mat-option>
-        } @else {
-          @for (proj of projects(); track proj.project_id) {
-            <mat-option [value]="proj.project_id">
-              {{ proj.name }}
-            </mat-option>
-          }
-        }
-      </mat-select>
-    </mat-form-field>
+    <app-searchable-select
+      class="filter-field project-select-field"
+      [options]="projectOptions()"
+      [ngModel]="selectedProjectId()"
+      (ngModelChange)="onProjectChange($event)"
+      placeholder="Project"
+      [disabled]="projectsLoading()"
+    />
 
     <span class="filter-divider" aria-hidden="true"></span>
 

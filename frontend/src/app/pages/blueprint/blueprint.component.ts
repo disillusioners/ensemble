@@ -37,6 +37,10 @@ import {
   BlueprintTag,
 } from '../../models/blueprint.model';
 import { Project } from '../../models/project.model';
+import {
+  SearchableSelectComponent,
+  SearchableSelectOption,
+} from '../../components/searchable-select/searchable-select.component';
 
 /**
  * List / CRUD page for the Project Blueprint surface (Phase 5).
@@ -86,6 +90,7 @@ import { Project } from '../../models/project.model';
     MatExpansionModule,
     MarkdownModule,
     CodemirrorDirective,
+    SearchableSelectComponent,
   ],
   templateUrl: './blueprint.component.html',
   styleUrl: './blueprint.component.scss',
@@ -114,6 +119,13 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   readonly hasSelectedProject = computed(
     () => this.selectedProjectId() !== null,
   );
+  /** Map projects → SearchableSelectOption for the searchable dropdown. */
+  readonly projectOptions = computed<SearchableSelectOption<string>[]>(() => {
+    return this.projects().map((p) => ({
+      value: p.project_id,
+      label: p.name,
+    }));
+  });
 
   // Service-provided signals (blueprints is populated by service.list).
   readonly blueprints = this.service.blueprints;
