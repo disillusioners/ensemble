@@ -209,7 +209,7 @@ async def _enqueue_blueprinter_job(
         message: The agent prompt body sent to the blueprinter job.
         run_token: Optional lease token from the C7 coordinator. When
             provided, stored in the job metadata so the worker can call
-            ``coordinator.heartbeat()`` / ``coordinator.release()``.
+            ``coordinator.release()``.
         job_id: Optional explicit JobItem UUID. When provided, it is
             forwarded to ``job_service.enqueue(job_id=...)`` so the
             enqueued job's id matches the lease stored on the project

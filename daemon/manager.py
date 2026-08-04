@@ -1856,13 +1856,13 @@ class InstanceManager:
                 self._run_skill_orphan_sweep,
             )
 
-        # ── Project Blueprint Phase 3: daily scan + lease sweeper ───
+        # ── Project Blueprint Phase 3: daily scan ─────────────────────
         # The daily scan is the daemon-side counterpart to manual
         # ``/rebuild`` / ``/update`` triggers — same chokepoint
         # (BlueprintTriggerCoordinator) — but driven by the system
         # clock and gated by the ``auto_rebuild_enabled`` feature flag
-        # (default OFF). The lease sweep is a safety net for blueprinter
-        # jobs that crashed mid-flight without releasing their lease.
+        # (default OFF). Crashed blueprinter jobs are cleaned up by
+        # ``reconcile_on_startup()`` at the next daemon restart.
         if (
             self._blueprint_repo is not None
             and self._blueprint_pending_repo is not None
@@ -1880,11 +1880,6 @@ class InstanceManager:
                 "blueprint_daily_scan",
                 min_interval_hours=24.0,
                 execute_fn=self._blueprint_scan_service.execute,
-            )
-            self._maintenance_service.register(
-                "blueprint_lease_sweep",
-                min_interval_hours=0.5,  # every 30 min
-                execute_fn=self._blueprint_trigger_coordinator._sweep_expired_leases,
             )
 
         await self._maintenance_service.start()

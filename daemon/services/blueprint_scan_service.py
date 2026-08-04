@@ -74,7 +74,7 @@ class BlueprintScanService:
         Short-circuits when ``auto_rebuild_enabled`` is False (the
         default). Never raises — any per-project exception is logged
         and swallowed so one bad project does not abort the whole
-        sweep.
+        scan.
         """
         if not getattr(self._config, "auto_rebuild_enabled", False):
             logger.debug("Blueprint daily scan skipped (auto_rebuild_enabled=False)")
@@ -90,7 +90,7 @@ class BlueprintScanService:
             try:
                 await self._scan_project(project_id)
             except Exception as exc:
-                # Don't let one bad project break the whole sweep.
+                # Don't let one bad project break the whole scan.
                 logger.warning(
                     "BlueprintScanService: scan failed for project %s: %s",
                     project_id, exc,

@@ -12,30 +12,25 @@ coordinator guarantees:
 * **Cross-mode conflict** — a claim for a different mode (e.g.
   ``incremental`` while a ``rebuild`` is in flight) returns
   ``conflict_mode`` so the caller can decide (e.g. 409).
-* **Heartbeat-based lease** — a stale ``last_heartbeat_at`` past the
-  TTL is treated as expired and the lease can be reclaimed.
 * **Terminal release** — the blueprinter calls ``release()`` with its
   ``run_token`` on success/failure/cancel.
 * **Startup reconciliation** — on daemon start, leases whose backing
   job is gone (or already terminal) are released.
-* **Periodic sweep** — every 30 min, expired leases are released via
-  ``_sweep_expired_leases``.
 
-Lease storage
--------------
+Lease lifecycle
+---------------
 
-The lease is stored as a single metadata value on the project row
-(``meta_key = "blueprint_build_lease"``). The value is a dict:
+* **Claim** — on ``try_claim()``, the coordinator atomically acquires
+  a lease for the project.
+* **Release** — on job completion (success/failure/cancel), the
+  blueprinter calls ``release(run_token)``.
+* **Reconcile** — on daemon startup, ``reconcile_on_startup()`` scans
+  for leases whose backing job is gone or already terminal and
+  releases them.
 
-.. code-block:: json
-
-    {
-      "run_token":        "<uuid4>",
-      "job_id":           "<job uuid>",
-      "mode":             "rebuild" | "incremental",
-      "claimed_at":       "<iso>",
-      "last_heartbeat_at":"<iso>"
-    }
+There is no TTL, no heartbeat, and no periodic sweep. A lease lives
+until it is released by the job that claimed it, or until it is
+reconciled on startup after a daemon crash.
 
 Atomicity
 ---------
@@ -61,7 +56,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
@@ -77,32 +72,10 @@ logger = logging.getLogger(__name__)
 #: Metadata key under which the lease dict is stored on the project row.
 LEASE_META_KEY = "blueprint_build_lease"
 
-#: Heartbeat-TTL: a lease whose ``last_heartbeat_at`` is older than this
-#: is considered expired and may be reclaimed by the next ``try_claim``.
-LEASE_TTL_SECONDS = 600  # 10 minutes
-
-#: How often the blueprinter is expected to call ``heartbeat()``.
-HEARTBEAT_INTERVAL_SECONDS = 120  # 2 minutes
-
 
 def _utcnow_iso() -> str:
     """Return current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 string produced by ``_utcnow_iso``.
-
-    Tolerant of the trailing ``+00:00`` produced by
-    ``datetime.isoformat()``; ``fromisoformat`` on Python 3.11+ accepts
-    that format directly.
-    """
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
 
 
 # ── Result dataclass ────────────────────────────────────────────────────
@@ -122,8 +95,7 @@ class ClaimResult:
         conflict_mode: Set when a build of a different mode is in
             flight; caller should reject with HTTP 409 or equivalent.
         run_token: The opaque lease token; the caller (the blueprinter
-            job) must pass this back to ``heartbeat()`` and
-            ``release()``.
+            job) must pass this back to ``release()``.
     """
 
     claimed: bool
@@ -158,9 +130,6 @@ class BlueprintTriggerCoordinator:
             for unit tests; reconciliation then treats every lease as
             orphaned.
     """
-
-    LEASE_TTL_SECONDS = LEASE_TTL_SECONDS
-    HEARTBEAT_INTERVAL_SECONDS = HEARTBEAT_INTERVAL_SECONDS
 
     def __init__(self, project_repository: Any, job_queue_service: Any = None) -> None:
         self._project_repository = project_repository
@@ -226,20 +195,6 @@ class BlueprintTriggerCoordinator:
                 project_id, exc,
             )
 
-    @staticmethod
-    def _is_expired(lease: dict[str, Any]) -> bool:
-        """True if the lease's heartbeat is older than the TTL."""
-        last_hb = _parse_iso(lease.get("last_heartbeat_at"))
-        if last_hb is None:
-            # A lease with no heartbeat timestamp is malformed — treat
-            # as expired so the next caller reclaims it.
-            return True
-        now = datetime.now(timezone.utc)
-        # Tolerate naive datetimes by attaching UTC.
-        if last_hb.tzinfo is None:
-            last_hb = last_hb.replace(tzinfo=timezone.utc)
-        return (now - last_hb) > timedelta(seconds=LEASE_TTL_SECONDS)
-
     # ── try_claim ────────────────────────────────────────────────────
 
     async def try_claim(
@@ -247,9 +202,12 @@ class BlueprintTriggerCoordinator:
         project_id: str,
         mode: str,
         job_id: str,
-        lease_duration_seconds: int = 3600,
     ) -> ClaimResult:
         """Atomically acquire (or coalesce onto) the project's build lease.
+
+        A lease is "active" if it exists and hasn't been released.
+        No TTL, no heartbeat — leases live until released or
+        reconciled on startup.
 
         Args:
             project_id: Project whose blueprint set is being built.
@@ -257,25 +215,17 @@ class BlueprintTriggerCoordinator:
             job_id: The caller-chosen UUID for the would-be blueprinter
                 job. Echoed back as ``ClaimResult.job_id`` on a fresh
                 claim; preserved for caller-side correlation.
-            lease_duration_seconds: Reserved for forward-compat (the
-                current implementation derives expiry from
-                ``last_heartbeat_at`` rather than an absolute deadline).
 
         Returns:
             :class:`ClaimResult` — see its docstring for the three
             outcomes (claimed, coalesced, conflict).
         """
-        # ``lease_duration_seconds`` is accepted for API symmetry but
-        # the current lease model uses heartbeat TTL instead. We still
-        # touch the parameter so mypy/IDE don't warn callers off.
-        del lease_duration_seconds
-
         lock = await self._get_lock(project_id)
         async with lock:
             existing = self._read_lease(project_id)
 
-            # Case 1: no lease OR expired lease → fresh claim.
-            if existing is None or self._is_expired(existing):
+            # Case 1: no lease → fresh claim.
+            if existing is None:
                 now = _utcnow_iso()
                 run_token = str(uuid4())
                 lease = {
@@ -283,7 +233,6 @@ class BlueprintTriggerCoordinator:
                     "job_id": job_id,
                     "mode": mode,
                     "claimed_at": now,
-                    "last_heartbeat_at": now,
                 }
                 self._write_lease(project_id, lease)
                 logger.info(
@@ -310,26 +259,6 @@ class BlueprintTriggerCoordinator:
                 conflict_mode=existing.get("mode"),
             )
 
-    # ── heartbeat ────────────────────────────────────────────────────
-
-    async def heartbeat(self, project_id: str, run_token: str) -> bool:
-        """Refresh the lease's ``last_heartbeat_at`` if the token matches.
-
-        Returns False when the lease is gone or the token does not
-        match (stale heartbeat — the original build is no longer the
-        owner). On a successful heartbeat, returns True.
-        """
-        lock = await self._get_lock(project_id)
-        async with lock:
-            existing = self._read_lease(project_id)
-            if existing is None:
-                return False
-            if existing.get("run_token") != run_token:
-                return False
-            existing["last_heartbeat_at"] = _utcnow_iso()
-            self._write_lease(project_id, existing)
-            return True
-
     # ── release ──────────────────────────────────────────────────────
 
     async def release(self, project_id: str, run_token: str) -> bool:
@@ -355,7 +284,7 @@ class BlueprintTriggerCoordinator:
     # ── is_active ────────────────────────────────────────────────────
 
     async def is_active(self, project_id: str, mode: str | None = None) -> bool:
-        """Return True if a non-expired lease exists for ``project_id``.
+        """Return True if a lease exists for ``project_id``.
 
         When ``mode`` is provided, only leases matching that mode count
         (an ``incremental`` lease does not satisfy a ``rebuild``
@@ -364,13 +293,11 @@ class BlueprintTriggerCoordinator:
         existing = self._read_lease(project_id)
         if existing is None:
             return False
-        if self._is_expired(existing):
-            return False
         if mode is not None and existing.get("mode") != mode:
             return False
         return True
 
-    # ── reconciliation & sweep ───────────────────────────────────────
+    # ── reconciliation ──────────────────────────────────────────────
 
     async def reconcile_on_startup(self) -> int:
         """Release leases whose backing job is gone or already terminal.
@@ -407,33 +334,6 @@ class BlueprintTriggerCoordinator:
             )
         return released
 
-    async def _sweep_expired_leases(self) -> int:
-        """Periodic sweep — release leases whose heartbeat is past TTL.
-
-        Registered with :class:`MaintenanceService` (every 30 min).
-        Returns the count of leases released.
-        """
-        released = 0
-        # This full-project DB scan is the expensive sync operation; keep it
-        # off the event loop. Single-row lease operations remain inline.
-        entries = await asyncio.to_thread(self._iter_projects_with_lease)
-        for project_id, lease in entries:
-            try:
-                if not await self._maybe_release_expired(project_id, lease):
-                    continue
-                released += 1
-            except Exception as exc:
-                logger.warning(
-                    "C7: sweep failed for project %s: %s",
-                    project_id, exc,
-                )
-        if released:
-            logger.info(
-                "C7: lease sweep released %d expired lease(s)",
-                released,
-            )
-        return released
-
     # ── internal helpers ─────────────────────────────────────────────
 
     def _iter_projects_with_lease(self) -> list[tuple[str, dict[str, Any]]]:
@@ -441,10 +341,10 @@ class BlueprintTriggerCoordinator:
 
         We can't filter by metadata in SQL without an extra join, and
         the project count is bounded enough that listing all projects
-        and probing each one is acceptable for a startup / 30-min sweep.
+        and probing each one is acceptable for startup reconciliation.
 
-        The ``lease_dict`` snapshot is the one the sweep / reconcile
-        will compare against after re-reading inside the per-project
+        The ``lease_dict`` snapshot is the one reconciliation will
+        compare against after re-reading inside the per-project
         lock. If a concurrent ``try_claim`` replaces the lease between
         this scan and the locked re-read, the ``run_token`` mismatch
         prevents us from deleting the new lease.
@@ -475,15 +375,15 @@ class BlueprintTriggerCoordinator:
         Returns True when a release happened. Tri-state from
         :meth:`_job_is_terminal` (True = terminal, False = active,
         None = unknown) controls the outcome — on ``None`` we keep
-        the lease (the periodic sweep will clean it once the
-        heartbeat ages out).
+        the lease (an operator can clear it manually, or the next
+        daemon restart will retry reconciliation).
 
         TOCTOU safety: ``lease`` is the snapshot observed by the
         outer scan (before we acquired the per-project lock). After
         acquiring the lock we re-read the lease; if a concurrent
         ``try_claim`` has already replaced it (different
         ``run_token``) we leave the new lease alone. Without this
-        guard, a sweep racing with a fresh claim could delete the
+        guard, a reconcile racing with a fresh claim could delete the
         just-claimed lease.
         """
         lock = await self._get_lock(project_id)
@@ -508,44 +408,14 @@ class BlueprintTriggerCoordinator:
                 logger.warning(
                     "C7: queue probe failed for job %s: %s", job_id, exc,
                 )
-                verdict = None  # Probe failed (indeterminate) — keep lease; periodic sweep will catch it.
+                verdict = None  # Probe failed (indeterminate) — keep lease.
             if verdict is None:
-                # Probe failed (indeterminate) — keep lease; periodic sweep will catch it.
+                # Probe failed (indeterminate) — keep lease.
                 return False  # Job still active or can't determine — keep lease
             if verdict is True:
                 self._delete_lease(project_id)
                 return True  # Lease released
             return False  # Job still active or can't determine — keep lease
-
-    async def _maybe_release_expired(
-        self, project_id: str, lease: dict[str, Any],
-    ) -> bool:
-        """Release the lease on ``project_id`` if its heartbeat is stale.
-
-        TOCTOU safety: ``lease`` is the snapshot observed by the
-        outer scan (before we acquired the per-project lock). After
-        acquiring the lock we re-read the lease; if a concurrent
-        ``try_claim`` has already replaced it (different
-        ``run_token``) or the heartbeat was renewed, we leave it
-        alone. Without this guard, a sweep racing with a fresh
-        claim could delete the just-claimed lease.
-        """
-        lock = await self._get_lock(project_id)
-        async with lock:
-            existing = self._read_lease(project_id)
-            if existing is None:
-                return False
-            # The concurrent try_claim may have already replaced it.
-            if existing.get("run_token") != lease.get("run_token"):
-                return False
-            if not self._is_expired(existing):
-                return False
-            self._delete_lease(project_id)
-            logger.info(
-                "C7: swept expired lease for project %s (job=%s)",
-                project_id, existing.get("job_id"),
-            )
-            return True
 
     async def _job_is_terminal(self, job_id: str) -> bool | None:
         """Best-effort terminal-status probe via JobQueueService.
@@ -613,6 +483,4 @@ __all__ = [
     "BlueprintTriggerCoordinator",
     "ClaimResult",
     "LEASE_META_KEY",
-    "LEASE_TTL_SECONDS",
-    "HEARTBEAT_INTERVAL_SECONDS",
 ]

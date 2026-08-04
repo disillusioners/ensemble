@@ -4,19 +4,19 @@ Covers the unified trigger coordinator that all blueprint build
 enqueuing must funnel through:
 
 * ``try_claim`` — atomic claim with coalesce + cross-mode conflict.
-* ``heartbeat`` — refresh ``last_heartbeat_at`` for the matching token.
 * ``release`` — terminal release guarded by ``run_token``.
-* Stale leases (``last_heartbeat_at`` past the TTL) are reclaimable.
-* Periodic sweep releases expired leases.
 * ``is_active`` reflects the live lease state.
 * ``reconcile_on_startup`` releases orphaned leases whose job is gone
   (or whose ``_job_queue_service`` is unset — the test default).
+
+The lease model is simple: claim on ``try_claim``, release on
+completion, reconcile on startup. There is no TTL, no heartbeat,
+and no periodic sweep.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -26,9 +26,7 @@ from sqlmodel import SQLModel
 
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.services.blueprint_trigger_coordinator import (
-    HEARTBEAT_INTERVAL_SECONDS,
     LEASE_META_KEY,
-    LEASE_TTL_SECONDS,
     BlueprintTriggerCoordinator,
     ClaimResult,
 )
@@ -122,31 +120,21 @@ class TestTryClaim:
         assert r1.claimed and r2.claimed
         assert r1.job_id == "job-A" and r2.job_id == "job-B"
 
+    def test_lease_has_no_heartbeat_field(self, coordinator, pid, project_repo):
+        """After ``try_claim``, the lease dict has no ``last_heartbeat_at``.
 
-# ── heartbeat ──────────────────────────────────────────────────────────
-
-
-class TestHeartbeat:
-    def test_heartbeat_success(self, coordinator, pid, project_repo):
-        r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        # Read the original timestamp; bump by hand so we can detect change.
-        before = project_repo.get_metadata(pid, LEASE_META_KEY)["last_heartbeat_at"]
-        # Force the timestamp backwards so a same-instant refresh is observable.
-        past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-        lease = project_repo.get_metadata(pid, LEASE_META_KEY)
-        lease["last_heartbeat_at"] = past
-        project_repo.set_metadata(pid, LEASE_META_KEY, lease)
-        assert _run(coordinator.heartbeat(pid, r1.run_token)) is True
-        after = project_repo.get_metadata(pid, LEASE_META_KEY)["last_heartbeat_at"]
-        assert after != past
-        assert after != before or before  # smoke: present and unchanged or replaced
-
-    def test_heartbeat_wrong_token(self, coordinator, pid):
+        The heartbeat/TTL mechanism was removed; leases live until
+        released or reconciled on startup. This test guards against a
+        regression where the field creeps back in.
+        """
         _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        assert _run(coordinator.heartbeat(pid, "not-the-token")) is False
-
-    def test_heartbeat_no_lease(self, coordinator, pid):
-        assert _run(coordinator.heartbeat(pid, "any-token")) is False
+        lease = project_repo.get_metadata(pid, LEASE_META_KEY)
+        assert isinstance(lease, dict)
+        assert "last_heartbeat_at" not in lease
+        # The shape should be exactly the four canonical keys.
+        assert set(lease.keys()) == {
+            "run_token", "job_id", "mode", "claimed_at",
+        }
 
 
 # ── release ────────────────────────────────────────────────────────────
@@ -174,54 +162,6 @@ class TestRelease:
         assert _run(coordinator.release(pid, "any-token")) is False
 
 
-# ── stale-lease reclaim + sweep ───────────────────────────────────────
-
-
-class TestStaleLease:
-    def test_stale_lease_treated_as_expired(self, coordinator, pid, project_repo):
-        """A lease whose heartbeat is older than TTL is reclaimable."""
-        r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        # Age the heartbeat past the TTL.
-        lease = project_repo.get_metadata(pid, LEASE_META_KEY)
-        lease["last_heartbeat_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=LEASE_TTL_SECONDS + 60)
-        ).isoformat()
-        project_repo.set_metadata(pid, LEASE_META_KEY, lease)
-
-        # A new claim with a different mode is now permitted (the stale
-        # lease is treated as gone, so it's a fresh claim, not a conflict).
-        r2 = _run(coordinator.try_claim(pid, "incremental", "job-B"))
-        assert r2.claimed is True
-        assert r2.run_token and r2.run_token != r1.run_token
-
-    def test_sweep_expired_leases(self, coordinator, pid, project_repo):
-        r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        # Age the heartbeat past the TTL.
-        lease = project_repo.get_metadata(pid, LEASE_META_KEY)
-        lease["last_heartbeat_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=LEASE_TTL_SECONDS + 60)
-        ).isoformat()
-        project_repo.set_metadata(pid, LEASE_META_KEY, lease)
-
-        released = _run(coordinator._sweep_expired_leases())
-        assert released == 1
-        # The lease is now gone.
-        assert project_repo.get_metadata(pid, LEASE_META_KEY) is None
-
-    def test_sweep_does_not_touch_fresh_leases(self, coordinator, pid):
-        _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        # Fresh lease: no sweep activity.
-        assert _run(coordinator._sweep_expired_leases()) == 0
-
-    def test_sweep_isolated_per_project(self, coordinator, project_repo, pid):
-        """Sweeping one project does not touch another."""
-        p2 = project_repo.create(name="p2", project_type="general")
-        _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        _run(coordinator.try_claim(p2.project_id, "rebuild", "job-B"))
-        # No leases are expired, so nothing is released.
-        assert _run(coordinator._sweep_expired_leases()) == 0
-
-
 # ── is_active ──────────────────────────────────────────────────────────
 
 
@@ -237,15 +177,6 @@ class TestIsActive:
         _run(coordinator.try_claim(pid, "rebuild", "job-A"))
         assert _run(coordinator.is_active(pid, mode="rebuild")) is True
         assert _run(coordinator.is_active(pid, mode="incremental")) is False
-
-    def test_is_active_false_for_expired_lease(self, coordinator, pid, project_repo):
-        _run(coordinator.try_claim(pid, "rebuild", "job-A"))
-        lease = project_repo.get_metadata(pid, LEASE_META_KEY)
-        lease["last_heartbeat_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=LEASE_TTL_SECONDS + 60)
-        ).isoformat()
-        project_repo.set_metadata(pid, LEASE_META_KEY, lease)
-        assert _run(coordinator.is_active(pid)) is False
 
 
 # ── reconcile_on_startup ───────────────────────────────────────────────
@@ -303,7 +234,7 @@ class TestReconcileOnStartup:
         )
         _run(coord.try_claim(pid, "rebuild", "job-A"))
         # Should not raise; returns 0 because the queue probe failed
-        # (conservative — leave the lease for the sweep to clean).
+        # (conservative — leave the lease in place).
         released = _run(coord.reconcile_on_startup())
         assert released == 0
 
@@ -345,10 +276,9 @@ def _async_return(value: Any):
     return _coro
 
 
-# ── Constants sanity ──────────────────────────────────────────────────
+# ── LEASE_META_KEY sanity ─────────────────────────────────────────────
 
 
-def test_constants_match_spec():
-    assert LEASE_TTL_SECONDS == 600
-    assert HEARTBEAT_INTERVAL_SECONDS == 120
+def test_lease_meta_key_matches_spec():
+    """The single exported constant must match the canonical key."""
     assert LEASE_META_KEY == "blueprint_build_lease"

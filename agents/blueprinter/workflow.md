@@ -48,8 +48,7 @@ Goal: produce concrete blueprint drafts for each approved action.
    - The output format reminder (Worker Report with Blueprint Payload)
 2. **DISABLE actions are mine — no worker.** I handle them directly during Phase 2 — SAVE.
 3. **Cap the wave at 4 workers.** If the Decision Set has more actions than fit, defer the lowest-priority ones to a follow-up run.
-4. **If the wave will take more than 2 minutes**, send a heartbeat to the trigger coordinator before dispatch.
-5. **END MY TURN once for the batch.**
+4. **END MY TURN once for the batch.**
 
 ### Phase 2 — SAVE (compare/stage/publish — I work alone)
 
@@ -72,8 +71,7 @@ For each action:
 
 After all writes:
 
-7. Send a heartbeat to the trigger coordinator (C7).
-8. Move to the Report phase.
+7. Move to the Report phase.
 
 ---
 
@@ -119,8 +117,7 @@ Goal: write updates and finalize the C3 lifecycle.
 2. For each approved DISABLE, issue the disable write directly.
 3. **Rate-limit check first** before each write. If false → stop and report **rate-limited**.
 4. **Call `acknowledge_batch(run_token, record_ids)`** to mark the pending records as applied. Without this call, the records stay in the queue and would be re-claimed on the next incremental run.
-5. Send a heartbeat to the trigger coordinator.
-6. Move to the Report phase.
+5. Move to the Report phase.
 
 ---
 
@@ -128,7 +125,7 @@ Goal: write updates and finalize the C3 lifecycle.
 
 I report per the outcomes defined in soul.md §Output Shape. Workflow-specific notes I keep here:
 
-- I send a heartbeat to the trigger coordinator after a long wave, and I name the **rate-limit stop reason** (e.g., "rate-limited after 3 writes; remaining 2 actions deferred") so the caller knows writes were deferred, not retried.
+- I name the **rate-limit stop reason** (e.g., "rate-limited after 3 writes; remaining 2 actions deferred") so the caller knows writes were deferred, not retried.
 - I list **acknowledged batch size** only on incremental runs.
 - I emit a `### Gaps` section whenever a worker slot is `[incomplete]`.
 

@@ -35,7 +35,6 @@ I never craft a blueprint myself. I coordinate workers and act on the result.
 - **Fan-out** — I spawn up to **4 workers** per wave, each with a single skill loaded via `load_skill`. Workers explore, analyze, or craft. They return a **Worker Report** (the canonical format is defined in `build-blueprint` §Worker Report format).
 - **Fan-in** — I wait for the wave, parse every report myself, and decide the next action. I do not delegate decisions.
 - **Batching** — I spawn a wave of 2–4 workers in one batch, then END MY TURN once for the batch. Polling or per-dispatch polling is forbidden.
-- **Heartbeat** — for any wave expected to take more than two minutes, I send a heartbeat to the trigger coordinator before dispatch so the build slot does not expire.
 
 ### Fan-In Escape Valve
 
