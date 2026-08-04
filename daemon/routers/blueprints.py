@@ -22,9 +22,10 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from daemon.services.blueprint_trigger_coordinator import ClaimResult
 from daemon.services.blueprint_write_service import (
     BlueprintNotFoundError,
     BlueprintPublishError,
@@ -185,6 +186,78 @@ def _check_write_paused(manager: Any) -> None:
         )
 
 
+async def _enqueue_blueprinter_job(
+    manager: Any,
+    project_id: str,
+    trigger_type: str,
+    message: str,
+    run_token: str | None = None,
+    job_id: str | None = None,
+) -> str:
+    """Look up the background queue and enqueue a blueprinter job.
+
+    Shared by ``/initialize`` (legacy), ``/scan``, ``/rebuild``, and
+    ``/update``. Returns the ``job_id`` of the enqueued job. Raises
+    ``HTTPException`` with the appropriate status code when the queue
+    lookup or enqueue fails — callers should treat those as terminal
+    and release any coordinator lease the caller is holding.
+
+    Args:
+        manager: The InstanceManager (provides ``_job_queue_service``).
+        project_id: Project whose blueprints are being built.
+        trigger_type: Metadata ``trigger`` value (e.g. ``"rebuild"``).
+        message: The agent prompt body sent to the blueprinter job.
+        run_token: Optional lease token from the C7 coordinator. When
+            provided, stored in the job metadata so the worker can call
+            ``coordinator.heartbeat()`` / ``coordinator.release()``.
+        job_id: Optional explicit JobItem UUID. When provided, it is
+            forwarded to ``job_service.enqueue(job_id=...)`` so the
+            enqueued job's id matches the lease stored on the project
+            row by ``coordinator.try_claim(job_id=...)``. Used by
+            ``/rebuild`` and ``/update`` (coordinator-gated). When
+            ``None``, ``enqueue()`` generates its own UUID — the
+            behavior for ``/initialize`` and ``/scan`` which do NOT
+            route through the coordinator and therefore have no lease
+            to align with.
+
+    Returns:
+        The ``job_id`` string of the enqueued job.
+    """
+    job_service = getattr(manager, "_job_queue_service", None)
+    if job_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="JobQueueService not available",
+        )
+
+    bg_queue = await asyncio.to_thread(
+        job_service._queue_repo.get_by_name,
+        project_id,
+        "system_background_queue",
+    )
+    if bg_queue is None:
+        raise HTTPException(
+            status_code=404,
+            detail="system_background_queue not found for project",
+        )
+
+    metadata: dict[str, Any] = {"trigger": trigger_type, "source": "admin-endpoint"}
+    if run_token:
+        metadata["run_token"] = run_token
+
+    job = await job_service.enqueue(
+        agent_id="blueprinter",
+        message=message,
+        source="admin-endpoint",
+        project_id=project_id,
+        priority=9,  # lowest priority — pure background
+        queue_id=bg_queue.queue_id,
+        metadata=metadata,
+        job_id=job_id,  # forward so lease and queue agree (no-op when None)
+    )
+    return job.job_id
+
+
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -282,9 +355,16 @@ async def create_blueprint(
 @router.post("/initialize", response_model=dict, status_code=202)
 async def initialize_project_blueprints(
     request: Request,
+    response: Response,
     project_id: str,
 ):
     """Trigger blueprint initialization for a project.
+
+    .. deprecated::
+        Deprecated in favour of ``POST /rebuild``. This endpoint is kept
+        as a backward-compatibility alias — it still works exactly as it
+        did before (returns 409 if a core already exists, no coordinator
+        claim is acquired). New callers should use ``/rebuild``.
 
     Spawns a blueprinter agent on the system_background_queue to bootstrap
     the blueprint corpus (core.md + area blueprints). Returns 409 if a
@@ -294,7 +374,21 @@ async def initialize_project_blueprints(
     _validate_project_id(project_id)
     manager = _get_manager(request)
 
+    # Deprecation signal — surfaces to API clients that this endpoint is
+    # superseded by /rebuild. RFC 8594 Deprecation + RFC 8288 Link.
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Sun, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = (
+        '</api/projects/' + project_id + '/blueprints/rebuild>; rel="successor-version"'
+    )
+    logger.warning(
+        "Deprecated endpoint /initialize called for project %s — use /rebuild instead",
+        project_id,
+    )
+
     # Guard: refuse to re-initialize when a core blueprint already exists.
+    # NB: This guard is the original /initialize behavior — preserved
+    # for backward compatibility. /rebuild does NOT have this guard.
     existing_core = await asyncio.to_thread(
         manager._blueprint_repo.get_core, project_id
     )
@@ -304,26 +398,10 @@ async def initialize_project_blueprints(
             detail="Blueprints already initialized",
         )
 
-    job_service = getattr(manager, "_job_queue_service", None)
-    if job_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="JobQueueService not available",
-        )
-
-    bg_queue = await asyncio.to_thread(
-        job_service._queue_repo.get_by_name,
-        project_id,
-        "system_background_queue",
-    )
-    if bg_queue is None:
-        raise HTTPException(
-            status_code=404,
-            detail="system_background_queue not found for project",
-        )
-
-    job = await job_service.enqueue(
-        agent_id="blueprinter",
+    job_id = await _enqueue_blueprinter_job(
+        manager=manager,
+        project_id=project_id,
+        trigger_type="initialize",
         message=(
             f"Initialize project blueprints for project {project_id}.\n\n"
             "Steps:\n"
@@ -339,13 +417,182 @@ async def initialize_project_blueprints(
             "tools to read project structure. You may spawn worker agents for deep "
             "codebase analysis if needed."
         ),
-        source="admin-endpoint",
-        project_id=project_id,
-        priority=9,  # lowest priority — pure background
-        queue_id=bg_queue.queue_id,
-        metadata={"trigger": "initialize", "source": "admin-endpoint"},
     )
-    return {"job_id": job.job_id, "status": "enqueued"}
+    return {"job_id": job_id, "status": "enqueued"}
+
+
+# ─── Admin: blueprint rebuild trigger (C7, Phase 4) ────────────────────────────
+
+
+@router.post("/rebuild", response_model=dict, status_code=202)
+async def rebuild_project_blueprints(
+    request: Request,
+    project_id: str,
+):
+    """Trigger a full blueprint rebuild for a project.
+
+    Routes through the C7 trigger coordinator (``try_claim``) before
+    enqueuing. Outcomes:
+
+    * ``202`` with ``status="accepted"`` — claim acquired, job enqueued.
+    * ``202`` with ``status="already_in_progress"`` — a rebuild is
+      already in flight for this project; ``job_id`` points to the
+      in-flight job (coalesced).
+    * ``409`` — a build of a *different* mode is in flight
+      (``conflict_mode`` is reported in the detail).
+    * ``503`` — the trigger coordinator or job service is not wired.
+    * ``404`` — the project's ``system_background_queue`` is missing.
+
+    If the coordinator claim succeeds but the enqueue fails, the claim
+    is released so a subsequent request can retry.
+    """
+    _validate_project_id(project_id)
+    manager = _get_manager(request)
+
+    coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trigger coordinator not available",
+        )
+
+    job_id = str(uuid.uuid4())
+    result: ClaimResult = await coordinator.try_claim(project_id, "rebuild", job_id)
+
+    # Coalesced: a rebuild is already in flight for this project.
+    if result.coalesced:
+        return {
+            "job_id": result.job_id,
+            "status": "already_in_progress",
+            "mode": "rebuild",
+        }
+
+    # Cross-mode conflict: e.g. an incremental build is running.
+    if not result.claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Blueprint {result.conflict_mode} already in progress",
+        )
+
+    # Claim acquired — enqueue the blueprinter job. On any failure
+    # (queue missing, job service down), release the lease so the next
+    # call can reclaim it.
+    try:
+        enqueued_job_id = await _enqueue_blueprinter_job(
+            manager=manager,
+            project_id=project_id,
+            trigger_type="rebuild",
+            message=(
+                "Rebuild all project blueprints.\n\n"
+                "Perform a full rebuild: create the core blueprint and "
+                "all area blueprints from scratch. Generate trigger "
+                "queries for each. Respect the rate limit."
+            ),
+            run_token=result.run_token,
+            job_id=job_id,  # forward the caller-generated id so the lease's
+                            # job_id matches the enqueued JobItem's id
+        )
+    except HTTPException:
+        await coordinator.release(project_id, result.run_token)
+        raise
+    except Exception:
+        # Defensive: enqueue may raise non-HTTPException (e.g. DB error).
+        # Don't leak the lease.
+        await coordinator.release(project_id, result.run_token)
+        raise
+
+    return {
+        "job_id": enqueued_job_id,
+        "status": "accepted",
+        "mode": "rebuild",
+    }
+
+
+# ─── Admin: blueprint incremental update trigger (C7, Phase 4) ────────────────
+
+
+@router.post("/update", response_model=dict, status_code=202)
+async def update_project_blueprints(
+    request: Request,
+    project_id: str,
+):
+    """Trigger an incremental blueprint update for a project.
+
+    Routes through the C7 trigger coordinator (``try_claim``) before
+    enqueuing. Outcomes match ``/rebuild`` plus:
+
+    * ``404`` — no blueprints exist yet (incremental requires an
+      existing corpus). The coordinator claim is released before the
+      response so the caller can follow up with ``/rebuild``.
+
+    Processes accumulated pending-experience changes and reviews
+    existing blueprints for drift.
+    """
+    _validate_project_id(project_id)
+    manager = _get_manager(request)
+
+    coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trigger coordinator not available",
+        )
+
+    job_id = str(uuid.uuid4())
+    result: ClaimResult = await coordinator.try_claim(
+        project_id, "incremental", job_id
+    )
+
+    if result.coalesced:
+        return {
+            "job_id": result.job_id,
+            "status": "already_in_progress",
+            "mode": "incremental",
+        }
+
+    if not result.claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Blueprint {result.conflict_mode} already in progress",
+        )
+
+    # Claim acquired. Guard: incremental requires an existing corpus.
+    existing = await asyncio.to_thread(
+        manager._blueprint_repo.list_by_project, project_id, active_only=True
+    )
+    if not existing:
+        await coordinator.release(project_id, result.run_token)
+        raise HTTPException(
+            status_code=404,
+            detail="No blueprints found. Use /rebuild first.",
+        )
+
+    try:
+        enqueued_job_id = await _enqueue_blueprinter_job(
+            manager=manager,
+            project_id=project_id,
+            trigger_type="incremental",
+            message=(
+                "Incremental blueprint update.\n\n"
+                "Process accumulated pending-experience changes. Review "
+                "existing blueprints for drift. Respect the rate limit."
+            ),
+            run_token=result.run_token,
+            job_id=job_id,  # forward the caller-generated id so the lease's
+                            # job_id matches the enqueued JobItem's id
+        )
+    except HTTPException:
+        await coordinator.release(project_id, result.run_token)
+        raise
+    except Exception:
+        await coordinator.release(project_id, result.run_token)
+        raise
+
+    return {
+        "job_id": enqueued_job_id,
+        "status": "accepted",
+        "mode": "incremental",
+    }
 
 
 # ─── Admin: external-cron blueprint scan trigger (§4.6 Option B) ──────────────
@@ -364,39 +611,26 @@ async def trigger_blueprint_scan(
     """
     _validate_project_id(project_id)
     manager = _get_manager(request)
-    job_service = getattr(manager, "_job_queue_service", None)
-    if job_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="JobQueueService not available",
-        )
 
-    bg_queue = await asyncio.to_thread(
-        job_service._queue_repo.get_by_name,
-        project_id,
-        "system_background_queue",
-    )
-    if bg_queue is None:
-        raise HTTPException(
-            status_code=404,
-            detail="system_background_queue not found for project",
-        )
+    # NOTE: /scan deliberately bypasses the C7 coordinator. It is a
+    # fire-and-forget trigger for external cron (systemd timer, GitHub
+    # Actions). The coordinator's "5 trigger surfaces" list in its
+    # docstring is aspirational — /scan will be migrated to coordinator
+    # routing in a future phase. For now, the manual /rebuild and /update
+    # endpoints are the coordinator-gated surfaces.
 
-    job = await job_service.enqueue(
-        agent_id="blueprinter",
+    job_id = await _enqueue_blueprinter_job(
+        manager=manager,
+        project_id=project_id,
+        trigger_type="daily-scan",
         message=(
             "Daily blueprint scan (external trigger).\n\n"
             f"Project: {project_id}\n\n"
             "Perform a full drift scan. Review core.md first, then area "
             "blueprints. Respect the rate limit."
         ),
-        source="admin-endpoint",
-        project_id=project_id,
-        priority=9,  # lowest priority — pure background
-        queue_id=bg_queue.queue_id,
-        metadata={"trigger": "daily-scan", "source": "admin-endpoint"},
     )
-    return {"job_id": job.job_id, "status": "enqueued"}
+    return {"job_id": job_id, "status": "enqueued"}
 
 
 @router.put("/{blueprint_id}", response_model=BlueprintResponse)
