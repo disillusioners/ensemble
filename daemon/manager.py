@@ -1889,26 +1889,6 @@ class InstanceManager:
 
         await self._maintenance_service.start()
 
-        # C7 (Phase 3): reconcile any leases left behind by a previous
-        # crashed run. Best-effort — a failure here logs WARNING and
-        # continues so a single bad row cannot stall startup. The
-        # 30-minute periodic sweep will eventually clean up anything
-        # the startup pass missed.
-        coordinator = getattr(self, "_blueprint_trigger_coordinator", None)
-        if coordinator is not None:
-            try:
-                released = await coordinator.reconcile_on_startup()
-                if released > 0:
-                    logger.info(
-                        "C7: Released %d orphaned blueprint build lease(s) on startup",
-                        released,
-                    )
-            except Exception as reconcile_exc:
-                logger.warning(
-                    "C7: Lease reconciliation on startup failed: %s",
-                    reconcile_exc,
-                )
-
         # ── Skill Bank seeding (Phase 3: versioned templates) ──────────
         # Scans agents/*/skill-set.yaml (legacy .md fallback) +
         # skills-template/ and populates skill_bank. Idempotent via
@@ -3200,6 +3180,11 @@ class InstanceManager:
         coordinator = getattr(self, "_blueprint_trigger_coordinator", None)
         if coordinator is not None and service is not None:
             coordinator.set_job_queue_service(service)
+            # C2: queue-aware reconciliation must run only after the service is wired.
+            try:
+                asyncio.ensure_future(coordinator.reconcile_on_startup())
+            except Exception:
+                logger.warning("Blueprint lease reconcile scheduling failed", exc_info=True)
 
         logger.info("JobQueueService connected to SessionManager")
 

@@ -303,3 +303,27 @@ def test_scan_project_list_failure_swallowed(blueprint_repo, pending_repo, coord
     )
     _run(svc.execute())
     coordinator.try_claim.assert_not_called()
+
+
+def test_scan_calls_list_projects_with_limit_keyword():
+    """C1 regression: list_projects must be called with limit=, not positional."""
+    from unittest.mock import Mock
+    mock_repo = Mock()
+    mock_repo.list_projects = Mock(return_value=[])
+    service = BlueprintScanService(
+        blueprint_repo=Mock(), pending_repo=Mock(),
+        coordinator=Mock(), config=Mock(auto_rebuild_enabled=True),
+        project_repository=mock_repo,
+    )
+    asyncio.run(service.execute())
+    mock_repo.list_projects.assert_called_once_with(limit=10_000)
+
+
+def test_scan_bare_core_only_triggers_rebuild(blueprint_repo, pending_repo, coordinator, project_repo):
+    """C3 regression: a core-only corpus needs a rebuild."""
+    blueprint_repo.list_by_project = MagicMock(return_value=[MagicMock(kind="core")])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+    svc = BlueprintScanService(blueprint_repo, pending_repo, coordinator,
+                               _make_config(True), project_repo)
+    _run(svc.execute())
+    assert [call.args[1] for call in coordinator.try_claim.call_args_list] == [MODE_REBUILD, MODE_REBUILD]

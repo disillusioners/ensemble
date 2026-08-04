@@ -737,13 +737,6 @@ class BlueprintConfig(EmbeddingConfig):
                     "post-experience). Manual triggers always work. "
                     "Default OFF for safety.",
     )
-    daily_scan_hour: int = Field(
-        default=2,
-        description="UTC hour for daily blueprint scan (0-23). Default 2 AM.",
-        ge=0,
-        le=23,
-    )
-
 
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""

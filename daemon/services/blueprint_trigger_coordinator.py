@@ -47,6 +47,13 @@ most), and the lock is per-project, so unrelated projects never
 block each other. The DB row is the durable record; the lock
 prevents in-process races between concurrent triggers (e.g. a
 ``/rebuild`` API call while the daily scan is firing).
+
+.. note::
+
+   Uses per-project ``asyncio.Lock`` for single-daemon coordination.
+   DB-level ``ON CONFLICT DO NOTHING`` atomicity is a future enhancement
+   for multi-daemon deployments. The current design is safe for the
+   single-process deployment model.
 """
 
 from __future__ import annotations
@@ -379,7 +386,10 @@ class BlueprintTriggerCoordinator:
         Returns the count of leases released.
         """
         released = 0
-        for project_id, lease in self._iter_projects_with_lease():
+        # This full-project DB scan is the expensive sync operation; keep it
+        # off the event loop. Single-row lease operations remain inline.
+        entries = await asyncio.to_thread(self._iter_projects_with_lease)
+        for project_id, lease in entries:
             try:
                 if not await self._maybe_release_orphaned(project_id, lease):
                     continue
@@ -404,7 +414,10 @@ class BlueprintTriggerCoordinator:
         Returns the count of leases released.
         """
         released = 0
-        for project_id, lease in self._iter_projects_with_lease():
+        # This full-project DB scan is the expensive sync operation; keep it
+        # off the event loop. Single-row lease operations remain inline.
+        entries = await asyncio.to_thread(self._iter_projects_with_lease)
+        for project_id, lease in entries:
             try:
                 if not await self._maybe_release_expired(project_id, lease):
                     continue
@@ -477,32 +490,32 @@ class BlueprintTriggerCoordinator:
         async with lock:
             existing = self._read_lease(project_id)
             if existing is None:
-                return False
+                return False  # Lease absent — nothing to release
             # The concurrent try_claim may have already replaced it.
             if existing.get("run_token") != lease.get("run_token"):
-                return False
+                return False  # Lease replaced concurrently — keep the new lease
             # No queue to consult → always treat as orphaned.
             if self._job_queue_service is None:
                 self._delete_lease(project_id)
-                return True
+                return True  # Lease released
             job_id = existing.get("job_id")
             if not job_id:
                 self._delete_lease(project_id)
-                return True
+                return True  # Lease released
             try:
                 verdict = await self._job_is_terminal(job_id)
             except Exception as exc:
                 logger.warning(
                     "C7: queue probe failed for job %s: %s", job_id, exc,
                 )
-                verdict = None  # Conservative: can't determine → don't release.
+                verdict = None  # Probe failed (indeterminate) — keep lease; periodic sweep will catch it.
             if verdict is None:
-                return False
+                # Probe failed (indeterminate) — keep lease; periodic sweep will catch it.
+                return False  # Job still active or can't determine — keep lease
             if verdict is True:
                 self._delete_lease(project_id)
-                return True
-            # verdict is False: job still active → keep lease.
-            return False
+                return True  # Lease released
+            return False  # Job still active or can't determine — keep lease
 
     async def _maybe_release_expired(
         self, project_id: str, lease: dict[str, Any],

@@ -35,8 +35,7 @@ class BlueprintScanService:
 
     Registered with :class:`MaintenanceService` and invoked on its
     interval (default: every 24 hours, configurable via
-    ``BLUEPRINT_DAILY_SCAN_HOUR`` for the hour-of-day the FIRST scan
-    fires; subsequent scans follow the maintenance interval).
+    the MaintenanceService interval (currently 24 hours).
 
     Args:
         blueprint_repo: :class:`BlueprintRepository` for
@@ -110,7 +109,7 @@ class BlueprintScanService:
         # list_projects is sync SQLAlchemy; push it to a thread so we
         # never block the event loop on disk I/O.
         projects = await asyncio.to_thread(
-            self._project_repository.list_projects, 10_000,
+            self._project_repository.list_projects, limit=10_000,
         )
         return [getattr(p, "project_id", None) for p in projects if getattr(p, "project_id", None)]
 
@@ -131,7 +130,15 @@ class BlueprintScanService:
 
         if not blueprints:
             await self._trigger(project_id, MODE_REBUILD)
-        elif pending_count > 0:
+            return
+
+        # A core blueprint alone is only a scaffold; area blueprints must be rebuilt.
+        has_non_core = any(b.kind != "core" for b in blueprints)
+        if not has_non_core:
+            await self._trigger(project_id, MODE_REBUILD)
+            return
+
+        if pending_count > 0:
             await self._trigger(project_id, MODE_INCREMENTAL)
         else:
             logger.debug(

@@ -39,19 +39,6 @@ RAG_TOOL_NAMES = frozenset({"rag_query_data", "rag_get_graph"})
 KB_GAP_TOOL_NAME = "read_file"
 
 # ── Blueprinter post-experience trigger keywords (§4.5) ──────────────
-# Architecture/domain keywords that indicate an experience() call may
-# contain structural drift worth a blueprint scan. Intentionally broad —
-# a no-op scan is cheaper than missing real drift.
-_BLUEPRINT_TRIGGER_KEYWORDS = frozenset({
-    "architecture", "pattern", "module", "service", "directory structure",
-    "entry point", "lifecycle", "protocol", "schema", "migration",
-    "queue", "directory", "component", "layer", "pipeline", "config",
-    "convention", "endpoint", "api", "database", "model", "repository",
-    "handler", "middleware", "decorator", "graph node", "state machine",
-    "session", "checkpoint", "context injection", "tool registry",
-})
-
-
 async def _scan_checkpoint_for_tool_match(
     checkpointer,
     instance_id: str,
@@ -1050,7 +1037,8 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         pending_repo = getattr(manager, "_blueprint_pending_repo", None)
         if pending_repo is not None:
             try:
-                pending_repo.enqueue(
+                await asyncio.to_thread(
+                    pending_repo.enqueue,
                     project_id=pid,
                     source_type="experience",
                     source_payload={"text": text[:10_000]},
