@@ -462,3 +462,50 @@ def test_scan_bare_core_only_triggers_rebuild(blueprint_repo, pending_repo, coor
                                job_queue_service=job_queue_service)
     _run(svc.execute())
     assert [call.args[1] for call in coordinator.try_claim.call_args_list] == [MODE_REBUILD, MODE_REBUILD]
+
+
+# ── Default project exclusion ─────────────────────────────────────────
+
+
+def test_scan_skips_default_project(
+    blueprint_repo, pending_repo, coordinator, job_queue_service,
+):
+    """The system default project (``__system_default__``) is a virtual
+    bookkeeping project — the scan must never invoke the coordinator
+    or even the per-project repo methods for it.
+    """
+    # Build a custom project repo with three projects: the default
+    # project mixed into the list alongside two real projects.
+    repo = MagicMock()
+    p1 = MagicMock(); p1.project_id = "proj-1"; p1.name = "Alice"
+    p2 = MagicMock(); p2.project_id = "proj-2"; p2.name = "Bob"
+    p_default = MagicMock()
+    p_default.project_id = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+    p_default.name = "__system_default__"
+    repo.list_projects = MagicMock(return_value=[p1, p_default, p2])
+
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+        job_queue_service=job_queue_service,
+    )
+    _run(svc.execute())
+
+    # Coordinator was called exactly twice — for proj-1 and proj-2.
+    # The default project's id must NOT appear in any call.
+    assert coordinator.try_claim.call_count == 2
+    claimed_project_ids = {call.args[0] for call in coordinator.try_claim.call_args_list}
+    assert claimed_project_ids == {"proj-1", "proj-2"}
+    assert "71931ae0-0f25-5fbf-853b-2a78cc978d7e" not in claimed_project_ids
+
+    # The per-project repo methods must also never see the default id.
+    list_call_ids = {call.args[0] for call in blueprint_repo.list_by_project.call_args_list}
+    assert "71931ae0-0f25-5fbf-853b-2a78cc978d7e" not in list_call_ids
+    pending_call_ids = {call.args[0] for call in pending_repo.get_pending_count.call_args_list}
+    assert "71931ae0-0f25-5fbf-853b-2a78cc978d7e" not in pending_call_ids

@@ -182,6 +182,64 @@ def test_experience_pending_repo_failure_logged_at_warning(monkeypatch, caplog):
     ), f"Expected WARNING log, got: {[r.message for r in caplog.records]}"
 
 
+def test_experience_skips_default_project(monkeypatch):
+    """The system default project never feeds the pending queue via experience().
+
+    The default project is a virtual bookkeeping project — no
+    blueprints are built for it, so even experience() calls on it
+    must not enqueue pending rows.
+    """
+    from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+    monkeypatch.setenv("LIGHTRAG_HOST", "http://localhost:8724")
+    monkeypatch.setenv("LIGHTRAG_API_KEY", "test-key")
+    monkeypatch.setenv("LIGHTRAG_WORKSPACE", "ws")
+
+    pending_repo = _make_pending_repo()
+    mgr = MagicMock()
+    mgr._blueprint_pending_repo = pending_repo
+
+    # The instance metadata points to the default project.
+    default_project_id = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+    inst = MagicMock()
+    inst.project_id = default_project_id
+    inst.instance_metadata = {"project_id": default_project_id}
+    mgr._instance_repository = MagicMock()
+    mgr._instance_repository.get = MagicMock(return_value=inst)
+    mgr._instance_repository.get_tree_root_id = MagicMock(return_value="root")
+
+    # _project_repository.get returns the default project.
+    default_project = MagicMock()
+    default_project.project_id = default_project_id
+    default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+    mgr._project_repository = MagicMock()
+    mgr._project_repository.get = MagicMock(return_value=default_project)
+
+    mgr._job_queue_service = MagicMock()
+    q = MagicMock(); q.queue_id = "q"
+    mgr._job_queue_service._queue_repo.get_by_name = MagicMock(return_value=q)
+
+    # Suppress the real kb-writer enqueue + shared-context save.
+    from daemon.tools import knowledge_tools
+    async def _noop(*_a, **_kw): return None
+    monkeypatch.setattr(knowledge_tools, "_enqueue_experience_job", _noop)
+    def _noop_sync(*_a, **_kw): return None
+    monkeypatch.setattr(knowledge_tools, "_save_experience_result", _noop_sync)
+
+    from daemon.tools.knowledge_tools import create_knowledge_tools
+    tools = create_knowledge_tools(mgr, "parent-iid", "agent")
+    exp_tool = next(t for t in tools if t.name == "experience")
+
+    result = asyncio.run(exp_tool.ainvoke({
+        "text": "Some knowledge about the default project.",
+        "project_id": default_project_id,
+    }))
+    assert "Knowledge recording started" in result
+
+    # The pending queue got NO row — the default project is excluded.
+    pending_repo.enqueue.assert_not_called()
+
+
 # ── project_history_add() ─────────────────────────────────────────────
 
 
@@ -291,3 +349,44 @@ def test_history_add_pending_repo_failure_logged_at_warning(caplog):
         "Blueprint pending-queue INSERT failed" in rec.message
         for rec in caplog.records
     )
+
+
+def test_history_add_skips_default_project():
+    """The system default project never feeds the pending queue.
+
+    The default project is a virtual bookkeeping project — no
+    blueprints are built for it, so feature/milestone history
+    entries on it must not enqueue pending rows.
+    """
+    from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+    pending_repo = _make_pending_repo()
+
+    # Build a manager whose project store returns the default project.
+    mgr = MagicMock()
+    mgr._blueprint_pending_repo = pending_repo
+    default_project = MagicMock()
+    default_project.project_id = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+    default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+    mgr.project_store = MagicMock()
+    mgr.project_store.get = MagicMock(return_value=default_project)
+    mgr.project_store.add_history_entry = MagicMock(
+        return_value={
+            "id": "entry-1",
+            "project_id": default_project.project_id,
+            "entry_type": "feature",
+            "summary": "s",
+            "details": None,
+        }
+    )
+
+    tool = _make_history_tool(mgr)
+    out = tool.invoke({
+        "project_id": default_project.project_id,
+        "entry_type": "feature",
+        "summary": "A feature on the default project",
+    })
+    # The history entry was still written…
+    assert mgr.project_store.add_history_entry.called
+    # …but no pending-queue row was enqueued.
+    pending_repo.enqueue.assert_not_called()

@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.services.blueprint_job_helper import (
     BlueprintEnqueueError,
     enqueue_blueprinter_job,
@@ -187,6 +188,29 @@ def _check_write_paused(manager: Any) -> None:
         raise HTTPException(
             status_code=503,
             detail="Writes are paused for database migration",
+        )
+
+
+async def _check_default_project_blocked(manager: Any, project_id: str) -> None:
+    """400 if ``project_id`` belongs to the system default project.
+
+    The virtual ``__system_default__`` project is used for bookkeeping
+    only — the router must never create or update blueprints for it.
+    ``/initialize`` is exempted (deprecated, backward-compat).
+    """
+    project_repo = getattr(manager, "_project_repository", None)
+    if project_repo is None:
+        return
+    try:
+        project = await asyncio.to_thread(project_repo.get, project_id)
+    except Exception:
+        # If the lookup fails, do not harden the check — let the
+        # downstream endpoint surface the underlying error.
+        return
+    if project is not None and getattr(project, "name", None) == SYSTEM_DEFAULT_PROJECT_NAME:
+        raise HTTPException(
+            status_code=400,
+            detail="Blueprints cannot be created for the system default project",
         )
 
 
@@ -435,6 +459,7 @@ async def rebuild_project_blueprints(
     """
     _validate_project_id(project_id)
     manager = _get_manager(request)
+    await _check_default_project_blocked(manager, project_id)
 
     coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
     if coordinator is None:
@@ -517,6 +542,7 @@ async def update_project_blueprints(
     """
     _validate_project_id(project_id)
     manager = _get_manager(request)
+    await _check_default_project_blocked(manager, project_id)
 
     coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
     if coordinator is None:

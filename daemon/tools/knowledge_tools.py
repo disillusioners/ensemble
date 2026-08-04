@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.persistence import CheckpointerAdapter
 from daemon.rag.config import is_rag_enabled
 from daemon.services.context_injection import get_shared_context
@@ -1034,8 +1035,11 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         # pending-experience queue. The blueprinter picks it up via
         # ``claim_batch``. Failure here is non-fatal — we never want
         # to break the kb-writer path on a Blueprint queue hiccup.
+        # The system default project (``__system_default__``) is a
+        # virtual bookkeeping project — no blueprints are built for
+        # it, so it does not feed the pending queue.
         pending_repo = getattr(manager, "_blueprint_pending_repo", None)
-        if pending_repo is not None:
+        if pending_repo is not None and project_name != SYSTEM_DEFAULT_PROJECT_NAME:
             try:
                 await asyncio.to_thread(
                     pending_repo.enqueue,

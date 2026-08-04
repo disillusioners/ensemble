@@ -21,6 +21,8 @@ import logging
 import uuid
 from typing import Any
 
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,13 +124,21 @@ class BlueprintScanService:
         — a dormant project that becomes active again is exactly the
         case where a rebuild matters. Filtering by status here would
         be a foot-gun.
+
+        The system default project (``__system_default__``) is a
+        virtual bookkeeping project — no blueprints should ever be
+        built for it, so we exclude it from the scan entirely.
         """
         # list_projects is sync SQLAlchemy; push it to a thread so we
         # never block the event loop on disk I/O.
         projects = await asyncio.to_thread(
             self._project_repository.list_projects, limit=10_000,
         )
-        return [getattr(p, "project_id", None) for p in projects if getattr(p, "project_id", None)]
+        return [
+            p.project_id for p in projects
+            if getattr(p, "project_id", None)
+            and getattr(p, "name", None) != SYSTEM_DEFAULT_PROJECT_NAME
+        ]
 
     async def _scan_project(self, project_id: str) -> None:
         """Smart trigger logic for one project.

@@ -680,6 +680,40 @@ class TestRebuildEndpoint:
         assert r.status_code == 400
         coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
 
+    def test_rebuild_rejects_default_project(self, coordinator_client, coordinator_app):
+        """The system default project is rejected with 400.
+
+        The default project (``__system_default__``) is the virtual
+        bookkeeping project — blueprints are never built for it. The
+        router must refuse the request before claiming a lease.
+        """
+        import uuid as _uuid
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+        default_project_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME)
+        )
+
+        # Wire the manager's _project_repository to return a project
+        # matching the default name for the deterministic id.
+        default_project = MagicMock()
+        default_project.project_id = default_project_id
+        default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+        coordinator_app.state.manager._project_repository = MagicMock()
+        coordinator_app.state.manager._project_repository.get = MagicMock(
+            return_value=default_project,
+        )
+
+        r = coordinator_client.post(
+            f"/api/projects/{default_project_id}/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "default project" in r.json()["detail"].lower()
+        # The coordinator must never be reached.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        # And no enqueue happens.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
     def test_rebuild_forwards_job_id_to_enqueue(
         self, coordinator_client, coordinator_app,
     ):
@@ -846,6 +880,37 @@ class TestUpdateEndpoint:
         assert enqueue_mock.call_count == 1
         enqueue_kwargs = enqueue_mock.call_args.kwargs
         assert enqueue_kwargs.get("job_id") == forwarded_job_id
+
+    def test_update_rejects_default_project(self, coordinator_client, coordinator_app):
+        """The system default project is rejected with 400.
+
+        Mirrors :meth:`TestRebuildEndpoint.test_rebuild_rejects_default_project`
+        for the ``/update`` path. The default project never enters
+        the coordinator's claim path.
+        """
+        import uuid as _uuid
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+        default_project_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME)
+        )
+
+        default_project = MagicMock()
+        default_project.project_id = default_project_id
+        default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+        coordinator_app.state.manager._project_repository = MagicMock()
+        coordinator_app.state.manager._project_repository.get = MagicMock(
+            return_value=default_project,
+        )
+
+        r = coordinator_client.post(
+            f"/api/projects/{default_project_id}/blueprints/update"
+        )
+        assert r.status_code == 400, r.text
+        assert "default project" in r.json()["detail"].lower()
+        # Nothing reached the coordinator or the job queue.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
 
 
 class TestInitializeDeprecation:

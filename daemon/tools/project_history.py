@@ -11,6 +11,7 @@ import logging
 from langchain_core.tools import tool
 
 from ..repositories.project.models import HistoryEntryType
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -170,7 +171,13 @@ def create_project_history_tools(
             if manager is not None
             else None
         )
-        if pending_repo is not None and entry_type in _PENDING_QUEUE_ENTRY_TYPES:
+        if (
+            pending_repo is not None
+            and entry_type in _PENDING_QUEUE_ENTRY_TYPES
+            # Skip the system default project — blueprints are never
+            # built for the virtual bookkeeping project.
+            and project.name != SYSTEM_DEFAULT_PROJECT_NAME
+        ):
             try:
                 pending_repo.enqueue(
                     project_id=project_id,
