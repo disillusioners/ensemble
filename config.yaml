@@ -169,6 +169,27 @@ skill_evolution:
   capture_min_iterations: 5
   capture_min_duration_seconds: 60
 
+# ─── Project Blueprint System ──────────────────────────────────
+# Auto-rebuild is ON by default. Set to false to disable all
+# automated triggers (daily scan, pending-queue processing).
+# Manual triggers (UI button, API calls) always work regardless.
+# 
+# YAML values take priority over BLUEPRINT_* env vars.
+# Use null to let env vars decide.
+blueprint:
+  auto_rebuild_enabled: true              # ON by default, set false or BLUEPRINT_AUTO_REBUILD_ENABLED=false to disable
+  bm25_weight: 0.4                        # BM25 fusion weight
+  vector_weight: 0.6                      # Vector cosine fusion weight
+  match_threshold: 0.30                   # Minimum fusion score to inject
+  max_results: 5                          # Max blueprints injected per turn
+  matchable_statuses:                     # Which statuses are matchable
+    - published
+  # Embedding config — null falls back to shared EMBEDDING_* env vars
+  embedding_model: null
+  embedding_dimensions: 1536
+  embedding_base_url: null
+  embedding_api_key: null
+
 # VS Code Server Editor Configuration
 vscode:
   allow_remote: false        # C1: default to localhost-only (code-server binds 127.0.0.1)
