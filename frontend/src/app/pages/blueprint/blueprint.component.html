@@ -9,13 +9,28 @@
       </span>
     </div>
     <div class="toolbar-actions">
-      <button mat-stroked-button color="accent"
-              (click)="onInitialize()"
-              [disabled]="initializing() || loading()"
-              matTooltip="Scan the project and generate initial blueprints">
-        <mat-icon [class.spinning]="initializing()">auto_awesome</mat-icon>
-        @if (initializing()) { Initializing… } @else { Initialize Blueprint }
-      </button>
+      <!-- Phase 6 dual-mode: Rebuild shows when the project is empty
+           (no blueprints yet); Update shows once at least one exists.
+           Both are disabled while a job is in flight so the user can't
+           fire a second one before the first lands. -->
+      @if (showRebuildButton()) {
+        <button mat-stroked-button color="accent"
+                (click)="onRebuildClick()"
+                [disabled]="rebuilding()"
+                matTooltip="Scan the project and generate blueprints from scratch">
+          <mat-icon [class.spinning]="rebuilding()">refresh</mat-icon>
+          @if (rebuilding()) { Rebuilding… } @else { Rebuild Blueprints }
+        </button>
+      }
+      @if (showUpdateButton()) {
+        <button mat-stroked-button color="accent"
+                (click)="onUpdateClick()"
+                [disabled]="rebuilding()"
+                matTooltip="Update existing blueprints">
+          <mat-icon [class.spinning]="rebuilding()">update</mat-icon>
+          @if (rebuilding()) { Updating… } @else { Update Blueprints }
+        </button>
+      }
       <button mat-stroked-button (click)="onRefresh()" [disabled]="loading()">
         <mat-icon [class.spinning]="loading()">refresh</mat-icon>
         Refresh
@@ -27,6 +42,33 @@
       </button>
     </div>
   </mat-toolbar>
+
+  <!-- Update mode popup (Phase 6) — user picks between an incremental
+       diff-driven update and a full re-scan. Backdrop click closes.
+       stopPropagation on the inner panel keeps the click from
+       bubbling to the overlay. -->
+  @if (showUpdatePopup()) {
+    <div class="update-popup-overlay" (click)="onClosePopup()">
+      <div class="update-popup" (click)="$event.stopPropagation()">
+        <h3>Update Blueprints</h3>
+        <button mat-button (click)="onIncrementalUpdate()">
+          <mat-icon>auto_fix_high</mat-icon>
+          <div class="popup-option">
+            <span class="popup-option-title">Incremental Update</span>
+            <small>Process recent changes</small>
+          </div>
+        </button>
+        <button mat-button (click)="onFullRebuild()">
+          <mat-icon>construction</mat-icon>
+          <div class="popup-option">
+            <span class="popup-option-title">Full Rebuild</span>
+            <small>Re-scan entire project</small>
+          </div>
+        </button>
+        <button mat-button (click)="onClosePopup()">Cancel</button>
+      </div>
+    </div>
+  }
 
   <!-- Filter bar -->
   <div class="filter-bar">
@@ -192,14 +234,17 @@
               or create a new blueprint.
             </p>
           } @else {
-            <p>Initialize blueprints automatically from the project structure,
+            <p>Generate blueprints automatically from the project structure,
                or create one manually to get started.</p>
           }
           <div class="empty-actions">
-            <button mat-flat-button color="accent" (click)="onInitialize()"
-                    [disabled]="initializing()">
-              <mat-icon [class.spinning]="initializing()">auto_awesome</mat-icon>
-              Initialize Project Blueprint
+            <!-- Phase 6: empty state shows the full-rebuild action
+                 (project is empty, so there's nothing to incrementally
+                 update). Disables while a job is in flight. -->
+            <button mat-flat-button color="accent" (click)="onRebuildClick()"
+                    [disabled]="rebuilding()">
+              <mat-icon [class.spinning]="rebuilding()">refresh</mat-icon>
+              @if (rebuilding()) { Rebuilding… } @else { Rebuild Blueprints }
             </button>
             <button mat-stroked-button (click)="onCreate()">
               <mat-icon>add</mat-icon> New Blueprint

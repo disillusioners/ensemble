@@ -121,10 +121,101 @@ class _FakeWriteService:
         return True
 
 
+class _FakePendingUpdate:
+    """Minimal stand-in for a BlueprintPendingUpdate row."""
+
+    def __init__(
+        self,
+        id: str,
+        project_id: str,
+        source_type: str = "experience",
+        source_payload: dict | None = None,
+    ) -> None:
+        self.id = id
+        self.project_id = project_id
+        self.source_type = source_type
+        self.source_payload = source_payload or {}
+
+
+class _FakePendingRepo:
+    """In-memory stand-in for BlueprintPendingRepository.
+
+    Implements the methods the new agent-facing tools touch: enqueue,
+    claim_batch, acknowledge_batch, get_pending_count.
+    """
+
+    def __init__(self) -> None:
+        self._records: list[_FakePendingUpdate] = []
+        self._status: dict[str, str] = {}  # id -> status
+        self._run_token: dict[str, str] = {}  # id -> run_token
+        self._counter = 0
+
+    def enqueue(
+        self,
+        project_id: str,
+        source_type: str,
+        source_payload: dict,
+    ) -> _FakePendingUpdate:
+        self._counter += 1
+        rec = _FakePendingUpdate(
+            id=f"pending-{self._counter}",
+            project_id=project_id,
+            source_type=source_type,
+            source_payload=source_payload,
+        )
+        self._records.append(rec)
+        self._status[rec.id] = "available"
+        return rec
+
+    def claim_batch(
+        self,
+        project_id: str,
+        batch_size: int = 50,
+        run_token: str = "",
+    ) -> list[_FakePendingUpdate]:
+        claimed: list[_FakePendingUpdate] = []
+        for rec in self._records:
+            if len(claimed) >= batch_size:
+                break
+            if rec.project_id != project_id:
+                continue
+            if self._status.get(rec.id) in ("available", "retryable"):
+                self._status[rec.id] = "claimed"
+                self._run_token[rec.id] = run_token
+                claimed.append(rec)
+        return claimed
+
+    def acknowledge_batch(
+        self,
+        run_token: str,
+        record_ids: list[str] | None = None,
+    ) -> int:
+        count = 0
+        for rec in self._records:
+            if self._status.get(rec.id) != "claimed":
+                continue
+            if self._run_token.get(rec.id) != run_token:
+                continue
+            if record_ids is not None and rec.id not in record_ids:
+                continue
+            self._status[rec.id] = "applied"
+            count += 1
+        return count
+
+    def get_pending_count(self, project_id: str) -> int:
+        return sum(
+            1
+            for rec in self._records
+            if rec.project_id == project_id
+            and self._status.get(rec.id) in ("available", "retryable")
+        )
+
+
 def _make_manager(
     repo: _FakeRepo | None = None,
     matcher: Any = None,
     instance_project_id: str = "proj-A",
+    pending_repo: _FakePendingRepo | None = None,
 ) -> MagicMock:
     """Build a MagicMock manager with the blueprint attributes the tools touch."""
     m = MagicMock()
@@ -134,6 +225,9 @@ def _make_manager(
     # ``get_blueprint_write_service`` returns a _FakeWriteService bound to
     # the same repo so create/update go through the service→repo path.
     m.get_blueprint_write_service = lambda pid: _FakeWriteService(repo, pid)
+    # ``_blueprint_pending_repo`` backs the claim/ack/count tools. ``None``
+    # by default so the "not available" guard path is exercised.
+    m._blueprint_pending_repo = pending_repo
     # ``_get_project_id()`` reads the instance repo; mock it to return an
     # instance carrying the requested project_id.
     inst = MagicMock()
@@ -148,7 +242,7 @@ def _run(coro: Any) -> Any:
 
 
 def _build_tools(manager: MagicMock, agent_id: str = "blueprinter") -> list:
-    """Create the 5 blueprint tools from a manager."""
+    """Create the 9 blueprint tools from a manager."""
     return create_blueprint_tools(manager, "inst-test", agent_id)
 
 
@@ -266,3 +360,203 @@ class TestBlueprintUpdateOwnership:
         assert "updated successfully" in result.lower()
         # The update must have actually mutated the stored blueprint.
         assert bp.content == "fresh content"
+
+
+# ─── Tool count sanity (return list grew from 5 → 9) ────────────────────────
+
+
+class TestBlueprintToolCount:
+    """The factory must return exactly 9 tools after the Phase 5b additions."""
+
+    def test_factory_returns_nine_tools(self) -> None:
+        manager = _make_manager()
+        tools = _build_tools(manager)
+        assert len(tools) == 9
+
+
+# ─── blueprint_claim_pending ────────────────────────────────────────────────
+
+
+class TestBlueprintClaimPending:
+    """``blueprint_claim_pending`` claims records and returns the run_token."""
+
+    def test_claim_pending_returns_records(self) -> None:
+        """Enqueue 3 records, claim → returns run_token + 3 records."""
+        pending = _FakePendingRepo()
+        pending.enqueue("proj-A", "experience", {"text": "e1"})
+        pending.enqueue("proj-A", "history", {"entry_type": "feature"})
+        pending.enqueue("proj-A", "manual", {"note": "m1"})
+
+        manager = _make_manager(pending_repo=pending)
+        tools = _build_tools(manager)
+        claim = tools[6]
+
+        result = _run(claim.ainvoke({"batch_size": 10}))
+        assert "Claimed 3 pending update(s)" in result
+        assert "Run token:" in result
+        # The run_token must be prominently present so the blueprinter
+        # can pass it to blueprint_acknowledge_pending afterward.
+        assert "pending-1" in result
+        assert "pending-3" in result
+
+    def test_claim_pending_empty(self) -> None:
+        """No records → 'No pending updates'."""
+        pending = _FakePendingRepo()
+        manager = _make_manager(pending_repo=pending)
+        tools = _build_tools(manager)
+        claim = tools[6]
+
+        result = _run(claim.ainvoke({}))
+        assert "No pending updates" in result
+
+    def test_claim_pending_unauthorized(self) -> None:
+        """Non-blueprinter agent → error message."""
+        pending = _FakePendingRepo()
+        pending.enqueue("proj-A", "experience", {"text": "e1"})
+
+        manager = _make_manager(pending_repo=pending)
+        tools = _build_tools(manager, agent_id="developer")
+        claim = tools[6]
+
+        result = _run(claim.ainvoke({}))
+        assert "Only the blueprinter agent" in result
+
+
+# ─── blueprint_acknowledge_pending ──────────────────────────────────────────
+
+
+class TestBlueprintAcknowledgePending:
+    """``blueprint_acknowledge_pending`` acks a run_token → count."""
+
+    def test_acknowledge_pending_success(self) -> None:
+        """Claim a batch, acknowledge the token → count returned."""
+        pending = _FakePendingRepo()
+        pending.enqueue("proj-A", "experience", {"text": "e1"})
+        pending.enqueue("proj-A", "experience", {"text": "e2"})
+
+        manager = _make_manager(pending_repo=pending)
+        tools = _build_tools(manager)
+        claim = tools[6]
+        ack = tools[7]
+
+        claimed = _run(claim.ainvoke({"batch_size": 10}))
+        # Extract the run_token from the first line of the claim output.
+        first_line = claimed.splitlines()[0]
+        token = first_line.split("Run token: ")[1].strip()
+
+        result = _run(ack.ainvoke({"run_token": token}))
+        assert "Acknowledged 2 pending update(s)" in result
+        assert token in result
+
+    def test_acknowledge_pending_unauthorized(self) -> None:
+        """Non-blueprinter → error message."""
+        pending = _FakePendingRepo()
+        manager = _make_manager(pending_repo=pending)
+        tools = _build_tools(manager, agent_id="developer")
+        ack = tools[7]
+
+        result = _run(ack.ainvoke({"run_token": "some-token"}))
+        assert "Only the blueprinter agent" in result
+
+
+# ─── blueprint_get_pending_count ────────────────────────────────────────────
+
+
+class TestBlueprintGetPendingCount:
+    """``blueprint_get_pending_count`` returns the active count (all agents)."""
+
+    def test_get_pending_count(self) -> None:
+        """Enqueue records → count matches unprocessed."""
+        pending = _FakePendingRepo()
+        pending.enqueue("proj-A", "experience", {"text": "e1"})
+        pending.enqueue("proj-A", "experience", {"text": "e2"})
+        pending.enqueue("proj-B", "experience", {"text": "other-project"})
+
+        manager = _make_manager(pending_repo=pending)
+        tools = _build_tools(manager)
+        count_tool = tools[8]
+
+        result = _run(count_tool.ainvoke({}))
+        # proj-A has 2; proj-B's record is filtered out by project_id.
+        assert result == "2"
+
+    def test_get_pending_count_no_repo(self) -> None:
+        """No pending repo configured → '0' (graceful)."""
+        manager = _make_manager(pending_repo=None)
+        tools = _build_tools(manager)
+        count_tool = tools[8]
+
+        result = _run(count_tool.ainvoke({}))
+        assert result == "0"
+
+
+# ─── blueprint_disable ──────────────────────────────────────────────────────
+
+
+class TestBlueprintDisable:
+    """``blueprint_disable`` soft-deletes a blueprint (blueprinter-only)."""
+
+    def test_disable_success(self) -> None:
+        """Existing blueprint owned by proj-A → disabled."""
+        repo = _FakeRepo()
+        bp = _FakeBlueprint(id="bp-d", project_id="proj-A", name="Stale")
+        repo._store["bp-d"] = bp
+
+        manager = _make_manager(repo=repo, instance_project_id="proj-A")
+        tools = _build_tools(manager, agent_id="blueprinter")
+        disable = tools[5]
+
+        result = _run(disable.ainvoke({"blueprint_id": "bp-d"}))
+        assert "disabled successfully" in result.lower()
+
+    def test_disable_unauthorized(self) -> None:
+        """Non-blueprinter → error message."""
+        repo = _FakeRepo()
+        bp = _FakeBlueprint(id="bp-d2", project_id="proj-A", name="Stale")
+        repo._store["bp-d2"] = bp
+
+        manager = _make_manager(repo=repo, instance_project_id="proj-A")
+        tools = _build_tools(manager, agent_id="developer")
+        disable = tools[5]
+
+        result = _run(disable.ainvoke({"blueprint_id": "bp-d2"}))
+        assert "Only the blueprinter agent" in result
+
+    def test_disable_not_found(self) -> None:
+        """Blueprint owned by proj-B, caller in proj-A → 'not found'."""
+        repo = _FakeRepo()
+        bp = _FakeBlueprint(id="bp-d3", project_id="proj-B", name="Other")
+        repo._store["bp-d3"] = bp
+
+        manager = _make_manager(repo=repo, instance_project_id="proj-A")
+        tools = _build_tools(manager, agent_id="blueprinter")
+        disable = tools[5]
+
+        result = _run(disable.ainvoke({"blueprint_id": "bp-d3"}))
+        assert result == "Blueprint not found."
+
+
+# ─── blueprint_update status param ──────────────────────────────────────────
+
+
+class TestBlueprintUpdateStatus:
+    """``blueprint_update`` forwards the ``status`` kwarg to the service."""
+
+    def test_update_with_status(self) -> None:
+        """Update with status='draft' → success, status forwarded."""
+        repo = _FakeRepo()
+        bp = _FakeBlueprint(id="bp-s", project_id="proj-A", name="StageMe")
+        repo._store["bp-s"] = bp
+
+        manager = _make_manager(repo=repo, instance_project_id="proj-A")
+        tools = _build_tools(manager, agent_id="blueprinter")
+        blueprint_update = tools[4]
+
+        result = _run(
+            blueprint_update.ainvoke(
+                {"blueprint_id": "bp-s", "status": "draft"}
+            )
+        )
+        assert "updated successfully" in result.lower()
+        # The status must have been forwarded to the blueprint row.
+        assert getattr(bp, "status", None) == "draft"

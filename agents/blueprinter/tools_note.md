@@ -10,9 +10,10 @@ My tool use is narrow and evidence-driven. Blueprint tools are my only write sur
 | `blueprint_get(blueprint_id?, slug?, project_id?)` | Phase 1 — load the current content and metadata of a blueprint before deciding whether it remains accurate. Pass either `blueprint_id` or `slug` (slug requires `project_id`). |
 | `blueprint_list(kind?, project_id?)` | Phase 0 / Phase 1 — list existing blueprints, detect an empty or bare-core corpus, and select candidates for comparison. Optional `kind` filter (`core` or `area`). |
 | `blueprint_create(slug, name, kind, content, tags?, file_refs?, trigger_queries?, reason?)` | Phase 2 SAVE — create a missing blueprint. Routes through the canonical write service, which enforces rate limits and revision capture. `trigger_queries` (3–10 natural-language queries) are embedded for matching. |
-| `blueprint_update(blueprint_id, content?, name?, tags?, file_refs?, trigger_queries?, reason?)` | Phase 2 SAVE — update an existing blueprint. Omitted fields are left unchanged. `trigger_queries=None` leaves triggers as-is; `[]` clears them; a list replaces them. |
+| `blueprint_update(blueprint_id, content?, name?, tags?, file_refs?, trigger_queries?, status?, reason?)` | Phase 2 SAVE — update an existing blueprint. Omitted fields are left unchanged. `trigger_queries=None` leaves triggers as-is; `[]` clears them; a list replaces them. `status="draft"` stages a revision for review (compare/stage); `status="published"` publishes it and marks the prior version inactive. |
+| `blueprint_disable(blueprint_id, reason?, project_id?)` | Soft-retire a stale or irrelevant blueprint. Marks it inactive (`is_active=False`) and records a final `source='disable'` revision. Reserve for persistent low-match evidence, not single weak signals. |
 
-**Auth note:** Only I (`blueprinter`) can call `blueprint_create` and `blueprint_update`. The write service enforces this; unauthorized calls return an error rather than mutating state. I do not attempt to share the write path with other agents.
+**Auth note:** Only I (`blueprinter`) can call `blueprint_create`, `blueprint_update`, and `blueprint_disable`. The write service enforces this; unauthorized calls return an error rather than mutating state. I do not attempt to share the write path with other agents.
 
 ## Pending-Batch Contract (C3 — incremental workflow)
 
@@ -20,11 +21,11 @@ These tools back the pending-queue lifecycle. The contract is: claim a batch, pr
 
 | Tool | When I use it |
 |------|---------------|
-| `claim_batch(project_id, batch_size, run_token)` | Incremental Phase 0 — claim a bounded slice of pending records. The `run_token` is unique to this run and propagates through the rest of the workflow. |
-| `get_pending_records(record_ids)` | Incremental Phase 0 — fetch the full text of the claimed records before passing them to explore workers. |
-| `acknowledge_batch(run_token, record_ids)` | Incremental Phase 2 — acknowledge the records after the writes succeed. Without this call, the records stay in the queue and would be re-claimed on the next run. |
+| `blueprint_claim_pending(batch_size?, project_id?)` | Incremental Phase 0 — claim a bounded slice of pending records. Returns the claimed records plus a `run_token` that propagates through the rest of the workflow and must be passed to `blueprint_acknowledge_pending`. RESTRICTED to me (blueprinter). |
+| `blueprint_acknowledge_pending(run_token)` | Incremental Phase 2 — acknowledge the records after the writes succeed. Without this call, the records stay claimed and would be re-claimed after the lease timeout. RESTRICTED to me (blueprinter). |
+| `blueprint_get_pending_count(project_id?)` | Scan / trigger logic — read-only count of unprocessed pending records (status: available or retryable). Available to ALL agents (not blueprinter-only), so other agents can decide whether an incremental update is warranted. Returns the count as a string. |
 
-I treat these as part of the write surface — they affect project state — so the rate-limit check applies before any of them.
+I treat the claim/acknowledge tools as part of the write surface — they affect project state — so the rate-limit check applies before any of them. `blueprint_get_pending_count` is read-only and needs no auth check.
 
 ## Worker Fan-Out (instance tools)
 
