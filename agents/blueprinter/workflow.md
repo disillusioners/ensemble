@@ -51,6 +51,18 @@ Goal: produce a structured action list from the worker reports.
 4. Produce a **Decision Set** (the format defined in `decide-changes` §Mandatory Output Format).
 5. Record the model tier used (`balanced` or `quick`).
 
+### Blueprint Hygiene Check
+
+Before finalizing the Decision Set, I review ALL existing blueprints for cleanup:
+
+1. **Call `blueprint_list`** to get the full list of active blueprints.
+2. **For each existing blueprint, assess:**
+   - **Area removed?** — Does the module/feature/architectural area still exist? Check if the blueprint's `file_refs` still point to existing files. If all refs are deleted and the area is gone → **DISABLE**.
+   - **Scope too narrow?** — Does the blueprint describe a specific bugfix, implementation detail, or one-off task rather than a persistent architectural area? (e.g., "User login timezone offset fix" = too narrow; "Authentication System" = appropriate) → **DISABLE**.
+   - **Significantly incorrect?** — Does the content fundamentally contradict the current codebase in ways that can't be fixed with an update? → **DISABLE**.
+   - **Manual blueprint?** — If `source="manual"`, SKIP. Do not auto-disable manual blueprints (Cardinal #3).
+3. **Add DISABLE actions** to the Decision Set for each blueprint that fails the checks above, with a clear reason.
+
 ### Phase 2 — CRAFT (fan-out)
 
 Goal: produce concrete blueprint drafts for each approved action.
@@ -153,6 +165,16 @@ Same as the Rebuild Path DECIDE step. Load `decide-changes`, apply the framework
 
 The Decision Set now includes both UPDATE actions (existing blueprints with drift) AND CREATE actions (new areas discovered from pending records that have no existing blueprint coverage). The `decide-changes` skill's decision matrix handles both.
 
+### Blueprint Hygiene Check (scoped)
+
+For blueprints in areas covered by the pending changes:
+
+1. **Check `file_refs` viability** — do the referenced files still exist? If the pending changes suggest the area was removed or significantly restructured → assess for DISABLE.
+2. **Check scope** — if a blueprint was created for something that turned out to be a one-off change, not a persistent area → DISABLE.
+3. **Manual blueprints** — SKIP (Cardinal #3).
+
+Add any DISABLE actions to the Decision Set with clear reasons. Only check blueprints in areas touched by pending records — do not scan the entire corpus.
+
 ### Phase 2 — CRAFT (fan-out)
 
 Same as the Rebuild Path CRAFT step. Workers use `build-blueprint`, one per CREATE/UPDATE, capped at 4 per wave.
@@ -201,6 +223,8 @@ Goal: produce a single-action Decision Set.
 3. Produce a Decision Set with exactly ONE action: UPDATE, DISABLE, or NO-OP.
 4. If NO-OP → report "no revision warranted", end the run (skip CRAFT and SAVE entirely).
 5. Record the model tier used (`balanced` or `quick`).
+
+If the blueprint's area no longer exists or the blueprint is fundamentally wrong, the Decision Set may be DISABLE instead of UPDATE. This is a valid outcome — not every single rebuild results in an update.
 
 ### Phase 2 — CRAFT (fan-out: 1 worker)
 

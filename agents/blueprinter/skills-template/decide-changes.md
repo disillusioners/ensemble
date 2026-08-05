@@ -32,6 +32,25 @@ During incremental runs, a pending record may describe a significant architectur
 3. **Require exploration evidence.** A CREATE decision requires the explore worker to have gathered enough architectural information (file structure, entry points, key patterns) to fill a 200-500 word blueprint. If the exploration is thin, defer to NO-OP.
 4. **Respect rate limits.** Each CREATE counts against the write budget. If rate-limited, defer remaining CREATEs to the next incremental run.
 
+## Blueprint Cleanup (Disable) Criteria
+
+A blueprint should be DISABLED when:
+
+1. **Area removed**: The module, feature, or architectural area described by the blueprint no longer exists in the codebase. The blueprint's `file_refs` point to deleted files/directories. Evidence: explore workers report the area is gone, or `file_refs` verification fails.
+
+2. **Scope too narrow**: The blueprint describes a specific implementation detail, bugfix, or one-off task rather than a persistent architectural area.
+   - Too narrow: "User login timezone offset fix", "Config typo in line 42"
+   - Appropriate: "Authentication System", "Job Queue Architecture", "Database Migration Pattern"
+
+3. **Significantly incorrect**: The blueprint content contradicts the current codebase in ways that can't be fixed with an update (fundamentally wrong architecture description, wrong module boundaries, wrong patterns described).
+
+**Manual blueprints (`source="manual"`) are NEVER auto-disabled.** Cardinal #3 applies — manual content requires explicit human intervention.
+
+When disabling, always provide a clear reason via the `blueprint_disable` tool's `reason` parameter:
+- "Area removed: the X module was deleted in recent changes"
+- "Scope too narrow: describes a one-off bugfix, not a persistent architecture area"
+- "Significantly incorrect: describes pattern Y but codebase now uses pattern Z"
+
 ## Priority Rules
 
 1. **`core.md` is highest priority** — review it first whenever any drift is present. If a worker's report touches `core.md`, you decide on it before any area blueprint.

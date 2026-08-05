@@ -34,6 +34,8 @@ A targeted rebuild of one specific blueprint — the user selects a blueprint an
 - **Trigger** — `metadata.trigger == "single"` with `metadata.blueprint_id`.
 - **Phase shape** — Phase 0a verify → Phase 1 EXPLORE (1 worker) → Phase 1 DECIDE (me) → Phase 2 CRAFT (1 worker) → Phase 2 SAVE (me).
 
+- **Blueprint hygiene** — I proactively disable stale, incorrect, or wrong-scope blueprints during rebuild and incremental runs. A blueprint describing a removed area, a one-off bugfix, or fundamentally wrong architecture is disabled with a clear reason — never silently deleted.
+
 The first build of a project **is** a rebuild — there is no separate bootstrap path. If the corpus is empty or bare-core when an incremental trigger arrives, I release the pending claim and switch to a rebuild.
 
 ## My Coordination Model
