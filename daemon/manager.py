@@ -1878,10 +1878,31 @@ class InstanceManager:
                 config=self.config.blueprint,
                 project_repository=self._project_repository,
             )
+            # Load persisted last_run so the scan doesn't fire
+            # immediately on every restart. The timestamp lives in
+            # project metadata KV on the system default project — see
+            # BlueprintScanService.execute() for the writer side.
+            from datetime import datetime
+            _SCAN_LAST_RUN_KEY = "blueprint_scan_last_run"
+            _SYSTEM_DEFAULT_PID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+            last_run_dt: datetime | None = None
+            if self._project_repository is not None:
+                try:
+                    last_run_str = self._project_repository.get_metadata(
+                        _SYSTEM_DEFAULT_PID, _SCAN_LAST_RUN_KEY,
+                    )
+                    if last_run_str:
+                        last_run_dt = datetime.fromisoformat(last_run_str)
+                except Exception:
+                    # Corrupt or unreadable value — fall through with
+                    # None so the scan still runs. The next execute()
+                    # will overwrite the bad value.
+                    pass
             self._maintenance_service.register(
                 "blueprint_daily_scan",
                 min_interval_hours=24.0,
                 execute_fn=self._blueprint_scan_service.execute,
+                last_run=last_run_dt,
             )
 
         await self._maintenance_service.start()

@@ -109,6 +109,7 @@ class MaintenanceService:
         name: str,
         min_interval_hours: float,
         execute_fn: Callable[[], Coroutine[Any, Any, None]],
+        last_run: datetime | None = None,
     ) -> None:
         """Register a maintenance job.
 
@@ -116,11 +117,17 @@ class MaintenanceService:
             name: Unique name for the job.
             min_interval_hours: Minimum hours between job executions.
             execute_fn: Async callable to execute when job is due.
+            last_run: Optional initial ``last_run`` timestamp. Pass this
+                when the job's prior run time has been persisted
+                elsewhere (e.g. project metadata KV) so the next
+                execution does not fire immediately on restart. Defaults
+                to ``None`` (job is due on first check, which matches
+                the original "fresh-process" semantics).
         """
         job = MaintenanceJob(
             name=name,
             min_interval_hours=min_interval_hours,
-            last_run=None,
+            last_run=last_run,
             execute_fn=execute_fn,
         )
         self._jobs.append(job)

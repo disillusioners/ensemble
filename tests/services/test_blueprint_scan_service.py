@@ -13,6 +13,7 @@ Covers the daemon-side daily scan's smart trigger logic:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -599,3 +600,173 @@ def test_scan_includes_project_opted_in(
     assert coordinator.try_claim.call_count == 2
     claimed_ids = {call.args[0] for call in coordinator.try_claim.call_args_list}
     assert claimed_ids == {"proj-1", "proj-2"}
+
+
+# ── last_run persistence (restart-survival) ─────────────────────────
+
+
+# Deterministic system default project ID — must match
+# ``daemon.services.blueprint_scan_service._SYSTEM_DEFAULT_PID`` and
+# the manager.py registration site.
+_SYSTEM_DEFAULT_PID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+_SCAN_LAST_RUN_KEY = "blueprint_scan_last_run"
+
+
+def _set_metadata_calls(repo: Any) -> list[tuple[str, str, Any]]:
+    """Return the recorded ``set_metadata`` calls as a list of
+    ``(project_id, key, value)`` tuples for easy filtering in
+    assertions."""
+    calls = []
+    for call in repo.set_metadata.call_args_list:
+        # set_metadata signature: (project_id, key, value)
+        args, _ = call
+        if len(args) >= 3:
+            calls.append((args[0], args[1], args[2]))
+        elif len(args) == 2:
+            calls.append((args[0], args[1], None))
+    return calls
+
+
+def test_scan_persists_last_run_after_execution(
+    blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service,
+):
+    """When the scan runs (flag enabled, regardless of project count),
+    it MUST persist the current UTC timestamp under the
+    ``blueprint_scan_last_run`` key on the system default project. The
+    manager loads this on registration to keep the 24h interval clock
+    honest across restarts.
+    """
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+    # ``set_metadata`` is auto-tracked on the MagicMock fixture; ensure
+    # it's a regular Mock (sync) so the service's ``asyncio.to_thread``
+    # wrapper accepts it.
+    project_repo.set_metadata = MagicMock()
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+        job_queue_service=job_queue_service,
+    )
+    _run(svc.execute())
+
+    # Exactly one scan-related metadata write — on the system default
+    # project, with the well-known key. There may be 0 other writes
+    # because the fixtures do not call ``set_metadata`` for any
+    # blueprint-related key.
+    scan_calls = [
+        c for c in _set_metadata_calls(project_repo)
+        if c[0] == _SYSTEM_DEFAULT_PID and c[1] == _SCAN_LAST_RUN_KEY
+    ]
+    assert len(scan_calls) == 1, (
+        f"expected 1 last_run persist call, got {len(scan_calls)}: {scan_calls}"
+    )
+    # Value must be an ISO 8601 UTC string parseable by
+    # ``datetime.fromisoformat`` — the contract the manager reads.
+    ts_str = scan_calls[0][2]
+    assert isinstance(ts_str, str)
+    parsed = datetime.fromisoformat(ts_str)
+    assert parsed.tzinfo is not None  # timezone-aware UTC
+
+
+def test_scan_does_not_persist_when_disabled(
+    blueprint_repo, pending_repo, coordinator, project_repo,
+):
+    """When ``auto_rebuild_enabled=False``, ``execute()`` short-circuits
+    before the scan loop. The persist step must NOT run — there was no
+    scan to record, and writing a fresh ``last_run`` would silently
+    delay the first real scan by a full 24h interval.
+    """
+    project_repo.set_metadata = MagicMock()
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=False),
+        project_repository=project_repo,
+    )
+    _run(svc.execute())
+
+    # No set_metadata call touched the scan last_run key.
+    scan_calls = [
+        c for c in _set_metadata_calls(project_repo)
+        if c[0] == _SYSTEM_DEFAULT_PID and c[1] == _SCAN_LAST_RUN_KEY
+    ]
+    assert scan_calls == [], (
+        f"expected no last_run persist when disabled, got {scan_calls}"
+    )
+    # The whole scan was a no-op: no coordinator, no per-project calls.
+    coordinator.try_claim.assert_not_called()
+    blueprint_repo.list_by_project.assert_not_called()
+    pending_repo.get_pending_count.assert_not_called()
+
+
+def test_scan_persists_even_with_no_active_projects(
+    blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service,
+):
+    """Edge case: the scan ran but no projects opted in. The persist
+    must still fire — the scan DID run, and the next restart should
+    honor that 24h interval regardless of how many projects it touched.
+    """
+    # No projects in the repo at all.
+    project_repo.list_projects = MagicMock(return_value=[])
+    project_repo.set_metadata = MagicMock()
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+        job_queue_service=job_queue_service,
+    )
+    _run(svc.execute())
+
+    # Coordinator saw nothing (no active projects) — but the persist
+    # MUST have happened anyway.
+    coordinator.try_claim.assert_not_called()
+    scan_calls = [
+        c for c in _set_metadata_calls(project_repo)
+        if c[0] == _SYSTEM_DEFAULT_PID and c[1] == _SCAN_LAST_RUN_KEY
+    ]
+    assert len(scan_calls) == 1, (
+        f"expected persist to run even with zero projects, got {scan_calls}"
+    )
+
+
+def test_scan_persist_failure_does_not_abort_execute(
+    blueprint_repo, pending_repo, coordinator, project_repo, job_queue_service,
+):
+    """A failure in the metadata write must NOT propagate. The scan
+    itself succeeded; the persist is best-effort bookkeeping.
+    """
+    blueprint_repo.list_by_project = MagicMock(return_value=[])
+    pending_repo.get_pending_count = MagicMock(return_value=0)
+
+    # Make set_metadata raise — simulate a transient DB hiccup.
+    project_repo.set_metadata = MagicMock(
+        side_effect=RuntimeError("DB temporarily unavailable"),
+    )
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+        job_queue_service=job_queue_service,
+    )
+    # Must not raise — the catch in execute() swallows the persist
+    # error so the rest of the scan and the in-memory last_run update
+    # still succeed.
+    _run(svc.execute())
+
+    # The scan still did its work despite the persist failure.
+    assert coordinator.try_claim.call_count == 2
+    assert project_repo.set_metadata.call_count == 1

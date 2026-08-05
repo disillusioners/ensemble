@@ -67,6 +67,39 @@ class TestMaintenanceServiceRegistration:
         assert service._jobs[0].name == "job1"
         assert service._jobs[1].name == "job2"
 
+    def test_register_accepts_last_run_parameter(self):
+        """``register(last_run=...)`` seeds the job's ``last_run`` field
+        so callers that have persisted a prior run time can avoid
+        re-firing on restart. Default behavior (``last_run=None``)
+        remains unchanged for existing callers.
+        """
+        service = MaintenanceService(check_interval_minutes=15)
+        execute_fn = AsyncMock()
+        prior_run = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+        service.register(
+            "scanned_job",
+            min_interval_hours=24.0,
+            execute_fn=execute_fn,
+            last_run=prior_run,
+        )
+
+        assert len(service._jobs) == 1
+        job = service._jobs[0]
+        assert job.name == "scanned_job"
+        assert job.min_interval_hours == 24.0
+        # The seeded timestamp is preserved verbatim — caller has
+        # already done any parsing/validation.
+        assert job.last_run == prior_run
+        assert job.last_run is not None  # not reset to None
+        assert job.execute_fn is execute_fn
+
+        # A second registration without ``last_run`` still defaults to
+        # None — proves the new parameter is optional, not a breaking
+        # signature change.
+        service.register("fresh_job", min_interval_hours=1.0, execute_fn=AsyncMock())
+        assert service._jobs[1].last_run is None
+
 
 class TestMaintenanceServiceLifecycle:
     """Tests for start/stop functionality."""

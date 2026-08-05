@@ -115,6 +115,37 @@ class BlueprintScanService:
                     project_id, exc,
                 )
 
+        # Persist last_run so the scan doesn't fire immediately on
+        # restart. The MaintenanceService keeps ``last_run`` in memory
+        # only — without this, a daemon restart would re-arm the
+        # 24h-interval clock and run the scan as soon as the worker
+        # loop next ticks. The timestamp lives in project metadata KV
+        # on the system default project (a bookkeeping home — the scan
+        # itself never operates on it).
+        #
+        # Wrapped in ``asyncio.to_thread`` because
+        # ``SQLModelProjectRepository.set_metadata`` is sync SQLAlchemy
+        # (ADR-12) — calling it directly would block the event loop on
+        # the project DB write. Failure is non-fatal: if the metadata
+        # write fails we log + swallow; the next scan will retry the
+        # persist and the in-memory ``last_run`` still updates
+        # immediately after execute() returns.
+        _SCAN_LAST_RUN_KEY = "blueprint_scan_last_run"
+        _SYSTEM_DEFAULT_PID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+        try:
+            from datetime import datetime, timezone
+            await asyncio.to_thread(
+                self._project_repository.set_metadata,
+                _SYSTEM_DEFAULT_PID,
+                _SCAN_LAST_RUN_KEY,
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            logger.warning(
+                "BlueprintScanService: failed to persist last_run timestamp",
+                exc_info=True,
+            )
+
     # ── Internals ─────────────────────────────────────────────────────
 
     async def _get_active_projects(self) -> list[str]:
