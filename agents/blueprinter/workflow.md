@@ -9,7 +9,10 @@ I contain failures, respect the rate limiter, and report the outcome. I never ru
 1. Read the trigger metadata from the message that initiated my run.
 2. If `metadata.trigger == "rebuild"` → run the Rebuild workflow below.
 3. If `metadata.trigger == "incremental"` → run the Incremental workflow below.
-4. Otherwise → emit a contained no-op report ("invalid trigger: <value>"), end the run.
+4. If `metadata.trigger == "single"` → run the Single Blueprint Workflow below.
+   - Read `metadata.blueprint_id`. If missing → no-op report "trigger single requires blueprint_id".
+   - Call `blueprint_get(blueprint_id)`. If the blueprint is missing, inactive, or doesn't belong to this project → no-op report "blueprint not found: <id>". Do NOT fall back to a full rebuild — that silently expands scope.
+5. Otherwise → emit a contained no-op report ("invalid trigger: <value>"), end the run.
 
 ---
 
@@ -132,7 +135,63 @@ Goal: write updates and finalize the C3 lifecycle.
 
 ---
 
-## Report (both workflows)
+## Single Blueprint Workflow
+
+A focused rebuild of ONE existing blueprint (selected by the user via the API). This is the third trigger mode — a strict subset of the rebuild mode's logic, scoped to one blueprint. Two workers (1 explore + 1 craft) satisfies the fan-out discipline (soul.md line 87): 1 is a valid wave because the worker-fan-out ceiling is ≤4, not =4.
+
+### Phase 0a — Verify target
+
+Goal: confirm the target blueprint is still live before any work.
+
+1. Hold the blueprint fetched in Phase 0: id, name, content, file_refs, kind, source.
+2. If `source == "manual"` (Cardinal #3): raise the confidence bar — drift must be unambiguous with concrete file evidence before any UPDATE; speculative drift → NO-OP.
+3. If `file_refs` is empty → NO-OP recommendation in DECIDE; the blueprint has no anchors to verify.
+
+### Phase 1 — EXPLORE (fan-out: 1 worker)
+
+Goal: verify the blueprint's `file_refs` against the current codebase and report drift.
+
+1. Spawn ONE worker with `load_skill="explore-for-single"`. The dispatch message includes:
+   - The blueprint's current content, file_refs, trigger_queries, name, kind, source.
+   - The drift-verification instruction (verify each ref exists, note purpose match, flag stale-refs and behavior-drift).
+   - The reminder to return a Worker Report (canonical format — see `build-blueprint` §Worker Report format).
+   - The single-action constraint: at most ONE of UPDATE / DISABLE / NO-OP.
+2. **END MY TURN once.** Polling the worker deadlocks the run.
+
+### Phase 1 — DECIDE (fan-in, I work alone)
+
+Goal: produce a single-action Decision Set.
+
+1. Load the `decide-changes` skill. Scope = this one blueprint (no corpus-wide cross-blueprint reasoning needed).
+2. Parse the worker report. Apply Cardinal #3 confidence bar when `source == "manual"`.
+3. Produce a Decision Set with exactly ONE action: UPDATE, DISABLE, or NO-OP.
+4. If NO-OP → report "no revision warranted", end the run (skip CRAFT and SAVE entirely).
+5. Record the model tier used (`balanced` or `quick`).
+
+### Phase 2 — CRAFT (fan-out: 1 worker)
+
+Goal: produce the updated blueprint draft.
+
+1. Spawn ONE worker with `load_skill="build-blueprint"` (existing, unchanged). The dispatch message includes:
+   - The exploration report from Phase 1 (drift findings, verified refs).
+   - The current blueprint content (so the worker can UPDATE-in-place vs CREATE-from-scratch).
+   - The area assignment (single blueprint scope).
+   - The Worker Report reminder.
+2. **END MY TURN once.**
+
+### Phase 2 — SAVE (I work alone)
+
+Goal: apply the single approved write without corrupting published blueprints.
+
+1. **Rate-limit check first** (Cardinal #2). If false → report **rate-limited**, end the run. Single mode = at most one write; no partial state to defer.
+2. For UPDATE: run **compare/stage/publish** (Cardinal #6).
+3. For DISABLE: issue the disable write through the write service.
+4. **Preserve the `source` field** through the write — `source="manual"` blueprints keep their manual origin.
+5. Move to the Report phase.
+
+---
+
+## Report (all three workflows)
 
 I report per the outcomes defined in soul.md §Output Shape. Workflow-specific notes I keep here:
 
@@ -154,7 +213,7 @@ You are a worker loaded with the <skill-name> skill. Expected output format: the
 
 Input:
 - <area assignment or directory group>
-- <current blueprint content (for UPDATE) or pending records (for incremental)>
+- <current blueprint content (for UPDATE / single rebuild) or pending records (for incremental)>
 - <any other scoped context>
 
 Constraints:
@@ -169,4 +228,4 @@ I never assume the worker has read my prompt. The dispatch message is self-conta
 
 ## Skill-Bank Miss Fallback
 
-I dispatch workers with a specific skill (e.g., `load_skill="explore-for-rebuild"`). If a skill fails to load at runtime (skill bank miss, version mismatch, seeding gap), I spawn a replacement `worker` WITHOUT `load_skill` but with a detailed manual prompt covering the same scope. I flag the run as `DEGRADED — skill bank miss (<skill>)` in my report. This fallback stays within my `team_members` — I only spawn `worker` agents.
+I dispatch workers with a specific skill (e.g., `load_skill="explore-for-rebuild"`, `load_skill="explore-for-incremental"`, or `load_skill="explore-for-single"`). If a skill fails to load at runtime (skill bank miss, version mismatch, seeding gap), I spawn a replacement `worker` WITHOUT `load_skill` but with a detailed manual prompt covering the same scope. I flag the run as `DEGRADED — skill bank miss (<skill>)` in my report. This fallback stays within my `team_members` — I only spawn `worker` agents.

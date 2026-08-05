@@ -340,6 +340,77 @@ export class BlueprintService {
   }
 
   /**
+   * POST /api/projects/{project_id}/blueprints/{blueprint_id}/rebuild
+   *
+   * Enqueues a single-blueprint rebuild — a focused rewrite of ONE
+   * blueprint (vs :meth:`rebuild` which scans the whole project).
+   * Shares the C7 project-level lease with ``/rebuild`` and
+   * ``/update``: coalesces with itself (deduplicates rapid retries
+   * for the same project) and conflicts (409) with ``/rebuild`` or
+   * ``/update`` while they are in flight. Two singles for DIFFERENT
+   * blueprints coalesce onto the first — known limitation, response
+   * status is still ``already_in_progress``.
+   *
+   * Outcomes mirror :meth:`rebuild` plus:
+   *   * 404 — blueprint not found, OR belongs to a different
+   *     project, OR is soft-deleted (``is_active=False``).
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *     blueprintId: Blueprint UUID (the target of the single rebuild).
+   *
+   * Returns:
+   *     Observable<BlueprintJobResponse> — re-thrown on error so the
+   *     component can render a status-specific snackbar.
+   */
+  rebuildSingle(
+    projectId: string,
+    blueprintId: string,
+  ): Observable<BlueprintJobResponse> {
+    return this.http
+      .post<BlueprintJobResponse>(
+        `${this.baseUrl(projectId)}/${encodeURIComponent(blueprintId)}/rebuild`,
+        {},
+      )
+      .pipe(
+        catchError((err) => {
+          if (err?.status === 409) {
+            this.error.set(
+              'Another blueprint operation is in progress',
+            );
+            return throwError(
+              () =>
+                makeHttpStatusError(
+                  409,
+                  'Another blueprint operation is in progress',
+                ),
+            );
+          }
+          if (err?.status === 404) {
+            return throwError(
+              () =>
+                makeHttpStatusError(
+                  404,
+                  'Blueprint not found',
+                ),
+            );
+          }
+          // Generic / unexpected (5xx, network, etc.) — see the same
+          // branch in :meth:`rebuild` for why we wrap with a friendly
+          // message instead of re-throwing the raw HttpErrorResponse.
+          this.error.set('Failed to queue blueprint rebuild. Please try again.');
+          return throwError(
+            () =>
+              makeHttpStatusError(
+                err?.status ?? 0,
+                'Failed to queue blueprint rebuild. Please try again.',
+              ),
+          );
+        }),
+      );
+  }
+
+  /**
    * PUT /api/projects/{project_id}/blueprints/{blueprint_id}
    *
    * Partial update — only the fields present on ``data`` are sent.

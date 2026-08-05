@@ -346,6 +346,16 @@
           </div>
           <div class="detail-toolbar-actions">
             @if (!editing()) {
+              <button mat-icon-button
+                      (click)="rebuildSingle()"
+                      [disabled]="singleRebuilding() || !bp.is_active"
+                      matTooltip="Rebuild this blueprint">
+                @if (singleRebuilding()) {
+                  <mat-spinner diameter="18"></mat-spinner>
+                } @else {
+                  <mat-icon>refresh</mat-icon>
+                }
+              </button>
               <button mat-stroked-button (click)="onEdit()" [disabled]="!bp.is_active">
                 <mat-icon>edit</mat-icon> Edit
               </button>

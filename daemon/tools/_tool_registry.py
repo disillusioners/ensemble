@@ -34,6 +34,13 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "rag_delete_docs",
     "rag_list_docs",
     "rag_track_status",
+    # db_* tools are created by create_db_tools() per-instance factory, not
+    # registered at import time; see daemon/tools/db_tools.py.
+    "db_conn_add",
+    "db_conn_delete",
+    "db_conn_list",
+    "db_conn_test",
+    "db_postgres_dml_select",
     "tool_help",
     "explore",
     "experience",

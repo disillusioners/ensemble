@@ -1107,3 +1107,327 @@ class TestInitializeDeprecation:
         assert "already initialized" in r.json()["detail"].lower()
         # Enqueue must NOT have been called.
         coordinator_client.app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 5: POST /{blueprint_id}/rebuild (single-blueprint rebuild)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestSingleRebuildEndpoint:
+    """POST /api/projects/{project_id}/blueprints/{blueprint_id}/rebuild.
+
+    Mirrors ``TestRebuildEndpoint`` (coordinator routing + lease release
+    on enqueue failure) plus the ownership + is_active check that runs
+    BEFORE the coordinator claim.
+
+    The new endpoint MUST be declared BEFORE the GET catch-all so route
+    shadowing doesn't redirect the POST to ``GET /{blueprint_id}``.
+    These tests pin that ordering: every test below hits the POST path
+    directly and would fail (404 from the GET handler) if the route
+    ordering regressed.
+    """
+
+    @staticmethod
+    def _create_active_bp(
+        repo: BlueprintRepository,
+        project: str = "00000000-0000-0000-0000-000000000001",
+        slug: str = "alpha",
+        kind: str = "area",
+    ):
+        return repo.create(
+            project_id=project,
+            slug=slug,
+            name=slug,
+            kind=kind,
+            content="body",
+        )
+
+    def test_single_rebuild_success(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Active blueprint, opted-in project → 202 with mode='single'."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["mode"] == "single"
+        assert body["blueprint_id"] == bp.id
+        # The job_id returned by enqueue (mock), not the coordinator's id.
+        assert body["job_id"] == "job-456"
+        # Coordinator was called with mode='single'.
+        calls = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == "00000000-0000-0000-0000-000000000001"
+        assert calls[0][1] == "single"
+
+    def test_single_rebuild_not_found(
+        self, coordinator_client, coordinator_app,
+    ):
+        """Unknown blueprint_id → 404, coordinator never reached."""
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/does-not-exist/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        # No coordinator work, no enqueue.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_wrong_project(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Blueprint belongs to a different project → 404 (no leak)."""
+        # Create blueprint in a DIFFERENT project.
+        other_bp = self._create_active_bp(
+            repo,
+            project="00000000-0000-0000-0000-000000000002",
+            slug="other",
+        )
+        # Try to rebuild it via the canonical (project 1) project_id.
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{other_bp.id}/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_conflict(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Different-mode in-flight → 409."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=False,
+                conflict_mode="rebuild",
+            )
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 409, r.text
+        assert "rebuild" in r.json()["detail"]
+        # Coordinator was NOT asked to release — the claim never succeeded.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.release.assert_not_called()
+
+    def test_single_rebuild_coalesced(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Same-mode in-flight → 202 with status=already_in_progress."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=True,
+                job_id="inflight-single", run_token=None,
+            )
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "already_in_progress"
+        assert body["mode"] == "single"
+        assert body["blueprint_id"] == bp.id
+        assert body["job_id"] == "inflight-single"
+        # No enqueue should have happened.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_inactive_project(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Project not opted in to blueprint system → 400, coordinator not reached."""
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=None)
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        # The coordinator must never be reached (gate is BEFORE claim).
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+        # And the gate queried the right key.
+        meta_calls = coordinator_app.state.manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY for call in meta_calls
+        ), meta_calls
+
+    def test_single_rebuild_deleted_blueprint(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Soft-deleted blueprint (is_active=False) → 404."""
+        bp = self._create_active_bp(repo, slug="deleted")
+        # Soft-delete via the write service so the canonical path is
+        # exercised (sets is_active=False + records a revision).
+        repo.soft_delete(bp.id)
+        # Sanity: blueprint now is_active=False.
+        from sqlalchemy import text as _text
+        with repo.engine.begin() as conn:
+            row = conn.execute(
+                _text("SELECT is_active FROM project_blueprints WHERE id = :i"),
+                {"i": bp.id},
+            ).fetchone()
+        assert row is not None and row[0] == 0
+
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        # Same 404 detail as the wrong-project test — no info leak.
+        assert bp.id in r.json()["detail"] or "not found" in r.json()["detail"].lower()
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_enqueue_failure_releases_claim(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Enqueue failure → 404 + lease released with the right token."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token-release-me")
+        )
+        # Force the background queue lookup to miss → enqueue raises
+        # HTTPException → coordinator.release called in except branch.
+        coordinator_app.state.manager._job_queue_service._queue_repo.get_by_name = (
+            MagicMock(return_value=None)
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        releases = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.release_calls
+        )
+        assert (
+            "00000000-0000-0000-0000-000000000001",
+            "c-token-release-me",
+        ) in releases
+
+    def test_single_rebuild_forwards_blueprint_id_to_metadata(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """The enqueue metadata MUST carry blueprint_id so the worker
+        knows which blueprint to fetch via blueprint_get.
+
+        Regression guard for the metadata contract: a stale-snapshot
+        race would be created if the worker had to look up the
+        blueprint via something other than a live ``blueprint_get``.
+        """
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        enqueue_mock = coordinator_app.state.manager._job_queue_service.enqueue
+        assert enqueue_mock.call_count == 1
+        metadata = enqueue_mock.call_args.kwargs.get("metadata", {})
+        assert metadata.get("trigger") == "single"
+        assert metadata.get("blueprint_id") == bp.id
+        # run_token is also forwarded for the coordinator release path.
+        assert metadata.get("run_token") == "c-token"
+
+    def test_single_rebuild_forwards_job_id_to_enqueue(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """The router-generated job_id must flow through to enqueue so
+        the lease's job_id matches the enqueued JobItem's id.
+
+        Mirrors :meth:`TestRebuildEndpoint.test_rebuild_forwards_job_id_to_enqueue`
+        for the single-mode path.
+        """
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+
+        try_claim_calls = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        )
+        assert len(try_claim_calls) == 1
+        forwarded_job_id = try_claim_calls[0][2]
+        assert forwarded_job_id
+
+        enqueue_mock = coordinator_app.state.manager._job_queue_service.enqueue
+        assert enqueue_mock.call_count == 1
+        enqueue_kwargs = enqueue_mock.call_args.kwargs
+        assert enqueue_kwargs.get("job_id") == forwarded_job_id
+
+    def test_single_rebuild_invalid_project_id(
+        self, coordinator_client, coordinator_app,
+    ):
+        """Non-UUID project_id → 400, coordinator untouched."""
+        r = coordinator_client.post(
+            "/api/projects/not-a-uuid/blueprints/anything/rebuild"
+        )
+        assert r.status_code == 400
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
+    def test_single_rebuild_rejects_default_project(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """System default project is rejected with 400 before any
+        coordinator work — mirrors the /rebuild + /update guard."""
+        import uuid as _uuid
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+        default_project_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME)
+        )
+        # Create a blueprint against the default project id so the
+        # ownership check would otherwise pass.
+        bp = self._create_active_bp(
+            repo,
+            project=default_project_id,
+            slug="default-core",
+            kind="core",
+        )
+
+        default_project = MagicMock()
+        default_project.project_id = default_project_id
+        default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+        coordinator_app.state.manager._project_repository = MagicMock()
+        coordinator_app.state.manager._project_repository.get = MagicMock(
+            return_value=default_project,
+        )
+
+        r = coordinator_client.post(
+            f"/api/projects/{default_project_id}/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "default project" in r.json()["detail"].lower()
+        # The coordinator must never be reached.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_coordinator_unavailable(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """No coordinator wired → 503 (ownership check passes first)."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator = None
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 503
+        assert "coordinator" in r.json()["detail"].lower()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()

@@ -19,7 +19,7 @@
 5. **Prefer no-op over speculative revision.** Missing evidence is not evidence of drift. A weak signal is not a write.
 6. **High-value vs low-value content.** High-value = stable architectural knowledge that recurs across multiple tasks (promote to a blueprint). Low-value = implementation detail that changes frequently (skip or split into a small area blueprint).
 7. **Disable = soft retirement.** I reserve disable for stale or irrelevant blueprints with persistent low-match evidence, not as a response to one weak signal.
-8. **Trigger surface is fixed.** I accept exactly two triggers: `rebuild` and `incremental`. Any other value is a contained no-op.
+8. **Trigger surface is fixed.** I accept exactly **three** triggers: `rebuild`, `incremental`, and `single`. Any other value is a contained no-op.
 9. **First build is a rebuild.** When an incremental trigger arrives but the corpus is empty or bare-core, I release the pending claim and switch to a rebuild. There is no separate bootstrap path.
 10. **Skill version consistency.** The skill version in each `.md` frontmatter is the source of truth; any listing of my skills must match that version.
 11. **Skill-bank miss fallback.** If `load_skill` fails to resolve (skill bank miss, version mismatch, seeding gap), I spawn a `worker` without `load_skill` and a manual prompt covering the same scope; I flag the run `DEGRADED — skill bank miss (<skill>)` in the report. The fallback stays within my `team_members` (I only spawn `worker`).

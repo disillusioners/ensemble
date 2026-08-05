@@ -1,21 +1,40 @@
 """C7 — Unified Blueprint Trigger Coordinator.
 
 A single chokepoint for all blueprint build enqueuing. Every trigger
-surface (manual ``/rebuild``, ``/update``, ``/scan``, the daily
-maintenance scan, the high-water threshold) MUST call
-``coordinator.try_claim()`` before enqueuing a blueprinter job. The
-coordinator guarantees:
+surface (manual ``/rebuild``, ``/{blueprint_id}/rebuild``, ``/update``,
+``/scan``, the daily maintenance scan, the high-water threshold) MUST
+call ``coordinator.try_claim()`` before enqueuing a blueprinter job.
+The coordinator guarantees:
 
 * **Atomic project claim** — at most one build per project at a time.
 * **Coalescing** — a second claim for the same mode returns the
   in-flight ``job_id`` instead of enqueuing a duplicate.
 * **Cross-mode conflict** — a claim for a different mode (e.g.
-  ``incremental`` while a ``rebuild`` is in flight) returns
-  ``conflict_mode`` so the caller can decide (e.g. 409).
+  ``incremental`` while a ``rebuild`` is in flight, or ``single`` while
+  any mode is in flight) returns ``conflict_mode`` so the caller can
+  decide (e.g. 409).
 * **Terminal release** — the blueprinter calls ``release()`` with its
   ``run_token`` on success/failure/cancel.
 * **Startup reconciliation** — on daemon start, leases whose backing
   job is gone (or already terminal) are released.
+
+Supported modes
+---------------
+
+The coordinator is mode-string-generic — ``try_claim`` dispatches on
+plain string equality (``existing.get("mode") == mode``). Three modes
+are in active use:
+
+* ``"rebuild"`` — full project-wide rebuild (``POST /rebuild``).
+* ``"incremental"`` — process accumulated pending-experience records
+  (``POST /update``).
+* ``"single"`` — rebuild exactly ONE blueprint identified by
+  ``metadata.blueprint_id`` (``POST /{blueprint_id}/rebuild``).
+  Coalesces with itself (deduplicates rapid retries for the same
+  project) and conflicts with ``"rebuild"`` / ``"incremental"``. Two
+  ``"single"`` triggers for DIFFERENT blueprints coalesce onto the
+  first — a known limitation; a per-``(project_id, blueprint_id)``
+  lease is a follow-up.
 
 Lease lifecycle
 ---------------
@@ -211,7 +230,13 @@ class BlueprintTriggerCoordinator:
 
         Args:
             project_id: Project whose blueprint set is being built.
-            mode: ``"rebuild"`` or ``"incremental"``.
+            mode: ``"rebuild"``, ``"incremental"``, or ``"single"``.
+                ``"single"`` is a third valid mode that targets one
+                specific blueprint (via ``metadata.blueprint_id``) for
+                a focused rebuild — it coalesces with itself and
+                conflicts with ``"rebuild"`` / ``"incremental"``. The
+                coordinator is mode-string-generic; the lease semantics
+                are uniform across all three.
             job_id: The caller-chosen UUID for the would-be blueprinter
                 job. Echoed back as ``ClaimResult.job_id`` on a fresh
                 claim; preserved for caller-side correlation.

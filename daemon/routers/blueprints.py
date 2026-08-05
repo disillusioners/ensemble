@@ -254,6 +254,7 @@ async def _enqueue_blueprinter_job(
     message: str,
     run_token: str | None = None,
     job_id: str | None = None,
+    blueprint_id: str | None = None,
 ) -> str:
     """Look up the background queue and enqueue a blueprinter job.
 
@@ -261,7 +262,7 @@ async def _enqueue_blueprinter_job(
     :func:`daemon.services.blueprint_job_helper.enqueue_blueprinter_job`
     and converts :class:`BlueprintEnqueueError` to the right
     :class:`HTTPException`. Shared by ``/initialize`` (legacy), ``/scan``,
-    ``/rebuild``, and ``/update``.
+    ``/rebuild``, ``/update``, and ``/{blueprint_id}/rebuild``.
 
     Args:
         manager: The InstanceManager (provides ``_job_queue_service``).
@@ -280,6 +281,10 @@ async def _enqueue_blueprinter_job(
             behavior for ``/initialize`` and ``/scan`` which do NOT
             route through the coordinator and therefore have no lease
             to align with.
+        blueprint_id: Optional target blueprint id for the ``"single"``
+            trigger mode (used by ``/{blueprint_id}/rebuild``). Forwarded
+            to the helper so the metadata carries it; the blueprinter
+            then fetches the live record via ``blueprint_get``.
 
     Returns:
         The ``job_id`` string of the enqueued job.
@@ -293,6 +298,7 @@ async def _enqueue_blueprinter_job(
             run_token=run_token,
             job_id=job_id,
             source="admin-endpoint",
+            blueprint_id=blueprint_id,
         )
     except BlueprintEnqueueError as e:
         # Map to HTTP status: "not available" = 503 (service missing),
@@ -337,6 +343,130 @@ async def list_blueprints(
         items=[_blueprint_to_response(b) for b in items],
         total=len(items),
     )
+
+
+# ─── Single blueprint rebuild (Phase 5 single-mode trigger) ─────────────
+# IMPORTANT ROUTE ORDERING: this POST must be declared BEFORE the
+# catch-all ``@router.get("/{blueprint_id}")`` below — otherwise FastAPI
+# matches the GET against ``/{blueprint_id} = "rebuild"`` first and the
+# new endpoint is unreachable. The comment ties the declaration order
+# to shadowing prevention (architecture doc, risks table).
+
+
+@router.post("/{blueprint_id}/rebuild", response_model=dict, status_code=202)
+async def rebuild_single_blueprint(
+    request: Request,
+    project_id: str,
+    blueprint_id: str,
+):
+    """Trigger a rebuild for ONE specific blueprint.
+
+    New C7 coordinator mode ``"single"``: shares the project-level
+    lease — coalesces with itself (deduplicates rapid retries) and
+    conflicts with ``"rebuild"`` / ``"incremental"`` (prevents
+    concurrent ops on the same project). Two singles for DIFFERENT
+    blueprints coalesce onto the first (the second blueprint is NOT
+    rebuilt) — a known limitation; a per-``(project_id, blueprint_id)``
+    lease is a follow-up.
+
+    Outcomes:
+
+    * ``202`` ``status="accepted"`` — claim acquired, job enqueued
+      (response also carries ``mode="single"`` and ``blueprint_id``).
+    * ``202`` ``status="already_in_progress"`` — a single rebuild is
+      already in flight; ``job_id`` points to the in-flight job.
+    * ``400`` — invalid project id OR project has not opted in to the
+      blueprint system OR project is the system default.
+    * ``404`` — blueprint not found, OR belongs to a different
+      project, OR is soft-deleted (``is_active=False``).
+    * ``409`` — a rebuild/incremental of a different mode is in
+      flight (``conflict_mode`` is reported in the detail).
+    * ``503`` — the trigger coordinator or job service is not wired.
+
+    On enqueue failure the lease is released so a subsequent request
+    can retry.
+    """
+    _validate_project_id(project_id)
+    manager = _get_manager(request)
+    await _check_default_project_blocked(manager, project_id)
+    await _check_blueprint_active(manager, project_id)
+
+    # Ownership + active check before any coordinator work. Mirrors the
+    # security pattern in update_blueprint / delete_blueprint:
+    # fetch + verify project_id match + is_active. 404 (NOT 403) on
+    # mismatch so cross-project existence is not leaked; the same code
+    # for missing vs. wrong-project vs. inactive.
+    repo = manager._blueprint_repo
+    bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
+    if bp is None or bp.project_id != project_id or not bp.is_active:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Blueprint not found in project '{project_id}'",
+        )
+
+    coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trigger coordinator not available",
+        )
+
+    job_id = str(uuid.uuid4())
+    result: ClaimResult = await coordinator.try_claim(
+        project_id, "single", job_id
+    )
+
+    # Coalesced: a single rebuild is already in flight for this project.
+    if result.coalesced:
+        return {
+            "job_id": result.job_id,
+            "status": "already_in_progress",
+            "mode": "single",
+            "blueprint_id": blueprint_id,
+        }
+
+    # Cross-mode conflict: e.g. a rebuild or incremental build is running.
+    if not result.claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Blueprint {result.conflict_mode} already in progress",
+        )
+
+    # Claim acquired — enqueue the blueprinter job. On any failure
+    # (queue missing, job service down), release the lease so the next
+    # call can reclaim it.
+    try:
+        enqueued_job_id = await _enqueue_blueprinter_job(
+            manager=manager,
+            project_id=project_id,
+            trigger_type="single",
+            message=(
+                f"Rebuild a single blueprint.\n\n"
+                f"Blueprint ID: {blueprint_id}\n\n"
+                "Read the blueprint via blueprint_get, explore its area, "
+                "and rewrite it with fresh content and trigger queries. "
+                "Respect the rate limit.\n[trigger: single]"
+            ),
+            run_token=result.run_token,
+            job_id=job_id,  # forward the caller-generated id so the lease's
+                            # job_id matches the enqueued JobItem's id
+            blueprint_id=blueprint_id,
+        )
+    except HTTPException:
+        await coordinator.release(project_id, result.run_token)
+        raise
+    except Exception:
+        # Defensive: enqueue may raise non-HTTPException (e.g. DB error).
+        # Don't leak the lease.
+        await coordinator.release(project_id, result.run_token)
+        raise
+
+    return {
+        "job_id": enqueued_job_id,
+        "status": "accepted",
+        "mode": "single",
+        "blueprint_id": blueprint_id,
+    }
 
 
 @router.get("/{blueprint_id}", response_model=BlueprintResponse)

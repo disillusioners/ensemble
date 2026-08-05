@@ -40,6 +40,7 @@ async def enqueue_blueprinter_job(
     run_token: str | None = None,
     job_id: str | None = None,
     source: str = "admin-endpoint",
+    blueprint_id: str | None = None,
 ) -> str:
     """Look up the background queue and enqueue a blueprinter job.
 
@@ -62,6 +63,11 @@ async def enqueue_blueprinter_job(
             ``enqueue()`` generates its own UUID.
         source: Job ``source`` value. ``"admin-endpoint"`` for the REST
             router path (default), ``"auto-scan"`` for the scan service.
+        blueprint_id: Optional target blueprint id for the
+            ``"single"`` trigger mode. When set, the blueprinter uses
+            ``blueprint_get(blueprint_id)`` to fetch the live record at
+            the start of its run (we do NOT embed content or file_refs
+            in the metadata — that would create a stale-snapshot race).
 
     Returns:
         The ``job_id`` string of the enqueued job.
@@ -82,6 +88,13 @@ async def enqueue_blueprinter_job(
     metadata: dict[str, Any] = {"trigger": trigger_type, "source": source}
     if run_token:
         metadata["run_token"] = run_token
+    if blueprint_id:
+        # Target blueprint id for the "single" trigger mode. The blueprinter
+        # fetches the live record via blueprint_get(blueprint_id) at the
+        # start of its run; we deliberately do NOT embed content or file_refs
+        # here (that would create a stale-snapshot race by the time the
+        # worker runs).
+        metadata["blueprint_id"] = blueprint_id
 
     try:
         job = await job_queue_service.enqueue(

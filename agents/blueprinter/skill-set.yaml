@@ -10,6 +10,11 @@ skills:
     auto_load: false
     category: execution
     description: "Worker skill: explore specific changed areas from pending-experience records — what changed, what blueprints are affected, what's stale. Returns a structured Worker Report."
+  - name: explore-for-single
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: targeted verification of ONE blueprint's file_refs and immediate area. Reports drift findings (stale-ref, behavior-drift, missing-coverage, scope-drift) for single-blueprint rebuild. Single-action recommendation (UPDATE / DISABLE / NO-OP)."
   - name: build-blueprint
     version: "1.0.0"
     auto_load: false
