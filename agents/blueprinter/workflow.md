@@ -133,19 +133,25 @@ Goal: take ownership of a bounded pending batch.
 
 ### Phase 1 — EXPLORE (fan-out)
 
-Goal: analyze the pending records and report which blueprints are affected.
+Goal: analyze the pending records, check blueprint coverage, and report which blueprints need updates or creation.
 
-1. **Split the pending records into ≤4 groups by topic or module similarity.** If a group spans unrelated topics, the analysis will be muddier — keep topics tight.
-2. **For each group: spawn a worker with `load_skill="explore-for-incremental"`**. The dispatch message includes:
+1. **For each pending record group, check coverage first.** Before spawning workers, use `blueprint_search` with keywords from the pending record to determine whether any existing blueprint covers this topic.
+   - If an existing blueprint matches → the worker should assess it for UPDATE (existing behavior).
+   - If NO existing blueprint matches a significant architectural area → the worker should explore that area for a potential CREATE.
+2. **Split the pending records into ≤4 groups by topic or module similarity.** Group records that describe the same architectural area together. A group may contain both "update existing" and "explore new" records.
+3. **For each group: spawn a worker with `load_skill="explore-for-incremental"`**. The dispatch message includes:
    - The pending records' full text (for the group)
-   - The current blueprint content for the affected areas
-   - The relevant file references and trigger queries
+   - The current blueprint content for matching areas (if any)
+   - Whether this group is an UPDATE assessment or a NEW-AREA exploration (or both)
+   - For NEW-AREA explorations: the worker should focus on exploring the codebase area described by the pending records, gathering enough architectural information for a new blueprint
    - The reminder to return a Worker Report
-3. **END MY TURN once for the batch.**
+4. **END MY TURN once for the batch.**
 
 ### Phase 1 — DECIDE (fan-in)
 
 Same as the Rebuild Path DECIDE step. Load `decide-changes`, apply the framework, produce a Decision Set.
+
+The Decision Set now includes both UPDATE actions (existing blueprints with drift) AND CREATE actions (new areas discovered from pending records that have no existing blueprint coverage). The `decide-changes` skill's decision matrix handles both.
 
 ### Phase 2 — CRAFT (fan-out)
 

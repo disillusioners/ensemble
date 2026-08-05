@@ -23,6 +23,15 @@ For each reported area, choose exactly one action:
 | **Disable** | A blueprint has persistent staleness or confirmed irrelevance — soft-retires it without deleting history |
 | **No-op** | Evidence is insufficient or current content remains accurate — do nothing |
 
+## Incremental CREATE Guidance
+
+During incremental runs, a pending record may describe a significant architectural area not covered by any existing blueprint. When this happens:
+
+1. **Verify no existing coverage.** Use `blueprint_search` with keywords from the pending record. Only decide CREATE if the search returns no relevant match.
+2. **Assess significance.** Only CREATE for significant architectural areas — e.g., a major subsystem (job queue, authentication, persistence), a new module pattern, or a cross-cutting concern. Do NOT create a blueprint for minor fixes, routine changes, or implementation details.
+3. **Require exploration evidence.** A CREATE decision requires the explore worker to have gathered enough architectural information (file structure, entry points, key patterns) to fill a 200-500 word blueprint. If the exploration is thin, defer to NO-OP.
+4. **Respect rate limits.** Each CREATE counts against the write budget. If rate-limited, defer remaining CREATEs to the next incremental run.
+
 ## Priority Rules
 
 1. **`core.md` is highest priority** — review it first whenever any drift is present. If a worker's report touches `core.md`, you decide on it before any area blueprint.

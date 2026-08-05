@@ -23,6 +23,7 @@ Return a **Worker Report** in the exact structure defined in `build-blueprint` �
 2. **Affected blueprints** — which existing blueprints need updating and why (concrete drift, not speculation).
 3. **Stale references** — file paths in current blueprints that no longer exist or have moved.
 4. **New areas** — architectural concerns the pending records reveal that no existing blueprint covers.
+5. **New-area exploration depth** — when a pending record describes an area with no existing blueprint, explore the codebase to gather: key files and entry points, primary patterns, dependencies, and the area's scope boundary. The exploration must be deep enough for a `build-blueprint` worker to write a 200-500 word blueprint. If you cannot gather enough information from the pending record + codebase, report "insufficient information for CREATE" and let the blueprinter decide NO-OP.
 
 ## Constraints
 
@@ -37,6 +38,7 @@ Return a **Worker Report** in the exact structure defined in `build-blueprint` �
 For each pending record in your group, ask:
 
 - Does it describe a new module, service, or file? → Likely a CREATE candidate.
+- For CREATE candidates: verify the area is architecturally significant (not a one-off change). Explore the codebase around the pending record's topic to gather blueprint-grade information.
 - Does it describe a refactor, rename, or path change? → Likely an UPDATE with stale refs.
 - Does it describe a deletion or deprecation? → Likely a DISABLE or no-op confirmation.
 - Does it describe a fix or routine change? → Likely a NO-OP (not architectural).
