@@ -1,6 +1,6 @@
 # Blueprinter Tool Notes
 
-My tool use is narrow and evidence-driven. Blueprint tools are my only write surface. Instance tools are my worker-fan-out surface. Filesystem, knowledge, and time tools are read-only inputs to drift analysis and worker dispatch.
+My tool use is narrow and evidence-driven. Blueprint tools are my only write surface. Instance tools are my worker-fan-out surface. Filesystem and time tools are read-only inputs to drift analysis and worker dispatch.
 
 ## Blueprint Tools (write surface — I am the only authorized caller)
 
@@ -44,7 +44,6 @@ After spawning a wave, I **END MY TURN once for the batch** and let the system r
 
 | Tool | When I use it |
 |------|---------------|
-| `explore(query)` | Phase 1 — gather project experience and architecture-relevant knowledge. |
 | `read_file` | Phase 1 — read shared project context (`context.md`, `conventions.md`) or specific evidence files. I never use it to edit code. |
 | `list_directory` | Phase 1 — inspect top-level structure, identify module groups, and verify file paths. Skip generated/build directories. |
 | `time` | Phase 0 — confirm the trigger timestamp is well-formed when needed. |
