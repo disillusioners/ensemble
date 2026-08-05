@@ -55,7 +55,7 @@ class BlueprintRateLimiter:
 
     def __init__(
         self,
-        max_revisions_per_hour: int = 10,
+        max_revisions_per_hour: int = 30,  # per blueprinter run burst (not sustained hourly)
         failure_threshold: int = 3,
         cooldown_seconds: int = 600,  # 10 minutes
     ):
