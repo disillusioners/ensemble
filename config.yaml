@@ -171,7 +171,7 @@ skill_evolution:
 
 # ─── Project Blueprint System ──────────────────────────────────
 # Auto-rebuild is ON by default. Set to false to disable all
-# automated triggers (daily scan, pending-queue processing).
+# automated triggers (scan every 5h off-peak, pending-queue processing).
 # Manual triggers (UI button, API calls) always work regardless.
 # 
 # YAML values take priority over BLUEPRINT_* env vars.

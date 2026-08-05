@@ -13,9 +13,9 @@ Covers the daemon-side daily scan's smart trigger logic:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -120,6 +120,223 @@ def _make_config(enabled: bool) -> Any:
     cfg.auto_rebuild_enabled = enabled
     cfg.daily_scan_hour = 2
     return cfg
+
+
+@pytest.fixture(autouse=True)
+def off_peak_scan_time():
+    """Keep scan tests deterministic regardless of the real local hour.
+
+    Pins ``datetime.now`` to 03:00 GMT+7 — outside the default peak
+    window [12, 20) — so most tests proceed into the scan loop
+    unimpeded. Tests that exercise the peak-hours gate re-patch
+    ``datetime`` themselves.
+    """
+    gmt_plus_7 = timezone(timedelta(hours=7))
+    with patch("daemon.services.blueprint_scan_service.datetime") as mock_datetime:
+        mock_datetime.now.return_value = datetime(
+            2026, 1, 1, 3, 0, 0, tzinfo=gmt_plus_7
+        )
+        mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        yield
+
+
+# ── Peak-hours gate ────────────────────────────────────────────────────
+
+
+@patch("daemon.services.blueprint_scan_service.datetime")
+def test_scan_skipped_during_peak_hours(
+    mock_datetime, blueprint_repo, pending_repo, coordinator, project_repo
+):
+    """15:00 GMT+7 is inside the default peak window (12-20 GMT+7),
+    so no projects are listed. The default peak-hours gate uses
+    GMT+7 (see ``BlueprintScanService._DEFAULT_TZ_OFFSET``)."""
+    gmt_plus_7 = timezone(timedelta(hours=7))
+    mock_datetime.now.return_value = datetime(
+        2026, 1, 1, 15, 0, 0, tzinfo=gmt_plus_7
+    )
+    mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+
+    _run(svc.execute())
+
+    project_repo.list_projects.assert_not_called()
+
+
+@patch("daemon.services.blueprint_scan_service.datetime")
+def test_scan_runs_during_off_hours(
+    mock_datetime, blueprint_repo, pending_repo, coordinator, project_repo
+):
+    """03:00 GMT+7 is outside the default peak window (12-20 GMT+7),
+    so project scanning proceeds. Asserts ``list_projects`` is called
+    on the way into the scan loop."""
+    gmt_plus_7 = timezone(timedelta(hours=7))
+    mock_datetime.now.return_value = datetime(
+        2026, 1, 1, 3, 0, 0, tzinfo=gmt_plus_7
+    )
+    mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=project_repo,
+    )
+
+    _run(svc.execute())
+
+    project_repo.list_projects.assert_called_once()
+
+
+# ── Configurable peak-hours gate ──────────────────────────────────────
+
+
+def _peak_repo(peak_config: dict[str, int] | None) -> Any:
+    """Build a project repo whose ``get_metadata`` returns the supplied
+    values for peak-hours keys and ``None`` (or True for the opt-in
+    key) for everything else. Mirrors the default fixture so the scan
+    service's per-project loop still works for tests that go past the
+    peak gate."""
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+    repo = MagicMock()
+    p1 = MagicMock(); p1.project_id = "proj-1"
+    p2 = MagicMock(); p2.project_id = "proj-2"
+    repo.list_projects = MagicMock(return_value=[p1, p2])
+    peak_keys = {
+        "blueprint_peak_hours_start",
+        "blueprint_peak_hours_end",
+        "blueprint_peak_hours_tz_offset",
+    }
+
+    def _get(pid: str, key: str) -> Any:
+        if peak_config is not None and key in peak_keys:
+            return peak_config[key]
+        return True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+
+    repo.get_metadata = MagicMock(side_effect=_get)
+    return repo
+
+
+@patch("daemon.services.blueprint_scan_service.datetime")
+def test_scan_uses_configured_peak_hours(
+    mock_datetime, blueprint_repo, pending_repo, coordinator
+):
+    """Custom peak window 09:00 - 17:00 GMT+7 is honored: 10:00 GMT+7
+    falls inside the window so the scan is skipped."""
+    gmt_plus_7 = timezone(timedelta(hours=7))
+    mock_datetime.now.return_value = datetime(
+        2026, 1, 1, 10, 0, 0, tzinfo=gmt_plus_7
+    )
+    mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+    repo = _peak_repo({
+        "blueprint_peak_hours_start": 9,
+        "blueprint_peak_hours_end": 17,
+        "blueprint_peak_hours_tz_offset": 7,
+    })
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+    )
+
+    _run(svc.execute())
+
+    repo.list_projects.assert_not_called()
+
+
+@patch("daemon.services.blueprint_scan_service.datetime")
+def test_scan_uses_defaults_when_no_config(
+    mock_datetime, blueprint_repo, pending_repo, coordinator
+):
+    """No metadata stored → defaults (12:00 - 20:00 GMT+7) apply. A
+    15:00 GMT+7 timestamp falls inside the default window so the scan
+    is skipped — proving the fallback path works."""
+    gmt_plus_7 = timezone(timedelta(hours=7))
+    mock_datetime.now.return_value = datetime(
+        2026, 1, 1, 15, 0, 0, tzinfo=gmt_plus_7
+    )
+    mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+    repo = _peak_repo(None)
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+    )
+
+    _run(svc.execute())
+
+    repo.list_projects.assert_not_called()
+
+
+@patch("daemon.services.blueprint_scan_service.datetime")
+def test_scan_runs_outside_configured_peak(
+    mock_datetime, blueprint_repo, pending_repo, coordinator
+):
+    """Same custom peak 09:00 - 17:00 GMT+7 — 18:00 GMT+7 falls
+    OUTSIDE the window so the scan proceeds and lists projects."""
+    gmt_plus_7 = timezone(timedelta(hours=7))
+    mock_datetime.now.return_value = datetime(
+        2026, 1, 1, 18, 0, 0, tzinfo=gmt_plus_7
+    )
+    mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+    repo = _peak_repo({
+        "blueprint_peak_hours_start": 9,
+        "blueprint_peak_hours_end": 17,
+        "blueprint_peak_hours_tz_offset": 7,
+    })
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+    )
+
+    _run(svc.execute())
+
+    repo.list_projects.assert_called_once()
+
+
+def test_scan_uses_defaults_when_metadata_read_raises(
+    blueprint_repo, pending_repo, coordinator
+):
+    """If ``get_metadata`` raises (repo down, project missing, etc.)
+    the scan falls back to the default 12:00 - 20:00 GMT+7 window
+    rather than crashing. The autouse fixture pins time to 03:00
+    GMT+7 (off-peak), so the scan proceeds past the gate."""
+    from daemon.services.blueprint_scan_service import BlueprintScanService
+
+    repo = MagicMock()
+    p1 = MagicMock(); p1.project_id = "proj-1"
+    repo.list_projects = MagicMock(return_value=[p1])
+    repo.get_metadata = MagicMock(side_effect=RuntimeError("DB down"))
+
+    svc = BlueprintScanService(
+        blueprint_repo=blueprint_repo,
+        pending_repo=pending_repo,
+        coordinator=coordinator,
+        config=_make_config(enabled=True),
+        project_repository=repo,
+    )
+
+    _run(svc.execute())
+
+    # Despite the read failure, the scan continued past the peak gate
+    # (using defaults), so list_projects must have been called.
+    repo.list_projects.assert_called_once()
 
 
 # ── Flag gate ──────────────────────────────────────────────────────────

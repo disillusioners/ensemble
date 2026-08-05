@@ -17,6 +17,7 @@ contract and ``/rebuild`` / ``/update`` semantics.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone, timedelta
 import logging
 import uuid
 from typing import Any
@@ -30,6 +31,21 @@ logger = logging.getLogger(__name__)
 # literals; keep them in sync if either side changes.
 MODE_REBUILD = "rebuild"
 MODE_INCREMENTAL = "incremental"
+
+# Configurable peak-hours gate. The defaults match the original behaviour
+# (12:00 - 20:00) but in GMT+7 rather than UTC, since most operator
+# timelines are anchored to a local working day. The values are stored on
+# the system default project's metadata KV so operators can tweak them via
+# the Settings UI without restarting the daemon.
+_SYSTEM_DEFAULT_PID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+_PEAK_HOURS_START_KEY = "blueprint_peak_hours_start"
+_PEAK_HOURS_END_KEY = "blueprint_peak_hours_end"
+_PEAK_HOURS_TZ_KEY = "blueprint_peak_hours_tz_offset"
+
+# Defaults (used when metadata is absent or read fails).
+_DEFAULT_PEAK_START = 12
+_DEFAULT_PEAK_END = 20
+_DEFAULT_TZ_OFFSET = 7  # GMT+7
 
 
 class BlueprintScanService:
@@ -95,6 +111,41 @@ class BlueprintScanService:
         and swallowed so one bad project does not abort the whole
         scan.
         """
+        # Skip during peak hours. Config is read FRESH from the system
+        # default project metadata on every execute() so an operator can
+        # adjust the window via the Settings UI without restarting the
+        # daemon. Defaults: 12:00 - 20:00 GMT+7.
+        peak_start = _DEFAULT_PEAK_START
+        peak_end = _DEFAULT_PEAK_END
+        tz_offset = _DEFAULT_TZ_OFFSET
+        try:
+            peak_start = int(await asyncio.to_thread(
+                self._project_repository.get_metadata,
+                _SYSTEM_DEFAULT_PID, _PEAK_HOURS_START_KEY,
+            ) or _DEFAULT_PEAK_START)
+            peak_end = int(await asyncio.to_thread(
+                self._project_repository.get_metadata,
+                _SYSTEM_DEFAULT_PID, _PEAK_HOURS_END_KEY,
+            ) or _DEFAULT_PEAK_END)
+            tz_offset = int(await asyncio.to_thread(
+                self._project_repository.get_metadata,
+                _SYSTEM_DEFAULT_PID, _PEAK_HOURS_TZ_KEY,
+            ) or _DEFAULT_TZ_OFFSET)
+        except Exception:
+            # Metadata read failed (repo down, project row missing, etc.) —
+            # fall back to defaults rather than aborting the whole scan.
+            pass
+
+        tz = timezone(timedelta(hours=tz_offset))
+        now = datetime.now(tz)
+        if peak_start <= now.hour < peak_end:
+            logger.info(
+                "BlueprintScanService: skipping scan during peak hours "
+                "(hour=%d, peak=%d-%d, tz=GMT%+d)",
+                now.hour, peak_start, peak_end, tz_offset,
+            )
+            return
+
         if not getattr(self._config, "auto_rebuild_enabled", False):
             logger.debug("Blueprint daily scan skipped (auto_rebuild_enabled=False)")
             return
@@ -131,9 +182,7 @@ class BlueprintScanService:
         # persist and the in-memory ``last_run`` still updates
         # immediately after execute() returns.
         _SCAN_LAST_RUN_KEY = "blueprint_scan_last_run"
-        _SYSTEM_DEFAULT_PID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
         try:
-            from datetime import datetime, timezone
             await asyncio.to_thread(
                 self._project_repository.set_metadata,
                 _SYSTEM_DEFAULT_PID,

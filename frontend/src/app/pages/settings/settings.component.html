@@ -112,4 +112,70 @@
       }
     </div>
   </section>
+
+  <section class="setting-section">
+    <h2>Blueprint Peak Hours</h2>
+    <p class="setting-description">
+      Skip automated blueprint scans during peak hours so background
+      rebuilds don't compete with active work. The scan uses the
+      configured window in the chosen timezone. Default:
+      <strong>12:00 – 20:00 GMT+7</strong>.
+    </p>
+
+    <div class="peak-hours-row">
+      <mat-form-field appearance="outline" class="peak-hours-input">
+        <mat-label>Start hour (0-23)</mat-label>
+        <input
+          matInput
+          type="number"
+          min="0"
+          max="23"
+          [value]="peakStart()"
+          (input)="peakStart.set($any($event.target).valueAsNumber)"
+          [disabled]="peakHoursSaving()"
+        />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="peak-hours-input">
+        <mat-label>End hour (0-23)</mat-label>
+        <input
+          matInput
+          type="number"
+          min="0"
+          max="23"
+          [value]="peakEnd()"
+          (input)="peakEnd.set($any($event.target).valueAsNumber)"
+          [disabled]="peakHoursSaving()"
+        />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="peak-hours-input">
+        <mat-label>GMT offset (-12 to 14)</mat-label>
+        <input
+          matInput
+          type="number"
+          min="-12"
+          max="14"
+          [value]="peakTzOffset()"
+          (input)="peakTzOffset.set($any($event.target).valueAsNumber)"
+          [disabled]="peakHoursSaving()"
+        />
+      </mat-form-field>
+    </div>
+
+    <div class="peak-hours-actions">
+      <button
+        mat-raised-button
+        color="primary"
+        (click)="savePeakHours()"
+        [disabled]="peakHoursSaving() || peakHoursLoading()"
+      >
+        @if (peakHoursSaving()) {
+          <span>Saving...</span>
+        } @else {
+          <span>Save Peak Hours</span>
+        }
+      </button>
+    </div>
+  </section>
 </div>

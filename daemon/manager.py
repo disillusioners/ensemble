@@ -1900,7 +1900,7 @@ class InstanceManager:
                     pass
             self._maintenance_service.register(
                 "blueprint_daily_scan",
-                min_interval_hours=24.0,
+                min_interval_hours=5.0,
                 execute_fn=self._blueprint_scan_service.execute,
                 last_run=last_run_dt,
             )

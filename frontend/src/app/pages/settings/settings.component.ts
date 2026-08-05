@@ -76,6 +76,15 @@ export class SettingsComponent implements OnInit, OnDestroy {
   // True when the user has changed the radio selection but has not yet applied.
   readonly editorDirty = computed(() => this.selectedEditor() !== this.savedEditor());
 
+  // Blueprint peak-hours state. The scan service reads the same window
+  // on every execute() tick, so saving here takes effect on the next
+  // scheduled scan with no daemon restart.
+  readonly peakStart = signal<number>(12);
+  readonly peakEnd = signal<number>(20);
+  readonly peakTzOffset = signal<number>(7);
+  readonly peakHoursLoading = signal<boolean>(false);
+  readonly peakHoursSaving = signal<boolean>(false);
+
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
@@ -95,6 +104,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.loadFromStorage();
     this.loadFromApi();
     this.loadEditorPreference();
+    this.loadPeakHours();
   }
 
   ngOnDestroy(): void {
@@ -456,5 +466,74 @@ export class SettingsComponent implements OnInit, OnDestroy {
         });
       },
     });
+  }
+
+  /**
+   * Fetch the current peak-hours window from the backend. The three
+   * signals are seeded with the canonical defaults (12:00 - 20:00 GMT+7)
+   * — the API returns these too when no metadata is stored yet, so the
+   * UI always renders a coherent window even before the round-trip
+   * completes.
+   */
+  private loadPeakHours(): void {
+    this.peakHoursLoading.set(true);
+    this.settingsService.getBlueprintPeakHours().subscribe({
+      next: (config) => {
+        this.peakStart.set(config.start);
+        this.peakEnd.set(config.end);
+        this.peakTzOffset.set(config.tz_offset);
+        this.peakHoursLoading.set(false);
+      },
+      error: () => {
+        // Fall back to the defaults already seeded on the signals — the
+        // user can still edit and save; the next load round-trip will
+        // retry. A toast surfaces the failure so the operator knows the
+        // values shown are local fallbacks, not the live server state.
+        this.peakHoursLoading.set(false);
+        this.snackBar.open('Failed to load peak hours — showing defaults', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  /**
+   * Persist the three peak-hours values via PUT. Validation lives on
+   * the backend Pydantic schema (start/end 0-23, tz_offset -12..14) —
+   * any out-of-range input surfaces as a 422 and we display a generic
+   * "validation failed" message; the signals are left untouched so the
+   * operator can correct the offending field without losing the rest of
+   * their in-progress edit.
+   */
+  savePeakHours(): void {
+    this.peakHoursSaving.set(true);
+    this.settingsService
+      .setBlueprintPeakHours({
+        start: this.peakStart(),
+        end: this.peakEnd(),
+        tz_offset: this.peakTzOffset(),
+      })
+      .subscribe({
+        next: (config) => {
+          // Echo the server-confirmed values so a clamped input reflects
+          // what was actually persisted.
+          this.peakStart.set(config.start);
+          this.peakEnd.set(config.end);
+          this.peakTzOffset.set(config.tz_offset);
+          this.peakHoursSaving.set(false);
+          this.snackBar.open('Peak hours saved', 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar',
+          });
+        },
+        error: () => {
+          this.peakHoursSaving.set(false);
+          this.snackBar.open('Failed to save peak hours', 'Dismiss', {
+            duration: 5000,
+            panelClass: 'error-snackbar',
+          });
+        },
+      });
   }
 }

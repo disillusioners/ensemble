@@ -7,6 +7,12 @@ export interface LanguagePreference {
   language: string;
 }
 
+export interface BlueprintPeakHours {
+  start: number;
+  end: number;
+  tz_offset: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class SettingsService {
   private readonly http = inject(HttpClient);
@@ -59,5 +65,19 @@ export class SettingsService {
    */
   stopVscodeServer(): Observable<any> {
     return this.http.post('/api/settings/vscode/stop', {});
+  }
+
+  /**
+   * GET /api/settings/blueprint-peak-hours
+   */
+  getBlueprintPeakHours(): Observable<BlueprintPeakHours> {
+    return this.http.get<BlueprintPeakHours>('/api/settings/blueprint-peak-hours');
+  }
+
+  /**
+   * PUT /api/settings/blueprint-peak-hours
+   */
+  setBlueprintPeakHours(config: BlueprintPeakHours): Observable<BlueprintPeakHours> {
+    return this.http.put<BlueprintPeakHours>('/api/settings/blueprint-peak-hours', config);
   }
 }
