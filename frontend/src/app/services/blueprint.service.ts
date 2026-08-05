@@ -7,6 +7,7 @@ import {
   BlueprintUpdateRequest,
   BlueprintRevision,
   BlueprintFilters,
+  BlueprintJobResponse,
 } from '../models/blueprint.model';
 
 /**
@@ -84,6 +85,12 @@ export class BlueprintService {
    *     projectId: Project UUID/slug — scopes the entire request.
    *     kind: Optional kind filter ('core' | 'area').
    *     status: Optional status filter ('published' | 'draft').
+   *     quiet: When ``true``, skip the ``loading`` signal toggles.
+   *         Used by the rebuild/update poll loop so the 10s tick
+   *         doesn't flash the skeleton / refresh-disabled state every
+   *         cycle. Defaults to ``false`` so one-shot callers (the
+   *         list page, manual refresh) keep the visible loading
+   *         indicator.
    *
    * Returns:
    *     Observable<Blueprint[]> — also pushed into the ``blueprints``
@@ -94,12 +101,15 @@ export class BlueprintService {
     projectId: string,
     kind?: BlueprintFilters['kind'],
     status?: BlueprintFilters['status'],
+    quiet = false,
   ): Observable<Blueprint[]> {
     let params = new HttpParams();
     if (kind) params = params.set('kind', kind);
     if (status) params = params.set('status', status);
 
-    this.loading.set(true);
+    if (!quiet) {
+      this.loading.set(true);
+    }
     return this.http
       .get<{ items?: Blueprint[] } | Blueprint[]>(this.baseUrl(projectId), {
         params,
@@ -114,7 +124,11 @@ export class BlueprintService {
           this.error.set(err?.message || 'Failed to fetch blueprints');
           return of([] as Blueprint[]);
         }),
-        finalize(() => this.loading.set(false)),
+        finalize(() => {
+          if (!quiet) {
+            this.loading.set(false);
+          }
+        }),
       );
   }
 
@@ -191,6 +205,12 @@ export class BlueprintService {
    *
    * Returns:
    *     Observable<void> — re-thrown on error (including 409).
+   *
+   * @deprecated Use :meth:`rebuild` instead. ``/initialize`` is the
+   *     Phase 5 single-shot endpoint and has been superseded by
+   *     ``/rebuild`` (full re-scan) and ``/update`` (incremental).
+   *     Kept for backward compatibility with any callers that still
+   *     reference it; new UI should drive the dual-mode flow.
    */
   initialize(projectId: string): Observable<void> {
     return this.http
@@ -198,11 +218,194 @@ export class BlueprintService {
       .pipe(
         catchError((err) => {
           if (err?.status === 409) {
-            this.error.set('Blueprints already initialized');
-            return throwError(() => new Error('Blueprints already initialized'));
+            return throwError(
+              () => makeHttpStatusError(409, 'Blueprints already initialized'),
+            );
           }
           this.error.set(err?.message || 'Failed to initialize blueprints');
           return throwError(() => err);
+        }),
+      );
+  }
+
+  /**
+   * POST /api/projects/{project_id}/blueprints/rebuild
+   *
+   * Enqueues a full blueprint rebuild job on the background queue.
+   * The backend responds 202 with ``BlueprintJobResponse`` — actual
+   * work happens asynchronously; the caller should poll ``list()``
+   * to observe the new blueprints land.
+   *
+   * Outcomes:
+   *   * 202 ``status='accepted'`` — job enqueued, caller starts polling.
+   *   * 202 ``status='already_in_progress'`` — coalesced duplicate
+   *     (NOT an error, also 202). Caller surfaces as a soft snackbar.
+   *   * 409 — different mode (e.g. an ``/update`` job is in flight).
+   *     Re-thrown with ``.status=409`` so the component's
+   *     ``showMutationError`` renders the right message.
+   *   * 503 — coordinator/queue not wired; ``showMutationError``
+   *     already handles this.
+   *   * 404 — queue missing on the backend.
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *
+   * Returns:
+   *     Observable<BlueprintJobResponse> — re-thrown on error.
+   */
+  rebuild(projectId: string): Observable<BlueprintJobResponse> {
+    this.loading.set(true);
+    return this.http
+      .post<BlueprintJobResponse>(`${this.baseUrl(projectId)}/rebuild`, {})
+      .pipe(
+        catchError((err) => {
+          if (err?.status === 409) {
+            this.error.set('Blueprint rebuild already in progress');
+            return throwError(
+              () => makeHttpStatusError(409, 'Blueprint rebuild already in progress'),
+            );
+          }
+          // Generic / unexpected (5xx, network, 404, etc.) — replace
+          // the raw ``HttpErrorResponse.message`` ("Http failure
+          // response for ...") with a friendly line before re-throwing
+          // so the component's snackbar renders a user-readable copy.
+          this.error.set('Failed to rebuild blueprints. Please try again.');
+          return throwError(
+            () =>
+              makeHttpStatusError(
+                err?.status ?? 0,
+                'Failed to rebuild blueprints. Please try again.',
+              ),
+          );
+        }),
+        finalize(() => this.loading.set(false)),
+      );
+  }
+
+  /**
+   * POST /api/projects/{project_id}/blueprints/update
+   *
+   * Enqueues an incremental blueprint update job on the background
+   * queue. Same response shape as :meth:`rebuild` (``mode='incremental'``).
+   * Use when the project already has blueprints and you want to
+   * process recent changes only.
+   *
+   * Outcomes mirror :meth:`rebuild` PLUS:
+   *   * 404 — no blueprints exist yet; caller should use
+   *     :meth:`rebuild` instead. We re-throw with a clear message
+   *     AND ``.status=404`` so the component can render a
+   *     "use rebuild first" hint.
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *
+   * Returns:
+   *     Observable<BlueprintJobResponse> — re-thrown on error.
+   */
+  updateBlueprints(projectId: string): Observable<BlueprintJobResponse> {
+    this.loading.set(true);
+    return this.http
+      .post<BlueprintJobResponse>(`${this.baseUrl(projectId)}/update`, {})
+      .pipe(
+        catchError((err) => {
+          if (err?.status === 409) {
+            this.error.set('Blueprint update already in progress');
+            return throwError(
+              () => makeHttpStatusError(409, 'Blueprint update already in progress'),
+            );
+          }
+          if (err?.status === 404) {
+            return throwError(
+              () =>
+                makeHttpStatusError(
+                  404,
+                  'No blueprints found. Use Rebuild first.',
+                ),
+            );
+          }
+          // Generic / unexpected (5xx, network, etc.) — see the same
+          // branch in :meth:`rebuild` for why we wrap with a friendly
+          // message instead of re-throwing the raw HttpErrorResponse.
+          this.error.set('Failed to update blueprints. Please try again.');
+          return throwError(
+            () =>
+              makeHttpStatusError(
+                err?.status ?? 0,
+                'Failed to update blueprints. Please try again.',
+              ),
+          );
+        }),
+        finalize(() => this.loading.set(false)),
+      );
+  }
+
+  /**
+   * POST /api/projects/{project_id}/blueprints/{blueprint_id}/rebuild
+   *
+   * Enqueues a single-blueprint rebuild — a focused rewrite of ONE
+   * blueprint (vs :meth:`rebuild` which scans the whole project).
+   * Shares the C7 project-level lease with ``/rebuild`` and
+   * ``/update``: coalesces with itself (deduplicates rapid retries
+   * for the same project) and conflicts (409) with ``/rebuild`` or
+   * ``/update`` while they are in flight. Two singles for DIFFERENT
+   * blueprints coalesce onto the first — known limitation, response
+   * status is still ``already_in_progress``.
+   *
+   * Outcomes mirror :meth:`rebuild` plus:
+   *   * 404 — blueprint not found, OR belongs to a different
+   *     project, OR is soft-deleted (``is_active=False``).
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *     blueprintId: Blueprint UUID (the target of the single rebuild).
+   *
+   * Returns:
+   *     Observable<BlueprintJobResponse> — re-thrown on error so the
+   *     component can render a status-specific snackbar.
+   */
+  rebuildSingle(
+    projectId: string,
+    blueprintId: string,
+  ): Observable<BlueprintJobResponse> {
+    return this.http
+      .post<BlueprintJobResponse>(
+        `${this.baseUrl(projectId)}/${encodeURIComponent(blueprintId)}/rebuild`,
+        {},
+      )
+      .pipe(
+        catchError((err) => {
+          if (err?.status === 409) {
+            this.error.set(
+              'Another blueprint operation is in progress',
+            );
+            return throwError(
+              () =>
+                makeHttpStatusError(
+                  409,
+                  'Another blueprint operation is in progress',
+                ),
+            );
+          }
+          if (err?.status === 404) {
+            return throwError(
+              () =>
+                makeHttpStatusError(
+                  404,
+                  'Blueprint not found',
+                ),
+            );
+          }
+          // Generic / unexpected (5xx, network, etc.) — see the same
+          // branch in :meth:`rebuild` for why we wrap with a friendly
+          // message instead of re-throwing the raw HttpErrorResponse.
+          this.error.set('Failed to queue blueprint rebuild. Please try again.');
+          return throwError(
+            () =>
+              makeHttpStatusError(
+                err?.status ?? 0,
+                'Failed to queue blueprint rebuild. Please try again.',
+              ),
+          );
         }),
       );
   }
@@ -324,4 +527,71 @@ export class BlueprintService {
   clearError(): void {
     this.error.set(null);
   }
+
+  // ── Per-project opt-in toggle (Phase 7) ──────────────────────────────
+  //
+  // Blueprint usage is a per-project opt-in: the system flag
+  // (``auto_rebuild_enabled``) controls whether the feature exists at
+  // all; this ``setBlueprintActive`` controls whether the current
+  // project participates. The metadata key lives in
+  // ``project_metadata_records`` under ``blueprint_active``; absent
+  // from the KV = inactive. The frontend defaults to "inactive" so a
+  // project must explicitly enable the blueprint system.
+  //
+  // We use the generic ``PUT /api/projects/{id}/metadata/{key}``
+  // endpoint (added alongside the gate) rather than a blueprint-
+  // specific one — the same path serves any per-project metadata
+  // toggle we add later.
+
+  /**
+   * PUT /api/projects/{id}/metadata/blueprint_active
+   *
+   * Flips the per-project blueprint opt-in. Returns ``void`` so the
+   * caller can subscribe without inspecting the response body — the
+   * backend responds with ``{"ok": true}`` on success.
+   *
+   * Args:
+   *     projectId: Project UUID/slug.
+   *     active: ``true`` to enable, ``false`` to disable.
+   *
+   * Returns:
+   *     ``Observable<void>`` — re-thrown on error so the caller can
+   *     render a snackbar.
+   */
+  setBlueprintActive(projectId: string, active: boolean): Observable<void> {
+    // The metadata endpoint lives under ``/api/projects/{id}`` — the
+    // service is mounted at ``/api/projects/{id}/blueprints`` so we
+    // strip the trailing ``/blueprints`` segment to derive the base.
+    const base = this.baseUrl(projectId).replace(/\/blueprints$/, '');
+    const url = `${base}/metadata/blueprint_active`;
+    return this.http
+      .put<void>(url, { value: active })
+      .pipe(
+        catchError((err) => {
+          this.error.set(
+            err?.message || `Failed to ${active ? 'enable' : 'disable'} blueprint`,
+          );
+          throw err;
+        }),
+      );
+  }
+}
+
+/**
+ * Build a synthetic ``Error`` that carries an HTTP ``status`` field.
+ *
+ * The original ``HttpErrorResponse`` from Angular has ``.status`` on it,
+ * but we replace the thrown error in our ``catchError`` chains so we
+ * can attach a friendlier ``.message``. Callers (e.g. the
+ * component's ``showMutationError``) need both the friendly text and
+ * the original status code to pick the right snackbar copy.
+ *
+ * Pure factory — no imports, easy to unit-test.
+ */
+function makeHttpStatusError(status: number, message: string): Error & {
+  status: number;
+} {
+  const err = new Error(message) as Error & { status: number };
+  err.status = status;
+  return err;
 }

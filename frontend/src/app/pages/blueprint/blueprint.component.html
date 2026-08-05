@@ -9,13 +9,28 @@
       </span>
     </div>
     <div class="toolbar-actions">
-      <button mat-stroked-button color="accent"
-              (click)="onInitialize()"
-              [disabled]="initializing() || loading()"
-              matTooltip="Scan the project and generate initial blueprints">
-        <mat-icon [class.spinning]="initializing()">auto_awesome</mat-icon>
-        @if (initializing()) { Initializing… } @else { Initialize Blueprint }
-      </button>
+      <!-- Phase 6 dual-mode: Rebuild shows when the project is empty
+           (no blueprints yet); Update shows once at least one exists.
+           Both are disabled while a job is in flight so the user can't
+           fire a second one before the first lands. -->
+      @if (showRebuildButton()) {
+        <button mat-stroked-button color="accent"
+                (click)="onRebuildClick()"
+                [disabled]="rebuilding()"
+                matTooltip="Scan the project and generate blueprints from scratch">
+          <mat-icon [class.spinning]="rebuilding()">refresh</mat-icon>
+          @if (rebuilding()) { Rebuilding… } @else { Rebuild Blueprints }
+        </button>
+      }
+      @if (showUpdateButton()) {
+        <button mat-stroked-button color="accent"
+                (click)="onUpdateClick()"
+                [disabled]="rebuilding()"
+                matTooltip="Update existing blueprints">
+          <mat-icon [class.spinning]="rebuilding()">update</mat-icon>
+          @if (rebuilding()) { Updating… } @else { Update Blueprints }
+        </button>
+      }
       <button mat-stroked-button (click)="onRefresh()" [disabled]="loading()">
         <mat-icon [class.spinning]="loading()">refresh</mat-icon>
         Refresh
@@ -25,33 +40,62 @@
         <mat-icon>add</mat-icon>
         New Blueprint
       </button>
+      <!-- Phase 7: per-project opt-in toggle. Shows only when the
+           system is active (project opted in). Clicking flips the
+           flag via PUT /api/projects/{id}/metadata/blueprint_active
+           and the local computed signal re-evaluates from the
+           project list. -->
+      @if (blueprintActive()) {
+        <button mat-icon-button
+                (click)="toggleBlueprintActive()"
+                [disabled]="togglingActive()"
+                matTooltip="Disable blueprint for this project">
+          <mat-icon>toggle_on</mat-icon>
+        </button>
+      }
     </div>
   </mat-toolbar>
+
+  <!-- Update mode popup (Phase 6) — user picks between an incremental
+       diff-driven update and a full re-scan. Backdrop click closes.
+       stopPropagation on the inner panel keeps the click from
+       bubbling to the overlay. -->
+  @if (showUpdatePopup()) {
+    <div class="update-popup-overlay" (click)="onClosePopup()">
+      <div class="update-popup" (click)="$event.stopPropagation()">
+        <h3>Update Blueprints</h3>
+        <button mat-button (click)="onIncrementalUpdate()">
+          <mat-icon>auto_fix_high</mat-icon>
+          <div class="popup-option">
+            <span class="popup-option-title">Incremental Update</span>
+            <small>Process recent changes</small>
+          </div>
+        </button>
+        <button mat-button (click)="onFullRebuild()">
+          <mat-icon>construction</mat-icon>
+          <div class="popup-option">
+            <span class="popup-option-title">Full Rebuild</span>
+            <small>Re-scan entire project</small>
+          </div>
+        </button>
+        <button mat-button (click)="onClosePopup()">Cancel</button>
+      </div>
+    </div>
+  }
 
   <!-- Filter bar -->
   <div class="filter-bar">
     <!-- Project selector — first field; visually scopes the rest
          of the filters. Auto-redirects to the first project when the
          route is /projects/all/blueprints. -->
-    <mat-form-field appearance="outline"
-                    class="filter-field project-select-field">
-      <mat-label>Project</mat-label>
-      <mat-select [value]="selectedProjectId()"
-                  (selectionChange)="onProjectChange($event.value)"
-                  [disabled]="projectsLoading()">
-        @if (projectsLoading()) {
-          <mat-option [value]="null" disabled>
-            Loading projects…
-          </mat-option>
-        } @else {
-          @for (proj of projects(); track proj.project_id) {
-            <mat-option [value]="proj.project_id">
-              {{ proj.name }}
-            </mat-option>
-          }
-        }
-      </mat-select>
-    </mat-form-field>
+    <app-searchable-select
+      class="filter-field project-select-field"
+      [options]="projectOptions()"
+      [ngModel]="selectedProjectId()"
+      (ngModelChange)="onProjectChange($event)"
+      placeholder="Project"
+      [disabled]="projectsLoading()"
+    />
 
     <span class="filter-divider" aria-hidden="true"></span>
 
@@ -147,6 +191,25 @@
       <h3>Select a project</h3>
       <p>Choose a project from the dropdown above to view its blueprints.</p>
     </div>
+  } @else if (!blueprintActive()) {
+    <!-- Phase 7: per-project opt-in. Default is inactive — show a
+         banner with an "Enable" button so the user can opt in
+         without leaving the page. -->
+    <div class="blueprint-inactive-banner">
+      <mat-icon class="banner-icon">info</mat-icon>
+      <div class="banner-text">
+        <h3>Blueprint system is not active for this project.</h3>
+        <p>Enable the blueprint system to auto-generate architectural
+           knowledge from project files. The system default project
+           does not participate.</p>
+      </div>
+      <button mat-raised-button color="primary"
+              (click)="toggleBlueprintActive()"
+              [disabled]="togglingActive()">
+        <mat-icon [class.spinning]="togglingActive()">toggle_off</mat-icon>
+        @if (togglingActive()) { Enabling… } @else { Enable Blueprint }
+      </button>
+    </div>
   } @else {
   <div class="blueprint-layout">
     <!-- LEFT: list -->
@@ -192,14 +255,17 @@
               or create a new blueprint.
             </p>
           } @else {
-            <p>Initialize blueprints automatically from the project structure,
+            <p>Generate blueprints automatically from the project structure,
                or create one manually to get started.</p>
           }
           <div class="empty-actions">
-            <button mat-flat-button color="accent" (click)="onInitialize()"
-                    [disabled]="initializing()">
-              <mat-icon [class.spinning]="initializing()">auto_awesome</mat-icon>
-              Initialize Project Blueprint
+            <!-- Phase 6: empty state shows the full-rebuild action
+                 (project is empty, so there's nothing to incrementally
+                 update). Disables while a job is in flight. -->
+            <button mat-flat-button color="accent" (click)="onRebuildClick()"
+                    [disabled]="rebuilding()">
+              <mat-icon [class.spinning]="rebuilding()">refresh</mat-icon>
+              @if (rebuilding()) { Rebuilding… } @else { Rebuild Blueprints }
             </button>
             <button mat-stroked-button (click)="onCreate()">
               <mat-icon>add</mat-icon> New Blueprint
@@ -280,6 +346,16 @@
           </div>
           <div class="detail-toolbar-actions">
             @if (!editing()) {
+              <button mat-icon-button
+                      (click)="rebuildSingle()"
+                      [disabled]="singleRebuilding() || !bp.is_active"
+                      matTooltip="Rebuild this blueprint">
+                @if (singleRebuilding()) {
+                  <mat-spinner diameter="18"></mat-spinner>
+                } @else {
+                  <mat-icon>refresh</mat-icon>
+                }
+              </button>
               <button mat-stroked-button (click)="onEdit()" [disabled]="!bp.is_active">
                 <mat-icon>edit</mat-icon> Edit
               </button>

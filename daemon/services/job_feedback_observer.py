@@ -1746,6 +1746,47 @@ class JobFeedbackObserver:
                     ctx.job_id, instance_id
                 )
 
+            # ─── Blueprint coordinator lease release ───────────────────────
+            # When a blueprinter job reaches terminal state, release the
+            # coordinator lease so subsequent triggers aren't blocked.
+            # The run_token + project_id are stored in the job's metadata.
+            if ctx.job_id is not None and db_result.agent_id == "blueprinter":
+                try:
+                    coordinator = getattr(
+                        self._instance_manager,
+                        "_blueprint_trigger_coordinator",
+                        None,
+                    )
+                    if coordinator is not None:
+                        job = await asyncio.to_thread(
+                            self._job_repo.get, ctx.job_id
+                        )
+                        if job is not None:
+                            metadata = getattr(job, "job_metadata", None) or {}
+                            run_token = metadata.get("run_token")
+                            project_id = metadata.get("project_id")
+                            if run_token and project_id:
+                                released = await coordinator.release(
+                                    project_id, run_token
+                                )
+                                logger.info(
+                                    "Observer: blueprint lease release for project %s "
+                                    "(token=%s...): %s",
+                                    project_id,
+                                    str(run_token)[:8],
+                                    (
+                                        "released"
+                                        if released
+                                        else "not found/already released"
+                                    ),
+                                )
+                except Exception as e:
+                    logger.warning(
+                        "Observer: blueprint lease release failed for job %s: %s",
+                        ctx.job_id[:8] if ctx.job_id else "unknown",
+                        e,
+                    )
+
             logger.info(
                 f"Observer: finalized job {ctx.job_id[:8] if ctx.job_id else 'no_job'}... "
                 f"status={db_result.terminal_status} for instance {instance_id[:8]}... "

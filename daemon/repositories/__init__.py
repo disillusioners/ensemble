@@ -94,8 +94,13 @@ from .instance_ui_prefs.repository import InstanceUiPrefsRepository
 # Imported here so SQLModel.metadata.create_all() registers the three
 # new tables (project_blueprints, project_blueprint_triggers,
 # project_blueprint_revisions). Brand-new tables — no _ensure_postgres_columns.
+# Phase 2 (C3): the pending-experience queue table
+# (project_blueprint_pending_updates) is also brand-new and is
+# registered the same way.
 from .blueprint.models import Blueprint, BlueprintTrigger, BlueprintRevision
+from .blueprint.pending_models import BlueprintPendingUpdate
 from .blueprint.repository import BlueprintRepository
+from .blueprint.pending_repository import BlueprintPendingRepository
 
 # Factory functions
 from .factory import (
@@ -113,6 +118,8 @@ from .factory import (
     create_shared_context_metadata_repository,
     create_skill_repository,
     create_blueprint_repository,
+    create_blueprint_embedding_repository,
+    create_blueprint_pending_repository,
     create_skill_lineage_repository,
     create_skill_usage_repository,
     create_skill_trigger_repository,
@@ -205,6 +212,8 @@ __all__ = [
     "BlueprintTrigger",
     "BlueprintRevision",
     "BlueprintRepository",
+    "BlueprintPendingUpdate",
+    "BlueprintPendingRepository",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -220,6 +229,8 @@ __all__ = [
     "create_shared_context_metadata_repository",
     "create_skill_repository",
     "create_blueprint_repository",
+    "create_blueprint_embedding_repository",
+    "create_blueprint_pending_repository",
     "create_skill_lineage_repository",
     "create_skill_usage_repository",
     "create_skill_trigger_repository",

@@ -633,7 +633,7 @@ def _messages_have_context_block(messages: list[Any]) -> bool:
     # block has been checkpointed on turn 1.
     _CONTEXT_KINDS = frozenset({
         "project", "shared_context", "auto_load_skills", "skills",
-        "task_context",
+        "task_context", "blueprint",  # C10: blueprint context MUST persist in checkpoints
     })
 
     for msg in messages:

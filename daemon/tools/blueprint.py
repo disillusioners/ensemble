@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -34,6 +35,7 @@ blueprint_get() retrieves a specific blueprint by ID or slug.
 blueprint_list() lists all blueprints for the current project.
 blueprint_create() creates a new blueprint (restricted to blueprinter agent).
 blueprint_update() updates a blueprint (restricted to blueprinter agent).
+blueprint_release_lease() releases the coordinator lease at workflow completion.
 """
 
 
@@ -53,8 +55,7 @@ def create_blueprint_tools(
             (unauthorized — read tools still work, write tools are blocked).
 
     Returns:
-        List of tool functions:
-        ``[blueprint_search, blueprint_get, blueprint_list, blueprint_create, blueprint_update]``.
+        List of blueprint management tool functions.
     """
 
     def _get_project_id() -> str | None:
@@ -249,10 +250,16 @@ def create_blueprint_tools(
         kind: str,
         content: str,
         project_id: str = None,
+        tags: list = None,
+        file_refs: list = None,
+        trigger_queries: list = None,
+        reason: str = None,
     ) -> str:
         """Create a new blueprint. RESTRICTED to the blueprinter agent.
 
-        Only the 'blueprinter' agent can create blueprints.
+        Only the 'blueprinter' agent can create blueprints. Routes
+        through the canonical write service so trigger embeddings,
+        rate-limiting, and revision capture all run.
 
         Args:
             slug: URL-safe unique slug within the project.
@@ -260,6 +267,11 @@ def create_blueprint_tools(
             kind: Blueprint kind ('core' or 'area').
             content: The blueprint markdown content.
             project_id: Optional project ID. Auto-detected from context if not provided.
+            tags: Optional list of tag dicts.
+            file_refs: Optional list of file reference strings.
+            trigger_queries: Optional list of trigger query strings to embed.
+                None = no triggers stored.
+            reason: Optional reason for the revision log.
 
         Returns:
             Success message with the new blueprint ID, or an authorization error.
@@ -271,15 +283,17 @@ def create_blueprint_tools(
         if not pid:
             return "Error: project_id not available. Ensure the agent instance has a project context set."
 
-        repo = manager._blueprint_repo
+        service = manager.get_blueprint_write_service(pid)
         try:
-            bp = await asyncio.to_thread(
-                repo.create,
-                project_id=pid,
+            bp = await service.create_blueprint(
                 slug=slug,
                 name=name,
                 kind=kind,
                 content=content,
+                tags=tags or [],
+                file_refs=file_refs or [],
+                trigger_queries=trigger_queries,
+                reason=reason,
             )
         except Exception as e:
             logger.warning("blueprint_create failed: %s", e, exc_info=True)
@@ -298,16 +312,36 @@ def create_blueprint_tools(
         content: str = None,
         name: str = None,
         project_id: str = None,
+        tags: list = None,
+        file_refs: list = None,
+        trigger_queries: list = None,
+        status: str = None,
+        reason: str = None,
     ) -> str:
         """Update a blueprint. RESTRICTED to the blueprinter agent.
 
-        Only the 'blueprinter' agent can update blueprints.
+        Only the 'blueprinter' agent can update blueprints. Routes
+        through the canonical write service.
+
+        Compare / stage / publish workflow: when revising a published
+        blueprint, first create or stage a draft with ``status="draft"``
+        for review, then publish it with ``status="published"`` (the
+        prior published version is marked inactive). Never overwrite a
+        published blueprint directly.
 
         Args:
             blueprint_id: The blueprint's primary key.
             content: Optional new content. Omitted fields are left unchanged.
             name: Optional new name.
             project_id: Optional project ID (unused by update but accepted for API symmetry).
+            tags: Optional new tags list.
+            file_refs: Optional new file references list.
+            trigger_queries: Optional trigger queries. None = leave
+                unchanged; [] = clear all triggers; [a,b] = replace.
+            status: Optional lifecycle status (e.g. ``"draft"`` to stage
+                a revision for review, ``"published"`` to publish). Omit
+                to leave the status unchanged.
+            reason: Optional reason for the revision log.
 
         Returns:
             Success message, or an authorization / error message.
@@ -315,15 +349,26 @@ def create_blueprint_tools(
         if not _is_writer_authorized(agent_id):
             return "ERROR: Only the blueprinter agent can update blueprints."
 
-        # Build fields dict from non-None values
-        fields: dict = {}
+        # Build kwargs dict from non-None values
+        kwargs: dict = {}
         if content is not None:
-            fields["content"] = content
+            kwargs["content"] = content
         if name is not None:
-            fields["name"] = name
+            kwargs["name"] = name
+        if tags is not None:
+            kwargs["tags"] = tags
+        if file_refs is not None:
+            kwargs["file_refs"] = file_refs
+        # trigger_queries: pass through as-is (None OR [] OR list).
+        if trigger_queries is not None:
+            kwargs["trigger_queries"] = trigger_queries
+        if status is not None:
+            kwargs["status"] = status
+        if reason is not None:
+            kwargs["reason"] = reason
 
-        if not fields:
-            return "Error: no fields to update. Provide content and/or name."
+        if not kwargs:
+            return "Error: no fields to update. Provide content, name, tags, file_refs, trigger_queries, status, or reason."
 
         repo = manager._blueprint_repo
         # Ownership check: verify the blueprint exists and belongs to
@@ -337,10 +382,9 @@ def create_blueprint_tools(
         if existing is None or (pid is not None and existing.project_id != pid):
             return "Blueprint not found."
 
+        service = manager.get_blueprint_write_service(pid)
         try:
-            bp = await asyncio.to_thread(
-                repo.update, blueprint_id, **fields
-            )
+            bp = await service.update_blueprint(blueprint_id, **kwargs)
         except Exception as e:
             logger.warning("blueprint_update failed: %s", e, exc_info=True)
             return f"Error: failed to update blueprint: {e}"
@@ -350,4 +394,241 @@ def create_blueprint_tools(
 
         return f"Blueprint updated successfully. ID: {bp.id}"
 
-    return [blueprint_search, blueprint_get, blueprint_list, blueprint_create, blueprint_update]
+    # ------------------------------------------------------------------
+    # 6. blueprint_disable — RESTRICTED to blueprinter agent
+    # ------------------------------------------------------------------
+
+    @register_tool_category("blueprint")
+    @tool
+    async def blueprint_disable(
+        blueprint_id: str,
+        reason: str = None,
+        project_id: str = None,
+    ) -> str:
+        """Soft-delete (disable) a blueprint. RESTRICTED to the blueprinter agent.
+
+        Marks the blueprint as inactive (is_active=False). Records a final
+        revision with source='disable'. Use for stale or irrelevant blueprints.
+
+        Args:
+            blueprint_id: The blueprint's primary key.
+            reason: Optional reason for the disable (recorded in revision log).
+            project_id: Optional project ID. Auto-detected from context if not provided.
+
+        Returns:
+            Success message, or authorization / error message.
+        """
+        if not _is_writer_authorized(agent_id):
+            return "ERROR: Only the blueprinter agent can disable blueprints."
+
+        pid = project_id or _get_project_id()
+        if not pid:
+            return "Error: project_id not available. Ensure the agent instance has a project context set."
+
+        repo = manager._blueprint_repo
+        # Ownership check: verify the blueprint exists and belongs to
+        # the caller's project before disabling.
+        try:
+            existing = await asyncio.to_thread(repo.get_by_id, blueprint_id)
+        except Exception as e:
+            logger.warning("blueprint_disable fetch failed: %s", e, exc_info=True)
+            return f"Error: failed to verify blueprint: {e}"
+        if existing is None or existing.project_id != pid:
+            return "Blueprint not found."
+
+        service = manager.get_blueprint_write_service(pid)
+        try:
+            ok = await service.disable_blueprint(blueprint_id, reason=reason)
+        except Exception as e:
+            logger.warning("blueprint_disable failed: %s", e, exc_info=True)
+            return f"Error: failed to disable blueprint: {e}"
+
+        if not ok:
+            return "Blueprint not found."
+
+        return f"Blueprint disabled successfully. ID: {blueprint_id}"
+
+    # ------------------------------------------------------------------
+    # 7. blueprint_claim_pending — RESTRICTED to blueprinter agent
+    # ------------------------------------------------------------------
+
+    @register_tool_category("blueprint")
+    @tool
+    async def blueprint_claim_pending(
+        batch_size: int = 50,
+        project_id: str = None,
+    ) -> str:
+        """Claim a batch of pending blueprint updates for processing.
+
+        RESTRICTED to the blueprinter agent. Atomically claims the N oldest
+        pending records (available or retryable) for the current project.
+        Returns the claimed records and a run_token that must be used to
+        acknowledge them after processing.
+
+        Args:
+            batch_size: Maximum number of records to claim (default 50).
+            project_id: Optional project ID. Auto-detected from context if not provided.
+
+        Returns:
+            Formatted string with run_token and claimed records, or error message.
+            Returns "No pending updates." if the queue is empty.
+        """
+        if not _is_writer_authorized(agent_id):
+            return "ERROR: Only the blueprinter agent can claim pending updates."
+
+        pid = project_id or _get_project_id()
+        if not pid:
+            return "Error: project_id not available. Ensure the agent instance has a project context set."
+
+        pending_repo = getattr(manager, "_blueprint_pending_repo", None)
+        if pending_repo is None:
+            return "Pending queue not available."
+
+        run_token = str(uuid.uuid4())
+        try:
+            claimed = await asyncio.to_thread(
+                pending_repo.claim_batch, pid, batch_size, run_token
+            )
+        except Exception as e:
+            logger.warning("blueprint_claim_pending failed: %s", e, exc_info=True)
+            return f"Error: failed to claim pending updates: {e}"
+
+        if not claimed:
+            return "No pending updates to process."
+
+        lines = [f"Claimed {len(claimed)} pending update(s). Run token: {run_token}"]
+        for rec in claimed:
+            lines.append(
+                f"- ID: {rec.id} | Source: {rec.source_type} | "
+                f"Payload: {rec.source_payload}"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 8. blueprint_acknowledge_pending — RESTRICTED to blueprinter agent
+    # ------------------------------------------------------------------
+
+    @register_tool_category("blueprint")
+    @tool
+    async def blueprint_acknowledge_pending(
+        run_token: str,
+    ) -> str:
+        """Acknowledge that a claimed batch of pending updates has been processed.
+
+        RESTRICTED to the blueprinter agent. Marks all records claimed with
+        the given run_token as 'applied' (processed_at set). Must be called
+        AFTER successfully processing and saving all blueprints from the batch.
+
+        Args:
+            run_token: The run token returned by blueprint_claim_pending.
+
+        Returns:
+            Success message with count acknowledged, or error message.
+        """
+        if not _is_writer_authorized(agent_id):
+            return "ERROR: Only the blueprinter agent can acknowledge pending updates."
+
+        pending_repo = getattr(manager, "_blueprint_pending_repo", None)
+        if pending_repo is None:
+            return "Pending queue not available."
+
+        try:
+            count = await asyncio.to_thread(pending_repo.acknowledge_batch, run_token)
+        except Exception as e:
+            logger.warning("blueprint_acknowledge_pending failed: %s", e, exc_info=True)
+            return f"Error: failed to acknowledge pending updates: {e}"
+
+        return f"Acknowledged {count} pending update(s) for run token: {run_token}"
+
+    # ------------------------------------------------------------------
+    # 9. blueprint_get_pending_count — read-only, available to ALL agents
+    # ------------------------------------------------------------------
+
+    @register_tool_category("blueprint")
+    @tool
+    async def blueprint_get_pending_count(
+        project_id: str = None,
+    ) -> str:
+        """Get the count of pending blueprint updates for the current project.
+
+        Returns the number of unprocessed pending records (status: available or retryable).
+        Useful for deciding whether an incremental update is warranted.
+
+        Args:
+            project_id: Optional project ID. Auto-detected from context if not provided.
+
+        Returns:
+            Integer count as a string.
+        """
+        pid = project_id or _get_project_id()
+        if not pid:
+            return "0"
+
+        pending_repo = getattr(manager, "_blueprint_pending_repo", None)
+        if pending_repo is None:
+            return "0"
+
+        try:
+            count = await asyncio.to_thread(pending_repo.get_pending_count, pid)
+        except Exception as e:
+            logger.warning("blueprint_get_pending_count failed: %s", e, exc_info=True)
+            return "0"
+
+        return str(count)
+
+    # ------------------------------------------------------------------
+    # 10. blueprint_release_lease — workflow-completion safety net
+    # ------------------------------------------------------------------
+
+    @register_tool_category("blueprint")
+    @tool
+    async def blueprint_release_lease(
+        run_token: str,
+        project_id: str = None,
+    ) -> str:
+        """Release the blueprint coordinator lease.
+
+        Call this at the end of every workflow, before reporting, using the
+        run_token from the trigger metadata. This frees the project for
+        subsequent blueprint operations.
+
+        Args:
+            run_token: The run_token from the trigger metadata.
+            project_id: Optional project ID. Auto-detected from context if not provided.
+
+        Returns:
+            Success or error message.
+        """
+        pid = project_id or _get_project_id()
+        if not pid:
+            return "Error: project_id not available."
+
+        coordinator = getattr(
+            manager, "_blueprint_trigger_coordinator", None
+        )
+        if coordinator is None:
+            return "No coordinator available (lease system not configured)."
+
+        try:
+            released = await coordinator.release(pid, run_token)
+            if released:
+                return "Lease released successfully."
+            return "Lease not found or already released."
+        except Exception as e:
+            logger.warning(
+                "blueprint_release_lease failed: %s", e, exc_info=True
+            )
+            return f"Error releasing lease: {e}"
+
+    return [
+        blueprint_search,
+        blueprint_get,
+        blueprint_list,
+        blueprint_create,
+        blueprint_update,
+        blueprint_disable,
+        blueprint_claim_pending,
+        blueprint_acknowledge_pending,
+        blueprint_get_pending_count,
+        blueprint_release_lease,
+    ]

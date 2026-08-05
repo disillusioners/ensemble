@@ -1,29 +1,41 @@
 """REST API router for Project Blueprints — user-facing CRUD.
 
-Mounted under /api/projects/{project_id}/blueprints. Per the architecture
-review (B2 fix): ALL endpoints consume ``manager._blueprint_repo`` for
-CRUD operations. The ``manager._blueprint_matcher`` is MATCH-ONLY and is
-NOT consumed by this router — do not add CRUD methods to it, do not call
-it from here.
+Mounted under /api/projects/{project_id}/blueprints. Per the Phase 1
+canonical write boundary (C5 fix): ALL write endpoints (POST/PUT/DELETE)
+route through ``manager.get_blueprint_write_service(project_id)``, which
+enforces the five invariants (rate-limit, embed-before-commit, revision
+capture, atomic publish unit, rate-limit record). Read endpoints (GET)
+consume ``manager._blueprint_repo`` directly — reads don't mutate state.
 
-No service layer — the router accesses ``manager._blueprint_repo``
-directly, matching the ``daemon/routers/skill_bank.py`` pattern.
-Input validation is handled by Pydantic ``Field(min_length=1)`` on the
-request schemas; the ``is_write_paused`` manager check is applied to
-every write endpoint (POST, PUT, DELETE).
+The ``manager._blueprint_matcher`` is MATCH-ONLY and is NOT consumed by
+this router.
 
-DI pattern: ``_get_manager(request) → manager._blueprint_repo``,
-sync calls bridged with ``asyncio.to_thread``. All endpoints are
-scoped by ``project_id`` path param — a security requirement. A
-blueprint belonging to project A is invisible (404) to project B.
+DI pattern: ``_get_manager(request) → manager.get_blueprint_write_service(project_id)``
+for writes, ``manager._blueprint_repo`` for reads; sync calls bridged
+with ``asyncio.to_thread``. All endpoints are scoped by ``project_id``
+path param — a security requirement. A blueprint belonging to project A
+is invisible (404) to project B.
 """
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
+
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.services.blueprint_job_helper import (
+    BlueprintEnqueueError,
+    enqueue_blueprinter_job,
+)
+from daemon.services.blueprint_trigger_coordinator import ClaimResult
+from daemon.services.blueprint_write_service import (
+    BlueprintNotFoundError,
+    BlueprintPublishError,
+    BlueprintRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +57,27 @@ class BlueprintCreate(BaseModel):
     content: str = Field(min_length=1, description="Blueprint body content")
     tags: list[dict] | None = None
     file_refs: list[str] | None = None
+    trigger_queries: list[str] | None = Field(
+        default=None,
+        description="Trigger queries to embed (vector matching). None = no triggers.",
+    )
 
 
 class BlueprintUpdate(BaseModel):
-    """Update request — all fields optional. Only non-None fields are applied."""
+    """Update request — all fields optional. Only non-None fields are applied.
+
+    ``trigger_queries`` semantics (C4 fix 2):
+      - ``None`` (omitted) → leave triggers unchanged
+      - ``[]`` (empty list) → clear ALL triggers explicitly
+      - ``[a, b, ...]`` → replace triggers with new embeddings
+    """
 
     name: str | None = Field(default=None, min_length=1)
     content: str | None = Field(default=None, min_length=1)
     tags: list[dict] | None = None
     file_refs: list[str] | None = None
     status: str | None = None
+    trigger_queries: list[str] | None = None
 
 
 class BlueprintResponse(BaseModel):
@@ -111,6 +134,27 @@ def _get_manager(request: Request) -> Any:
     return request.app.state.manager
 
 
+def _validate_project_id(project_id: str) -> None:
+    """Validate that the path param is UUID-shaped (C2 fix e / C7).
+
+    Prevents attacker-controlled arbitrary strings from reaching the
+    rate limiter (which keys state by project_id). Returns 400 on an
+    invalid UUID. ``project_id`` must be a valid UUID string.
+
+    Threat model: without this check, an attacker flooding unique
+    random strings as ``project_id`` grows the limiter's ``_state``
+    dict without bound (C2/C7). The limiter now has an LRU cap, but
+    UUID validation at the boundary is defense-in-depth.
+    """
+    try:
+        uuid.UUID(project_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail="project_id must be a valid UUID",
+        )
+
+
 def _blueprint_to_response(bp: Any) -> BlueprintResponse | None:
     """Convert a Blueprint model instance (or dict) to a Pydantic response."""
     if bp is None:
@@ -147,6 +191,123 @@ def _check_write_paused(manager: Any) -> None:
         )
 
 
+async def _check_default_project_blocked(manager: Any, project_id: str) -> None:
+    """400 if ``project_id`` belongs to the system default project.
+
+    The virtual ``__system_default__`` project is used for bookkeeping
+    only — the router must never create or update blueprints for it.
+    ``/initialize`` is exempted (deprecated, backward-compat).
+    """
+    project_repo = getattr(manager, "_project_repository", None)
+    if project_repo is None:
+        return
+    try:
+        project = await asyncio.to_thread(project_repo.get, project_id)
+    except Exception:
+        # If the lookup fails, do not harden the check — let the
+        # downstream endpoint surface the underlying error.
+        return
+    if project is not None and getattr(project, "name", None) == SYSTEM_DEFAULT_PROJECT_NAME:
+        raise HTTPException(
+            status_code=400,
+            detail="Blueprints cannot be created for the system default project",
+        )
+
+
+async def _check_blueprint_active(manager: Any, project_id: str) -> None:
+    """400 if the project has not opted in to the blueprint system.
+
+    Per-project opt-in (default: false). Stored in
+    ``project_metadata_records`` under ``BLUEPRINT_ACTIVE_METADATA_KEY``;
+    absent = inactive. A metadata lookup failure must NOT harden the
+    check (treat the project as inactive so the user gets a clear
+    error instead of an ambiguous 5xx).
+
+    NOT applied to ``/initialize`` (deprecated, backward-compat) or
+    ``/scan`` (read-only diagnostic).
+    """
+    project_repo = getattr(manager, "_project_repository", None)
+    if project_repo is None:
+        return
+    try:
+        val = await asyncio.to_thread(
+            project_repo.get_metadata,
+            project_id,
+            BLUEPRINT_ACTIVE_METADATA_KEY,
+        )
+    except Exception:
+        val = None
+    if not bool(val):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Blueprint system not active for this project. "
+                "Enable it in project settings first."
+            ),
+        )
+
+
+async def _enqueue_blueprinter_job(
+    manager: Any,
+    project_id: str,
+    trigger_type: str,
+    message: str,
+    run_token: str | None = None,
+    job_id: str | None = None,
+    blueprint_id: str | None = None,
+) -> str:
+    """Look up the background queue and enqueue a blueprinter job.
+
+    Thin router wrapper — delegates the real work to
+    :func:`daemon.services.blueprint_job_helper.enqueue_blueprinter_job`
+    and converts :class:`BlueprintEnqueueError` to the right
+    :class:`HTTPException`. Shared by ``/initialize`` (legacy), ``/scan``,
+    ``/rebuild``, ``/update``, and ``/{blueprint_id}/rebuild``.
+
+    Args:
+        manager: The InstanceManager (provides ``_job_queue_service``).
+        project_id: Project whose blueprints are being built.
+        trigger_type: Metadata ``trigger`` value (e.g. ``"rebuild"``).
+        message: The agent prompt body sent to the blueprinter job.
+        run_token: Optional lease token from the C7 coordinator. When
+            provided, stored in the job metadata so the worker can call
+            ``coordinator.release()``.
+        job_id: Optional explicit JobItem UUID. When provided, it is
+            forwarded to ``job_service.enqueue(job_id=...)`` so the
+            enqueued job's id matches the lease stored on the project
+            row by ``coordinator.try_claim(job_id=...)``. Used by
+            ``/rebuild`` and ``/update`` (coordinator-gated). When
+            ``None``, ``enqueue()`` generates its own UUID — the
+            behavior for ``/initialize`` and ``/scan`` which do NOT
+            route through the coordinator and therefore have no lease
+            to align with.
+        blueprint_id: Optional target blueprint id for the ``"single"``
+            trigger mode (used by ``/{blueprint_id}/rebuild``). Forwarded
+            to the helper so the metadata carries it; the blueprinter
+            then fetches the live record via ``blueprint_get``.
+
+    Returns:
+        The ``job_id`` string of the enqueued job.
+    """
+    try:
+        return await enqueue_blueprinter_job(
+            job_queue_service=getattr(manager, "_job_queue_service", None),
+            project_id=project_id,
+            trigger_type=trigger_type,
+            message=message,
+            run_token=run_token,
+            job_id=job_id,
+            source="admin-endpoint",
+            blueprint_id=blueprint_id,
+        )
+    except BlueprintEnqueueError as e:
+        # Map to HTTP status: "not available" = 503 (service missing),
+        # everything else (missing queue, enqueue failure) = 404.
+        if "not available" in str(e):
+            raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -170,6 +331,7 @@ async def list_blueprints(
     ``active_only``. ``active_only`` is hardcoded to True (soft-deleted
     blueprints are invisible here).
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     repo = manager._blueprint_repo
     items = await asyncio.to_thread(
@@ -183,6 +345,130 @@ async def list_blueprints(
     )
 
 
+# ─── Single blueprint rebuild (Phase 5 single-mode trigger) ─────────────
+# IMPORTANT ROUTE ORDERING: this POST must be declared BEFORE the
+# catch-all ``@router.get("/{blueprint_id}")`` below — otherwise FastAPI
+# matches the GET against ``/{blueprint_id} = "rebuild"`` first and the
+# new endpoint is unreachable. The comment ties the declaration order
+# to shadowing prevention (architecture doc, risks table).
+
+
+@router.post("/{blueprint_id}/rebuild", response_model=dict, status_code=202)
+async def rebuild_single_blueprint(
+    request: Request,
+    project_id: str,
+    blueprint_id: str,
+):
+    """Trigger a rebuild for ONE specific blueprint.
+
+    New C7 coordinator mode ``"single"``: shares the project-level
+    lease — coalesces with itself (deduplicates rapid retries) and
+    conflicts with ``"rebuild"`` / ``"incremental"`` (prevents
+    concurrent ops on the same project). Two singles for DIFFERENT
+    blueprints coalesce onto the first (the second blueprint is NOT
+    rebuilt) — a known limitation; a per-``(project_id, blueprint_id)``
+    lease is a follow-up.
+
+    Outcomes:
+
+    * ``202`` ``status="accepted"`` — claim acquired, job enqueued
+      (response also carries ``mode="single"`` and ``blueprint_id``).
+    * ``202`` ``status="already_in_progress"`` — a single rebuild is
+      already in flight; ``job_id`` points to the in-flight job.
+    * ``400`` — invalid project id OR project has not opted in to the
+      blueprint system OR project is the system default.
+    * ``404`` — blueprint not found, OR belongs to a different
+      project, OR is soft-deleted (``is_active=False``).
+    * ``409`` — a rebuild/incremental of a different mode is in
+      flight (``conflict_mode`` is reported in the detail).
+    * ``503`` — the trigger coordinator or job service is not wired.
+
+    On enqueue failure the lease is released so a subsequent request
+    can retry.
+    """
+    _validate_project_id(project_id)
+    manager = _get_manager(request)
+    await _check_default_project_blocked(manager, project_id)
+    await _check_blueprint_active(manager, project_id)
+
+    # Ownership + active check before any coordinator work. Mirrors the
+    # security pattern in update_blueprint / delete_blueprint:
+    # fetch + verify project_id match + is_active. 404 (NOT 403) on
+    # mismatch so cross-project existence is not leaked; the same code
+    # for missing vs. wrong-project vs. inactive.
+    repo = manager._blueprint_repo
+    bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
+    if bp is None or bp.project_id != project_id or not bp.is_active:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Blueprint not found in project '{project_id}'",
+        )
+
+    coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trigger coordinator not available",
+        )
+
+    job_id = str(uuid.uuid4())
+    result: ClaimResult = await coordinator.try_claim(
+        project_id, "single", job_id
+    )
+
+    # Coalesced: a single rebuild is already in flight for this project.
+    if result.coalesced:
+        return {
+            "job_id": result.job_id,
+            "status": "already_in_progress",
+            "mode": "single",
+            "blueprint_id": blueprint_id,
+        }
+
+    # Cross-mode conflict: e.g. a rebuild or incremental build is running.
+    if not result.claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Blueprint {result.conflict_mode} already in progress",
+        )
+
+    # Claim acquired — enqueue the blueprinter job. On any failure
+    # (queue missing, job service down), release the lease so the next
+    # call can reclaim it.
+    try:
+        enqueued_job_id = await _enqueue_blueprinter_job(
+            manager=manager,
+            project_id=project_id,
+            trigger_type="single",
+            message=(
+                f"Rebuild a single blueprint.\n\n"
+                f"Blueprint ID: {blueprint_id}\n\n"
+                "Read the blueprint via blueprint_get, explore its area, "
+                "and rewrite it with fresh content and trigger queries. "
+                "Respect the rate limit.\n[trigger: single]"
+            ),
+            run_token=result.run_token,
+            job_id=job_id,  # forward the caller-generated id so the lease's
+                            # job_id matches the enqueued JobItem's id
+            blueprint_id=blueprint_id,
+        )
+    except HTTPException:
+        await coordinator.release(project_id, result.run_token)
+        raise
+    except Exception:
+        # Defensive: enqueue may raise non-HTTPException (e.g. DB error).
+        # Don't leak the lease.
+        await coordinator.release(project_id, result.run_token)
+        raise
+
+    return {
+        "job_id": enqueued_job_id,
+        "status": "accepted",
+        "mode": "single",
+        "blueprint_id": blueprint_id,
+    }
+
+
 @router.get("/{blueprint_id}", response_model=BlueprintResponse)
 async def get_blueprint(
     request: Request,
@@ -194,6 +480,7 @@ async def get_blueprint(
     Returns 404 if the blueprint does not exist OR belongs to a different
     project — never leaks cross-project existence.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     repo = manager._blueprint_repo
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
@@ -209,23 +496,30 @@ async def create_blueprint(
 ):
     """Create a new blueprint.
 
-    Validation: slug, name, content must be non-empty (Pydantic
-    ``Field(min_length=1)`` → 422 on empty string). ``project_id``
-    comes from the URL path, NOT the body.
+    Routes through the canonical write service (C5), which enforces
+    rate-limiting, embeds trigger queries BEFORE commit (C4 fix 1), and
+    records a revision. Validation: slug, name, content must be
+    non-empty (Pydantic ``Field(min_length=1)`` → 422 on empty string).
+    ``project_id`` comes from the URL path, NOT the body.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     _check_write_paused(manager)
-    repo = manager._blueprint_repo
-    created = await asyncio.to_thread(
-        repo.create,
-        project_id=project_id,
-        slug=body.slug,
-        name=body.name,
-        kind=body.kind,
-        content=body.content,
-        tags=body.tags if body.tags is not None else [],
-        file_refs=body.file_refs if body.file_refs is not None else [],
-    )
+    service = manager.get_blueprint_write_service(project_id)
+    try:
+        created = await service.create_blueprint(
+            slug=body.slug,
+            name=body.name,
+            kind=body.kind,
+            content=body.content,
+            tags=body.tags if body.tags is not None else [],
+            file_refs=body.file_refs if body.file_refs is not None else [],
+            trigger_queries=body.trigger_queries,
+        )
+    except BlueprintRateLimitError:
+        raise HTTPException(status_code=429, detail="Blueprint write rate-limited")
+    except BlueprintPublishError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     return _blueprint_to_response(created)
 
 
@@ -235,18 +529,40 @@ async def create_blueprint(
 @router.post("/initialize", response_model=dict, status_code=202)
 async def initialize_project_blueprints(
     request: Request,
+    response: Response,
     project_id: str,
 ):
     """Trigger blueprint initialization for a project.
+
+    .. deprecated::
+        Deprecated in favour of ``POST /rebuild``. This endpoint is kept
+        as a backward-compatibility alias — it still works exactly as it
+        did before (returns 409 if a core already exists, no coordinator
+        claim is acquired). New callers should use ``/rebuild``.
 
     Spawns a blueprinter agent on the system_background_queue to bootstrap
     the blueprint corpus (core.md + area blueprints). Returns 409 if a
     core.md blueprint already exists. The initialization runs asynchronously
     — this endpoint returns immediately with 202 Accepted.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
 
+    # Deprecation signal — surfaces to API clients that this endpoint is
+    # superseded by /rebuild. RFC 8594 Deprecation + RFC 8288 Link.
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Sun, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = (
+        '</api/projects/' + project_id + '/blueprints/rebuild>; rel="successor-version"'
+    )
+    logger.warning(
+        "Deprecated endpoint /initialize called for project %s — use /rebuild instead",
+        project_id,
+    )
+
     # Guard: refuse to re-initialize when a core blueprint already exists.
+    # NB: This guard is the original /initialize behavior — preserved
+    # for backward compatibility. /rebuild does NOT have this guard.
     existing_core = await asyncio.to_thread(
         manager._blueprint_repo.get_core, project_id
     )
@@ -256,26 +572,10 @@ async def initialize_project_blueprints(
             detail="Blueprints already initialized",
         )
 
-    job_service = getattr(manager, "_job_queue_service", None)
-    if job_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="JobQueueService not available",
-        )
-
-    bg_queue = await asyncio.to_thread(
-        job_service._queue_repo.get_by_name,
-        project_id,
-        "system_background_queue",
-    )
-    if bg_queue is None:
-        raise HTTPException(
-            status_code=404,
-            detail="system_background_queue not found for project",
-        )
-
-    job = await job_service.enqueue(
-        agent_id="blueprinter",
+    job_id = await _enqueue_blueprinter_job(
+        manager=manager,
+        project_id=project_id,
+        trigger_type="initialize",
         message=(
             f"Initialize project blueprints for project {project_id}.\n\n"
             "Steps:\n"
@@ -291,13 +591,186 @@ async def initialize_project_blueprints(
             "tools to read project structure. You may spawn worker agents for deep "
             "codebase analysis if needed."
         ),
-        source="admin-endpoint",
-        project_id=project_id,
-        priority=9,  # lowest priority — pure background
-        queue_id=bg_queue.queue_id,
-        metadata={"trigger": "initialize", "source": "admin-endpoint"},
     )
-    return {"job_id": job.job_id, "status": "enqueued"}
+    return {"job_id": job_id, "status": "enqueued"}
+
+
+# ─── Admin: blueprint rebuild trigger (C7, Phase 4) ────────────────────────────
+
+
+@router.post("/rebuild", response_model=dict, status_code=202)
+async def rebuild_project_blueprints(
+    request: Request,
+    project_id: str,
+):
+    """Trigger a full blueprint rebuild for a project.
+
+    Routes through the C7 trigger coordinator (``try_claim``) before
+    enqueuing. Outcomes:
+
+    * ``202`` with ``status="accepted"`` — claim acquired, job enqueued.
+    * ``202`` with ``status="already_in_progress"`` — a rebuild is
+      already in flight for this project; ``job_id`` points to the
+      in-flight job (coalesced).
+    * ``409`` — a build of a *different* mode is in flight
+      (``conflict_mode`` is reported in the detail).
+    * ``503`` — the trigger coordinator or job service is not wired.
+    * ``404`` — the project's ``system_background_queue`` is missing.
+
+    If the coordinator claim succeeds but the enqueue fails, the claim
+    is released so a subsequent request can retry.
+    """
+    _validate_project_id(project_id)
+    manager = _get_manager(request)
+    await _check_default_project_blocked(manager, project_id)
+    await _check_blueprint_active(manager, project_id)
+
+    coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trigger coordinator not available",
+        )
+
+    job_id = str(uuid.uuid4())
+    result: ClaimResult = await coordinator.try_claim(project_id, "rebuild", job_id)
+
+    # Coalesced: a rebuild is already in flight for this project.
+    if result.coalesced:
+        return {
+            "job_id": result.job_id,
+            "status": "already_in_progress",
+            "mode": "rebuild",
+        }
+
+    # Cross-mode conflict: e.g. an incremental build is running.
+    if not result.claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Blueprint {result.conflict_mode} already in progress",
+        )
+
+    # Claim acquired — enqueue the blueprinter job. On any failure
+    # (queue missing, job service down), release the lease so the next
+    # call can reclaim it.
+    try:
+        enqueued_job_id = await _enqueue_blueprinter_job(
+            manager=manager,
+            project_id=project_id,
+            trigger_type="rebuild",
+            message=(
+                "Rebuild all project blueprints.\n\n"
+                "Perform a full rebuild: create the core blueprint and "
+                "all area blueprints from scratch. Generate trigger "
+                "queries for each. Respect the rate limit."
+            ),
+            run_token=result.run_token,
+            job_id=job_id,  # forward the caller-generated id so the lease's
+                            # job_id matches the enqueued JobItem's id
+        )
+    except HTTPException:
+        await coordinator.release(project_id, result.run_token)
+        raise
+    except Exception:
+        # Defensive: enqueue may raise non-HTTPException (e.g. DB error).
+        # Don't leak the lease.
+        await coordinator.release(project_id, result.run_token)
+        raise
+
+    return {
+        "job_id": enqueued_job_id,
+        "status": "accepted",
+        "mode": "rebuild",
+    }
+
+
+# ─── Admin: blueprint incremental update trigger (C7, Phase 4) ────────────────
+
+
+@router.post("/update", response_model=dict, status_code=202)
+async def update_project_blueprints(
+    request: Request,
+    project_id: str,
+):
+    """Trigger an incremental blueprint update for a project.
+
+    Routes through the C7 trigger coordinator (``try_claim``) before
+    enqueuing. Outcomes match ``/rebuild`` plus:
+
+    * ``404`` — no blueprints exist yet (incremental requires an
+      existing corpus). The coordinator claim is released before the
+      response so the caller can follow up with ``/rebuild``.
+
+    Processes accumulated pending-experience changes and reviews
+    existing blueprints for drift.
+    """
+    _validate_project_id(project_id)
+    manager = _get_manager(request)
+    await _check_default_project_blocked(manager, project_id)
+    await _check_blueprint_active(manager, project_id)
+
+    coordinator = getattr(manager, "_blueprint_trigger_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trigger coordinator not available",
+        )
+
+    job_id = str(uuid.uuid4())
+    result: ClaimResult = await coordinator.try_claim(
+        project_id, "incremental", job_id
+    )
+
+    if result.coalesced:
+        return {
+            "job_id": result.job_id,
+            "status": "already_in_progress",
+            "mode": "incremental",
+        }
+
+    if not result.claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Blueprint {result.conflict_mode} already in progress",
+        )
+
+    # Claim acquired. Guard: incremental requires an existing corpus.
+    existing = await asyncio.to_thread(
+        manager._blueprint_repo.list_by_project, project_id, active_only=True
+    )
+    if not existing:
+        await coordinator.release(project_id, result.run_token)
+        raise HTTPException(
+            status_code=404,
+            detail="No blueprints found. Use /rebuild first.",
+        )
+
+    try:
+        enqueued_job_id = await _enqueue_blueprinter_job(
+            manager=manager,
+            project_id=project_id,
+            trigger_type="incremental",
+            message=(
+                "Incremental blueprint update.\n\n"
+                "Process accumulated pending-experience changes. Review "
+                "existing blueprints for drift. Respect the rate limit."
+            ),
+            run_token=result.run_token,
+            job_id=job_id,  # forward the caller-generated id so the lease's
+                            # job_id matches the enqueued JobItem's id
+        )
+    except HTTPException:
+        await coordinator.release(project_id, result.run_token)
+        raise
+    except Exception:
+        await coordinator.release(project_id, result.run_token)
+        raise
+
+    return {
+        "job_id": enqueued_job_id,
+        "status": "accepted",
+        "mode": "incremental",
+    }
 
 
 # ─── Admin: external-cron blueprint scan trigger (§4.6 Option B) ──────────────
@@ -314,40 +787,28 @@ async def trigger_blueprint_scan(
     Dispatches on system_background_queue. Requires that the queue exists
     for the project (provisioned automatically on project creation).
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
-    job_service = getattr(manager, "_job_queue_service", None)
-    if job_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="JobQueueService not available",
-        )
 
-    bg_queue = await asyncio.to_thread(
-        job_service._queue_repo.get_by_name,
-        project_id,
-        "system_background_queue",
-    )
-    if bg_queue is None:
-        raise HTTPException(
-            status_code=404,
-            detail="system_background_queue not found for project",
-        )
+    # NOTE: /scan deliberately bypasses the C7 coordinator. It is a
+    # fire-and-forget trigger for external cron (systemd timer, GitHub
+    # Actions). The coordinator's "5 trigger surfaces" list in its
+    # docstring is aspirational — /scan will be migrated to coordinator
+    # routing in a future phase. For now, the manual /rebuild and /update
+    # endpoints are the coordinator-gated surfaces.
 
-    job = await job_service.enqueue(
-        agent_id="blueprinter",
+    job_id = await _enqueue_blueprinter_job(
+        manager=manager,
+        project_id=project_id,
+        trigger_type="daily-scan",
         message=(
             "Daily blueprint scan (external trigger).\n\n"
             f"Project: {project_id}\n\n"
             "Perform a full drift scan. Review core.md first, then area "
             "blueprints. Respect the rate limit."
         ),
-        source="admin-endpoint",
-        project_id=project_id,
-        priority=9,  # lowest priority — pure background
-        queue_id=bg_queue.queue_id,
-        metadata={"trigger": "daily-scan", "source": "admin-endpoint"},
     )
-    return {"job_id": job.job_id, "status": "enqueued"}
+    return {"job_id": job_id, "status": "enqueued"}
 
 
 @router.put("/{blueprint_id}", response_model=BlueprintResponse)
@@ -357,23 +818,49 @@ async def update_blueprint(
     blueprint_id: str,
     body: BlueprintUpdate,
 ):
-    """Update a blueprint. Only non-None fields are applied.
+    """Update a blueprint via the canonical write service (C5).
 
-    Fetches the blueprint first to verify it belongs to ``project_id``
-    (security). The repo's ``update`` auto-bumps the version when
-    ``content``, ``file_refs``, or ``tags`` change.
+    Only non-None fields are applied. Fetches the blueprint first to
+    verify it belongs to ``project_id`` (security). ``status`` is passed
+    through to the repo (not a version-incrementing field).
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     _check_write_paused(manager)
     repo = manager._blueprint_repo
     # Verify ownership BEFORE mutating.
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
     _check_project_ownership(bp, project_id)
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not fields:
+
+    # Build kwargs from non-None values. trigger_queries has special
+    # semantics: None = unchanged, [] = clear all (C4 fix 2).
+    kwargs: dict[str, Any] = {}
+    if body.name is not None:
+        kwargs["name"] = body.name
+    if body.content is not None:
+        kwargs["content"] = body.content
+    if body.tags is not None:
+        kwargs["tags"] = body.tags
+    if body.file_refs is not None:
+        kwargs["file_refs"] = body.file_refs
+    if body.status is not None:
+        kwargs["status"] = body.status
+    # trigger_queries: pass through as-is (None OR [] OR list). The
+    # service distinguishes None (no-op) from [] (clear).
+    if body.trigger_queries is not None:
+        kwargs["trigger_queries"] = body.trigger_queries
+
+    if not kwargs:
         raise HTTPException(status_code=400, detail="No fields to update")
-    updated = await asyncio.to_thread(repo.update, blueprint_id, **fields)
-    if updated is None:
+
+    service = manager.get_blueprint_write_service(project_id)
+    try:
+        updated = await service.update_blueprint(blueprint_id, **kwargs)
+    except BlueprintRateLimitError:
+        raise HTTPException(status_code=429, detail="Blueprint write rate-limited")
+    except BlueprintPublishError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except BlueprintNotFoundError:
         raise HTTPException(status_code=404, detail="Blueprint not found")
     return _blueprint_to_response(updated)
 
@@ -384,18 +871,25 @@ async def delete_blueprint(
     project_id: str,
     blueprint_id: str,
 ):
-    """Soft-delete a blueprint (sets ``is_active=False``).
+    """Soft-delete a blueprint via the canonical write service (C5).
 
-    Fetches the blueprint first to verify it belongs to ``project_id``.
+    The service soft-deletes (sets ``is_active=False``) and records a
+    final revision (``version=-1, source="disable"``). Fetches the
+    blueprint first to verify it belongs to ``project_id``.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     _check_write_paused(manager)
     repo = manager._blueprint_repo
     # Verify ownership BEFORE deleting.
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)
     _check_project_ownership(bp, project_id)
-    deleted = await asyncio.to_thread(repo.soft_delete, blueprint_id)
-    if not deleted:
+    service = manager.get_blueprint_write_service(project_id)
+    try:
+        await service.disable_blueprint(blueprint_id)
+    except BlueprintRateLimitError:
+        raise HTTPException(status_code=429, detail="Blueprint write rate-limited")
+    except BlueprintNotFoundError:
         raise HTTPException(status_code=404, detail="Blueprint not found")
     return {"deleted": True}
 
@@ -413,6 +907,7 @@ async def list_blueprint_revisions(
 
     Verifies the blueprint belongs to ``project_id`` first.
     """
+    _validate_project_id(project_id)
     manager = _get_manager(request)
     repo = manager._blueprint_repo
     bp = await asyncio.to_thread(repo.get_by_id, blueprint_id)

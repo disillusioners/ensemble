@@ -40,6 +40,8 @@ from .repositories import (
     create_shared_context_metadata_repository,
     create_skill_repository,
     create_blueprint_repository,
+    create_blueprint_embedding_repository,
+    create_blueprint_pending_repository,
     create_skill_lineage_repository,
     create_skill_embedding_repository,
     create_skill_usage_repository,
@@ -85,6 +87,7 @@ from .services.skill_store_service import SkillStoreService
 from .services.skill_search_service import SkillSearchService
 from .services.blueprint_matcher import BlueprintMatcher
 from .services.blueprint_rate_limiter import BlueprintRateLimiter
+from .services.blueprint_write_service import BlueprintWriteService
 from .services.skill_injection_service import SkillInjectionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
@@ -757,6 +760,73 @@ class InstanceManager:
 
         # Project Blueprint: blueprint repository (Phase 1 schema created via SQLModel.metadata.create_all)
         self._blueprint_repo = create_blueprint_repository(engine=self._engine, create_tables=False)
+        # Phase 2 / C3: pending-experience queue repository. The
+        # ``project_blueprint_pending_updates`` table is auto-created
+        # by ``SQLModel.metadata.create_all`` at line 439 because the
+        # model is registered via the import above. The repo itself
+        # is constructed regardless of any flag — the smart-scan
+        # trigger (see Item 4) checks ``get_pending_count`` on every
+        # nudge, so the repo must be available for read-only consumers
+        # even when the blueprinter is disabled.
+        self._blueprint_pending_repo = create_blueprint_pending_repository(
+            engine=self._engine, create_tables=False,
+        )
+
+        # C7 (Phase 3): BlueprintTriggerCoordinator — the single
+        # chokepoint for ALL blueprint build enqueuing. Lease is
+        # persisted as project metadata. ``_job_queue_service`` is
+        # late-bound via ``set_job_queue_service()`` below because it
+        # is not constructed yet at this point in the init sequence.
+        from .services.blueprint_trigger_coordinator import (
+            BlueprintTriggerCoordinator,
+        )
+        self._blueprint_trigger_coordinator = BlueprintTriggerCoordinator(
+            project_repository=self._project_repository,
+            job_queue_service=None,
+        )
+
+        # G7 (C6): one-core-per-project DB constraint. Called here — AFTER
+        # ``self._blueprint_repo`` and ``self._project_repository`` are
+        # assigned — so the auto-dedup pre-flight can reach them. The
+        # helper itself catches and logs errors so a constraint failure
+        # cannot crash startup; the app-level UX guard in
+        # ``BlueprintRepository.create`` is the safety net.
+        self._ensure_blueprint_g7_unique_index()
+        # Backfill: opt in existing projects that already have blueprints
+        self._backfill_blueprint_active()
+
+        # ── Project Blueprint: embedding repo + service (G4 fix) ───────
+        # INDEPENDENT of skill_evolution. Operates on the same
+        # ``project_blueprint_triggers`` table, but is constructed
+        # whenever a blueprint embedding model is configured.
+        # skill_evolution is NOT a prerequisite.
+        _blueprint_embedding_configured = (
+            getattr(self.config.blueprint, "embedding_model", None) is not None
+        )
+        if _blueprint_embedding_configured:
+            self._blueprint_embedding_repo = create_blueprint_embedding_repository(
+                engine=self._engine, create_tables=False,
+            )
+            blueprint_llm_config: dict[str, Any] = {
+                "base_url": self.config.llm.base_url,
+                "api_key": self.config.llm.api_key,
+                "model": self.config.llm.model,
+                "model_vision": self.config.llm.model_vision,
+                "temperature": self.config.llm.temperature,
+                "request_timeout": self.config.llm.request_timeout,
+            }
+            self._blueprint_embedding_service = SkillEmbeddingService(
+                config=self.config.blueprint,  # BlueprintConfig, NOT skill_evolution
+                embedding_repo=self._blueprint_embedding_repo,
+                llm_config=blueprint_llm_config,
+            )
+        else:
+            self._blueprint_embedding_repo = None
+            self._blueprint_embedding_service = None
+        # NOTE: ``BlueprintMatcher`` construction is deferred to after the
+        # skill_evolution block below (it lives there historically); we
+        # just gate it on the blueprint embedding service, not the skill
+        # service. See the ``BlueprintMatcher`` block ~line 940.
 
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
@@ -927,20 +997,22 @@ class InstanceManager:
             self._skill_search_service = None
 
         # Project Blueprint: matching engine (BM25 + vector fusion).
-        # Only construct if the embedding service is available; Phase 2
-        # injection code handles ``matcher is None`` gracefully (skips
-        # blueprint injection).
-        if self._skill_embedding_service is not None:
+        # G4 fix: construct whenever the BLUEPRINT embedding service is
+        # available, REGARDLESS of whether skill_evolution is configured.
+        # ``self._blueprint_matcher`` is no longer gated on
+        # ``self._skill_embedding_service is not None`` (rev 1 mistake —
+        # it coupled blueprints to skill_evolution).
+        if self._blueprint_embedding_service is not None:
             self._blueprint_matcher = BlueprintMatcher(
                 repository=self._blueprint_repo,
-                embedding_service=self._skill_embedding_service,
+                embedding_service=self._blueprint_embedding_service,
                 config=self.config.blueprint,
             )
         else:
             self._blueprint_matcher = None
-            logger.warning(
-                "BlueprintMatcher not initialized - "
-                "no embedding service available"
+            logger.info(
+                "BlueprintMatcher not initialized — "
+                "BLUEPRINT_EMBEDDING_MODEL not set"
             )
 
         # Project Blueprint Phase 4: rate limiter + circuit breaker for
@@ -1123,6 +1195,30 @@ class InstanceManager:
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
+
+    def get_blueprint_write_service(
+        self,
+        project_id: str,
+    ) -> BlueprintWriteService:
+        """Factory for the canonical write boundary (C5).
+
+        Returns a :class:`BlueprintWriteService` bound to ``project_id``
+        and the manager's blueprint subsystem. Used by the REST router,
+        the blueprinter tools, and (in Phase 3) the admission
+        coordinator. ALL blueprint writes route through this service so
+        the five invariants (rate-limit, embed-before-commit, revision
+        capture, atomic publish unit, rate-limit record) are enforced on
+        every path.
+        """
+        return BlueprintWriteService(
+            repository=self._blueprint_repo,
+            embedding_repository=self._blueprint_embedding_repo,
+            embedding_service=self._blueprint_embedding_service,
+            rate_limiter=self._blueprint_rate_limiter,
+            config=self.config.blueprint,
+            project_id=project_id,
+            manager=self,  # for save-plan metadata + future history hooks
+        )
 
     def _bootstrap_builtin_servers(self) -> None:
         """Bootstrap built-in MCP servers on daemon startup.
@@ -1760,6 +1856,53 @@ class InstanceManager:
                 "skill_orphan_sweep",
                 self.config.skill_evolution.metric_scan_interval_hours,
                 self._run_skill_orphan_sweep,
+            )
+
+        # ── Project Blueprint Phase 3: daily scan ─────────────────────
+        # The daily scan is the daemon-side counterpart to manual
+        # ``/rebuild`` / ``/update`` triggers — same chokepoint
+        # (BlueprintTriggerCoordinator) — but driven by the system
+        # clock and gated by the ``auto_rebuild_enabled`` feature flag
+        # (default OFF). Crashed blueprinter jobs are cleaned up by
+        # ``reconcile_on_startup()`` at the next daemon restart.
+        if (
+            self._blueprint_repo is not None
+            and self._blueprint_pending_repo is not None
+            and getattr(self, "_blueprint_trigger_coordinator", None) is not None
+        ):
+            from .services.blueprint_scan_service import BlueprintScanService
+            self._blueprint_scan_service = BlueprintScanService(
+                blueprint_repo=self._blueprint_repo,
+                pending_repo=self._blueprint_pending_repo,
+                coordinator=self._blueprint_trigger_coordinator,
+                config=self.config.blueprint,
+                project_repository=self._project_repository,
+            )
+            # Load persisted last_run so the scan doesn't fire
+            # immediately on every restart. The timestamp lives in
+            # project metadata KV on the system default project — see
+            # BlueprintScanService.execute() for the writer side.
+            from datetime import datetime
+            _SCAN_LAST_RUN_KEY = "blueprint_scan_last_run"
+            _SYSTEM_DEFAULT_PID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+            last_run_dt: datetime | None = None
+            if self._project_repository is not None:
+                try:
+                    last_run_str = self._project_repository.get_metadata(
+                        _SYSTEM_DEFAULT_PID, _SCAN_LAST_RUN_KEY,
+                    )
+                    if last_run_str:
+                        last_run_dt = datetime.fromisoformat(last_run_str)
+                except Exception:
+                    # Corrupt or unreadable value — fall through with
+                    # None so the scan still runs. The next execute()
+                    # will overwrite the bad value.
+                    pass
+            self._maintenance_service.register(
+                "blueprint_daily_scan",
+                min_interval_hours=5.0,
+                execute_fn=self._blueprint_scan_service.execute,
+                last_run=last_run_dt,
             )
 
         await self._maintenance_service.start()
@@ -3047,6 +3190,28 @@ class InstanceManager:
         metrics = getattr(self, "_skill_metrics_service", None)
         if metrics is not None and self._skill_job_dispatcher is not None:
             metrics.set_job_dispatcher(self._skill_job_dispatcher)
+
+        # Wire the BlueprintTriggerCoordinator (C7) so it can probe
+        # job status during startup reconciliation. Defensive getattr
+        # because the coordinator may not exist on test doubles that
+        # bypass the normal __init__ flow.
+        coordinator = getattr(self, "_blueprint_trigger_coordinator", None)
+        if coordinator is not None and service is not None:
+            coordinator.set_job_queue_service(service)
+            # C2: queue-aware reconciliation must run only after the service is wired.
+            try:
+                asyncio.ensure_future(coordinator.reconcile_on_startup())
+            except Exception:
+                logger.warning("Blueprint lease reconcile scheduling failed", exc_info=True)
+
+        # Wire the BlueprintScanService so it can enqueue blueprinter jobs
+        # after a coordinator claim. Defensive getattr: the scan service is
+        # only constructed when blueprint auto-rebuild is configured, so test
+        # doubles that bypass __init__ may not have the attribute.
+        scan_service = getattr(self, "_blueprint_scan_service", None)
+        if scan_service is not None and service is not None:
+            scan_service.set_job_queue_service(service)
+
         logger.info("JobQueueService connected to SessionManager")
 
     def set_job_feedback_observer(self, observer: Any) -> None:
@@ -4170,6 +4335,159 @@ class InstanceManager:
             "Phase 5 column drop: seven legacy job_queue_items columns "
             "removed (or absent) on PostgreSQL"
         )
+
+    def _ensure_blueprint_g7_unique_index(self) -> None:
+        """C6 / G7: enforce one core per project via a partial unique index.
+
+        Phase 2 of the Project Blueprint subsystem. The DB-level
+        partial unique index is the PRIMARY enforcement mechanism —
+        the app-level UX guard in :meth:`BlueprintRepository.create`
+        is convenience only. The index is created via raw DDL
+        (NOT a ``.sql`` migration, which the migration runner
+        silently skips on PostgreSQL) so it works on both
+        SQLite and PostgreSQL.
+
+        Steps
+        -----
+
+        1. **Auto-dedup pre-flight** — for every project, scan for
+           duplicate active cores and soft-disable every copy except
+           the newest (``auto_dedup_cores``). This is required
+           BEFORE the unique index can be created on existing
+           databases with duplicates.
+        2. **Create the partial unique index** — ``WHERE kind =
+           'core' AND is_active``. Bare ``is_active`` is portable
+           across drivers:
+
+           * SQLite stores ``bool`` as INTEGER 0/1; bare ``is_active``
+             is a truthy check (0 is false, 1 is true).
+           * PostgreSQL uses a genuine BOOLEAN column; bare
+             ``is_active`` is a boolean expression.
+
+           Do NOT use ``is_active = 1`` — PostgreSQL has no
+           int→boolean implicit cast and will raise
+           ``operator does not exist: boolean = integer``.
+
+           ``IF NOT EXISTS`` makes the call idempotent.
+
+        Failure semantics
+        -----------------
+
+        Wrapped in ``try/except Exception`` so that a constraint
+        failure (e.g. driver inconsistency, dead rows) does not
+        crash startup. The app-level UX guard in
+        :meth:`BlueprintRepository.create` still catches the
+        double-core case at the API boundary; the DB index is the
+        belt-and-braces enforcement.
+        """
+        try:
+            # Step 1: Auto-dedup pre-flight (LEADER DECISION #2).
+            # ``_blueprint_repo`` is constructed earlier in __init__.
+            if self._blueprint_repo is not None:
+                project_repo = getattr(self, "_project_repository", None)
+                if project_repo is not None:
+                    try:
+                        projects = project_repo.list_projects(limit=10000)
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.debug(
+                            "G7 auto-dedup: project list unavailable, "
+                            "skipping pre-flight: %s", exc,
+                        )
+                        projects = []
+                    for project in projects:
+                        try:
+                            self._blueprint_repo.auto_dedup_cores(
+                                project.project_id
+                            )
+                        except Exception as exc:  # noqa: BLE001 — per-project scope
+                            logger.warning(
+                                "G7 auto-dedup failed for project %s: %s",
+                                project.project_id, exc,
+                            )
+
+            # Step 2: Create the partial unique index.
+            # SQLite stores booleans as INTEGER (0/1); bare ``is_active``
+            # is truthy. PostgreSQL uses genuine BOOLEAN; bare
+            # ``is_active`` is a boolean expression. Both drivers
+            # evaluate ``WHERE is_active`` correctly. Do NOT use
+            # ``= 1`` — PostgreSQL has no int→boolean implicit cast
+            # and will raise ``operator does not exist: boolean = integer``.
+            ddl = (
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_blueprint_one_core "
+                "ON project_blueprints (project_id) "
+                "WHERE kind = 'core' AND is_active"
+            )
+            with self._engine.begin() as conn:
+                conn.execute(text(ddl))
+            logger.info(
+                "G7: created partial unique index ux_blueprint_one_core "
+                "(one core per project, active rows)"
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash startup
+            logger.error(
+                "G7 partial unique index creation failed: %s. "
+                "App-level UX guard in create() is still active.",
+                exc, exc_info=True,
+            )
+
+    def _backfill_blueprint_active(self) -> None:
+        """One-time startup backfill: opt in projects that already have blueprints.
+
+        When the per-project ``blueprint_active`` gate was introduced, existing
+        projects with blueprints would have been silently disabled (default =
+        absent = false). This backfill runs on every startup and sets
+        ``blueprint_active=true`` for any project that has at least one active
+        blueprint row but no metadata key yet.
+
+        Idempotent: if the key already exists (true or false), it is NOT
+        overwritten — the operator's explicit choice is respected.
+        """
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        try:
+            bp_repo = getattr(self, "_blueprint_repo", None)
+            project_repo = getattr(self, "_project_repository", None)
+            if bp_repo is None or project_repo is None:
+                return
+
+            projects = project_repo.list_projects(limit=10_000)
+            backfilled = 0
+            for project in projects:
+                pid = getattr(project, "project_id", None) or getattr(project, "id", None)
+                if not pid:
+                    continue
+                # Skip the system default project
+                if getattr(project, "name", None) == "__system_default__":
+                    continue
+                try:
+                    # Check if project already has the metadata key
+                    existing = project_repo.get_metadata(pid, BLUEPRINT_ACTIVE_METADATA_KEY)
+                    if existing is not None:
+                        continue  # Key exists — respect the operator's choice
+                    # Check if project has any active blueprints
+                    blueprints = bp_repo.list_by_project(pid, active_only=True)
+                    if blueprints:
+                        project_repo.set_metadata(pid, BLUEPRINT_ACTIVE_METADATA_KEY, True)
+                        backfilled += 1
+                        logger.info(
+                            "Blueprint backfill: opted in project %s "
+                            "(has %d active blueprint(s))",
+                            pid, len(blueprints),
+                        )
+                except Exception as exc:  # noqa: BLE001 — per-project isolation
+                    logger.warning(
+                        "Blueprint backfill: failed for project %s: %s",
+                        pid, exc,
+                    )
+            if backfilled > 0:
+                logger.info(
+                    "Blueprint backfill: opted in %d project(s) with existing blueprints",
+                    backfilled,
+                )
+        except Exception as exc:  # noqa: BLE001 — never crash startup
+            logger.warning(
+                "Blueprint backfill: startup scan failed: %s", exc, exc_info=True,
+            )
 
     def setup_worker_pool(
         self,

@@ -21,11 +21,15 @@ Test surface
 * GET /{id}/revisions returns revision history.
 * Project scoping: a blueprint in project A is 404 from project B.
 * 404 on missing blueprint for get / update / delete.
+* /rebuild + /update (Phase 4): routes through the C7 coordinator,
+  with coalesce/conflict/corpus-missing edge cases.
+* /initialize (deprecated): still 202 + adds Deprecation/Sunset/Link
+  headers and logs a WARNING.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -34,8 +38,14 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 from starlette.testclient import TestClient
 
+from daemon.repositories.blueprint.embedding_repository import (
+    BlueprintEmbeddingRepository,
+)
 from daemon.repositories.blueprint.repository import BlueprintRepository
 from daemon.routers.blueprints import router as blueprints_router
+from daemon.services.blueprint_rate_limiter import BlueprintRateLimiter
+from daemon.services.blueprint_trigger_coordinator import ClaimResult
+from daemon.services.blueprint_write_service import BlueprintWriteService
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -44,31 +54,65 @@ from daemon.routers.blueprints import router as blueprints_router
 
 
 @pytest.fixture
-def repo():
-    """A fresh BlueprintRepository over an in-memory SQLite engine.
+def engine():
+    """A fresh in-memory SQLite engine with all tables created.
 
-    Uses ``StaticPool`` + ``check_same_thread=False`` so the same connection
-    (and its schema) is shared across threads. The router bridges sync repo
-    calls via ``asyncio.to_thread``, so a default pool would open a new
-    in-memory DB per worker thread and lose the tables.
+    Uses ``StaticPool`` + ``check_same_thread=False`` so the same
+    connection (and its schema) is shared across threads. The router
+    bridges sync repo calls via ``asyncio.to_thread``, so a default pool
+    would open a new in-memory DB per worker thread and lose the tables.
     """
-    engine = create_engine(
+    eng = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.create_all(eng)
+    return eng
+
+
+@pytest.fixture
+def repo(engine):
+    """A fresh BlueprintRepository over an in-memory SQLite engine."""
     return BlueprintRepository(engine)
 
 
 @pytest.fixture
-def app(repo: BlueprintRepository):
-    """A FastAPI app with the blueprints router and a stub manager."""
+def embedding_repo(engine):
+    """A BlueprintEmbeddingRepository over the same engine."""
+    return BlueprintEmbeddingRepository(engine)
+
+
+@pytest.fixture
+def app(
+    engine,
+    repo: BlueprintRepository,
+    embedding_repo: BlueprintEmbeddingRepository,
+):
+    """A FastAPI app with the blueprints router and a stub manager.
+
+    The manager stub wires ``get_blueprint_write_service`` to return a
+    real ``BlueprintWriteService`` backed by the in-memory engine, so
+    the router's create/update/delete calls exercise the full canonical
+    write boundary (revision capture, trigger replace, etc.) without an
+    embedding service (``embedding_service=None`` → triggers skipped).
+    """
     manager = MagicMock()
     manager._blueprint_repo = repo
-    # MagicMock returns truthy child mocks by default — pin these explicitly
-    # so the ``is_write_paused`` check evaluates to False.
     manager.is_write_paused = False
+
+    def _get_write_service(project_id: str) -> BlueprintWriteService:
+        return BlueprintWriteService(
+            repository=repo,
+            embedding_repository=embedding_repo,
+            embedding_service=None,  # no embedding API in tests
+            rate_limiter=None,  # no rate limiting in most API tests
+            config=MagicMock(),
+            project_id=project_id,
+            manager=manager,
+        )
+
+    manager.get_blueprint_write_service = _get_write_service
 
     app = FastAPI()
     app.include_router(blueprints_router, prefix="/api")
@@ -90,7 +134,7 @@ def bp_factory(repo: BlueprintRepository):
     """
 
     def _make(
-        project: str = "proj-a",
+        project: str = "00000000-0000-0000-0000-000000000001",
         slug: str = "slug",
         kind: str = "area",
         content: str = "body",
@@ -107,6 +151,126 @@ def bp_factory(repo: BlueprintRepository):
     return _make
 
 
+# ─── Phase 4 fixtures ─────────────────────────────────────────────────────
+
+
+class _FakeJobService:
+    """Minimal stand-in for a ``JobQueueService`` for trigger endpoints.
+
+    The router reads three things from it:
+      * ``_queue_repo.get_by_name`` (sync) → returns ``bg_queue``
+      * ``enqueue`` (async) → returns ``fake_job``
+    Both are :class:`MagicMock` so tests can override return values or
+    assert call counts. ``enqueue`` is :class:`AsyncMock`-compatible via
+    ``MagicMock`` because the router ``await``s it — FastAPI/Starlette
+    runs the coroutine via the test client's event loop.
+    """
+
+    def __init__(self) -> None:
+        self.fake_queue = MagicMock()
+        self.fake_queue.queue_id = "queue-123"
+        self._queue_repo = MagicMock()
+        self._queue_repo.get_by_name = MagicMock(return_value=self.fake_queue)
+        self.fake_job = MagicMock()
+        self.fake_job.job_id = "job-456"
+        self.enqueue = AsyncMock(return_value=self.fake_job)
+
+
+class _FakeCoordinator:
+    """Minimal stand-in for ``BlueprintTriggerCoordinator``.
+
+    Both ``try_claim`` and ``release`` are :class:`AsyncMock` so the
+    router can ``await`` them. Tests assign the ``try_claim_result``
+    attribute before invoking the endpoint to drive the response.
+    """
+
+    def __init__(self) -> None:
+        self.try_claim_result = ClaimResult(
+            claimed=True,
+            job_id="coordinator-job-id",
+            run_token="run-token-xyz",
+        )
+        self.try_claim = AsyncMock(
+            side_effect=lambda *a, **kw: self.try_claim_result,
+        )
+        self.release = AsyncMock(return_value=True)
+        self.release_calls: list[tuple[str, str | None]] = []
+        self.try_claim_calls: list[tuple[str, str, str]] = []
+
+        async def _track_try_claim(project_id, mode, job_id, *args, **kwargs):
+            self.try_claim_calls.append((project_id, mode, job_id))
+            return self.try_claim_result
+
+        async def _track_release(project_id, run_token, *args, **kwargs):
+            self.release_calls.append((project_id, run_token))
+            return True
+
+        self.try_claim.side_effect = _track_try_claim
+        self.release.side_effect = _track_release
+
+
+@pytest.fixture
+def coordinator_app(engine, repo: BlueprintRepository):
+    """FastAPI app with a mocked coordinator + job service.
+
+    Wired for the trigger endpoints (``/rebuild``, ``/update``,
+    ``/initialize``, ``/scan``). Real ``BlueprintRepository`` is used so
+    the corpus-existence guard (``/update`` with empty corpus) exercises
+    the real SQL path. Coordinator + job service are mocks so each
+    test controls the outcome.
+
+    The project repository mock is wired so the two-tier opt-in gate
+    (``_check_default_project_blocked`` + ``_check_blueprint_active``)
+    passes for the default project id used by the test corpus
+    (``00000000-0000-0000-0000-000000000001``):
+
+    * ``_project_repository.get`` returns a project with a non-default
+      name (so the default-project guard does NOT trip).
+    * ``_project_repository.get_metadata`` returns ``True`` for
+      ``blueprint_active`` (so the per-project opt-in passes).
+
+    Tests that need to exercise the guards themselves override these
+    mocks per-case (see ``test_rebuild_rejects_default_project`` and
+    the new opt-in tests).
+    """
+    from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+    manager = MagicMock()
+    manager._blueprint_repo = repo
+    manager.is_write_paused = False
+    manager._blueprint_trigger_coordinator = _FakeCoordinator()
+    manager._job_queue_service = _FakeJobService()
+    # Write-service factory is not used by trigger endpoints but is
+    # referenced by other endpoints sharing the same router.
+    manager.get_blueprint_write_service = MagicMock()
+
+    # Wire the project repository mock so the trigger-endpoint guards
+    # pass for the canonical test project id. The project has a benign
+    # name (not ``__system_default__``) and is opted in to blueprints.
+    project_repo = MagicMock()
+    benign_project = MagicMock()
+    benign_project.project_id = "00000000-0000-0000-0000-000000000001"
+    benign_project.name = "Test Project"
+    project_repo.get = MagicMock(return_value=benign_project)
+    project_repo.get_metadata = MagicMock(
+        side_effect=lambda pid, key: (
+            True if key == BLUEPRINT_ACTIVE_METADATA_KEY else None
+        ),
+    )
+    manager._project_repository = project_repo
+
+    app = FastAPI()
+    app.include_router(blueprints_router, prefix="/api")
+    app.state.manager = manager
+    return app
+
+
+@pytest.fixture
+def coordinator_client(coordinator_app: FastAPI):
+    with TestClient(coordinator_app) as c:
+        yield c
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # POST / — create
 # ──────────────────────────────────────────────────────────────────────────────
@@ -117,7 +281,7 @@ class TestCreateBlueprint:
 
     def test_create_returns_201_with_expected_fields(self, client):
         r = client.post(
-            "/api/projects/proj-a/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
             json={
                 "slug": "core",
                 "name": "Core Doc",
@@ -129,7 +293,7 @@ class TestCreateBlueprint:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["project_id"] == "proj-a"
+        assert body["project_id"] == "00000000-0000-0000-0000-000000000001"
         assert body["slug"] == "core"
         assert body["name"] == "Core Doc"
         assert body["kind"] == "core"
@@ -144,15 +308,15 @@ class TestCreateBlueprint:
     def test_create_uses_path_project_id_not_body(self, client):
         """The body has no project_id; the path param wins."""
         r = client.post(
-            "/api/projects/path-proj/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000003/blueprints",
             json={"slug": "s", "name": "n", "content": "c"},
         )
         assert r.status_code == 201
-        assert r.json()["project_id"] == "path-proj"
+        assert r.json()["project_id"] == "00000000-0000-0000-0000-000000000003"
 
     def test_create_defaults_kind_to_area(self, client):
         r = client.post(
-            "/api/projects/proj-a/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
             json={"slug": "s", "name": "n", "content": "c"},
         )
         assert r.status_code == 201
@@ -160,7 +324,7 @@ class TestCreateBlueprint:
 
     def test_create_rejects_empty_content(self, client):
         r = client.post(
-            "/api/projects/proj-a/blueprints",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
             json={"slug": "s", "name": "n", "content": ""},
         )
         assert r.status_code == 422
@@ -169,12 +333,15 @@ class TestCreateBlueprint:
         manager = MagicMock()
         manager._blueprint_repo = repo
         manager.is_write_paused = True
+        # The write service factory must exist, but it should never be
+        # called because the paused check fires first.
+        manager.get_blueprint_write_service = MagicMock()
         app = FastAPI()
         app.include_router(blueprints_router, prefix="/api")
         app.state.manager = manager
         with TestClient(app) as c:
             r = c.post(
-                "/api/projects/proj-a/blueprints",
+                "/api/projects/00000000-0000-0000-0000-000000000001/blueprints",
                 json={"slug": "s", "name": "n", "content": "c"},
             )
         assert r.status_code == 503
@@ -190,15 +357,15 @@ class TestGetBlueprint:
 
     def test_get_returns_blueprint(self, client, bp_factory):
         bp = bp_factory(slug="alpha")
-        r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}")
         assert r.status_code == 200
         body = r.json()
         assert body["id"] == bp.id
         assert body["slug"] == "alpha"
-        assert body["project_id"] == "proj-a"
+        assert body["project_id"] == "00000000-0000-0000-0000-000000000001"
 
     def test_get_missing_returns_404(self, client):
-        r = client.get("/api/projects/proj-a/blueprints/does-not-exist")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints/does-not-exist")
         assert r.status_code == 404
 
 
@@ -213,9 +380,9 @@ class TestListBlueprints:
     def test_list_returns_all_active_for_project(self, client, bp_factory):
         bp_factory(slug="a")
         bp_factory(slug="b")
-        bp_factory(project="proj-b", slug="other")  # cross-project: must be excluded
+        bp_factory(project="00000000-0000-0000-0000-000000000002", slug="other")  # cross-project: must be excluded
 
-        r = client.get("/api/projects/proj-a/blueprints")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints")
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 2
@@ -226,7 +393,7 @@ class TestListBlueprints:
         bp_factory(slug="core-doc", kind="core")
         bp_factory(slug="area-doc", kind="area")
 
-        r = client.get("/api/projects/proj-a/blueprints?kind=core")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints?kind=core")
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 1
@@ -238,7 +405,7 @@ class TestListBlueprints:
         bp_factory(slug="pub")  # default status="published"
         # Create a draft one via direct repo (the router cannot set status yet)
         repo.create(
-            project_id="proj-a",
+            project_id="00000000-0000-0000-0000-000000000001",
             slug="draft",
             name="draft",
             kind="area",
@@ -246,13 +413,13 @@ class TestListBlueprints:
             status="draft",
         )
 
-        r = client.get("/api/projects/proj-a/blueprints?status=published")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints?status=published")
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 1
         assert body["items"][0]["slug"] == "pub"
 
-        r = client.get("/api/projects/proj-a/blueprints?status=draft")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints?status=draft")
         body = r.json()
         assert body["total"] == 1
         assert body["items"][0]["slug"] == "draft"
@@ -262,7 +429,7 @@ class TestListBlueprints:
         bp_factory(slug="doomed")
         repo.soft_delete(b.id)
 
-        r = client.get("/api/projects/proj-a/blueprints")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints")
         body = r.json()
         slugs = {item["slug"] for item in body["items"]}
         assert slugs == {"doomed"}
@@ -279,7 +446,7 @@ class TestUpdateBlueprint:
     def test_update_name_and_content(self, client, repo, bp_factory):
         bp = bp_factory(slug="s", content="v1")
         r = client.put(
-            f"/api/projects/proj-a/blueprints/{bp.id}",
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}",
             json={"name": "renamed", "content": "v2"},
         )
         assert r.status_code == 200, r.text
@@ -294,7 +461,7 @@ class TestUpdateBlueprint:
     ):
         bp = bp_factory(slug="s")
         r = client.put(
-            f"/api/projects/proj-a/blueprints/{bp.id}",
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}",
             json={"name": "renamed"},
         )
         assert r.status_code == 200
@@ -304,16 +471,47 @@ class TestUpdateBlueprint:
     def test_update_empty_body_returns_400(self, client, bp_factory):
         bp = bp_factory(slug="s")
         r = client.put(
-            f"/api/projects/proj-a/blueprints/{bp.id}", json={}
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}", json={}
         )
         assert r.status_code == 400
 
     def test_update_missing_returns_404(self, client):
         r = client.put(
-            "/api/projects/proj-a/blueprints/missing",
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/missing",
             json={"name": "x"},
         )
         assert r.status_code == 404
+
+    def test_update_with_status_field(self, client, repo, bp_factory):
+        """C1 fix: status-only PUT does not crash; status is applied."""
+        bp = bp_factory(slug="s")
+        r = client.put(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}",
+            json={"status": "draft"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "draft"
+        # status is NOT a version-incrementing field → version unchanged.
+        assert body["version"] == 1
+
+
+# ─── C2(e)/C7: UUID validation ─────────────────────────────────────────────
+
+
+class TestProjectIdValidation:
+    """Invalid project_id (non-UUID) returns 400 (C2 fix e / C7)."""
+
+    def test_invalid_project_id_returns_400_on_list(self, client):
+        r = client.get("/api/projects/not-a-uuid/blueprints")
+        assert r.status_code == 400
+
+    def test_invalid_project_id_returns_400_on_create(self, client):
+        r = client.post(
+            "/api/projects/not-a-uuid/blueprints",
+            json={"slug": "s", "name": "n", "content": "c"},
+        )
+        assert r.status_code == 400
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,14 +524,14 @@ class TestDeleteBlueprint:
 
     def test_delete_sets_inactive(self, client, repo, bp_factory):
         bp = bp_factory(slug="s")
-        r = client.delete(f"/api/projects/proj-a/blueprints/{bp.id}")
+        r = client.delete(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}")
         assert r.status_code == 200
         assert r.json() == {"deleted": True}
         # The repo still finds the row (soft delete) but is_active is False.
         assert repo.get_by_id(bp.id).is_active is False
 
     def test_delete_missing_returns_404(self, client):
-        r = client.delete("/api/projects/proj-a/blueprints/missing")
+        r = client.delete("/api/projects/00000000-0000-0000-0000-000000000001/blueprints/missing")
         assert r.status_code == 404
 
 
@@ -355,7 +553,7 @@ class TestListRevisions:
             source="manual", reason="second pass",
         )
 
-        r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}/revisions")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/revisions")
         assert r.status_code == 200
         body = r.json()
         assert len(body) == 2
@@ -366,12 +564,12 @@ class TestListRevisions:
         assert body[0]["reason"] == "second pass"
 
     def test_revisions_missing_blueprint_returns_404(self, client):
-        r = client.get("/api/projects/proj-a/blueprints/missing/revisions")
+        r = client.get("/api/projects/00000000-0000-0000-0000-000000000001/blueprints/missing/revisions")
         assert r.status_code == 404
 
     def test_revisions_empty_returns_empty_list(self, client, bp_factory):
         bp = bp_factory(slug="s")
-        r = client.get(f"/api/projects/proj-a/blueprints/{bp.id}/revisions")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/revisions")
         assert r.status_code == 200
         assert r.json() == []
 
@@ -385,27 +583,851 @@ class TestProjectScoping:
     """A blueprint in project A must be invisible (404) from project B."""
 
     def test_get_other_project_returns_404(self, client, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
-        r = client.get(f"/api/projects/proj-b/blueprints/{bp.id}")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}")
         assert r.status_code == 404
 
     def test_update_other_project_returns_404(self, client, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
         r = client.put(
-            f"/api/projects/proj-b/blueprints/{bp.id}",
+            f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}",
             json={"name": "hijack"},
         )
         assert r.status_code == 404
         assert r.json()["detail"].startswith("Blueprint not found")
 
     def test_delete_other_project_returns_404(self, client, repo, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
-        r = client.delete(f"/api/projects/proj-b/blueprints/{bp.id}")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
+        r = client.delete(f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}")
         assert r.status_code == 404
         # The blueprint is still active in its own project.
         assert repo.get_by_id(bp.id).is_active is True
 
     def test_revisions_other_project_returns_404(self, client, bp_factory):
-        bp = bp_factory(project="proj-a", slug="x")
-        r = client.get(f"/api/projects/proj-b/blueprints/{bp.id}/revisions")
+        bp = bp_factory(project="00000000-0000-0000-0000-000000000001", slug="x")
+        r = client.get(f"/api/projects/00000000-0000-0000-0000-000000000002/blueprints/{bp.id}/revisions")
         assert r.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 4: /rebuild, /update (C7 coordinator), /initialize deprecation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestRebuildEndpoint:
+    """POST /api/projects/{project_id}/blueprints/rebuild.
+
+    Routes through ``coordinator.try_claim("rebuild", ...)`` then enqueues.
+    """
+
+    def test_rebuild_success(self, coordinator_client, coordinator_app):
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["mode"] == "rebuild"
+        # The job_id returned by enqueue, not the coordinator's job_id.
+        assert body["job_id"] == "job-456"
+        # Coordinator saw the right (project_id, mode) tuple.
+        calls = coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        assert len(calls) == 1
+        assert calls[0][0] == "00000000-0000-0000-0000-000000000001"
+        assert calls[0][1] == "rebuild"
+
+    def test_rebuild_coalesced(self, coordinator_client, coordinator_app):
+        """Same-mode in-flight → 202 with status=already_in_progress."""
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=True,
+                job_id="inflight-job", run_token=None,
+            )
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "already_in_progress"
+        assert body["mode"] == "rebuild"
+        assert body["job_id"] == "inflight-job"
+        # No enqueue should have happened.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_rebuild_conflict(self, coordinator_client, coordinator_app):
+        """Different-mode in-flight → 409 with conflict_mode in detail."""
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=False,
+                conflict_mode="incremental",
+            )
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 409, r.text
+        assert "incremental" in r.json()["detail"]
+        # Coordinator was NOT asked to release — the claim never succeeded.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.release.assert_not_called()
+
+    def test_rebuild_coordinator_unavailable(self, coordinator_client, coordinator_app):
+        """No coordinator wired → 503, no enqueue."""
+        coordinator_app.state.manager._blueprint_trigger_coordinator = None
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 503
+        assert "coordinator" in r.json()["detail"].lower()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_rebuild_enqueue_failure_releases_claim(
+        self, coordinator_client, coordinator_app,
+    ):
+        """If enqueue raises, the coordinator claim must be released."""
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token-release-me")
+        )
+        # Make the background queue lookup fail so enqueue is never reached
+        # but the helper raises HTTPException → coordinator.release called.
+        coordinator_app.state.manager._job_queue_service._queue_repo.get_by_name = (
+            MagicMock(return_value=None)
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        # The lease must have been released with the token the router got
+        # from try_claim.
+        releases = coordinator_app.state.manager._blueprint_trigger_coordinator.release_calls
+        assert ("00000000-0000-0000-0000-000000000001", "c-token-release-me") in releases
+
+    def test_rebuild_invalid_project_id(self, coordinator_client, coordinator_app):
+        """Non-UUID project_id → 400, coordinator untouched."""
+        r = coordinator_client.post("/api/projects/not-a-uuid/blueprints/rebuild")
+        assert r.status_code == 400
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
+    def test_rebuild_rejects_default_project(self, coordinator_client, coordinator_app):
+        """The system default project is rejected with 400.
+
+        The default project (``__system_default__``) is the virtual
+        bookkeeping project — blueprints are never built for it. The
+        router must refuse the request before claiming a lease.
+        """
+        import uuid as _uuid
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+        default_project_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME)
+        )
+
+        # Wire the manager's _project_repository to return a project
+        # matching the default name for the deterministic id.
+        default_project = MagicMock()
+        default_project.project_id = default_project_id
+        default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+        coordinator_app.state.manager._project_repository = MagicMock()
+        coordinator_app.state.manager._project_repository.get = MagicMock(
+            return_value=default_project,
+        )
+
+        r = coordinator_client.post(
+            f"/api/projects/{default_project_id}/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "default project" in r.json()["detail"].lower()
+        # The coordinator must never be reached.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        # And no enqueue happens.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_rebuild_forwards_job_id_to_enqueue(
+        self, coordinator_client, coordinator_app,
+    ):
+        """The coordinator's lease ``job_id`` must match the enqueued job's id.
+
+        Regression test for the lease/queue ``job_id`` mismatch bug: prior
+        to this fix, the router passed its generated UUID to
+        ``coordinator.try_claim`` (stored in the lease) but did NOT forward
+        it to ``job_service.enqueue``, which generated its own UUID. The
+        lease's ``job_id`` then pointed to a non-existent job — breaking
+        coalescing (returning a ``job_id`` for a job that never existed)
+        and orphaning the lease on the periodic sweep (job-not-found →
+        released).
+        """
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 202, r.text
+
+        # The job_id the router passed to coordinator.try_claim
+        try_claim_calls = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        )
+        assert len(try_claim_calls) == 1
+        forwarded_job_id = try_claim_calls[0][2]
+        assert forwarded_job_id, "router must generate a non-empty job_id for try_claim"
+
+        # That same id must have been forwarded to enqueue so the lease
+        # and the queued JobItem agree.
+        enqueue_mock = coordinator_app.state.manager._job_queue_service.enqueue
+        assert enqueue_mock.call_count == 1
+        enqueue_kwargs = enqueue_mock.call_args.kwargs
+        assert enqueue_kwargs.get("job_id") == forwarded_job_id, (
+            "enqueue() must receive the same job_id the router passed to "
+            "coordinator.try_claim; otherwise the lease's job_id points to "
+            "a JobItem that doesn't exist."
+        )
+
+    def test_rebuild_rejects_inactive_project(self, coordinator_client, coordinator_app):
+        """The per-project ``blueprint_active`` opt-in is enforced.
+
+        A project without the metadata key (default: inactive) must be
+        rejected with 400 BEFORE the coordinator claim — the gate is a
+        cheaper check than the lease and must not be skipped.
+        """
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        # Make ``get_metadata`` return None (the absent-from-KV default).
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=None)
+        )
+
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        # The coordinator must never be reached.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        # And no enqueue happens.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+        # The gate must have queried the right key on the right project.
+        meta_calls = coordinator_app.state.manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[0] == "00000000-0000-0000-0000-000000000001"
+            and call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY
+            for call in meta_calls
+        ), meta_calls
+
+    def test_rebuild_works_for_active_project(self, coordinator_client, coordinator_app):
+        """Regression: a project with ``blueprint_active=true`` is NOT
+        rejected by the new gate. The full coordinator path still
+        runs as before.
+        """
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        # The fixture already opts the test project in; no override needed.
+
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["mode"] == "rebuild"
+
+    def test_rebuild_inactive_falsy_value(self, coordinator_client, coordinator_app):
+        """A truthy check — even ``False`` (explicitly inactive) trips the gate.
+
+        Defends against a future refactor that uses ``is not None`` instead
+        of ``bool()``.
+        """
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=False)
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
+    def test_rebuild_inactive_metadata_lookup_failure(self, coordinator_client, coordinator_app):
+        """A metadata lookup failure must be treated as INACTIVE (400), not
+        passed through. A 5xx here would leak the underlying DB error
+        and confuse the user."""
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(side_effect=RuntimeError("DB down"))
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
+
+class TestUpdateEndpoint:
+    """POST /api/projects/{project_id}/blueprints/update.
+
+    Same coordinator routing as ``/rebuild`` plus a corpus-existence
+    guard (404 if no blueprints, with claim released).
+    """
+
+    def test_update_success(self, coordinator_client, coordinator_app, repo):
+        # Need an existing blueprint so the corpus guard passes.
+        repo.create(
+            project_id="00000000-0000-0000-0000-000000000001",
+            slug="core-doc",
+            name="core-doc",
+            kind="core",
+            content="body",
+        )
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["mode"] == "incremental"
+        # Coordinator was called with mode="incremental".
+        calls = coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        assert calls[0][1] == "incremental"
+
+    def test_update_no_corpus(self, coordinator_client, coordinator_app):
+        """Empty corpus → 404, claim released."""
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=True, job_id="c-job",
+                run_token="token-to-release",
+            )
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 404, r.text
+        assert "rebuild" in r.json()["detail"].lower()
+        # Claim must have been released.
+        releases = coordinator_app.state.manager._blueprint_trigger_coordinator.release_calls
+        assert ("00000000-0000-0000-0000-000000000001", "token-to-release") in releases
+        # And no enqueue happened.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_update_coalesced(self, coordinator_client, coordinator_app, repo):
+        """Same-mode in-flight → 202 with status=already_in_progress."""
+        repo.create(
+            project_id="00000000-0000-0000-0000-000000000001",
+            slug="exists",
+            name="exists",
+            kind="area",
+            content="body",
+        )
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=True,
+                job_id="inflight-inc", run_token=None,
+            )
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 202
+        body = r.json()
+        assert body["status"] == "already_in_progress"
+        assert body["mode"] == "incremental"
+        assert body["job_id"] == "inflight-inc"
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_update_conflict(self, coordinator_client, coordinator_app):
+        """Different-mode in-flight → 409."""
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=False,
+                conflict_mode="rebuild",
+            )
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 409
+        assert "rebuild" in r.json()["detail"]
+
+    def test_update_forwards_job_id_to_enqueue(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """The coordinator's lease ``job_id`` must match the enqueued job's id.
+
+        Mirrors :meth:`TestRebuildEndpoint.test_rebuild_forwards_job_id_to_enqueue`
+        for the ``/update`` path. Both coordinator-gated endpoints share the
+        same helper and the same lease/queue alignment requirement.
+        """
+        # Need an existing blueprint so the corpus guard passes.
+        repo.create(
+            project_id="00000000-0000-0000-0000-000000000001",
+            slug="core-doc",
+            name="core-doc",
+            kind="core",
+            content="body",
+        )
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 202, r.text
+
+        try_claim_calls = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        )
+        assert len(try_claim_calls) == 1
+        forwarded_job_id = try_claim_calls[0][2]
+        assert forwarded_job_id
+
+        enqueue_mock = coordinator_app.state.manager._job_queue_service.enqueue
+        assert enqueue_mock.call_count == 1
+        enqueue_kwargs = enqueue_mock.call_args.kwargs
+        assert enqueue_kwargs.get("job_id") == forwarded_job_id
+
+    def test_update_rejects_default_project(self, coordinator_client, coordinator_app):
+        """The system default project is rejected with 400.
+
+        Mirrors :meth:`TestRebuildEndpoint.test_rebuild_rejects_default_project`
+        for the ``/update`` path. The default project never enters
+        the coordinator's claim path.
+        """
+        import uuid as _uuid
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+        default_project_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME)
+        )
+
+        default_project = MagicMock()
+        default_project.project_id = default_project_id
+        default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+        coordinator_app.state.manager._project_repository = MagicMock()
+        coordinator_app.state.manager._project_repository.get = MagicMock(
+            return_value=default_project,
+        )
+
+        r = coordinator_client.post(
+            f"/api/projects/{default_project_id}/blueprints/update"
+        )
+        assert r.status_code == 400, r.text
+        assert "default project" in r.json()["detail"].lower()
+        # Nothing reached the coordinator or the job queue.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_update_rejects_inactive_project(self, coordinator_client, coordinator_app):
+        """The per-project ``blueprint_active`` opt-in is enforced on
+        ``/update`` too. Mirrors the ``/rebuild`` test.
+        """
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        # Make ``get_metadata`` return None (the absent-from-KV default).
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=None)
+        )
+
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/update"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+        # Sanity: the gate queried the right key.
+        meta_calls = coordinator_app.state.manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY for call in meta_calls
+        ), meta_calls
+
+
+class TestInitializeDeprecation:
+    """POST /initialize is deprecated but must remain backward-compatible.
+
+    Behavior unchanged: returns 202 if no core exists, 409 if a core
+    already exists, 503 if no job service. The new behavior is purely
+    additive: deprecation headers + WARNING log.
+    """
+
+    def test_initialize_still_works(self, coordinator_client):
+        """Empty corpus → 202 (no coordinator used)."""
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/initialize"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "enqueued"
+        assert body["job_id"] == "job-456"
+
+    def test_initialize_deprecation_headers(self, coordinator_client):
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/initialize"
+        )
+        assert r.status_code == 202
+        assert r.headers.get("deprecation") == "true"
+        assert r.headers.get("sunset") == "Sun, 31 Dec 2026 23:59:59 GMT"
+        link = r.headers.get("link", "")
+        assert "/blueprints/rebuild" in link
+        assert 'rel="successor-version"' in link
+
+    def test_initialize_logs_warning(self, coordinator_client, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="daemon.routers.blueprints"):
+            r = coordinator_client.post(
+                "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/initialize"
+            )
+        assert r.status_code == 202
+        # The warning must surface in caplog.
+        matching = [
+            rec for rec in caplog.records
+            if rec.levelno >= _logging.WARNING
+            and "/initialize" in rec.getMessage()
+        ]
+        assert matching, f"no /initialize WARNING captured: {[r.getMessage() for r in caplog.records]}"
+
+    def test_initialize_409_when_core_exists(self, coordinator_client, repo):
+        """Backward-compat guard: 409 if a core blueprint already exists."""
+        repo.create(
+            project_id="00000000-0000-0000-0000-000000000001",
+            slug="core-doc",
+            name="core-doc",
+            kind="core",
+            content="body",
+        )
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/initialize"
+        )
+        assert r.status_code == 409
+        assert "already initialized" in r.json()["detail"].lower()
+        # Enqueue must NOT have been called.
+        coordinator_client.app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 5: POST /{blueprint_id}/rebuild (single-blueprint rebuild)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestSingleRebuildEndpoint:
+    """POST /api/projects/{project_id}/blueprints/{blueprint_id}/rebuild.
+
+    Mirrors ``TestRebuildEndpoint`` (coordinator routing + lease release
+    on enqueue failure) plus the ownership + is_active check that runs
+    BEFORE the coordinator claim.
+
+    The new endpoint MUST be declared BEFORE the GET catch-all so route
+    shadowing doesn't redirect the POST to ``GET /{blueprint_id}``.
+    These tests pin that ordering: every test below hits the POST path
+    directly and would fail (404 from the GET handler) if the route
+    ordering regressed.
+    """
+
+    @staticmethod
+    def _create_active_bp(
+        repo: BlueprintRepository,
+        project: str = "00000000-0000-0000-0000-000000000001",
+        slug: str = "alpha",
+        kind: str = "area",
+    ):
+        return repo.create(
+            project_id=project,
+            slug=slug,
+            name=slug,
+            kind=kind,
+            content="body",
+        )
+
+    def test_single_rebuild_success(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Active blueprint, opted-in project → 202 with mode='single'."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["mode"] == "single"
+        assert body["blueprint_id"] == bp.id
+        # The job_id returned by enqueue (mock), not the coordinator's id.
+        assert body["job_id"] == "job-456"
+        # Coordinator was called with mode='single'.
+        calls = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == "00000000-0000-0000-0000-000000000001"
+        assert calls[0][1] == "single"
+
+    def test_single_rebuild_not_found(
+        self, coordinator_client, coordinator_app,
+    ):
+        """Unknown blueprint_id → 404, coordinator never reached."""
+        r = coordinator_client.post(
+            "/api/projects/00000000-0000-0000-0000-000000000001/blueprints/does-not-exist/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        # No coordinator work, no enqueue.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_wrong_project(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Blueprint belongs to a different project → 404 (no leak)."""
+        # Create blueprint in a DIFFERENT project.
+        other_bp = self._create_active_bp(
+            repo,
+            project="00000000-0000-0000-0000-000000000002",
+            slug="other",
+        )
+        # Try to rebuild it via the canonical (project 1) project_id.
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{other_bp.id}/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_conflict(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Different-mode in-flight → 409."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=False,
+                conflict_mode="rebuild",
+            )
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 409, r.text
+        assert "rebuild" in r.json()["detail"]
+        # Coordinator was NOT asked to release — the claim never succeeded.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.release.assert_not_called()
+
+    def test_single_rebuild_coalesced(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Same-mode in-flight → 202 with status=already_in_progress."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(
+                claimed=False, coalesced=True,
+                job_id="inflight-single", run_token=None,
+            )
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "already_in_progress"
+        assert body["mode"] == "single"
+        assert body["blueprint_id"] == bp.id
+        assert body["job_id"] == "inflight-single"
+        # No enqueue should have happened.
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_inactive_project(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Project not opted in to blueprint system → 400, coordinator not reached."""
+        from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._project_repository.get_metadata = (
+            MagicMock(return_value=None)
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "not active" in r.json()["detail"].lower()
+        # The coordinator must never be reached (gate is BEFORE claim).
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+        # And the gate queried the right key.
+        meta_calls = coordinator_app.state.manager._project_repository.get_metadata.call_args_list
+        assert any(
+            call.args[1] == BLUEPRINT_ACTIVE_METADATA_KEY for call in meta_calls
+        ), meta_calls
+
+    def test_single_rebuild_deleted_blueprint(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Soft-deleted blueprint (is_active=False) → 404."""
+        bp = self._create_active_bp(repo, slug="deleted")
+        # Soft-delete via the write service so the canonical path is
+        # exercised (sets is_active=False + records a revision).
+        repo.soft_delete(bp.id)
+        # Sanity: blueprint now is_active=False.
+        from sqlalchemy import text as _text
+        with repo.engine.begin() as conn:
+            row = conn.execute(
+                _text("SELECT is_active FROM project_blueprints WHERE id = :i"),
+                {"i": bp.id},
+            ).fetchone()
+        assert row is not None and row[0] == 0
+
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        # Same 404 detail as the wrong-project test — no info leak.
+        assert bp.id in r.json()["detail"] or "not found" in r.json()["detail"].lower()
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_enqueue_failure_releases_claim(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """Enqueue failure → 404 + lease released with the right token."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token-release-me")
+        )
+        # Force the background queue lookup to miss → enqueue raises
+        # HTTPException → coordinator.release called in except branch.
+        coordinator_app.state.manager._job_queue_service._queue_repo.get_by_name = (
+            MagicMock(return_value=None)
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 404, r.text
+        releases = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.release_calls
+        )
+        assert (
+            "00000000-0000-0000-0000-000000000001",
+            "c-token-release-me",
+        ) in releases
+
+    def test_single_rebuild_forwards_blueprint_id_to_metadata(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """The enqueue metadata MUST carry blueprint_id so the worker
+        knows which blueprint to fetch via blueprint_get.
+
+        Regression guard for the metadata contract: a stale-snapshot
+        race would be created if the worker had to look up the
+        blueprint via something other than a live ``blueprint_get``.
+        """
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+        enqueue_mock = coordinator_app.state.manager._job_queue_service.enqueue
+        assert enqueue_mock.call_count == 1
+        metadata = enqueue_mock.call_args.kwargs.get("metadata", {})
+        assert metadata.get("trigger") == "single"
+        assert metadata.get("blueprint_id") == bp.id
+        # run_token is also forwarded for the coordinator release path.
+        assert metadata.get("run_token") == "c-token"
+
+    def test_single_rebuild_forwards_job_id_to_enqueue(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """The router-generated job_id must flow through to enqueue so
+        the lease's job_id matches the enqueued JobItem's id.
+
+        Mirrors :meth:`TestRebuildEndpoint.test_rebuild_forwards_job_id_to_enqueue`
+        for the single-mode path.
+        """
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_result = (
+            ClaimResult(claimed=True, job_id="c-job", run_token="c-token")
+        )
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 202, r.text
+
+        try_claim_calls = (
+            coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim_calls
+        )
+        assert len(try_claim_calls) == 1
+        forwarded_job_id = try_claim_calls[0][2]
+        assert forwarded_job_id
+
+        enqueue_mock = coordinator_app.state.manager._job_queue_service.enqueue
+        assert enqueue_mock.call_count == 1
+        enqueue_kwargs = enqueue_mock.call_args.kwargs
+        assert enqueue_kwargs.get("job_id") == forwarded_job_id
+
+    def test_single_rebuild_invalid_project_id(
+        self, coordinator_client, coordinator_app,
+    ):
+        """Non-UUID project_id → 400, coordinator untouched."""
+        r = coordinator_client.post(
+            "/api/projects/not-a-uuid/blueprints/anything/rebuild"
+        )
+        assert r.status_code == 400
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+
+    def test_single_rebuild_rejects_default_project(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """System default project is rejected with 400 before any
+        coordinator work — mirrors the /rebuild + /update guard."""
+        import uuid as _uuid
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+        default_project_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME)
+        )
+        # Create a blueprint against the default project id so the
+        # ownership check would otherwise pass.
+        bp = self._create_active_bp(
+            repo,
+            project=default_project_id,
+            slug="default-core",
+            kind="core",
+        )
+
+        default_project = MagicMock()
+        default_project.project_id = default_project_id
+        default_project.name = SYSTEM_DEFAULT_PROJECT_NAME
+        coordinator_app.state.manager._project_repository = MagicMock()
+        coordinator_app.state.manager._project_repository.get = MagicMock(
+            return_value=default_project,
+        )
+
+        r = coordinator_client.post(
+            f"/api/projects/{default_project_id}/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 400, r.text
+        assert "default project" in r.json()["detail"].lower()
+        # The coordinator must never be reached.
+        coordinator_app.state.manager._blueprint_trigger_coordinator.try_claim.assert_not_called()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()
+
+    def test_single_rebuild_coordinator_unavailable(
+        self, coordinator_client, coordinator_app, repo,
+    ):
+        """No coordinator wired → 503 (ownership check passes first)."""
+        bp = self._create_active_bp(repo)
+        coordinator_app.state.manager._blueprint_trigger_coordinator = None
+        r = coordinator_client.post(
+            f"/api/projects/00000000-0000-0000-0000-000000000001/blueprints/{bp.id}/rebuild"
+        )
+        assert r.status_code == 503
+        assert "coordinator" in r.json()["detail"].lower()
+        coordinator_app.state.manager._job_queue_service.enqueue.assert_not_called()

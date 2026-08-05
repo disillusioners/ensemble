@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.persistence import CheckpointerAdapter
 from daemon.rag.config import is_rag_enabled
 from daemon.services.context_injection import get_shared_context
@@ -39,19 +40,6 @@ RAG_TOOL_NAMES = frozenset({"rag_query_data", "rag_get_graph"})
 KB_GAP_TOOL_NAME = "read_file"
 
 # ── Blueprinter post-experience trigger keywords (§4.5) ──────────────
-# Architecture/domain keywords that indicate an experience() call may
-# contain structural drift worth a blueprint scan. Intentionally broad —
-# a no-op scan is cheaper than missing real drift.
-_BLUEPRINT_TRIGGER_KEYWORDS = frozenset({
-    "architecture", "pattern", "module", "service", "directory structure",
-    "entry point", "lifecycle", "protocol", "schema", "migration",
-    "queue", "directory", "component", "layer", "pipeline", "config",
-    "convention", "endpoint", "api", "database", "model", "repository",
-    "handler", "middleware", "decorator", "graph node", "state machine",
-    "session", "checkpoint", "context injection", "tool registry",
-})
-
-
 async def _scan_checkpoint_for_tool_match(
     checkpointer,
     instance_id: str,
@@ -1039,6 +1027,52 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
             logger.warning("Failed to schedule kb-writer job (no event loop): %s", e)
         except Exception as e:
             logger.warning("Failed to schedule kb-writer job: %s", e)
+
+        # ── Blueprint pending-queue hook for experience events ──
+        # C8 / Phase 3: every experience() call (no keyword filter
+        # anymore — filtering moves into the blueprinter's
+        # ``explore-for-incremental`` skill) drops a row in the
+        # pending-experience queue. The blueprinter picks it up via
+        # ``claim_batch``. Failure here is non-fatal — we never want
+        # to break the kb-writer path on a Blueprint queue hiccup.
+        # The system default project (``__system_default__``) is a
+        # virtual bookkeeping project — no blueprints are built for
+        # it, so it does not feed the pending queue.
+        pending_repo = getattr(manager, "_blueprint_pending_repo", None)
+        if pending_repo is not None and project_name != SYSTEM_DEFAULT_PROJECT_NAME:
+            # Per-project opt-in gate (default: false = no enqueue).
+            # Stored in project metadata KV under
+            # ``BLUEPRINT_ACTIVE_METADATA_KEY``; absent = inactive.
+            # ``get_metadata`` is sync SQLAlchemy; wrap in
+            # ``asyncio.to_thread`` per ADR-12. A metadata lookup
+            # failure must NOT abort the kb-writer path; treat the
+            # project as inactive (safer default).
+            project_blueprint_active = False
+            proj_repo = getattr(manager, "_project_repository", None)
+            if proj_repo is not None:
+                try:
+                    val = await asyncio.to_thread(
+                        proj_repo.get_metadata,
+                        pid,
+                        BLUEPRINT_ACTIVE_METADATA_KEY,
+                    )
+                    project_blueprint_active = bool(val)
+                except Exception:
+                    project_blueprint_active = False
+            if project_blueprint_active:
+                try:
+                    await asyncio.to_thread(
+                        pending_repo.enqueue,
+                        project_id=pid,
+                        source_type="experience",
+                        source_payload={"text": text[:10_000]},
+                    )
+                except Exception as bp_err:
+                    logger.warning(
+                        "Blueprint pending-queue INSERT failed for experience "
+                        "(non-fatal): %s",
+                        bp_err,
+                    )
 
         return "Knowledge recording started."
 

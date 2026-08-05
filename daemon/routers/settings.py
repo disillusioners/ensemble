@@ -29,7 +29,22 @@ from .schemas import (
     VSCodeStatusResponse,
     DefaultAgentVersionsResponse,
     DefaultAgentVersionUpdate,
+    BlueprintPeakHoursResponse,
+    BlueprintPeakHoursUpdate,
 )
+
+# Peak-hours gate metadata keys — these are the same keys read by
+# ``BlueprintScanService`` on every execute(). Keeping the literal
+# strings here (rather than re-exporting from scan_service) avoids a
+# circular import: the scan service itself never imports from the router.
+_PEAK_HOURS_START_KEY = "blueprint_peak_hours_start"
+_PEAK_HOURS_END_KEY = "blueprint_peak_hours_end"
+_PEAK_HOURS_TZ_KEY = "blueprint_peak_hours_tz_offset"
+# Default peak-hours window when no metadata has been stored yet. Match
+# ``BlueprintScanService._DEFAULT_*`` (defaults are 12:00 - 20:00 GMT+7).
+_DEFAULT_PEAK_START = 12
+_DEFAULT_PEAK_END = 20
+_DEFAULT_TZ_OFFSET = 7
 
 logger = logging.getLogger(__name__)
 
@@ -437,3 +452,67 @@ async def set_default_agent_version(request: DefaultAgentVersionUpdate):
             existing_dict,
         )
     return DefaultAgentVersionsResponse(default_versions=existing_dict)
+
+
+# ==================== Blueprint Peak Hours Endpoints ====================
+
+
+@router.get("/blueprint-peak-hours", response_model=BlueprintPeakHoursResponse)
+async def get_blueprint_peak_hours():
+    """Get the current blueprint scan peak-hours gate.
+
+    Reads ``blueprint_peak_hours_start`` / ``_end`` / ``_tz_offset`` from
+    the system default project metadata. Missing keys fall back to the
+    defaults (12:00 - 20:00 GMT+7) so the scan service always sees a
+    valid window even on first boot.
+    """
+    repo = get_project_repository()  # raises 503 if not initialized
+    project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if project_id is None:
+        raise HTTPException(status_code=503, detail="System default project not initialized")
+
+    # ``get_metadata`` is sync SQLAlchemy (ADR-12) — off the event loop.
+    start = await asyncio.to_thread(
+        repo.get_metadata, project_id, _PEAK_HOURS_START_KEY
+    )
+    end = await asyncio.to_thread(
+        repo.get_metadata, project_id, _PEAK_HOURS_END_KEY
+    )
+    tz_offset = await asyncio.to_thread(
+        repo.get_metadata, project_id, _PEAK_HOURS_TZ_KEY
+    )
+    return BlueprintPeakHoursResponse(
+        start=int(start) if start is not None else _DEFAULT_PEAK_START,
+        end=int(end) if end is not None else _DEFAULT_PEAK_END,
+        tz_offset=int(tz_offset) if tz_offset is not None else _DEFAULT_TZ_OFFSET,
+    )
+
+
+@router.put("/blueprint-peak-hours", response_model=BlueprintPeakHoursResponse)
+async def set_blueprint_peak_hours(body: BlueprintPeakHoursUpdate):
+    """Set the blueprint scan peak-hours gate.
+
+    Writes the three values atomically (best-effort — there is no
+    transaction wrapping the three calls because ``set_metadata``
+    commits per call). Validation is enforced by the Pydantic
+    ``BlueprintPeakHoursUpdate`` schema (start/end 0-23, tz_offset
+    -12..14). The scan service picks up the new values on its next
+    ``execute()`` tick — no daemon restart required.
+    """
+    repo = get_project_repository()  # raises 503 if not initialized
+    project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if project_id is None:
+        raise HTTPException(status_code=503, detail="System default project not initialized")
+
+    await asyncio.to_thread(
+        repo.set_metadata, project_id, _PEAK_HOURS_START_KEY, body.start
+    )
+    await asyncio.to_thread(
+        repo.set_metadata, project_id, _PEAK_HOURS_END_KEY, body.end
+    )
+    await asyncio.to_thread(
+        repo.set_metadata, project_id, _PEAK_HOURS_TZ_KEY, body.tz_offset
+    )
+    return BlueprintPeakHoursResponse(
+        start=body.start, end=body.end, tz_offset=body.tz_offset,
+    )

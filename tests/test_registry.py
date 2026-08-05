@@ -970,20 +970,68 @@ class TestValidateToolConfigs:
     def test_unknown_tool_in_deny_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
         """Test that unknown tool name in deny list produces a warning."""
         self._setup_mock_tools(monkeypatch)
-        
+
         self._create_agent_with_tools(
             temp_agents_dir, "test_agent",
             {"allow": ["bash"], "deny": ["nonexistent_tool"]}
         )
-        
+
         registry = AgentRegistry(temp_agents_dir)
         registry.discover()
-        
+
         warnings = registry.validate_tool_configs()
         assert len(warnings) == 1
         assert "nonexistent_tool" in warnings[0]
         assert "deny" in warnings[0]
         assert "test_agent" in warnings[0]
+
+    def test_dynamic_tool_names_recognized(self) -> None:
+        """Per-instance factory tool names (db_* etc.) must be in DYNAMIC_TOOL_NAMES.
+
+        These tools are not registered at import time, so the only way the
+        startup validator can know they are valid is via DYNAMIC_TOOL_NAMES
+        in daemon/tools/_tool_registry.py. If a new factory tool is added and
+        not listed here, validator logs a spurious warning.
+        """
+        from daemon.tools import _tool_registry
+
+        for name in (
+            "db_conn_add",
+            "db_conn_delete",
+            "db_conn_list",
+            "db_conn_test",
+            "db_postgres_dml_select",
+        ):
+            assert name in _tool_registry.DYNAMIC_TOOL_NAMES, (
+                f"{name!r} must be in DYNAMIC_TOOL_NAMES so the tool config "
+                f"validator recognizes it as a valid allow/deny entry."
+            )
+
+    def test_dynamic_tool_in_deny_no_warning(
+        self, temp_agents_dir: Path, monkeypatch
+    ) -> None:
+        """A deny list entry that is in DYNAMIC_TOOL_NAMES must not warn."""
+        from daemon.tools import _tool_registry
+
+        self._setup_mock_tools(monkeypatch)
+        # Simulate that factory-created tools have been registered as known
+        # (the production validator reads DYNAMIC_TOOL_NAMES directly).
+        monkeypatch.setattr(
+            _tool_registry,
+            "DYNAMIC_TOOL_NAMES",
+            _tool_registry.DYNAMIC_TOOL_NAMES | {"db_conn_add", "db_conn_delete"},
+        )
+
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": ["bash"], "deny": ["db_conn_add", "db_conn_delete"]}
+        )
+
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        warnings = registry.validate_tool_configs()
+        assert warnings == []
 
     def test_zero_tools_result_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
         """Test that a config resulting in zero tools produces a warning."""

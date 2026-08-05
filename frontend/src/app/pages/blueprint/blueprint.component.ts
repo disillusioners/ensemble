@@ -25,6 +25,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MarkdownModule } from 'ngx-markdown';
+import { Subscription, switchMap, take, timer } from 'rxjs';
 import { BlueprintService } from '../../services/blueprint.service';
 import { ProjectService } from '../../services/project.service';
 import { CodemirrorDirective } from '../../components/code-viewer/codemirror.directive';
@@ -36,6 +37,10 @@ import {
   BlueprintTag,
 } from '../../models/blueprint.model';
 import { Project } from '../../models/project.model';
+import {
+  SearchableSelectComponent,
+  SearchableSelectOption,
+} from '../../components/searchable-select/searchable-select.component';
 
 /**
  * List / CRUD page for the Project Blueprint surface (Phase 5).
@@ -85,6 +90,7 @@ import { Project } from '../../models/project.model';
     MatExpansionModule,
     MarkdownModule,
     CodemirrorDirective,
+    SearchableSelectComponent,
   ],
   templateUrl: './blueprint.component.html',
   styleUrl: './blueprint.component.scss',
@@ -113,6 +119,13 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   readonly hasSelectedProject = computed(
     () => this.selectedProjectId() !== null,
   );
+  /** Map projects → SearchableSelectOption for the searchable dropdown. */
+  readonly projectOptions = computed<SearchableSelectOption<string>[]>(() => {
+    return this.projects().map((p) => ({
+      value: p.project_id,
+      label: p.name,
+    }));
+  });
 
   // Service-provided signals (blueprints is populated by service.list).
   readonly blueprints = this.service.blueprints;
@@ -153,8 +166,77 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   readonly formContent = signal('');
   readonly formSubmitting = signal(false);
 
-  // Initialize state
-  readonly initializing = signal(false);
+  // ── Rebuild / update (Phase 6 dual-mode) ─────────────────────────────
+  /**
+   * True while a rebuild OR update job is running (i.e. the 202 was
+   * accepted and polling is in flight). Drives the disabled state on
+   * both toolbar buttons so the user can't fire a second job before
+   * the first one lands.
+   */
+  readonly rebuilding = signal(false);
+  // ── Single blueprint rebuild (Phase 5 single-mode) ────────────────────
+  /**
+   * True while a per-blueprint rebuild is running (i.e. the 202 was
+   * accepted and polling is in flight). Independent of ``rebuilding``
+   * so the detail-pane "Rebuild" button stays accurate while a project-
+   * wide rebuild is also in flight — the C7 coordinator allows only
+   * one project-level lease at a time, so the two signals normally
+   * track together, but a defensive split avoids stale button states
+   * if the lease semantics evolve.
+   */
+  readonly singleRebuilding = signal(false);
+  /** Holds the active single-rebuild poll subscription so we can tear
+   * it down on destroy / project switch / blueprint re-select. */
+  private singleRebuildPollingSub?: Subscription;
+  /** Controls the "incremental vs full rebuild" modal popup. */
+  readonly showUpdatePopup = signal(false);
+  /** Holds the active poll subscription so we can tear it down on
+   * destroy / project switch. */
+  private rebuildPollingSub?: Subscription;
+  // ── Per-project blueprint opt-in (Phase 7) ───────────────────────────
+  /**
+   * Whether the currently selected project has opted in to the
+   * blueprint system. Read from the project metadata already loaded
+   * by :class:`ProjectService` (no extra round-trip needed).
+   * ``metadata.blueprint_active`` truthy = active; absent or falsy
+   * = inactive (the default).
+   */
+  readonly blueprintActive = computed<boolean>(() => {
+    const id = this.selectedProjectId();
+    if (!id) return false;
+    const proj = this.projects().find((p) => p.project_id === id);
+    if (!proj) return false;
+    return Boolean(proj.metadata?.['blueprint_active']);
+  });
+  /** Drives the disabled state on the enable / disable button. */
+  readonly togglingActive = signal(false);
+  /**
+   * Show the "Rebuild Blueprints" button — only when the project is
+   * empty (no blueprints yet) AND no rebuild is running AND a project
+   * is selected.
+   */
+  readonly showRebuildButton = computed(
+    () =>
+      this.blueprints().length === 0 &&
+      !this.loading() &&
+      !this.rebuilding() &&
+      this.hasSelectedProject(),
+  );
+  /**
+   * Show the "Update Blueprints" button — only when the project has
+   * at least one blueprint AND no rebuild/update is running. The
+   * dual-mode choice (incremental vs full) is exposed via the popup.
+   *
+   * ``!this.loading()`` mirrors ``showRebuildButton`` so a project
+   * switch doesn't briefly reveal the button for the previous
+   * project's blueprints while the new list is in flight.
+   */
+  readonly showUpdateButton = computed(
+    () =>
+      this.blueprints().length > 0 &&
+      !this.loading() &&
+      !this.rebuilding(),
+  );
 
   // Kind enum re-exported for template binding.
   protected readonly BlueprintKind = {
@@ -183,10 +265,9 @@ export class BlueprintComponent implements OnInit, OnDestroy {
   readonly isEmptyState = computed(
     () => !this.loading() && this.blueprints().length === 0 && !this.error(),
   );
-  /** Show the Initialize button when there are no blueprints at all. */
-  readonly canInitialize = computed(
-    () => !this.loading() && this.blueprints().length === 0 && !this.error(),
-  );
+  /** Toolbar-button visibility is driven by ``showRebuildButton`` /
+   * ``showUpdateButton`` (defined above under the Phase 6 dual-mode
+   * state block). */
   readonly isFilteredEmpty = computed(
     () =>
       !this.loading() &&
@@ -300,6 +381,11 @@ export class BlueprintComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.service.clearError();
+    // Cancel any in-flight rebuild/update poll so the 10s timer
+    // doesn't keep firing after the component is gone.
+    this.rebuildPollingSub?.unsubscribe();
+    // Same for any in-flight single-blueprint rebuild poll.
+    this.singleRebuildPollingSub?.unsubscribe();
   }
 
   // ── List loading ─────────────────────────────────────────────────────
@@ -342,6 +428,18 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     this.formName.set('');
     this.formSlug.set('');
     this.formContent.set('');
+    // Cancel any in-flight rebuild/update poll for the OLD project —
+    // the timer would otherwise keep hitting the (now stale) projectId
+    // and dump its results into the new project's view.
+    this.rebuildPollingSub?.unsubscribe();
+    this.rebuildPollingSub = undefined;
+    this.rebuilding.set(false);
+    // Same for the single-blueprint rebuild poll — it would otherwise
+    // keep polling against the OLD project.
+    this.singleRebuildPollingSub?.unsubscribe();
+    this.singleRebuildPollingSub = undefined;
+    this.singleRebuilding.set(false);
+    this.showUpdatePopup.set(false);
     // Keep the URL so reload / share-link work.
     void this.router.navigate(['/projects', projectId, 'blueprints']);
     this.loadList();
@@ -360,6 +458,46 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     this.statusFilter.set('all');
   }
 
+  // ── Blueprint opt-in toggle (Phase 7) ────────────────────────────────
+  /**
+   * Flip the per-project ``blueprint_active`` flag. Optimistic: the
+   * local project row's metadata is updated immediately so the UI
+   * re-renders without a server round-trip; on failure we revert and
+   * surface a snackbar.
+   */
+  protected toggleBlueprintActive(): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
+    const newValue = !this.blueprintActive();
+    this.togglingActive.set(true);
+    this.service.setBlueprintActive(projectId, newValue).subscribe({
+      next: () => {
+        // Patch the local project row so the computed `blueprintActive`
+        // signal re-evaluates without a re-fetch.
+        this.projects.update((items) =>
+          items.map((p) =>
+            p.project_id === projectId
+              ? {
+                  ...p,
+                  metadata: { ...(p.metadata || {}), blueprint_active: newValue },
+                }
+              : p,
+          ),
+        );
+        this.togglingActive.set(false);
+        this.snackBar.open(
+          newValue ? 'Blueprint enabled for this project' : 'Blueprint disabled for this project',
+          'Close',
+          { duration: 3000 },
+        );
+      },
+      error: (err: Error) => {
+        this.togglingActive.set(false);
+        this.showMutationError(err, newValue ? 'enable blueprint' : 'disable blueprint');
+      },
+    });
+  }
+
   // ── Select / detail ─────────────────────────────────────────────────
 
   protected onSelect(bp: Blueprint): void {
@@ -371,6 +509,15 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     this.showHistory.set(false);
     this.revisions.set([]);
     this.selectedRevision.set(null);
+    // The single-rebuild spinner is per-selected-blueprint: a rebuild
+    // for blueprint A does not show a spinner on blueprint B. Clear
+    // it here and cancel the poll subscription (the LIST itself will
+    // refresh via the normal refresh button or the next list call —
+    // we don't need the 10s poll to keep running once the user has
+    // moved on to a different blueprint's detail).
+    this.singleRebuilding.set(false);
+    this.singleRebuildPollingSub?.unsubscribe();
+    this.singleRebuildPollingSub = undefined;
     // Then fetch the fresh full row (in case the cached copy is stale
     // — the list endpoint may project a subset in the future).
     this.detailLoading.set(true);
@@ -439,37 +586,243 @@ export class BlueprintComponent implements OnInit, OnDestroy {
       });
   }
 
-  // ── Initialize ───────────────────────────────────────────────────────
+  // ── Rebuild / update (Phase 6 dual-mode) ─────────────────────────────
 
-  protected onInitialize(): void {
+  /**
+   * Toolbar "Rebuild Blueprints" handler. Fires a full re-scan via
+   * ``POST /rebuild`` and starts polling the list endpoint so the UI
+   * shows new blueprints as they land.
+   *
+   * The backend may return 202 ``status='already_in_progress'`` when a
+   * previous rebuild for this project is still queued. That's a
+   * coalesce response, NOT an error — we surface it as a soft snackbar
+   * and skip the polling (the existing job will land blueprints when
+   * it finishes).
+   */
+  protected onRebuildClick(): void {
     const projectId = this.selectedProjectId();
     if (!projectId) return;
-    const confirmed = window.confirm(
-      'This will scan the project and create initial blueprints. ' +
-        'This runs in the background and may take a few minutes. Continue?',
-    );
-    if (!confirmed) return;
-    this.initializing.set(true);
-    this.service.initialize(projectId).subscribe({
-      next: () => {
-        this.initializing.set(false);
-        this.snackBar.open(
-          'Blueprint initialization queued. Check back in a few minutes.',
-          'Close',
-          { duration: 5000, panelClass: 'success-snackbar' },
-        );
+    this.rebuilding.set(true);
+    this.service.rebuild(projectId).subscribe({
+      next: (resp) => {
+        if (resp.status === 'already_in_progress') {
+          // Coalesced — a previous rebuild for this project is still
+          // queued. Still start polling so the list auto-refreshes
+          // when that earlier job lands; the snackbar copy above
+          // tells the user nothing was lost.
+          this.startRebuildPolling(projectId);
+          this.snackBar.open(
+            'Blueprint rebuild already in progress',
+            'Close',
+            { duration: 5000 },
+          );
+          return;
+        }
+        this.snackBar.open('Blueprint rebuild started…', 'Close', {
+          duration: 5000,
+          panelClass: 'success-snackbar',
+        });
+        this.startRebuildPolling(projectId);
       },
       error: (err: Error & { status?: number }) => {
-        this.initializing.set(false);
+        this.rebuilding.set(false);
+        this.showMutationError(err, 'rebuild');
+      },
+    });
+  }
+
+  /**
+   * Toolbar "Update Blueprints" handler. Opens the modal that asks
+   * the user to choose between an incremental (diff-driven) and a
+   * full rebuild. The two branches live in :meth:`onIncrementalUpdate`
+   * and :meth:`onFullRebuild`.
+   */
+  protected onUpdateClick(): void {
+    this.showUpdatePopup.set(true);
+  }
+
+  /**
+   * Popup branch — incremental update. Fires ``POST /update`` and
+   * starts polling. Same already-in-progress coalesce handling as
+   * the rebuild path.
+   */
+  protected onIncrementalUpdate(): void {
+    this.showUpdatePopup.set(false);
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
+    this.rebuilding.set(true);
+    this.service.updateBlueprints(projectId).subscribe({
+      next: (resp) => {
+        if (resp.status === 'already_in_progress') {
+          // Coalesced — same logic as onRebuildClick: poll for the
+          // existing job's completion so the list re-renders.
+          this.startRebuildPolling(projectId);
+          this.snackBar.open(
+            'Blueprint update already in progress',
+            'Close',
+            { duration: 5000 },
+          );
+          return;
+        }
+        this.snackBar.open('Incremental update started…', 'Close', {
+          duration: 5000,
+          panelClass: 'success-snackbar',
+        });
+        this.startRebuildPolling(projectId);
+      },
+      error: (err: Error & { status?: number }) => {
+        this.rebuilding.set(false);
+        this.showMutationError(err, 'update');
+      },
+    });
+  }
+
+  /**
+   * Popup branch — full rebuild. Same wire effect as the toolbar
+   * "Rebuild Blueprints" button; the popup just confirms the user's
+   * intent before throwing away existing work.
+   */
+  protected onFullRebuild(): void {
+    this.showUpdatePopup.set(false);
+    this.onRebuildClick();
+  }
+
+  /** Popup close — also called by clicking the backdrop. */
+  protected onClosePopup(): void {
+    this.showUpdatePopup.set(false);
+  }
+
+  // ── Single-blueprint rebuild (Phase 5 single-mode) ───────────────────
+
+  /**
+   * Detail-pane "Rebuild" button handler. Fires
+   * ``POST /{blueprint_id}/rebuild`` for the currently selected
+   * blueprint and starts polling the project list so the list view
+   * picks up the revised blueprint when the job lands.
+   *
+   * Shares the C7 project-level lease with ``/rebuild`` / ``/update``:
+   * the response may be 202 ``status="already_in_progress"`` (a
+   * previous single for this project is in flight) or 409 (a different
+   * mode is in flight). Both are surfaced as friendly snackbars — 409
+   * still flips the spinner off so the user can retry once the
+   * conflicting job ends.
+   *
+   * No-ops silently when no blueprint is selected (the button is
+   * disabled in that state via ``[disabled]``).
+   */
+  protected rebuildSingle(): void {
+    const projectId = this.selectedProjectId();
+    const blueprint = this.selectedBlueprint();
+    if (!projectId || !blueprint) return;
+    const blueprintId = blueprint.id;
+    this.singleRebuilding.set(true);
+    this.service.rebuildSingle(projectId, blueprintId).subscribe({
+      next: (resp) => {
+        if (resp.status === 'already_in_progress') {
+          // Coalesced — a previous single rebuild for this project is
+          // already in flight. Still start polling so the list auto-
+          // refreshes when that earlier job lands.
+          this.startSingleRebuildPolling(projectId);
+          this.snackBar.open(
+            'Another blueprint operation is in progress',
+            'Close',
+            { duration: 3000 },
+          );
+          return;
+        }
+        this.snackBar.open('Blueprint rebuild queued', 'Close', {
+          duration: 3000,
+          panelClass: 'success-snackbar',
+        });
+        this.startSingleRebuildPolling(projectId);
+      },
+      error: (err: Error & { status?: number }) => {
+        this.singleRebuilding.set(false);
         const status = err?.status;
-        let message = err?.message || 'Failed to initialize blueprints';
+        let message: string;
         if (status === 409) {
-          message = 'Blueprints already exist. Use refresh to update them.';
+          message = 'Another blueprint operation in progress';
+        } else if (status === 404) {
+          message = 'Blueprint not found';
+        } else {
+          message = err?.message || 'Failed to queue rebuild';
         }
         this.snackBar.open(message, 'Dismiss', {
-          duration: 5000,
+          duration: 3000,
           panelClass: 'error-snackbar',
         });
+      },
+    });
+  }
+
+  /**
+   * Poll ``GET /blueprints`` every 10s (max 5 minutes) while a
+   * single-blueprint rebuild is in flight. Mirrors
+   * :meth:`startRebuildPolling` (same quiet=true, same 10s tick) but
+   * tracks its own ``singleRebuilding`` signal + subscription so
+   * switching to a different blueprint can cancel this poll cleanly.
+   */
+  private startSingleRebuildPolling(projectId: string): void {
+    this.singleRebuildPollingSub?.unsubscribe();
+    const poll$ = timer(0, 10_000).pipe(
+      take(30), // 30 × 10s = 5 minutes upper bound
+      switchMap(() => this.service.list(projectId, undefined, undefined, true)),
+    );
+    this.singleRebuildPollingSub = poll$.subscribe({
+      next: (blueprints) => {
+        this.blueprints.set(blueprints);
+        // Keep the local ``selectedBlueprint`` in sync so the detail
+        // pane reflects the rebuilt content when the user re-selects
+        // this blueprint (or refreshes the view).
+        const stillSelected = this.selectedBlueprint();
+        if (stillSelected) {
+          const fresh = blueprints.find((b) => b.id === stillSelected.id);
+          if (fresh) this.selectedBlueprint.set(fresh);
+        }
+      },
+      complete: () => {
+        this.singleRebuilding.set(false);
+      },
+      error: () => {
+        this.singleRebuilding.set(false);
+      },
+    });
+  }
+
+  /**
+   * Poll ``GET /blueprints`` every 10s (max 5 minutes) while a
+   * rebuild / update job is in flight so the list re-renders as new
+   * blueprints land. The ``service.list`` call already pushes the
+   * result into the ``blueprints`` signal; we don't need to set it
+   * again here, but the explicit assignment is defensive in case the
+   * service impl changes later.
+   *
+   * The subscription is stored on the instance so ``ngOnDestroy`` and
+   * project switches can tear it down deterministically. A new poll
+   * cancels the old one via ``unsubscribe`` before starting.
+   */
+  private startRebuildPolling(projectId: string): void {
+    this.rebuildPollingSub?.unsubscribe();
+    const poll$ = timer(0, 10_000).pipe(
+      take(30), // 30 × 10s = 5 minutes upper bound
+      // ``quiet=true`` keeps the poll off the shared loading signal so
+      // the 10s tick doesn't flash the list skeleton / disable the
+      // Refresh button on every cycle.
+      switchMap(() => this.service.list(projectId, undefined, undefined, true)),
+    );
+    this.rebuildPollingSub = poll$.subscribe({
+      next: (blueprints) => {
+        this.blueprints.set(blueprints);
+      },
+      complete: () => {
+        this.rebuilding.set(false);
+        this.snackBar.open('Blueprint refresh complete', 'Close', {
+          duration: 3000,
+          panelClass: 'success-snackbar',
+        });
+      },
+      error: () => {
+        this.rebuilding.set(false);
       },
     });
   }
@@ -668,7 +1021,17 @@ export class BlueprintComponent implements OnInit, OnDestroy {
     if (status === 422) {
       message = 'Invalid blueprint data — check required fields.';
     } else if (status === 404) {
-      message = 'Blueprint not found in this project.';
+      // Service may have supplied a more specific message (e.g. the
+      // /update endpoint's 404 says "No blueprints found. Use Rebuild
+      // first."). Prefer it; fall back to a generic if missing.
+      message = message || 'Blueprint not found in this project.';
+    } else if (status === 409) {
+      // Cross-mode conflict on /rebuild vs /update, OR a coalesced
+      // already-in-progress response that the service re-threw with
+      // a synthetic status. The service-supplied message is already
+      // friendly, so prefer it (set above) and only fall back to a
+      // generic if missing.
+      message = message || 'Blueprint operation already in progress.';
     } else if (status === 503) {
       message =
         'Service is temporarily paused for writes. Please try again later.';

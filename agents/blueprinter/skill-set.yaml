@@ -1,0 +1,37 @@
+agent_id: blueprinter
+skills:
+  - name: explore-for-rebuild
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: explore project at overview level for full rebuild — directories, module scope, entry points, patterns, dependencies. Returns a structured Worker Report."
+  - name: explore-for-incremental
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: explore specific changed areas from pending-experience records — what changed, what blueprints are affected, what's stale. Returns a structured Worker Report."
+  - name: explore-for-single
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: targeted verification of ONE blueprint's file_refs and immediate area. Reports drift findings (stale-ref, behavior-drift, missing-coverage, scope-drift) for single-blueprint rebuild. Single-action recommendation (UPDATE / DISABLE / NO-OP)."
+  - name: build-blueprint
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: craft a concise blueprint (200–500 words) from exploration data. Returns a structured Worker Report with name, content, file_refs, trigger_queries. Defines the canonical Worker Report format."
+  - name: decide-changes
+    version: "1.0.0"
+    auto_load: false
+    category: planning
+    description: "Blueprinter skill: analyze structured worker reports, decide create/update/disable/no-op. Notes model tier: 'balanced' if available, else 'quick'. Owns compare/stage/publish semantics."
+  - name: explore-doc-drift
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: detect documentation and code-comment drift for a specific blueprint area. Reports findings (stale-doc, missing-doc, comment-mismatch, moved-ref) with confidence levels. Does NOT write — report-only."
+  - name: maintain-docs
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "doc-maintainer worker skill: update docs/ markdown files and Python docstrings using the restricted doc_write + comment_edit tools. Reports via Doc Maintenance Report format. High-confidence drift only."

@@ -830,6 +830,24 @@ class SQLModelProjectRepository:
             select(ProjectMetadataRecord).where(ProjectMetadataRecord.project_id == project_id)
         ).all()
 
+    def get_metadata(self, project_id: str, key: str) -> Any | None:
+        """Get a metadata value by (project_id, key).
+
+        Convenience wrapper that opens its own session. Returns
+        ``meta_value`` (deserialized from JSON) or ``None`` when the
+        project does not exist OR the metadata key is absent.
+
+        Used by C7 BlueprintTriggerCoordinator to read the
+        ``blueprint_build_lease`` lease record without callers having
+        to plumb a Session.
+        """
+        with Session(self.engine) as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                return None
+            record = self.get_metadata_record(session, project_id, key)
+            return record.meta_value if record is not None else None
+
     def set_metadata(self, project_id: str, key: str, value: Any) -> Project | None:
         """Set a metadata key-value pair."""
         with Session(self.engine) as session:

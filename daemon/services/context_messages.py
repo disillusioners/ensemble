@@ -48,6 +48,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
 logger = logging.getLogger(__name__)
@@ -1348,12 +1349,33 @@ async def assemble_context_messages(
         # Project Blueprint: matched architectural knowledge injected once
         # on the first user turn. Gated by:
         #   (a) project_already_injected must be False (once-per-instance)
-        #   (b) blueprint_inactive must be False (opt-out via meta.json)
-        #   (c) manager._blueprint_matcher must exist (graceful skip if absent)
+        #   (b) project must have opted in (default: false = no injection).
+        #       The per-project opt-in lives in ``project_metadata_records``
+        #       under ``BLUEPRINT_ACTIVE_METADATA_KEY``; absent = inactive.
+        #   (c) blueprint_inactive must be False (opt-out via meta.json)
+        #   (d) manager._blueprint_matcher must exist (graceful skip if absent)
         # matcher.match() is async — await DIRECTLY (assemble_context_messages
         # is already async). Do NOT wrap in asyncio.to_thread(asyncio.run(...)).
+        #
+        # ``get_metadata`` is sync SQLAlchemy — wrap in ``asyncio.to_thread``
+        # per ADR-12 so we don't block the agent-node loop on a disk read.
+        # A metadata lookup failure must NOT abort the whole context
+        # assembly, so we swallow the exception and treat the project as
+        # inactive (the safer default).
+        project_blueprint_active = False
+        project_repo_for_meta = getattr(manager, "_project_repository", None)
+        if project_repo_for_meta is not None and project_id:
+            try:
+                val = await asyncio.to_thread(
+                    project_repo_for_meta.get_metadata,
+                    project_id,
+                    BLUEPRINT_ACTIVE_METADATA_KEY,
+                )
+                project_blueprint_active = bool(val)
+            except Exception:
+                project_blueprint_active = False
         blueprint_inactive = bool(getattr(agent_meta, "blueprint_inactive", False))
-        if not blueprint_inactive:
+        if project_blueprint_active and not blueprint_inactive:
             try:
                 matcher = getattr(manager, "_blueprint_matcher", None)
                 if matcher is None:

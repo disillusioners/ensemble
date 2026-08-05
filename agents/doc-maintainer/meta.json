@@ -1,0 +1,26 @@
+{
+    "id": "doc-maintainer",
+    "name": "Doc Maintainer",
+    "description": "Restricted worker for maintaining project docs and code comments. No shell access, no raw file writes — only doc_write and comment_edit.",
+    "icon": "📝",
+    "color": "accent-amber",
+    "version": "1.0.0",
+    "llm_models": [
+        {"model": "coding", "weight": 100}
+    ],
+    "skill_injection": true,
+    "tools": {
+        "allow": [
+            "doc_write",
+            "comment_edit",
+            "read_file",
+            "list_directory",
+            "glob_files",
+            "grep_files",
+            "skill_search",
+            "shared_context_metadata",
+            "time",
+            "help"
+        ]
+    }
+}

@@ -719,6 +719,58 @@ class BlueprintConfig(EmbeddingConfig):
     vector_weight: float = Field(default=0.6)
     match_threshold: float = Field(default=0.30)
     max_results: int = Field(default=5)
+    # G8: statuses eligible for matcher loading. The repository's
+    # ``search_candidates`` uses a hardcoded ``"published"`` filter
+    # for now; this option is reserved for future flexibility
+    # (e.g. phased rollouts, ``"review"`` for human approval
+    # checkpoints). Drafts are excluded by default.
+    matchable_statuses: list[str] = Field(
+        default_factory=lambda: ["published"],
+        description="Blueprint statuses eligible for matching (G8). Drafts excluded by default.",
+    )
+    # C7 / Phase 3: gate for automated blueprint triggers (daily scan,
+    # post-experience sidecars). Manual triggers always work. Default ON —
+    # set BLUEPRINT_AUTO_REBUILD_ENABLED=false to disable.
+    auto_rebuild_enabled: bool = Field(
+        default=True,
+        description="Gate for automated blueprint triggers (daily scan, "
+                    "post-experience). Manual triggers always work. "
+                    "Default ON — set BLUEPRINT_AUTO_REBUILD_ENABLED=false to disable.",
+    )
+    # Phase 4 / Doc Maintenance: opt-in gate for doc-maintainer workers.
+    # Two flags compose the doc-maintenance trust ladder:
+    #
+    # * ``doc_maintenance_enabled`` — doc-maintainer workers WRITE docs/ and
+    #   code comments at all. Off by default — operators must explicitly
+    #   opt in to having a background agent touch project docs.
+    # * ``doc_maintenance_commit_enabled`` — atomic build-validation +
+    #   git-commit step runs after doc writes. Off by default — operators
+    #   can dry-run the writes first and commit manually.
+    #
+    # Both default to False. Set BLUEPRINT_DOC_MAINTENANCE_ENABLED=true and
+    # BLUEPRINT_DOC_MAINTENANCE_COMMIT_ENABLED=true to enable. The flags
+    # compose: commit_enabled implies enabled.
+    doc_maintenance_enabled: bool = Field(
+        default=False,
+        description="Opt-in gate for doc-maintenance writes. When false, "
+                    "doc-maintainer workers are not dispatched. Default OFF — "
+                    "set BLUEPRINT_DOC_MAINTENANCE_ENABLED=true to enable.",
+    )
+    doc_maintenance_commit_enabled: bool = Field(
+        default=False,
+        description="Opt-in gate for the atomic build-validation + git-commit "
+                    "step. When false, doc-maintenance changes stay in the "
+                    "working tree for manual review. Default OFF — set "
+                    "BLUEPRINT_DOC_MAINTENANCE_COMMIT_ENABLED=true to enable "
+                    "(requires doc_maintenance_enabled=true).",
+    )
+    doc_maintenance_build_cmd: str | None = Field(
+        default=None,
+        description="Optional override for the build/test command. If set, "
+                    "replaces the detected command (npm test, pytest -x, etc.). "
+                    "Parsed via shlex.split. Override via "
+                    "BLUEPRINT_DOC_MAINTENANCE_BUILD_CMD or per-project metadata.",
+    )
 
 
 class Config(BaseSettings):

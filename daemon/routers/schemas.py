@@ -845,3 +845,33 @@ class DefaultAgentVersionUpdate(BaseModel):
         if not cleaned:
             raise ValueError("version_tag must be a non-empty string or null")
         return cleaned
+
+
+# ==================== Blueprint Peak Hours Schemas ====================
+
+
+class BlueprintPeakHoursResponse(BaseModel):
+    """Response for GET /api/settings/blueprint-peak-hours.
+
+    The daemon-side daily blueprint scan skips itself when the local
+    time falls inside the [start, end) hour window. The window is
+    expressed in ``tz_offset`` (UTC offset in whole hours, e.g. 7 for
+    GMT+7) so the operator can match their working-day timeline.
+    """
+
+    start: int = Field(..., description="Inclusive start hour 0-23 (local time)")
+    end: int = Field(..., description="Exclusive end hour 0-23 (local time)")
+    tz_offset: int = Field(..., description="UTC offset in whole hours (e.g. 7 for GMT+7)")
+
+
+class BlueprintPeakHoursUpdate(BaseModel):
+    """Request body for PUT /api/settings/blueprint-peak-hours."""
+
+    start: int = Field(..., ge=0, le=23, description="Inclusive start hour 0-23")
+    end: int = Field(..., ge=0, le=23, description="Exclusive end hour 0-23")
+    tz_offset: int = Field(
+        ...,
+        ge=-12,
+        le=14,
+        description="UTC offset in whole hours (-12 to 14, e.g. 7 for GMT+7)",
+    )

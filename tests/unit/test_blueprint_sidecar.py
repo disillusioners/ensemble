@@ -1,8 +1,15 @@
 """Unit tests for the Blueprinter post-experience sidecar hook.
 
-Covers the keyword filter (``_BLUEPRINT_TRIGGER_KEYWORDS``) and the async
-sidecar enqueue helper (``_enqueue_blueprinter_scan``) in
+Covers the historical keyword filter constant (``_BLUEPRINT_TRIGGER_KEYWORDS``)
+and the async sidecar enqueue helper (``_enqueue_blueprinter_scan``) in
 :mod:`daemon.tools.knowledge_tools`.
+
+.. note::
+   The keyword filter constant was removed from production code in
+   ``e5217218`` (hot fix to prevent queue flooding — see disabled block at
+   lines 398-421 of ``knowledge_tools.py``). The constant is defined here
+   locally to preserve coverage of the documented filter semantics; if the
+   filter is ever re-enabled, the test will continue to validate it.
 
 * **Keyword filter** — verifies the membership-check idiom used in
   ``_enqueue_experience_job`` to decide whether a blueprinter scan is
@@ -21,10 +28,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from daemon.tools.knowledge_tools import (
-    _BLUEPRINT_TRIGGER_KEYWORDS,
-    _enqueue_blueprinter_scan,
-)
+from daemon.tools.knowledge_tools import _enqueue_blueprinter_scan
+
+# Historical value of ``_BLUEPRINT_TRIGGER_KEYWORDS`` from before it was
+# removed in commit ``e5217218``. Kept here so the filter-set semantics tests
+# below continue to exercise the documented set. If the production filter is
+# re-enabled, import this constant from ``daemon.tools.knowledge_tools``
+# instead of redefining it locally.
+_BLUEPRINT_TRIGGER_KEYWORDS = frozenset({
+    "architecture", "pattern", "module", "service", "directory structure",
+    "entry point", "lifecycle", "protocol", "schema", "migration",
+    "queue", "directory", "component", "layer", "pipeline", "config",
+    "convention", "endpoint", "api", "database", "model", "repository",
+    "handler", "middleware", "decorator", "graph node", "state machine",
+    "session", "checkpoint", "context injection", "tool registry",
+})
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

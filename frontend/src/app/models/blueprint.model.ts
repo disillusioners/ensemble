@@ -116,3 +116,24 @@ export interface BlueprintFilters {
   kind?: BlueprintKind;
   status?: BlueprintStatus;
 }
+
+/**
+ * Response from ``POST /api/projects/{project_id}/blueprints/rebuild`` and
+ * ``POST /api/projects/{project_id}/blueprints/update`` — the backend
+ * enqueues a job on the background queue and returns 202 immediately
+ * with this envelope.
+ *
+ * - ``job_id`` — the queued JobItem id (used for tracing).
+ * - ``status`` — ``'accepted'`` for a fresh enqueue or
+ *   ``'already_in_progress'`` for a coalesced duplicate (also 202).
+ *   NOTE: a cross-mode conflict surfaces as 409 (NOT 202), so callers
+ *   can treat any 202 as "job is running, safe to poll".
+ * - ``mode`` — ``'rebuild'`` for a full re-scan, ``'incremental'`` for
+ *   a diff-driven update. Matches the ``mode`` discriminator the
+ *   backend uses on the job record.
+ */
+export interface BlueprintJobResponse {
+  job_id: string;
+  status: string;
+  mode: string;
+}
