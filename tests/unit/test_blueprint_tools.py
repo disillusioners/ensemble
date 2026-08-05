@@ -216,6 +216,7 @@ def _make_manager(
     matcher: Any = None,
     instance_project_id: str = "proj-A",
     pending_repo: _FakePendingRepo | None = None,
+    coordinator: Any = None,
 ) -> MagicMock:
     """Build a MagicMock manager with the blueprint attributes the tools touch."""
     m = MagicMock()
@@ -228,6 +229,7 @@ def _make_manager(
     # ``_blueprint_pending_repo`` backs the claim/ack/count tools. ``None``
     # by default so the "not available" guard path is exercised.
     m._blueprint_pending_repo = pending_repo
+    m._blueprint_trigger_coordinator = coordinator
     # ``_get_project_id()`` reads the instance repo; mock it to return an
     # instance carrying the requested project_id.
     inst = MagicMock()
@@ -242,7 +244,7 @@ def _run(coro: Any) -> Any:
 
 
 def _build_tools(manager: MagicMock, agent_id: str = "blueprinter") -> list:
-    """Create the 9 blueprint tools from a manager."""
+    """Create the 10 blueprint tools from a manager."""
     return create_blueprint_tools(manager, "inst-test", agent_id)
 
 
@@ -362,16 +364,44 @@ class TestBlueprintUpdateOwnership:
         assert bp.content == "fresh content"
 
 
-# ─── Tool count sanity (return list grew from 5 → 9) ────────────────────────
+# ─── Tool count sanity (return list grew from 9 → 10) ───────────────────────
 
 
 class TestBlueprintToolCount:
-    """The factory must return exactly 9 tools after the Phase 5b additions."""
+    """The factory must return exactly 10 tools with lease release."""
 
-    def test_factory_returns_nine_tools(self) -> None:
+    def test_factory_returns_ten_tools(self) -> None:
         manager = _make_manager()
         tools = _build_tools(manager)
-        assert len(tools) == 9
+        assert len(tools) == 10
+
+
+# ─── blueprint_release_lease ─────────────────────────────────────────────────
+
+
+class TestBlueprintReleaseLease:
+    """``blueprint_release_lease`` safely releases coordinator leases."""
+
+    def test_release_lease_tool_success(self) -> None:
+        coordinator = MagicMock()
+        coordinator.release = AsyncMock(return_value=True)
+        manager = _make_manager(coordinator=coordinator)
+        release_lease = _build_tools(manager)[9]
+
+        result = _run(release_lease.ainvoke({"run_token": "run-token"}))
+
+        assert result == "Lease released successfully."
+        coordinator.release.assert_awaited_once_with("proj-A", "run-token")
+
+    def test_release_lease_tool_no_coordinator(self) -> None:
+        manager = _make_manager(coordinator=None)
+        release_lease = _build_tools(manager)[9]
+
+        result = _run(release_lease.ainvoke({"run_token": "run-token"}))
+
+        assert result == (
+            "No coordinator available (lease system not configured)."
+        )
 
 
 # ─── blueprint_claim_pending ────────────────────────────────────────────────

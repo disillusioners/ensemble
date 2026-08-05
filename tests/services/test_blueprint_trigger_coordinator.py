@@ -141,7 +141,9 @@ class TestTryClaim:
 
 
 class TestRelease:
-    def test_release_success(self, coordinator, pid, project_repo):
+    def test_lease_released_after_claim_and_release(
+        self, coordinator, pid, project_repo
+    ):
         r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
         assert _run(coordinator.release(pid, r1.run_token)) is True
         # Lease is gone from metadata.
@@ -150,6 +152,27 @@ class TestRelease:
         r2 = _run(coordinator.try_claim(pid, "rebuild", "job-D"))
         assert r2.claimed is True
         assert r2.job_id == "job-D"
+
+    def test_double_release_is_noop(self, coordinator, pid):
+        r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
+        assert _run(coordinator.release(pid, r1.run_token)) is True
+        assert _run(coordinator.release(pid, r1.run_token)) is False
+
+    def test_lease_blocks_until_released(self, coordinator, pid):
+        r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
+
+        blocked = _run(coordinator.try_claim(pid, "rebuild", "job-B"))
+        assert blocked.claimed is False
+        assert blocked.coalesced is True
+        assert blocked.job_id == "job-A"
+
+        assert _run(coordinator.release(pid, r1.run_token)) is True
+
+        fresh = _run(coordinator.try_claim(pid, "rebuild", "job-B"))
+        assert fresh.claimed is True
+        assert fresh.coalesced is False
+        assert fresh.job_id == "job-B"
+        assert fresh.run_token != r1.run_token
 
     def test_release_wrong_token(self, coordinator, pid, project_repo):
         r1 = _run(coordinator.try_claim(pid, "rebuild", "job-A"))

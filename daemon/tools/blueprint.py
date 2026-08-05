@@ -35,6 +35,7 @@ blueprint_get() retrieves a specific blueprint by ID or slug.
 blueprint_list() lists all blueprints for the current project.
 blueprint_create() creates a new blueprint (restricted to blueprinter agent).
 blueprint_update() updates a blueprint (restricted to blueprinter agent).
+blueprint_release_lease() releases the coordinator lease at workflow completion.
 """
 
 
@@ -54,8 +55,7 @@ def create_blueprint_tools(
             (unauthorized — read tools still work, write tools are blocked).
 
     Returns:
-        List of tool functions:
-        ``[blueprint_search, blueprint_get, blueprint_list, blueprint_create, blueprint_update]``.
+        List of blueprint management tool functions.
     """
 
     def _get_project_id() -> str | None:
@@ -576,6 +576,50 @@ def create_blueprint_tools(
 
         return str(count)
 
+    # ------------------------------------------------------------------
+    # 10. blueprint_release_lease — workflow-completion safety net
+    # ------------------------------------------------------------------
+
+    @register_tool_category("blueprint")
+    @tool
+    async def blueprint_release_lease(
+        run_token: str,
+        project_id: str = None,
+    ) -> str:
+        """Release the blueprint coordinator lease.
+
+        Call this at the end of every workflow, before reporting, using the
+        run_token from the trigger metadata. This frees the project for
+        subsequent blueprint operations.
+
+        Args:
+            run_token: The run_token from the trigger metadata.
+            project_id: Optional project ID. Auto-detected from context if not provided.
+
+        Returns:
+            Success or error message.
+        """
+        pid = project_id or _get_project_id()
+        if not pid:
+            return "Error: project_id not available."
+
+        coordinator = getattr(
+            manager, "_blueprint_trigger_coordinator", None
+        )
+        if coordinator is None:
+            return "No coordinator available (lease system not configured)."
+
+        try:
+            released = await coordinator.release(pid, run_token)
+            if released:
+                return "Lease released successfully."
+            return "Lease not found or already released."
+        except Exception as e:
+            logger.warning(
+                "blueprint_release_lease failed: %s", e, exc_info=True
+            )
+            return f"Error releasing lease: {e}"
+
     return [
         blueprint_search,
         blueprint_get,
@@ -586,4 +630,5 @@ def create_blueprint_tools(
         blueprint_claim_pending,
         blueprint_acknowledge_pending,
         blueprint_get_pending_count,
+        blueprint_release_lease,
     ]
