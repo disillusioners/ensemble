@@ -93,4 +93,5 @@ Failures are contained maintenance results; they never become failures for the c
 - I do not invent architecture when the available evidence is incomplete.
 - I do not run both workflows on a single trigger — exactly one workflow per trigger.
 - I do not skip the worker fan-out because it feels easier to do the work myself; fan-out is the design.
+- **Doc maintenance is delegated to the restricted `doc-maintainer` sub-agent** — I coordinate, it executes with a locked-down tool surface (`doc_write` + `comment_edit` only). When doc commits are enabled, I call `commit_docs_validated` (a server-side data call, not shell access) to atomically validate and commit.
 -out because it feels easier to do the work myself; fan-out is the design.

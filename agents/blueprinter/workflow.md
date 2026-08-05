@@ -62,7 +62,35 @@ Goal: produce concrete blueprint drafts for each approved action.
    - The output format reminder (Worker Report with Blueprint Payload)
 2. **DISABLE actions are mine — no worker.** I handle them directly during Phase 2 — SAVE.
 3. **Cap the wave at 4 workers.** If the Decision Set has more actions than fit, defer the lowest-priority ones to a follow-up run.
-4. **END MY TURN once for the batch.**
+4. **Doc-maintainer mixed batch (when enabled).** When the project has `doc_maintenance_enabled=true` AND drift candidates exist:
+   - Count blueprint actions (N).
+   - If N < 4, allocate `M = 4 - N` doc-maintainer slots. Each slot gets `load_skill="maintain-docs"` and dispatches against one Decision-Set area touching `docs/` or docstring-bearing source.
+   - If N >= 4, defer doc maintenance this run; note "doc maintenance deferred — all slots used by blueprint craft" in the report.
+   - If `doc_maintenance_enabled=false`, skip doc-maintenance dispatch entirely.
+5. **Spawn the MIXED batch (N + M workers, ≤4 total).** END MY TURN once for the batch.
+
+### Phase 2 — Fan-in (route by skill type)
+
+After the mixed batch reports land:
+
+1. **Route each worker report by skill assignment** (recorded at dispatch):
+   - `build-blueprint` reports → existing Worker Report parser (unchanged)
+   - `maintain-docs` reports → Doc Maintenance Report parser (extract `### Files Updated`)
+2. **Blueprint updates proceed to SAVE** (unchanged logic).
+3. **Doc results are aggregated into a final `### Doc Maintenance` section** of the report. Contain any doc errors — never block SAVE or the Report.
+
+### Phase 2a — Build Gate + Commit (atomic, best-effort)
+
+After fan-in, before SAVE:
+
+1. **Collect doc changes** from all `### Files Updated` sections across `maintain-docs` reports. Deduplicate paths.
+2. **If no doc changes** → skip this phase entirely.
+3. **If `doc_maintenance_commit_enabled=false`** → skip the commit step. Doc changes remain in the working tree for manual review. Continue to SAVE.
+4. **If `doc_maintenance_commit_enabled=true`** → call `commit_docs_validated(changed_paths, message)`:
+   - `message` format: `docs(blueprinter): auto-update <mode> <area> [skip ci]`
+   - The tool runs the atomic build-validation + git-commit sequence server-side.
+   - **Build FAIL or TIMEOUT** → hard stop; changes remain in the working tree. Record the outcome in the report under `### Doc Commit`. Cardinal #1 extends to this step — never blocks SAVE.
+5. **Continue to Phase 2 — SAVE** regardless of commit outcome (best-effort).
 
 ### Phase 2 — SAVE (compare/stage/publish — I work alone)
 
@@ -198,6 +226,7 @@ I report per the outcomes defined in soul.md §Output Shape. Workflow-specific n
 - I name the **rate-limit stop reason** (e.g., "rate-limited after 3 writes; remaining 2 actions deferred") so the caller knows writes were deferred, not retried.
 - I list **acknowledged batch size** only on incremental runs.
 - I emit a `### Gaps` section whenever a worker slot is `[incomplete]`.
+- When doc maintenance ran, I include a `### Doc Maintenance` section: files updated, drift found, errors. When commit was attempted, I include `### Doc Commit`: status (COMMITTED/BUILD_FAILED/...), commit hash or skip reason, build output if failed.
 
 After the report, I end the run. I do not repeat analysis or perform an unrequested second pass.
 

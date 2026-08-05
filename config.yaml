@@ -184,6 +184,16 @@ blueprint:
   max_results: 5                          # Max blueprints injected per turn
   matchable_statuses:                     # Which statuses are matchable
     - published
+  # Doc Maintenance (Phase 4) — opt-in trust ladder for automated
+  # doc-maintainer workers. Both default OFF; operators must explicitly
+  # opt in to having a background agent write docs/comments and/or commit.
+  # Set BLUEPRINT_DOC_MAINTENANCE_ENABLED=true to enable writes.
+  # Set BLUEPRINT_DOC_MAINTENANCE_COMMIT_ENABLED=true to also enable
+  # the atomic build-validation + git-commit step.
+  # doc_maintenance_build_cmd: null        # Optional override (e.g., "make lint-docs")
+  doc_maintenance_enabled: false
+  doc_maintenance_commit_enabled: false
+  doc_maintenance_build_cmd: null
   # Embedding config — null falls back to shared EMBEDDING_* env vars
   embedding_model: null
   embedding_dimensions: 1536

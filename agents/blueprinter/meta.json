@@ -25,10 +25,12 @@
             "time",
             "self",
             "help",
-            "instance"
+            "instance",
+            "commit_docs_validated"
         ]
     },
     "team_members": [
-        "worker"
+        "worker",
+        "doc-maintainer"
     ]
 }

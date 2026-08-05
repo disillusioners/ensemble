@@ -178,6 +178,9 @@ from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .blueprint import create_blueprint_tools
+from .doc_write import create_doc_write_tools
+from .comment_edit import create_comment_edit_tools
+from .doc_commit import create_doc_commit_tools
 from .chart_tools import create_chart_tools
 from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
@@ -2006,6 +2009,17 @@ Returns:
     # are gated by runtime agent_id check (_is_writer_authorized).
     blueprint_tool_list = create_blueprint_tools(manager, current_instance_id, agent_id)
     tools.extend(blueprint_tool_list)
+
+    # ── Doc maintenance tools (doc-maintainer agent's restricted write surface) ──
+    # The doc-maintainer agent is the ONLY agent that should be invoking
+    # doc_write / comment_edit (they are absent from all other agents'
+    # tools.allow). commit_docs_validated is restricted to the blueprinter.
+    doc_write_tool_list = create_doc_write_tools(manager, current_instance_id, agent_id)
+    tools.extend(doc_write_tool_list)
+    comment_edit_tool_list = create_comment_edit_tools(manager, current_instance_id, agent_id)
+    tools.extend(comment_edit_tool_list)
+    doc_commit_tool_list = create_doc_commit_tools(manager, current_instance_id, agent_id)
+    tools.extend(doc_commit_tool_list)
 
     # ── System tools (read-only env / config / health snapshots) ──
     # Always available — internal agents use these for fast triage of

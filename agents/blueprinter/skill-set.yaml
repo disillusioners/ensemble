@@ -25,3 +25,13 @@ skills:
     auto_load: false
     category: planning
     description: "Blueprinter skill: analyze structured worker reports, decide create/update/disable/no-op. Notes model tier: 'balanced' if available, else 'quick'. Owns compare/stage/publish semantics."
+  - name: explore-doc-drift
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Worker skill: detect documentation and code-comment drift for a specific blueprint area. Reports findings (stale-doc, missing-doc, comment-mismatch, moved-ref) with confidence levels. Does NOT write — report-only."
+  - name: maintain-docs
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "doc-maintainer worker skill: update docs/ markdown files and Python docstrings using the restricted doc_write + comment_edit tools. Reports via Doc Maintenance Report format. High-confidence drift only."
