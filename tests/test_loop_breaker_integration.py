@@ -797,6 +797,7 @@ def _make_manager_with_loop_breaker_surface():
     stub._question_manager.clear_question_pack = MagicMock()
     stub.clear_question_pause_requested = MagicMock()
     stub._deferred_question_pause = set()
+    stub._deferred_watchover_terminate = set()
     return stub
 
 
