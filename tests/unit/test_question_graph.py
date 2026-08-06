@@ -369,6 +369,10 @@ class TestCleanupDropsDeferredMarker:
         # (memory-leak fix following the same 5-path cleanup pattern); must
         # be seeded since ``__new__`` skips ``__init__``.
         manager._loop_breaker_state = {}
+        # ``_deferred_watchover_terminate`` is discarded in
+        # ``_cleanup_instance_state`` (Phase 1 watchover); seed it since
+        # ``__new__`` skips ``__init__``.
+        manager._deferred_watchover_terminate = set()
         # ``release_context_usage_cache`` is a method on the real manager;
         # stub it so the cleanup call doesn't reach real DB code.
         manager.release_context_usage_cache = MagicMock()

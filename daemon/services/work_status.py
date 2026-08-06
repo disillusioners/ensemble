@@ -111,6 +111,14 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     # ``work_resolver._job_to_record`` — these are the canonical
     # targets for ``canonicalize_status(terminal_reason)``.
     "aborted": "cancelled",
+    # Phase 2 / T2.7 (TD-3/TD-4). A watchover 3-strike termination
+    # writes ``"watchover_terminated"`` onto the JobItem
+    # ``terminal_reason`` column. From the work-record consumer's POV
+    # this is still a cancellation — the work unit was forcibly stopped
+    # by the watcher, not because it completed or failed on its own.
+    # Without this mapping ``canonicalize_status()`` would leak the
+    # raw ``"watchover_terminated"`` string through to API responses.
+    "watchover_terminated": "cancelled",
 }
 
 

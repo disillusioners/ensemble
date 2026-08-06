@@ -29,6 +29,12 @@ export interface InstanceInfo {
    *  (null for base / unversioned agents). Surfaced in the UI as a small
    *  badge next to the instance title when truthy. */
   agent_tag?: string | null;
+  // Watchover (Phase 4): security monitoring state. Populated from
+  // instance_metadata on the backend. Optional because older responses
+  // may omit them.
+  watchover_enabled?: boolean;
+  watchover_context?: string | null;
+  watchover_denial_count?: number;
 }
 
 export interface InstanceListResponse {

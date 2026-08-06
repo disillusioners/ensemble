@@ -1135,7 +1135,33 @@ class InstanceLifecycleService:
 
         return instance_id, validated_model_override
 
-    async def terminate_instance(self, instance_id: str) -> bool:
+    def _clear_watchover_termination_marker(self, instance_id: str) -> None:
+        """Best-effort clear of a completed watchover termination intent."""
+        try:
+            repo = getattr(self._manager, "_instance_repository", None)
+            setter = getattr(repo, "set_metadata_many", None)
+            if callable(setter):
+                setter(
+                    instance_id,
+                    {
+                        "watchover_pending_termination": False,
+                        "watchover_pending_termination_at": None,
+                    },
+                )
+        except Exception as exc:
+            # The instance is already terminal at this point. Preserve the
+            # marker so a later cold restore or operator retry can repeat the
+            # idempotent cleanup rather than failing termination itself.
+            logger.warning(
+                "watchover termination marker clear failed for instance %s: %s: %s",
+                instance_id,
+                type(exc).__name__,
+                exc,
+            )
+
+    async def terminate_instance(
+        self, instance_id: str, terminal_reason: str = "aborted"
+    ) -> bool:
         """Terminate an instance.
 
         This method performs comprehensive cleanup:
@@ -1162,6 +1188,14 @@ class InstanceLifecycleService:
 
         Args:
             instance_id: The ID of the instance to terminate.
+            terminal_reason: Phase 2 (TD-3/TD-4). Discriminator that
+                distinguishes a watchover 3-strike termination
+                (``"watchover_terminated"``) from a user-initiated delete /
+                parent-terminate cascade (``"aborted"``). The value is
+                persisted on the JobItem ``terminal_reason`` column and
+                is the canonical target of :func:`canonicalize_status`.
+                Children terminated as part of the cascade always get
+                ``"aborted"`` regardless of the parent's reason.
 
         Returns:
             True if termination was successful, False if instance was not found.
@@ -1181,12 +1215,19 @@ class InstanceLifecycleService:
         # helper's own re-check is the authoritative guard for re-entry races.
         if meta and meta.status == InstanceStatus.TERMINATED.value:
             logger.info(f"Instance {instance_id[:8]}... already terminated, skipping")
+            if terminal_reason == "watchover_terminated":
+                self._clear_watchover_termination_marker(instance_id)
             return True
 
         # Cascade to children FIRST - terminate all child instances in parallel.
         # (Parallel because each child may itself unwind an in-flight LLM call;
         # serial cascade would compound to 5s*N worst case.)
         # child IDs come from instance_hierarchy junction table.
+        # Phase 2 (TD-3/TD-4): child terminations always carry
+        # ``terminal_reason="aborted"`` regardless of the parent's reason.
+        # A watchover-terminated root reports ``"watchover_terminated"``,
+        # but its children are innocent — they were killed by the parent's
+        # cascade, not by watchover, so they get the standard abort label.
         child_ids: list[str] = []
         if (
             hasattr(self._manager, '_instance_repository')
@@ -1205,7 +1246,7 @@ class InstanceLifecycleService:
                 child_ids = list(rows)
         if child_ids:
             results = await asyncio.gather(
-                *(self.terminate_instance(cid) for cid in child_ids),
+                *(self.terminate_instance(cid, terminal_reason="aborted") for cid in child_ids),
                 return_exceptions=True,
             )
             # Cascade logs emitted AFTER gather completes (reviewer S2), so the
@@ -1287,7 +1328,18 @@ class InstanceLifecycleService:
             )
 
         # 2. Clean up live hub connections for this instance.
-        await self._manager._live_hub.cleanup_instance(instance_id)
+        #
+        # Phase 2 / T2.8 (CR-4 / TD-5): ``cleanup_instance`` was
+        # historically called HERE so any in-flight SSE clients were
+        # disconnected as soon as the graph task was cancelled. But the
+        # watchover-termination ``status_change`` SSE event (emitted
+        # post-DB-commit, below) was dropped on the floor because the
+        # SSE queue was already torn down — a silent violation of FR-23
+        # ("watchover termination MUST be observable on the FE").
+        #
+        # The fix moves ``cleanup_instance`` to AFTER
+        # ``stream_status_change`` (step 5.5). The MCP / proc / bash
+        # cleanups stay where they are — they don't touch SSE.
 
         # 2.5. Close MCP connections for this instance (async, no DB write).
         if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
@@ -1363,11 +1415,16 @@ class InstanceLifecycleService:
         # so SQLite WAL write contention cannot deadlock the daemon (mirrors
         # the H15 / _finalize_job pattern in job_feedback_observer.py and the
         # _process_child_completion pattern in child_reports.py).
+        # Phase 2 (TD-3/TD-4): ``terminal_reason`` is threaded through so a
+        # watchover 3-strike termination writes ``"watchover_terminated"``
+        # onto the JobItem ``terminal_reason`` column rather than the
+        # generic ``"aborted"``.
         db_result = await asyncio.to_thread(
             self._terminate_instance_db_sync,
             self._manager.engine,
             self._manager.write_guard,
             instance_id,
+            terminal_reason,
         )
 
         if db_result.skip:
@@ -1380,7 +1437,15 @@ class InstanceLifecycleService:
                 f"(row missing or already terminal; graph_unwind_ms={graph_unwind_ms}, "
                 f"jobs_cancelled=0, children={len(child_ids)}, duration_ms={duration_ms})"
             )
+            if terminal_reason == "watchover_terminated":
+                self._clear_watchover_termination_marker(instance_id)
             return True
+
+        if terminal_reason == "watchover_terminated":
+            # The authoritative DB transition committed. Clear the persistent
+            # crash-recovery intent now; post-commit SSE/resource cleanup
+            # failures must not cause the stale-marker sweeper to re-arm it.
+            self._clear_watchover_termination_marker(instance_id)
 
         parent_id = db_result.parent_id
         agent_id = db_result.agent_id
@@ -1439,6 +1504,22 @@ class InstanceLifecycleService:
                     f"failed for {instance_id[:8]}...: "
                     f"{type(e).__name__}: {e}"
                 )
+
+        # Phase 2 / T2.8 (CR-4 / TD-5): cleanup_instance was hoisted from
+        # pre-graph-cancel to AFTER the post-commit status_change /
+        # injection_consumed SSE events. Watchover terminations and other
+        # SSE events MUST reach active clients BEFORE the live hub tears
+        # down their connections — otherwise the FR-23 contract ("user
+        # always sees the watchover termination event") is violated.
+        # Wrapped in try/except so a transient live_hub failure does not
+        # block the rest of the terminate cascade.
+        try:
+            await self._manager._live_hub.cleanup_instance(instance_id)
+        except Exception as e:
+            logger.warning(
+                f"terminate_instance: cleanup_instance failed for "
+                f"{instance_id[:8]}...: {type(e).__name__}: {e}"
+            )
 
         # 6. Release project lock if JobQueueService is connected.
         if self._job_queue_service is not None:
@@ -1782,7 +1863,12 @@ class InstanceLifecycleService:
             "counts": cascade_result.get("counts", {}),
         }
 
-    async def pause_instance_cascade(self, instance_id: str) -> dict:
+    async def pause_instance_cascade(
+        self,
+        instance_id: str,
+        *,
+        suspension_reason: str | None = None,
+    ) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
         Uses tree traversal helpers to find and pause the entire tree.
@@ -1799,6 +1885,10 @@ class InstanceLifecycleService:
 
         Args:
             instance_id: The ID of the instance to pause.
+            suspension_reason: Optional turn suspension discriminator. When
+                omitted, preserves the existing ``paused_external`` reason.
+                Watchover activation passes ``watchover_setup`` so the paused
+                turn records why the cascade was initiated.
 
         Returns dict with:
           - paused_ids: list of all instance IDs that were paused
@@ -1928,6 +2018,7 @@ class InstanceLifecycleService:
             tree_ids=tree_ids,
             paused_at_iso=paused_at_iso,
             paused_instances_data=paused_instances_data,
+            suspension_reason=suspension_reason,
         )
 
         # Post-commit side effects: SSE status_change per paused node.
@@ -2236,6 +2327,91 @@ class InstanceLifecycleService:
             raise KeyError(f"Instance not found: {instance_id}")
 
         return await self._restore_instance(instance_id, meta)
+
+    async def _recover_watchover_pending_termination(
+        self,
+        instance_id: str,
+        meta: Instance,
+    ) -> None:
+        """Finish a watchover cascade whose persistent intent survived a crash.
+
+        Called only after the restored graph has been registered in
+        ``manager.instances`` so the regular termination cascade can clean up
+        all in-memory and child state. Failures are deliberately non-fatal:
+        the graph stays registered and restore returns it for operator use,
+        while the marker remains available to the periodic recovery sweep.
+        """
+        metadata = getattr(meta, "instance_metadata", None) or {}
+        if not isinstance(metadata, dict) or not metadata.get(
+            "watchover_pending_termination"
+        ):
+            return
+
+        logger.warning(
+            "watchover crash recovery: instance %s has stale "
+            "watchover_pending_termination marker — triggering termination cascade",
+            instance_id,
+        )
+        registered_entry = self._manager.instances.get(instance_id)
+        try:
+            terminated = await self._manager.terminate_instance(
+                instance_id,
+                terminal_reason="watchover_terminated",
+            )
+        except Exception as exc:
+            # ``terminate_instance`` performs some in-memory cleanup before
+            # its DB transaction. If that transaction fails after popping the
+            # graph, put the already-built graph back so restore truly remains
+            # usable as promised by this recovery boundary.
+            if (
+                registered_entry is not None
+                and instance_id not in self._manager.instances
+            ):
+                self._manager.instances[instance_id] = registered_entry
+            logger.warning(
+                "watchover crash recovery: termination cascade failed for "
+                "instance %s: %s: %s — restore will remain usable",
+                instance_id,
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        if not terminated:
+            if (
+                registered_entry is not None
+                and instance_id not in self._manager.instances
+            ):
+                self._manager.instances[instance_id] = registered_entry
+            return
+
+        # ``terminate_instance`` clears the marker after its authoritative
+        # DB transition. Retain this fallback for partial/mock managers and
+        # older lifecycle implementations where that cleanup is absent.
+        try:
+            repo = getattr(self._manager, "_instance_repository", None)
+            current = repo.get(instance_id) if repo is not None else None
+            current_metadata = getattr(current, "instance_metadata", None) or {}
+            if isinstance(current_metadata, dict) and current_metadata.get(
+                "watchover_pending_termination"
+            ):
+                setter = getattr(repo, "set_metadata_many", None)
+                if callable(setter):
+                    setter(
+                        instance_id,
+                        {
+                            "watchover_pending_termination": False,
+                            "watchover_pending_termination_at": None,
+                        },
+                    )
+        except Exception as exc:
+            logger.warning(
+                "watchover crash recovery: marker clear failed for instance "
+                "%s after successful termination: %s: %s",
+                instance_id,
+                type(exc).__name__,
+                exc,
+            )
 
     async def _restore_instance(self, instance_id: str, meta: Instance) -> CompiledStateGraph:
         """Restore an instance from database into memory.
@@ -2585,8 +2761,12 @@ class InstanceLifecycleService:
             ),
         )
 
-        # Store in instances dict
+        # Store in instances dict before watchover crash recovery. The regular
+        # termination cascade expects the graph to be registered so it can
+        # cancel/clean every in-memory resource consistently.
         self._manager.instances[instance_id] = (graph, meta.agent_dir)
+
+        await self._recover_watchover_pending_termination(instance_id, meta)
 
         return graph
 
@@ -2718,6 +2898,7 @@ class InstanceLifecycleService:
         engine,
         write_guard,
         instance_id: str,
+        terminal_reason: str = "aborted",
     ) -> _TerminateResult:
         """Sync DB half of ``terminate_instance`` (H10 fix).
 
@@ -2928,11 +3109,18 @@ class InstanceLifecycleService:
                 # ``terminal_reason`` over ``Instance.status`` for
                 # ``admission_state='done'`` rows, so writing
                 # ``'aborted'`` here is what callers will see.
+                #
+                # Phase 2 (TD-3/TD-4): ``terminal_reason`` is the
+                # discriminator that distinguishes a watchover 3-strike
+                # termination (``"watchover_terminated"``) from a generic
+                # user-delete / parent-cascade abort (``"aborted"``).
+                # ``_STATUS_CANONICAL_MAP`` in ``work_status.py`` collapses
+                # both onto ``"cancelled"`` for the work API surface.
                 session.execute(
                     text(
                         "UPDATE job_queue_items "
                         "SET admission_state = :done_admission, "
-                        "    terminal_reason = :aborted_reason "
+                        "    terminal_reason = :terminal_reason "
                         "WHERE instance_id = :iid "
                         "  AND admission_state IN ("
                         "    :queued_admission, :active_admission"
@@ -2941,7 +3129,7 @@ class InstanceLifecycleService:
                     {
                         "iid": instance_id,
                         "done_admission": AdmissionState.DONE.value,
-                        "aborted_reason": "aborted",
+                        "terminal_reason": terminal_reason,
                         "queued_admission": AdmissionState.QUEUED.value,
                         "active_admission": AdmissionState.ACTIVE.value,
                     },
@@ -3161,6 +3349,7 @@ status=InstanceStatus.IDLE.value,
         tree_ids: list[str],
         paused_at_iso: str,
         paused_instances_data: list[tuple[str, str | None]],
+        suspension_reason: str | None = None,
     ) -> _CascadeUpdateResult:
         """Persist a tree pause and suspend each in-flight turn.
 
@@ -3198,6 +3387,9 @@ status=InstanceStatus.IDLE.value,
                 return getattr(task_repo, name)
 
         transition_task_repo = _TransitionTaskRepo()
+        effective_suspension_reason = (
+            suspension_reason or SuspensionReason.PAUSED_EXTERNAL.value
+        )
 
         with WriteGuardSession(Session(engine), write_guard) as session:
             session.execute(
@@ -3236,7 +3428,7 @@ status=InstanceStatus.IDLE.value,
             for row in task_rows:
                 result = SuspendTurn(
                     work_id=str(row["work_id"]),
-                    reason=SuspensionReason.PAUSED_EXTERNAL.value,
+                    reason=effective_suspension_reason,
                     resume_target_turn_id=str(row["work_id"]),
                     task_repo=transition_task_repo,
                     instance_id=row["instance_id"],

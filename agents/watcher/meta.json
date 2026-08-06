@@ -1,0 +1,33 @@
+{
+  "id": "watcher",
+  "name": "Watcher",
+  "description": "Security-focused tool call evaluator — intercepts every tool call from a watched instance before execution, returns Allow or Deny verdict based on verb classification and target sensitivity",
+  "icon": "🛡️",
+  "color": "accent-red",
+  "version": "1.0.0",
+  "innate_skills": [],
+  "skill_injection": false,
+  "capabilities": [
+    "security-audit",
+    "tool-call-evaluation",
+    "sensitive-read-blocking",
+    "destructive-write-blocking"
+  ],
+  "tags": [
+    "security",
+    "watchover",
+    "evaluator"
+  ],
+  "tools": {
+    "allow": []
+  },
+  "team_members": [],
+  "watchover": {
+    "llm_model": "quick",
+    "timeout_seconds": 10,
+    "max_denials_per_turn": 3,
+    "mirror_message_count": 5,
+    "failure_mode": "bifurcated",
+    "context_refresh_interval": 1
+  }
+}

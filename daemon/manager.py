@@ -737,7 +737,27 @@ class InstanceManager:
         # ``question_pause_node`` at all; this set carries the result
         # forward to the post-graph code that performs the cascade.
         self._deferred_question_pause: set[str] = set()
-        
+
+        # Watchover — per-instance watchover enabled flag is read from
+        # ``instance_metadata`` JSONB (DB-backed, no in-memory dict needed).
+        # This in-memory set carries the deferred termination marker from
+        # ``watchover_terminate_node`` (which runs INSIDE the graph task) to
+        # the post-graph completion path, mirroring the C2-safe deferred
+        # pattern used by ``_deferred_question_pause`` above. The cascade
+        # MUST NOT run inside the graph task (self-cancel / torn-state bug).
+        # The post-graph consumer runs in ``instance_messaging.py``
+        # (``_drain_deferred_watchover_terminate``).
+        self._deferred_watchover_terminate: set[str] = set()
+
+        # Watchover activation/deactivation service (Phase 3, T3.4-T3.6).
+        # Holds no I/O state — it delegates everything to the manager
+        # facade below. Constructed here so the router can call
+        # ``manager.enable_watchover_lifecycle(...)`` /
+        # ``manager.disable_watchover_lifecycle(...)``.
+        from .services.watchover_service import WatchoverService
+
+        self._watchover_service = WatchoverService(self)
+
         self.source_dispatcher = ResponseDispatcher(
             registry=self.source_registry,
             subscriber_id="response_dispatcher"
@@ -2460,6 +2480,368 @@ class InstanceManager:
         self._deferred_question_pause.discard(instance_id)
         return True
 
+    # =========================================================================
+    # Watchover accessors (Phase 1 — core graph interception).
+    #
+    # Watchover inserts a ``watchover_check`` node between ``agent`` and
+    # ``tools``. The per-instance enabled flag is read from the instance's
+    # ``instance_metadata`` JSONB (``watchover_enabled`` key); the deferred
+    # termination marker uses the same C2-safe pattern as
+    # ``_deferred_question_pause`` — the graph node sets the marker, the
+    # cascade runs from the post-graph completion path.
+    # =========================================================================
+
+    def is_watchover_enabled(self, instance_id: str) -> bool:
+        """Check ``instance_metadata`` JSONB for the ``watchover_enabled`` flag.
+
+        Returns ``False`` if the instance is unknown, the metadata is
+        missing, or the flag is absent — so unwatched instances are
+        zero-cost on the hot path (the caller already short-circuits via
+        the global ``WATCHOVER_ENABLED`` kill-switch before reaching here).
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            ``True`` only when the instance has
+            ``instance_metadata["watchover_enabled"] == True``.
+        """
+        try:
+            instance = self._instance_repository.get(instance_id)
+            if instance is None or not instance.instance_metadata:
+                return False
+            return bool(instance.instance_metadata.get("watchover_enabled", False))
+        except Exception as exc:
+            # M3: surface programming errors instead of silently swallowing.
+            # The broad ``except Exception`` is kept (this is a hot-path
+            # method that must not raise), but the warning makes genuine
+            # bugs visible — a swallowed ``AttributeError`` from a model
+            # schema change used to disappear without a trace.
+            logger.warning(
+                f"is_watchover_enabled failed for {instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}",
+                exc_info=True,
+            )
+            return False
+
+    def set_metadata_many(
+        self, instance_id: str, updates: dict[str, Any]
+    ) -> "Instance | None":
+        """Thin delegator to :meth:`InstanceRepository.set_metadata_many`.
+
+        Atomically writes multiple ``instance_metadata`` keys in ONE
+        SQL statement (single UPDATE with a nested ``jsonb_set`` /
+        ``json_set`` chain). Prevents torn-state on partial crash or
+        concurrent read mid-activation. See the repository method for
+        the dialect-aware implementation.
+
+        Args:
+            instance_id: Owning instance identifier.
+            updates: Mapping of top-level JSON key to JSON-serialisable
+                value. Must be non-empty.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
+        return self._instance_repository.set_metadata_many(instance_id, updates)
+
+    def enable_watchover(
+        self,
+        instance_id: str,
+        *,
+        requirement: str | None = None,
+        context: str | None = None,
+        refresh_interval: int | None = None,
+    ) -> "Instance | None":
+        """Atomically enable watchover for ``instance_id``.
+
+        Phase 3 (T3.3) + Phase 5 (T5.4). Writes the full watchover config
+        in a SINGLE atomic ``set_metadata_many`` call so a crash mid-write
+        cannot leave the instance half-configured (e.g. enabled=True but
+        context still empty). Defaults ``denial_count`` to 0; tolerates
+        ``None`` ``context`` / ``requirement``.
+
+        Phase 5 (T5.4) additions — context freshness tracking:
+
+          * ``watchover_context_turn``: 0 — the per-check turn counter,
+            reset to 0 at activation so the first watchover check sees a
+            fresh context (the context was just built).
+          * ``watchover_context_refresh_interval``: ``refresh_interval``
+            or the ``WATCHOVER_CONTEXT_REFRESH_INTERVAL`` env var or 1
+            (per-turn). The watchover check node reads this to decide
+            when the context snapshot is stale and needs a lightweight
+            refresh (Open Question #2 — default per-turn, configurable).
+
+        The keys set are:
+
+        * ``watchover_enabled``: True
+        * ``watchover_context``: ``context`` (may be ``None``)
+        * ``watchover_denial_count``: 0
+        * ``watchover_requirement``: ``requirement`` (may be ``None``)
+        * ``watchover_context_turn``: 0 (T5.4)
+        * ``watchover_context_refresh_interval``: N (T5.4, default 1)
+
+        Args:
+            instance_id: Owning instance identifier.
+            requirement: User-supplied requirement string the watcher
+                uses as the Allow/Deny prompt. Optional — may be ``None``.
+            context: The constructed ``watchover_context`` (compaction
+                summary or raw-tail fallback). Optional — may be ``None``.
+            refresh_interval: How many watchover checks may elapse
+                before the context snapshot is considered stale and
+                refreshed (T5.4). Defaults to the
+                ``WATCHOVER_CONTEXT_REFRESH_INTERVAL`` env var, or 1
+                (every check) when unset.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
+        # T5.4 — resolve the refresh interval. Explicit kwarg wins,
+        # then env var, then default 1 (per-turn). Floor at 1.
+        import os
+
+        if refresh_interval is None:
+            env_val = os.environ.get("WATCHOVER_CONTEXT_REFRESH_INTERVAL")
+            if env_val is not None:
+                try:
+                    refresh_interval = int(env_val)
+                except ValueError:
+                    refresh_interval = 1
+            else:
+                refresh_interval = 1
+        if refresh_interval < 1:
+            refresh_interval = 1
+
+        updates: dict[str, Any] = {
+            "watchover_enabled": True,
+            "watchover_denial_count": 0,
+            # T5.4 — context freshness tracking keys.
+            "watchover_context_turn": 0,
+            "watchover_context_refresh_interval": refresh_interval,
+        }
+        if context is not None:
+            updates["watchover_context"] = context
+        if requirement is not None:
+            updates["watchover_requirement"] = requirement
+        return self.set_metadata_many(instance_id, updates)
+
+    def disable_watchover(self, instance_id: str) -> "Instance | None":
+        """Atomically disable watchover for ``instance_id``.
+
+        Phase 3 (T3.3). Clears ``watchover_enabled`` only — the existing
+        ``watchover_context`` / ``watchover_requirement`` are kept for
+        audit so an operator can see what the watcher was guarding.
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
+        return self.set_metadata_many(
+            instance_id, {"watchover_enabled": False}
+        )
+
+    def get_watchover_context(self, instance_id: str) -> str | None:
+        """Read the ``watchover_context`` key from ``instance_metadata``.
+
+        Phase 3 (T3.3). Defensive read — returns ``None`` when the
+        instance is missing, the metadata dict is missing/empty, or the
+        key is absent. Never raises on a transient repository error
+        (returns ``None`` and logs at debug).
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            The stored context string, or ``None``.
+        """
+        try:
+            instance = self._instance_repository.get(instance_id)
+            if instance is None or not instance.instance_metadata:
+                return None
+            value = instance.instance_metadata.get("watchover_context")
+            if value is None:
+                return None
+            return str(value)
+        except Exception:
+            logger.debug(
+                "get_watchover_context(%s): repo error; returning None",
+                instance_id,
+                exc_info=True,
+            )
+            return None
+
+    async def wait_for_instance_quiescent(
+        self, instance_id: str, timeout: float = 30.0
+    ) -> bool:
+        """Wait until the instance has no in-flight graph task.
+
+        Phase 3 / Watchover (T3.5b, 2026-08-05). Best-effort barrier
+        that blocks activation until any current graph run for this
+        instance finishes, so the watchover_context snapshot is taken
+        against a quiescent LangGraph state. Implements FR-28 / NFR-15
+        at the **graph-boundary** level (in-flight limitation still
+        documented per LD-4).
+
+        Implementation: polls ``self._graph_tasks.get(instance_id)``
+        and ``await``s the task with a bounded timeout. If no task is
+        present (or the task is already done) the method returns
+        immediately. Never raises — a timeout returns ``False`` and
+        logs so the caller can proceed and surface a soft warning
+        rather than deadlock the operator.
+
+        Args:
+            instance_id: Owning instance identifier.
+            timeout: Maximum seconds to wait. Default 30s. ``<= 0``
+                means "do not wait" (return ``True`` if no task,
+                ``False`` if task exists).
+
+        Returns:
+            ``True`` if the instance is quiescent within ``timeout``,
+            ``False`` if a task is still running when the timeout
+            expires (best-effort).
+        """
+        task = self._graph_tasks.get(instance_id)
+        if task is None or task.done():
+            logger.debug(
+                "wait_for_instance_quiescent(%s): already quiescent (no task)",
+                instance_id,
+            )
+            return True
+
+        if timeout <= 0:
+            logger.debug(
+                "wait_for_instance_quiescent(%s): task in flight and timeout<=0; returning False",
+                instance_id,
+            )
+            return False
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            logger.info(
+                "wait_for_instance_quiescent(%s): task completed within %.1fs",
+                instance_id,
+                timeout,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "wait_for_instance_quiescent(%s): timed out after %.1fs; "
+                "task still in flight — proceeding anyway (LD-4 in-flight "
+                "limitation may apply)",
+                instance_id,
+                timeout,
+            )
+            return False
+        except Exception as exc:
+            # Best-effort — never block activation on an unexpected error.
+            logger.warning(
+                "wait_for_instance_quiescent(%s): unexpected error during wait: %s",
+                instance_id,
+                exc,
+            )
+            return False
+
+    # ------------------------------------------------------------------
+    # T3.5 / T3.6 — activation & deactivation lifecycle (facade)
+    # ------------------------------------------------------------------
+
+    async def enable_watchover_lifecycle(
+        self,
+        instance_id: str,
+        *,
+        requirement: str | None = None,
+        user_context: str | None = None,
+    ) -> dict[str, Any]:
+        """Orchestrate watchover activation: pause → context → flag → resume.
+
+        Phase 3 (T3.5) facade. Thin wrapper over
+        :meth:`WatchoverService.activate_watchover` — kept here so the
+        router endpoint has a stable manager-level API independent of
+        the service class name.
+
+        Args:
+            instance_id: Owning instance identifier.
+            requirement: Operator-supplied requirement string.
+            user_context: Optional pre-built context string. Production
+                callers pass ``None`` and let the service build the
+                context via ``ContextCompactor``; tests pass a fixture.
+
+        Returns:
+            Dict with ``instance_id``, ``watchover_enabled``,
+            ``context_length``, ``quiescent``.
+
+        Raises:
+            KeyError: When the instance is not found.
+            Exception: When the activation sequence fails (after
+                rollback has cleared any partial state).
+        """
+        return await self._watchover_service.activate_watchover(
+            instance_id,
+            requirement=requirement,
+            user_context=user_context,
+        )
+
+    async def disable_watchover_lifecycle(self, instance_id: str) -> dict[str, Any]:
+        """Orchestrate watchover deactivation: pause → clear flag → resume.
+
+        Phase 3 (T3.6) facade. Thin wrapper over
+        :meth:`WatchoverService.deactivate_watchover`.
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            Dict with ``instance_id`` and ``watchover_enabled=False``.
+
+        Raises:
+            KeyError: When the instance is not found.
+            Exception: When the deactivation sequence fails.
+        """
+        return await self._watchover_service.deactivate_watchover(instance_id)
+
+    def set_deferred_watchover_terminate(self, instance_id: str) -> None:
+        """Mark ``instance_id`` for watchover termination (C2-safe deferred marker).
+
+        Called from ``watchover_terminate_node`` INSIDE the graph task. The
+        intended termination cascade runs from the post-graph completion path
+        AFTER ``_graph_tasks`` is popped — mirroring the
+        ``_deferred_question_pause`` contract so there is no self-cancel
+        torn-state bug. The marker is consumed by
+        :meth:`InstanceMessagingService._drain_deferred_watchover_terminate`
+        in the post-graph completion path (``send_message`` and
+        ``_process_message_with_tracking`` ``finally`` blocks).
+
+        Args:
+            instance_id: Owning instance identifier.
+        """
+        self._deferred_watchover_terminate.add(instance_id)
+
+    def is_watchover_terminate_requested(self, instance_id: str) -> bool:
+        """Check whether a deferred watchover termination is pending.
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            ``True`` if the marker is set; ``False`` otherwise.
+        """
+        return instance_id in self._deferred_watchover_terminate
+
+    def clear_watchover_terminate_requested(self, instance_id: str) -> None:
+        """Discard the deferred watchover termination marker for ``instance_id``.
+
+        Called from the post-graph completion path after the cascade has
+        been processed, and from ``_cleanup_instance_state`` to prevent a
+        stale marker from leaking to a fresh instance that reuses the id.
+        Idempotent (``set.discard``).
+        """
+        self._deferred_watchover_terminate.discard(instance_id)
+
     def bump_gii_throttle(self, instance_id: str) -> int:
         """Increment the consecutive ``get_instance_info`` call counter.
 
@@ -2640,6 +3022,10 @@ class InstanceManager:
         # that would silently trigger ``pause_instance_cascade`` on the
         # next graph completion for the new instance.
         self._deferred_question_pause.discard(instance_id)
+        # Watchover — same C2-safe cleanup: drop any deferred termination
+        # marker so a fresh instance reusing this id cannot inherit a stuck
+        # "terminate pending" state.
+        self._deferred_watchover_terminate.discard(instance_id)
         # Note: request_registry.cancel_by_instance() is called separately
         # by the lifecycle callers because the cancellation reason differs
         # per call site (USER_STOPPED vs SESSION_TERMINATED). Centralizing
@@ -4573,6 +4959,7 @@ class InstanceManager:
             retry_backoff_max=svc.task_retry_backoff_max,
             on_task_permanently_failed=self._on_stale_task_permanent_failure,
             on_task_cancelled_and_retried=self._on_stale_task_cancelled_and_retried,
+            instance_manager=self,
         )
         # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
         # even if recover_on_startup() raises an exception
@@ -5300,7 +5687,9 @@ class InstanceManager:
             task.cancel()
         return True
 
-    async def terminate_instance(self, instance_id: str) -> bool:
+    async def terminate_instance(
+        self, instance_id: str, terminal_reason: str = "aborted"
+    ) -> bool:
         """Terminate an instance.
 
         This method performs comprehensive cleanup:
@@ -5311,11 +5700,20 @@ class InstanceManager:
 
         Args:
             instance_id: The ID of the instance to terminate.
+            terminal_reason: Phase 2 (TD-3/TD-4). Discriminator that
+                distinguishes a watchover 3-strike termination
+                (``"watchover_terminated"``) from a user-initiated delete
+                / parent-terminate cascade (``"aborted"``). Persisted on
+                the JobItem ``terminal_reason`` column. Defaults to
+                ``"aborted"`` for backward compatibility with all
+                existing call sites.
 
         Returns:
             True if termination was successful, False if instance was not found.
         """
-        return await self._lifecycle_service.terminate_instance(instance_id)
+        return await self._lifecycle_service.terminate_instance(
+            instance_id, terminal_reason=terminal_reason
+        )
 
     async def hard_delete_instance(self, instance_id: str) -> dict[str, Any]:
         """Hard-delete an instance tree from both DBs.
@@ -5345,7 +5743,12 @@ class InstanceManager:
         """
         return await self._lifecycle_service.hard_delete_instance(instance_id)
 
-    async def pause_instance_cascade(self, instance_id: str) -> dict:
+    async def pause_instance_cascade(
+        self,
+        instance_id: str,
+        *,
+        suspension_reason: str | None = None,
+    ) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
         Recursively pauses the target instance and all its descendants.
@@ -5354,13 +5757,19 @@ class InstanceManager:
 
         Args:
             instance_id: The ID of the instance to pause.
+            suspension_reason: Optional reason persisted on suspended task
+                turns. ``None`` preserves the lifecycle service's existing
+                ``paused_external`` default.
 
         Returns:
             Dict with:
               - paused_ids: list of all instance IDs that were paused
               - skipped_ids: list of instance IDs that were already paused (skipped)
         """
-        return await self._lifecycle_service.pause_instance_cascade(instance_id)
+        return await self._lifecycle_service.pause_instance_cascade(
+            instance_id,
+            suspension_reason=suspension_reason,
+        )
 
     async def resume_instance_cascade(self, instance_id: str) -> dict:
         """Resume an instance and cascade to all children.

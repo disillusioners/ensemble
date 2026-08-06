@@ -172,6 +172,28 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly showToolCalls = signal(localStorage.getItem('ensemble-show-toolcalls') === 'true');
   readonly showSystemPrompt = signal(localStorage.getItem('ensemble-show-system-prompt') === 'true');
 
+  // Watchover: per-instance security monitoring toggle.
+  // When ON, a watcher agent evaluates every tool call and can deny
+  // destructive operations. The toggle state is sourced from the API
+  // (InstanceInfo.watchover_enabled) on instance load and synced via SSE.
+  readonly watchoverEnabled = signal(false);
+  readonly watchoverContext = signal<string | null>(null);
+  readonly watchoverDenialCount = signal(0);
+
+  // True while a watchover toggle API call is in-flight. Disables the
+  // toggle button to prevent overlapping lifecycle requests.
+  readonly watchoverPending = signal(false);
+
+  // Auto-sync watchover state from instance data (polling refreshes).
+  private watchoverSyncEffect = effect(() => {
+    const instance = this.currentInstance();
+    if (!instance) return;
+    this.syncWatchoverState(instance);
+  }, { allowSignalWrites: true });
+
+  private readonly processedWatchoverDenials = new Set<string>();
+  private readonly processedWatchoverStatusEvents = new WeakSet<object>();
+
   @ViewChild(MessageInputComponent) messageInputRef!: MessageInputComponent;
 
   // Computed instance agent
@@ -281,6 +303,148 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.queuedMessage.set(null);
       }
     }, { allowSignalWrites: true });
+
+    // Handle watchover SSE status events. The backend emits status_change
+    // with special status values for watchover activation/deactivation/failure.
+    // InstanceService consumes statusChange eagerly, so the retained raw event
+    // is also checked to ensure these special statuses cannot be missed.
+    effect(() => {
+      const statusChange = this.sseService.statusChange();
+      const events = this.sseService.events();
+      this.handleWatchoverStatus(statusChange, false);
+
+      const lastEvent = events[events.length - 1];
+      if (lastEvent?.type === 'status_change') {
+        this.handleWatchoverStatus(lastEvent.data, true);
+      }
+    }, { allowSignalWrites: true });
+
+    // Handle watchover denials. ToolMessage results are normally represented
+    // by SseService.messages; the raw event fallback covers tool_result payloads
+    // that are patched onto their matching tool call instead of being upserted.
+    effect(() => {
+      const messages = this.sseService.messages();
+      const events = this.sseService.events();
+      const lastMessage = messages[messages.length - 1];
+      this.handleWatchoverDenial(lastMessage);
+
+      const lastEvent = events[events.length - 1];
+      if (lastEvent?.type === 'tool_call' || lastEvent?.type === 'tool_result') {
+        this.handleWatchoverDenial(lastEvent.data['message']);
+      }
+    }, { allowSignalWrites: true });
+  }
+
+  private handleWatchoverStatus(statusChange: unknown, notify: boolean): void {
+    if (!statusChange || typeof statusChange !== 'object') return;
+    const candidate = statusChange as Record<string, unknown>;
+    const instanceId = candidate['instance_id'];
+    const status = candidate['status'];
+    if (typeof instanceId !== 'string' || typeof status !== 'string') return;
+
+    const currentInstance = this.currentInstance();
+    if (!currentInstance || instanceId !== currentInstance.instance_id) return;
+    const shouldNotify = notify && !this.processedWatchoverStatusEvents.has(statusChange);
+
+    switch (status) {
+      case 'watchover_active':
+        this.watchoverEnabled.set(true);
+        if (shouldNotify) {
+          this.snackBar.open('👁️ Watchover activated', 'Dismiss', {
+            duration: 2000,
+            panelClass: 'info-snackbar',
+          });
+        }
+        break;
+      case 'watchover_inactive':
+        this.watchoverEnabled.set(false);
+        this.watchoverDenialCount.set(0);
+        if (shouldNotify) {
+          this.snackBar.open('👁️ Watchover deactivated', 'Dismiss', {
+            duration: 2000,
+            panelClass: 'info-snackbar',
+          });
+        }
+        break;
+      case 'watchover_failed':
+        this.watchoverEnabled.set(false);
+        this.watchoverDenialCount.set(0);
+        if (shouldNotify) {
+          this.snackBar.open('⚠️ Watchover operation failed', 'Dismiss', { duration: 3000 });
+        }
+        break;
+      case 'watchover_terminated':
+        this.watchoverEnabled.set(false);
+        this.watchoverDenialCount.set(0);
+        if (shouldNotify) {
+          this.snackBar.open(
+            '🛑 Instance terminated by Watchover (3 denials reached)',
+            'Dismiss',
+            { duration: 6000 }
+          );
+        }
+        break;
+      default:
+        return;
+    }
+
+    if (notify) {
+      this.processedWatchoverStatusEvents.add(statusChange);
+    }
+  }
+
+  private syncWatchoverState(instance: InstanceInfo): void {
+    this.watchoverEnabled.set(instance.watchover_enabled ?? false);
+    this.watchoverContext.set(instance.watchover_context ?? null);
+    // Deliberately NOT syncing watchoverDenialCount from the API.
+    // The backend always returns 0 (graph state is not fetched per-instance
+    // in list/get endpoints). The real-time SSE denial tracker is the
+    // authoritative source for the counter.
+  }
+
+  private handleWatchoverDenial(message: unknown): void {
+    if (!message || typeof message !== 'object') return;
+    const candidate = message as Record<string, unknown>;
+    if (candidate['role'] !== undefined && candidate['role'] !== 'tool') return;
+
+    const content = candidate['content'];
+    if (
+      typeof content !== 'string'
+      || (!content.startsWith('Watchover denied') && !content.startsWith('Watchover deferred'))
+    ) {
+      return;
+    }
+
+    const currentInstance = this.currentInstance();
+    if (!currentInstance) return;
+    const messageInstanceId = candidate['instance_id'];
+    if (typeof messageInstanceId === 'string' && messageInstanceId !== currentInstance.instance_id) {
+      return;
+    }
+
+    const messageKey = [
+      currentInstance.instance_id,
+      candidate['message_id'] ?? candidate['tool_call_id'] ?? candidate['created_at'] ?? '',
+      content,
+    ].join(':');
+    if (this.processedWatchoverDenials.has(messageKey)) return;
+    this.processedWatchoverDenials.add(messageKey);
+
+    const nextCount = this.watchoverDenialCount() + 1;
+    this.watchoverDenialCount.set(nextCount);
+    const reason = content.replace(/^Watchover (denied|deferred).*?:\s*/, '').split('.')[0];
+    this.snackBar.open(
+      `⚠️ Watchover denied: ${reason || 'tool call blocked'} (${nextCount}/3)`,
+      'Dismiss',
+      { duration: 4000 }
+    );
+    if (nextCount >= 3) {
+      this.snackBar.open(
+        '🛑 Watchover limit reached — instance will be terminated',
+        'Dismiss',
+        { duration: 6000 }
+      );
+    }
   }
 
   /**
@@ -374,6 +538,17 @@ export class ChatComponent implements OnInit, OnDestroy {
     // chats.
     this.queuedMessage.set(null);
 
+    // Reset watchover UI state synchronously while the next instance's
+    // metadata loads. InstanceInfo (not localStorage) remains authoritative.
+    this.watchoverEnabled.set(false);
+    this.watchoverDenialCount.set(0);
+    this.watchoverContext.set(null);
+
+    // Clear the denial dedup set so it doesn't grow unboundedly across
+    // instance switches. The keys are instance-scoped, so clearing on
+    // switch is safe — denials are re-tracked by SSE for the new instance.
+    this.processedWatchoverDenials.clear();
+
     if (!instanceId) {
       console.log('[Chat] No instanceId, disconnecting SSE');
       this.currentInstanceId.set(null);
@@ -397,6 +572,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     console.log('[Chat] Instance found in list:', !!instance, 'instances count:', this.instanceService.instances().length);
     if (instance) {
       console.log('[Chat] Using instance from list, connecting SSE');
+      this.syncWatchoverState(instance);
       this.loadInstanceMessages(instanceId);
     } else {
       // Try to get instance from API
@@ -404,6 +580,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.api.getInstance(instanceId).subscribe({
         next: (instanceData) => {
           console.log('[Chat] Got instance from API, connecting SSE');
+          this.syncWatchoverState(instanceData);
           // Add to instanceService list so currentInstance computed can find it
           this.instanceService.instances.update(list => {
             if (!list.find(i => i.instance_id === instanceId)) {
@@ -583,6 +760,88 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   protected onClearError(): void {
     this.sendError.set(null);
+  }
+
+  protected onToggleWatchover(): void {
+    const instance = this.currentInstance();
+    if (!instance) return;
+
+    const currentlyEnabled = this.watchoverEnabled();
+
+    if (!currentlyEnabled) {
+      // Turning ON — prompt for monitoring requirement.
+      const savedRequirement = this.getSavedWatchoverRequirement(instance.instance_id) ?? '';
+      const requirement = window.prompt(
+        'Enter watchover requirement (what to monitor for):',
+        savedRequirement || 'Block destructive operations (no writes, no deletes, no external API calls)'
+      );
+      if (requirement === null) return;
+
+      // Keep the requirement even if activation fails so the operator does
+      // not have to re-enter it on the next attempt. The enabled value is
+      // never restored from storage; InstanceInfo remains the source of truth.
+      this.persistWatchoverPreference(instance.instance_id, currentlyEnabled, requirement);
+      this._toggleWatchoverApi(instance.instance_id, true, requirement);
+    } else {
+      // Turning OFF.
+      this._toggleWatchoverApi(instance.instance_id, false, null);
+    }
+  }
+
+  private _toggleWatchoverApi(
+    instanceId: string,
+    enabled: boolean,
+    requirement: string | null,
+  ): void {
+    this.watchoverPending.set(true);
+    this.api.setWatchover(instanceId, enabled, requirement).subscribe({
+      next: (response) => {
+        // Guard: ignore stale responses after instance switch
+        if (this.currentInstanceId() !== instanceId) return;
+        this.watchoverEnabled.set(response.watchover_enabled);
+        if (!response.watchover_enabled) {
+          this.watchoverDenialCount.set(0);
+        }
+        this.persistWatchoverPreference(instanceId, response.watchover_enabled, requirement);
+        this.snackBar.open(
+          response.watchover_enabled ? '👁️ Watchover enabled' : '👁️ Watchover disabled',
+          'Dismiss',
+          { duration: 2000, panelClass: 'info-snackbar' }
+        );
+      },
+      error: (err) => {
+        console.error('[Chat] Watchover toggle failed:', err);
+        this.snackBar.open('Failed to toggle watchover', 'Dismiss', { duration: 3000 });
+        this.watchoverPending.set(false);
+      },
+      complete: () => {
+        this.watchoverPending.set(false);
+      }
+    });
+  }
+
+  private getSavedWatchoverRequirement(instanceId: string): string | null {
+    const raw = localStorage.getItem(`ensemble-watchover-${instanceId}`);
+    if (!raw) return null;
+
+    try {
+      const saved = JSON.parse(raw) as { requirement?: unknown };
+      return typeof saved.requirement === 'string' ? saved.requirement : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private persistWatchoverPreference(
+    instanceId: string,
+    enabled: boolean,
+    requirement: string | null,
+  ): void {
+    const savedRequirement = requirement ?? this.getSavedWatchoverRequirement(instanceId);
+    localStorage.setItem(
+      `ensemble-watchover-${instanceId}`,
+      JSON.stringify({ enabled, requirement: savedRequirement })
+    );
   }
 
   protected onToggleThinking(): void {

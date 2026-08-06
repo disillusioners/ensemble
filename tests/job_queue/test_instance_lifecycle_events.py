@@ -285,7 +285,14 @@ class TestLifecycleEventCallSites:
             assert result is True
 
             # Verify: lifecycle service's terminate_instance was called
-            manager._lifecycle_service.terminate_instance.assert_called_once_with("test-instance")
+            # Phase 2 (TD-3/TD-4): the manager facade now passes
+            # ``terminal_reason`` through to the lifecycle service so
+            # the watchover 3-strike discriminator reaches the JobItem
+            # column. The default is ``"aborted"`` for all existing
+            # call sites that don't override.
+            manager._lifecycle_service.terminate_instance.assert_called_once_with(
+                "test-instance", terminal_reason="aborted"
+            )
 
 
 class TestEventKindEnum:

@@ -802,7 +802,12 @@ class TestFacadeDelegationPattern:
         asyncio.run(test())
 
     def test_manager_terminate_instance_delegates_to_lifecycle_service(self):
-        """terminate_instance should delegate to _lifecycle_service."""
+        """terminate_instance should delegate to _lifecycle_service.
+
+        Phase 2 (TD-3/TD-4): the manager facade now passes
+        ``terminal_reason`` through to the lifecycle service so the
+        watchover 3-strike discriminator reaches the JobItem column.
+        """
         from daemon.manager import InstanceManager
 
         manager = InstanceManager.__new__(InstanceManager)
@@ -813,7 +818,7 @@ class TestFacadeDelegationPattern:
             result = await manager.terminate_instance("instance-123")
             assert result is True
             manager._lifecycle_service.terminate_instance.assert_called_once_with(
-                "instance-123"
+                "instance-123", terminal_reason="aborted"
             )
 
         import asyncio

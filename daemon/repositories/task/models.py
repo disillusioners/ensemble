@@ -53,11 +53,22 @@ class TaskStatus(str, enum.Enum):
 
 
 class SuspensionReason(str, enum.Enum):
-    """Reason a turn is suspended and awaiting an explicit resume."""
+    """Reason a turn is suspended and awaiting an explicit resume.
+
+    ``WATCHOVER_SETUP`` (Phase 3 / Watchover, 2026-08-05) is added as a
+    pure-Python member — ``suspension_reason`` is a TEXT/VARCHAR column
+    (``Task.suspension_reason`` at :mod:`daemon.repositories.task.models`),
+    NOT a PostgreSQL native enum type, so adding this member requires
+    zero SQL migration. The value is set during the activation pause
+    window (T3.5) so that downstream observers (operator dashboards,
+    future resume routing) can distinguish a watchover-induced pause
+    from a generic external pause.
+    """
 
     AWAITING_ANSWER = "awaiting_answer"
     AWAITING_CHILDREN = "awaiting_children"
     PAUSED_EXTERNAL = "paused_external"
+    WATCHOVER_SETUP = "watchover_setup"
 
 
 # Module-level Column kept as a reference for use in Task.__mapper_args__.
