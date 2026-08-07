@@ -402,8 +402,8 @@ class TestWatcherContextBuilderFallback:
 class TestWatcherContextBuilderConfig:
     """Constructor defaults and overrides."""
 
-    def test_default_timeout_is_15_seconds(self):
-        """The default timeout is the design-doc default of 15s."""
+    def test_default_timeout_is_300_seconds(self):
+        """The default timeout is the design-doc default of 300s."""
         manager = _make_manager_with_llm(lambda **kw: MagicMock())
         builder = WatcherContextBuilder(
             manager=manager,
@@ -411,7 +411,7 @@ class TestWatcherContextBuilderConfig:
             builder_prompt="x",
         )
         assert builder._timeout_seconds == DEFAULT_BUILDER_TIMEOUT_SECONDS
-        assert DEFAULT_BUILDER_TIMEOUT_SECONDS == 15
+        assert DEFAULT_BUILDER_TIMEOUT_SECONDS == 300
 
     def test_default_message_window_is_40(self):
         """The default message window is the design-doc default of 40."""
