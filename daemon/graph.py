@@ -3377,7 +3377,7 @@ def create_question_pause_node(manager: Any):
 # the constants exist so tests and the agent_node reset path have a
 # stable value without parsing the meta file at runtime.
 WATCHOVER_MAX_DENIALS_DEFAULT = 3
-WATCHOVER_MIRROR_MESSAGE_COUNT_DEFAULT = 5
+WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT = 20
 WATCHOVER_TIMEOUT_SECONDS_DEFAULT = 10
 
 # System prompt cache: read ``agents/watcher/soul.md`` ONCE at module
@@ -3646,7 +3646,11 @@ class WatchoverEvaluator:
             ``timeout_seconds`` (default 10),
             ``max_denials_per_turn`` (default 3 — used by the node, not
             the evaluator),
-            ``mirror_message_count`` (default 5),
+            ``delta_max_messages`` (default 20 — sliding-window size
+            before snapshot regeneration triggers),
+            ``snapshot_refresh_interval`` (informational; matches
+            ``delta_max_messages``),
+            ``snapshot_llm_model`` (informational; summarization model),
             ``failure_mode`` (informational; evaluator always runs in
             bifurcated mode regardless).
     """
@@ -3667,9 +3671,9 @@ class WatchoverEvaluator:
                 "timeout_seconds", WATCHOVER_TIMEOUT_SECONDS_DEFAULT
             )
         )
-        self._mirror_message_count: int = int(
+        self._delta_max: int = int(
             watcher_config.get(
-                "mirror_message_count", WATCHOVER_MIRROR_MESSAGE_COUNT_DEFAULT
+                "delta_max_messages", WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT
             )
         )
         self._max_denials: int = int(
@@ -3677,6 +3681,16 @@ class WatchoverEvaluator:
                 "max_denials_per_turn", WATCHOVER_MAX_DENIALS_DEFAULT
             )
         )
+        # Sliding-window state. ``_snapshot`` is the cached LLM-generated
+        # summary of older conversation turns; ``_delta_messages`` is the
+        # buffer of original-typed messages that have NOT yet been folded
+        # into the snapshot. ``_last_seen_count`` tracks how many
+        # conversation messages we've already absorbed so we can detect
+        # the tail of NEW messages on the next ``evaluate()`` call.
+        self._snapshot: str = ""
+        self._snapshot_turn: int = 0
+        self._delta_messages: list[BaseMessage] = []
+        self._last_seen_count: int = 0
         # Lazy LLM construction — defer the (cheap) ChatOpenAI build to
         # the first ``evaluate`` call so a manager with a bad
         # ``llm_config`` does not break graph wiring.
@@ -3840,13 +3854,15 @@ class WatchoverEvaluator:
                 dicts — the LangGraph tool-call payload. The ``id`` is
                 preserved on the returned :class:`WatcherVerdict` so the
                 node can match it with the corresponding ``ToolMessage``.
-            messages: Full conversation history (oldest-first). Only the
-                last ``mirror_message_count`` entries are serialised into
-                the ``[RECENT MESSAGES BEGIN]`` layer (mirrors the
-                ``LoopRepairer._build_excerpt`` pattern). The excerpt is
-                formatted as readable ``[role]: content`` lines via
-                :meth:`_format_recent_messages` so the LLM provider's
-                prefix cache can reuse the older messages across checks.
+            messages: Full conversation history (oldest-first). New
+                messages (tail of the list, beyond ``_last_seen_count``)
+                are appended to a per-instance delta buffer; once the
+                buffer exceeds ``_delta_max`` (default 20), the watcher
+                LLM regenerates a conversation snapshot summarising
+                ``[CURRENT SNAPSHOT] + delta`` and resets the delta to
+                the overflow messages. This sliding-window design
+                preserves prefix caching across tool calls in a batch
+                while bounding the per-eval LLM payload size.
             watchover_context: The user-supplied requirement / context
                 for the watchover session. ``None`` or empty string is
                 acceptable — the watcher is told the context is empty and
@@ -3856,18 +3872,32 @@ class WatchoverEvaluator:
                 cache it across calls until the user rotates it.
 
         Note:
-            The LLM payload is split into four messages — one
-            ``SystemMessage`` (watcher soul prompt, fully cached) plus
-            three ``HumanMessage`` layers (``[WATCHOVER CONTEXT]``,
-            ``[RECENT MESSAGES BEGIN]``, ``[WATCHOVER CHECK]``). The
-            first three are stable across tool calls in the batch and
-            are built once outside the loop — only the per-call
-            ``[WATCHOVER CHECK]`` is uncached.
+            The LLM payload is split into FIVE logical layers (with two
+            separator markers around the delta block) so the provider's
+            prefix cache can hit on stable layers across a batch:
 
-        Returns:
-            A list of :class:`WatcherVerdict` of the same length as
-            ``tool_calls``. Never raises — failures are converted to
-            structured verdict + error_type.
+              1. ``SystemMessage(content=system_prompt)`` — watcher soul
+                 prompt, fully cached (loaded once via
+                 ``_load_watcher_soul_prompt``).
+              2. ``HumanMessage(content="[WATCHOVER CONTEXT]... [WATCHOVER CONTEXT END]")``
+                 — semi-stable, cached until the user rotates the context.
+              3. ``HumanMessage(content="[CONVERSATION SNAPSHOT]... [CONVERSATION SNAPSHOT END]")``
+                 — present only once a snapshot has been generated
+                 (skip on early turns).
+              4. **Delta messages** — the original ``HumanMessage`` /
+                 ``AIMessage`` / ``ToolMessage`` objects appended
+                 verbatim (types preserved) between two separator
+                 ``HumanMessage`` markers ``[start of recent messages]``
+                 and ``[end of recent messages]``.
+              5. ``HumanMessage(content="[WATCHOVER CHECK]...")`` — per-
+                 call, the only fully uncached layer.
+
+            Layers 1-4 + the two separator messages are stable across
+            tool calls in the batch and are built ONCE outside the
+            per-call loop — only the per-call ``[WATCHOVER CHECK]``
+            differs. (Layer 3 is omitted while ``_snapshot`` is empty,
+            so early turns see Layers 1, 2, the start separator, the
+            delta, the end separator, and the check.)
         """
         if not tool_calls:
             return []
@@ -3877,21 +3907,66 @@ class WatchoverEvaluator:
         from .compaction import _extract_text_from_content
 
         system_prompt = _load_watcher_soul_prompt()
-        excerpt = self._build_excerpt(messages, max_messages=self._mirror_message_count)
 
+        # ------------------------------------------------------------------
+        # Sliding-window delta extraction. ``_last_seen_count`` records how
+        # many conversation messages we've already absorbed; the tail of
+        # ``messages`` beyond that count is the NEW portion to buffer.
+        # On the first call (_last_seen_count == 0) this absorbs the full
+        # history as the initial delta.
+        # ------------------------------------------------------------------
+        new_messages = list(messages[self._last_seen_count:])
+        self._last_seen_count = len(messages)
+        self._delta_messages.extend(new_messages)
+
+        # Snapshot trigger: when the delta exceeds the configured maximum,
+        # LLM-summarise the existing snapshot + the overflow delta into a
+        # new snapshot, then BOUND the delta to the last ``_delta_max``
+        # messages (the sliding-window tail). The snapshot absorbs all
+        # messages up to this point; the delta keeps only the recent tail
+        # so the next call doesn't immediately re-trigger regeneration.
+        if len(self._delta_messages) > self._delta_max:
+            self._snapshot = await self._regenerate_snapshot()
+            self._snapshot_turn += 1
+            self._delta_messages = self._delta_messages[-self._delta_max:]
+
+        # ------------------------------------------------------------------
         # Build the stable LLM layers ONCE — reused across every tool call
-        # in the batch. Splitting the payload into separate messages lets the
-        # LLM provider's prefix cache hit on the stable layers (system
-        # prompt + watchover context + recent messages); only the per-call
-        # ``[WATCHOVER CHECK]`` is fully uncached.
+        # in the batch. Splitting the payload into separate messages lets
+        # the LLM provider's prefix cache hit on the stable layers (system
+        # prompt + watchover context + snapshot + delta + separators); only
+        # the per-call ``[WATCHOVER CHECK]`` is fully uncached.
+        # ------------------------------------------------------------------
         context_text = watchover_context or "(no watchover context provided)"
         context_message = HumanMessage(
             content=f"[WATCHOVER CONTEXT]\n{context_text}\n[WATCHOVER CONTEXT END]"
         )
-        recent_text = self._format_recent_messages(excerpt)
-        recent_message = HumanMessage(
-            content=f"[RECENT MESSAGES BEGIN]\n{recent_text}\n[RECENT MESSAGES END]"
+        snapshot_message = (
+            HumanMessage(
+                content=(
+                    f"[CONVERSATION SNAPSHOT]\n{self._snapshot}\n"
+                    f"[CONVERSATION SNAPSHOT END]"
+                )
+            )
+            if self._snapshot
+            else None
         )
+        start_marker = HumanMessage(content="[start of recent messages]")
+        end_marker = HumanMessage(content="[end of recent messages]")
+
+        # Layer 4: the delta messages preserve their ORIGINAL types
+        # (HumanMessage / AIMessage / ToolMessage) — no text reformatting.
+        # This lets the provider's prefix cache key on the per-message
+        # structure as well as content.
+        msg_list: list[BaseMessage] = [
+            SystemMessage(content=system_prompt),
+            context_message,
+        ]
+        if snapshot_message is not None:
+            msg_list.append(snapshot_message)
+        msg_list.append(start_marker)
+        msg_list.extend(self._delta_messages)
+        msg_list.append(end_marker)
 
         results: list[WatcherVerdict] = []
         infra_error_seen = False
@@ -3933,12 +4008,7 @@ class WatchoverEvaluator:
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         llm.invoke,
-                        [
-                            SystemMessage(content=system_prompt),
-                            context_message,
-                            recent_message,
-                            check_message,
-                        ],
+                        msg_list + [check_message],
                     ),
                     timeout=self._timeout_seconds,
                 )
@@ -4010,61 +4080,90 @@ class WatchoverEvaluator:
 
         return results
 
-    @staticmethod
-    def _build_excerpt(messages: list[BaseMessage], max_messages: int) -> list[dict]:
-        """Build a serialisable excerpt of the last ``max_messages`` entries.
+    async def _regenerate_snapshot(self) -> str:
+        """LLM-summarise the current snapshot + delta messages into a new snapshot.
 
-        Mirrors :meth:`LoopRepairer._build_excerpt` (``graph.py:1467-1498``)
-        — multimodal content is flattened to plain text via
-        ``_extract_text_from_content`` so the watcher never sees
-        ``str(list_of_dicts)`` garbage.
+        Uses the :class:`LoopRepairer` pattern (``asyncio.to_thread`` +
+        ``asyncio.wait_for``) so the synchronous ``llm.invoke`` call stays
+        off the event loop and a hung provider can never freeze the
+        ``agent_node`` chain. The summarization uses the watcher's quick
+        model and the same ``_timeout_seconds`` cap as the main eval call.
+
+        On any failure (timeout, infra, judgment) we keep the previous
+        snapshot — stale context is preferable to no context. The delta
+        buffer is reset by the caller regardless, so a failed regeneration
+        just means the next eval carries more delta messages than usual.
 
         Returns:
-            A list of ``{"role": str, "content": str}`` dicts. Empty list
-            when ``messages`` is empty. Newest last.
+            The new snapshot text. Falls back to ``self._snapshot`` on
+            any error so the sliding window never produces an empty
+            snapshot mid-conversation.
         """
         from .compaction import _extract_text_from_content
 
-        if not messages:
-            return []
-        tail = list(messages[-max_messages:])
-        out: list[dict] = []
-        for msg in tail:
-            role = getattr(msg, "type", None) or "human"
-            content = getattr(msg, "content", "")
-            try:
-                text = _extract_text_from_content(content)
-            except Exception:
-                text = str(content)
-            out.append({"role": role, "content": text})
-        return out
+        delta_text = self._format_messages_for_summary(self._delta_messages)
+
+        summary_messages = [
+            SystemMessage(
+                content=(
+                    "You are a conversation summarizer for a security watcher. "
+                    "Summarize the key actions, decisions, and tool calls from the conversation. "
+                    "Focus on what operations were performed, what was allowed/denied, "
+                    "and what the agent is currently trying to accomplish. "
+                    "Keep it concise — 5-10 lines maximum."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"[CURRENT SNAPSHOT]\n{self._snapshot or '(none yet)'}\n\n"
+                    f"[MESSAGES TO INCORPORATE]\n{delta_text}\n\n"
+                    f"Provide an updated summary incorporating the new messages."
+                )
+            ),
+        ]
+
+        try:
+            llm = self._get_llm()
+            response = await asyncio.wait_for(
+                asyncio.to_thread(llm.invoke, summary_messages),
+                timeout=self._timeout_seconds,
+            )
+            return _extract_text_from_content(response.content)
+        except Exception as exc:
+            # If snapshot regeneration fails, keep the old snapshot
+            # (better to have stale context than no context).
+            logger.warning(
+                f"[Watchover] snapshot regeneration failed for "
+                f"{self._instance_id[:8]}...: {type(exc).__name__}: {exc}"
+            )
+            return self._snapshot
 
     @staticmethod
-    def _format_recent_messages(excerpt: list[dict]) -> str:
-        """Format the ``_build_excerpt`` output as readable multi-line text.
+    def _format_messages_for_summary(messages: list[BaseMessage]) -> str:
+        """Format messages as readable text for the snapshot summarisation prompt.
 
-        Complements :meth:`_build_excerpt`: the excerpt produces
-        ``{"role": str, "content": str}`` dicts; this formats them as
-        ``[role]: content`` lines for the ``[RECENT MESSAGES BEGIN]``
-        block. Readable text (not JSON) lets the LLM provider
-        prefix-cache the older messages — only the newest line differs
-        between checks.
+        Unlike Layer 4 of the eval payload (which preserves original
+        message types), this DOES reformat messages into ``[role]:
+        content`` text because the output is going into the
+        summarizer's ``HumanMessage``, not the main eval call.
+        Multimodal content is flattened to plain text via
+        ``_extract_text_from_content`` so the summarizer never sees
+        ``str(list_of_dicts)`` garbage.
 
         Args:
-            excerpt: List of ``{"role": str, "content": str}`` dicts
-                (output of :meth:`_build_excerpt`). Empty list → empty
-                string.
+            messages: List of LangChain ``BaseMessage`` instances.
 
         Returns:
-            Newline-joined ``[role]: content`` lines. Empty string when
-            ``excerpt`` is empty.
+            Newline-joined ``[role]: content`` lines. ``"(no messages)"``
+            when the input is empty.
         """
-        if not excerpt:
-            return ""
+        if not messages:
+            return "(no messages)"
+        from .compaction import _extract_text_from_content
+
         # Map raw LangGraph message types to concise human-readable
-        # labels so the watcher never sees ``"HumanMessage"`` /
-        # ``"AIMessage"`` style technical noise in the recent-history
-        # block.
+        # labels so the summarizer never sees ``"HumanMessage"`` /
+        # ``"AIMessage"`` style technical noise.
         role_map = {
             "human": "human",
             "user": "human",
@@ -4074,11 +4173,15 @@ class WatchoverEvaluator:
             "system": "system",
         }
         lines: list[str] = []
-        for entry in excerpt:
-            raw_role = entry.get("role", "human")
+        for msg in messages:
+            raw_role = getattr(msg, "type", None) or "human"
             role = role_map.get(raw_role, raw_role)
-            content = entry.get("content", "")
-            lines.append(f"[{role}]: {content}")
+            content = getattr(msg, "content", "")
+            try:
+                text = _extract_text_from_content(content)
+            except Exception:
+                text = str(content)
+            lines.append(f"[{role}]: {text}")
         return "\n".join(lines)
 
 

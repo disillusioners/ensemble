@@ -79,6 +79,50 @@ def _plain_user_message() -> dict:
     return {"role": "user", "content": "List the running pods in the cluster."}
 
 
+def _snapshot_user_message() -> dict:
+    """Layer-3 [CONVERSATION SNAPSHOT] marker payload (no summarize cue)."""
+    return {
+        "role": "user",
+        "content": (
+            "[CONVERSATION SNAPSHOT]\n"
+            "[tool_call] bash kubectl get nodes\n"
+            "[tool_call] bash kubectl get pods"
+        ),
+    }
+
+
+def _summarize_system_message() -> dict:
+    """Layer-2 system cue that pairs with [CONVERSATION SNAPSHOT] to mark a snapshot call."""
+    return {
+        "role": "system",
+        "content": "You are a conversation summarizer. Summarize the following concisely.",
+    }
+
+
+def _layer4_messages() -> list[dict]:
+    """Layer-4 separator pair wrapping individual messages.
+
+    In the 5-layer architecture, layer 4 holds the actual recent messages
+    individually (not packed), bracketed by [start of recent messages] and
+    [end of recent messages] markers.
+    """
+    return [
+        {"role": "user", "content": "[start of recent messages]"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "kubectl get nodes"}'},
+                }
+            ],
+        },
+        {"role": "user", "content": "[end of recent messages]"},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Group 1: Detection Logic — `_detect_call_type`
 # ---------------------------------------------------------------------------
@@ -132,6 +176,115 @@ def test_detect_priority_check_before_context():
         ]
     )
     assert mock_server._detect_call_type(req) == "watcher"
+
+
+def test_detect_snapshot_via_conversation_snapshot_marker():
+    """[CONVERSATION SNAPSHOT] + summarize in system → 'snapshot' call type."""
+    req = _make_request([_summarize_system_message(), _snapshot_user_message()])
+    assert mock_server._detect_call_type(req) == "snapshot"
+
+
+def test_detect_snapshot_requires_summarize_cue():
+    """[CONVERSATION SNAPSHOT] without 'summarize' in system → NOT snapshot.
+
+    Snapshot detection requires BOTH the layer-3 marker AND a 'summarize'
+    cue in a system message. Without the system cue, the request falls
+    through to the default 'agent' classification.
+    """
+    req = _make_request([_snapshot_user_message()])
+    assert mock_server._detect_call_type(req) == "agent"
+
+
+def test_detect_snapshot_priority_over_watcher():
+    """Snapshot marker wins over [WATCHOVER CHECK] when both are present.
+
+    Snapshot calls may legitimately contain watchover-related text (they
+    summarize prior tool calls including watcher decisions), so the
+    snapshot-specific check must run FIRST.
+    """
+    req = _make_request(
+        [
+            _summarize_system_message(),
+            {
+                "role": "user",
+                "content": (
+                    "[CONVERSATION SNAPSHOT]\n"
+                    "[WATCHOVER CHECK] previous tool: kubectl get nodes"
+                ),
+            },
+        ]
+    )
+    assert mock_server._detect_call_type(req) == "snapshot"
+
+
+def test_detect_5layer_individual_messages():
+    """Layer 4 messages are individual, not packed into one.
+
+    [start of recent messages] / [end of recent messages] are layer-4
+    separators that bracket INDIVIDUAL messages (each its own entry in the
+    request.messages list). The markers themselves carry no classification
+    signal — they must not trigger snapshot, watcher, or builder detection
+    on their own.
+    """
+    # Case 1: layer-4 markers alone (no [CONVERSATION SNAPSHOT], no summarize)
+    # → must classify as 'agent', not 'snapshot'.
+    req = _make_request([_plain_user_message()] + _layer4_messages())
+    assert mock_server._detect_call_type(req) == "agent"
+
+    # Case 2: layer-4 markers alongside [CONVERSATION SNAPSHOT] but NO
+    # 'summarize' in any system message → still 'agent' (snapshot needs both).
+    req_no_summarize = _make_request(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[CONVERSATION SNAPSHOT]\n"
+                    "[start of recent messages]\n"
+                    "msg1\n"
+                    "[end of recent messages]"
+                ),
+            }
+        ]
+    )
+    assert mock_server._detect_call_type(req_no_summarize) == "agent"
+
+    # Case 3: layer-4 markers alongside [CONVERSATION SNAPSHOT] WITH
+    # 'summarize' in system → 'snapshot' (the two signals together).
+    req_full = _make_request(
+        [
+            _summarize_system_message(),
+            {
+                "role": "user",
+                "content": (
+                    "[CONVERSATION SNAPSHOT]\n"
+                    "[start of recent messages]\n"
+                    "msg1\n"
+                    "[end of recent messages]"
+                ),
+            },
+        ]
+    )
+    assert mock_server._detect_call_type(req_full) == "snapshot"
+
+
+def test_snapshot_response_returns_summary_text(client: TestClient):
+    """Snapshot calls through the HTTP path return the deterministic summary
+    with finish_reason='stop'."""
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "mock-test-model",
+            "messages": [_summarize_system_message(), _snapshot_user_message()],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    choice = body["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    content = choice["message"]["content"]
+    assert "kubectl" in content
+    assert "get nodes" in content
+    assert "get pods" in content
 
 
 # ---------------------------------------------------------------------------

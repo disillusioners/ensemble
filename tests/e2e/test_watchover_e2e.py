@@ -777,3 +777,322 @@ async def test_e2e_no_duplicate_continue(daemon_and_mock):
         )
     finally:
         await _terminate_instance(client, instance_id)
+
+
+
+# --------------------------------------------------------------------------- #
+# 5-Layer Message Architecture tests
+#
+# The watchover evaluator (daemon/graph.py:WatchoverEvaluator) builds the
+# LLM payload as five logical layers so the provider's prefix cache can
+# hit on the stable layers across a batch of tool calls:
+#
+#   1. SystemMessage  — watcher soul prompt
+#   2. HumanMessage   — [WATCHOVER CONTEXT] ... [WATCHOVER CONTEXT END]
+#   3. HumanMessage   — [CONVERSATION SNAPSHOT] ... [CONVERSATION SNAPSHOT
+#                       END]  (omitted on early turns before the first
+#                       snapshot regeneration)
+#   4. Delta messages — verbatim HumanMessage / AIMessage / ToolMessage
+#                       between two HumanMessage separators:
+#                       [start of recent messages] / [end of recent messages]
+#   5. HumanMessage   — [WATCHOVER CHECK] ...  (per-call, uncached)
+#
+# The mock LLM server captures every watcher-evaluator payload; these tests
+# assert on that captured payload via GET /requests (and the /stats counters
+# for snapshot regeneration).
+# --------------------------------------------------------------------------- #
+async def get_captured_requests(client: httpx.AsyncClient) -> dict:
+    """Fetch the captured watcher-evaluator payloads from the mock server.
+
+    Returns ``{"watcher_requests": [...], "watcher_call_count": N,
+    "builder_call_count": N, "snapshot_call_count": N,
+    "agent_call_count": N}``.
+    """
+    resp = await client.get(f"{MOCK_URL}/requests")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _captured_watcher_text(captured: list[dict]) -> str:
+    """Flatten one captured watcher payload into a single lowercased string.
+
+    Used for substring assertions on the 5-layer markers.
+    """
+    parts: list[str] = []
+    for msg in captured:
+        content = msg.get("content") or ""
+        if isinstance(content, str):
+            parts.append(content)
+    return "\n".join(parts).lower()
+
+
+# --------------------------------------------------------------------------- #
+# Test 9: 5-layer message structure
+# --------------------------------------------------------------------------- #
+async def test_e2e_5layer_message_structure(daemon_and_mock):
+    """Verify the watcher evaluator receives the 5-layer message structure."""
+    client = daemon_and_mock
+    await set_scenario(client, "allow")
+
+    inst = await create_instance(client)
+    instance_id = inst["instance_id"]
+    logger.info(
+        "[test_e2e_5layer_message_structure] created instance=%s",
+        instance_id[:8],
+    )
+
+    try:
+        activation = await enable_watchover(
+            client,
+            instance_id,
+            requirement="read-only cluster inspection only",
+        )
+        assert activation.get("watchover_enabled") is True, (
+            f"enable_watchover returned watchover_enabled="
+            f"{activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {activation}"
+        )
+
+        # Send a message so the agent emits a tool call the watcher evaluates.
+        await send_message(client, instance_id, "check cluster status")
+
+        # Wait for the watcher to capture at least one payload.
+        async def _watcher_payload_captured() -> bool:
+            data = await get_captured_requests(client)
+            return len(data.get("watcher_requests", [])) >= 1
+
+        ok = await wait_for_condition(
+            _watcher_payload_captured, timeout=WATCHER_TIMEOUT
+        )
+        data = await get_captured_requests(client)
+        captured = data.get("watcher_requests", [])
+        assert ok, (
+            f"no watcher payload captured within {WATCHER_TIMEOUT}s; "
+            f"stats={await get_stats(client)}"
+        )
+        assert captured, (
+            "expected at least one captured watcher payload, got none"
+        )
+
+        # Inspect the most recent captured watcher payload.
+        payload = captured[-1]
+        blob = _captured_watcher_text(payload)
+
+        # Layer 2: guardrail / context block (populated by the builder).
+        assert "[watchover context]" in blob, (
+            "watcher payload missing layer-2 [WATCHOVER CONTEXT] marker. "
+            f"Payload roles: {[m.get('role') for m in payload]}"
+        )
+        assert "[watchover context end]" in blob, (
+            "watcher payload missing layer-2 [WATCHOVER CONTEXT END] marker."
+        )
+
+        # Layer 3: snapshot marker. On early turns the snapshot layer is
+        # omitted (no regeneration yet), so we accept EITHER the populated
+        # snapshot marker OR the absence-of-snapshot case. We assert that
+        # IF a snapshot is present, both delimiters appear together.
+        has_snapshot = "[conversation snapshot]" in blob
+        has_snapshot_end = "[conversation snapshot end]" in blob
+        assert has_snapshot == has_snapshot_end, (
+            "snapshot markers are inconsistent: "
+            f"start={has_snapshot}, end={has_snapshot_end}. "
+            "Both must appear together or not at all."
+        )
+
+        # Layer 4: delta message separators must always be present
+        # (the delta block is emitted even when empty).
+        assert "[start of recent messages]" in blob, (
+            "watcher payload missing layer-4 [start of recent messages] "
+            "separator."
+        )
+        assert "[end of recent messages]" in blob, (
+            "watcher payload missing layer-4 [end of recent messages] "
+            "separator."
+        )
+
+        # Layer 5: per-call check marker (the tool call under evaluation).
+        assert "[watchover check]" in blob, (
+            "watcher payload missing layer-5 [WATCHOVER CHECK] marker "
+            "(the tool call under evaluation)."
+        )
+
+        # The system prompt (layer 1) is always present as a system role.
+        roles = [m.get("role") for m in payload]
+        assert "system" in roles, (
+            f"watcher payload missing layer-1 system message. Roles: {roles}"
+        )
+    finally:
+        await _terminate_instance(client, instance_id)
+
+
+# --------------------------------------------------------------------------- #
+# Test 10: snapshot regeneration at delta_max
+# --------------------------------------------------------------------------- #
+async def test_e2e_snapshot_at_delta_max(daemon_and_mock):
+    """Snapshot regeneration triggers when message count exceeds delta_max (20)."""
+    client = daemon_and_mock
+    await set_scenario(client, "allow")
+
+    inst = await create_instance(client)
+    instance_id = inst["instance_id"]
+    logger.info(
+        "[test_e2e_snapshot_at_delta_max] created instance=%s",
+        instance_id[:8],
+    )
+
+    try:
+        activation = await enable_watchover(client, instance_id)
+        assert activation.get("watchover_enabled") is True, (
+            f"enable_watchover returned watchover_enabled="
+            f"{activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {activation}"
+        )
+
+        # Each user message drives one agent turn (the mock agent emits one
+        # bash tool call per turn, which the watcher evaluates, adding to the
+        # delta buffer). Send enough messages to push the delta buffer past
+        # delta_max=20 and trigger at least one snapshot regeneration.
+        for i in range(22):
+            await send_message(client, instance_id, f"check status round {i}")
+
+        # Wait for the snapshot counter to increment at least once.
+        async def _snapshot_triggered() -> bool:
+            stats = await get_stats(client)
+            return stats.get("snapshot_call_count", 0) >= 1
+
+        ok = await wait_for_condition(
+            _snapshot_triggered, timeout=DEFAULT_TIMEOUT
+        )
+        stats = await get_stats(client)
+        assert ok, (
+            f"snapshot regeneration never triggered within "
+            f"{DEFAULT_TIMEOUT}s after 22 messages; "
+            f"snapshot_call_count={stats.get('snapshot_call_count', 0)}, "
+            f"watcher_call_count={stats.get('watcher_call_count', 0)}, "
+            f"full stats={stats}"
+        )
+        assert stats["snapshot_call_count"] >= 1, (
+            f"expected snapshot_call_count >= 1, got "
+            f"{stats['snapshot_call_count']}"
+        )
+
+        # After regeneration the watcher payload should carry the populated
+        # snapshot layer (layer 3).
+        data = await get_captured_requests(client)
+        captured = data.get("watcher_requests", [])
+        assert captured, (
+            "expected captured watcher payloads after snapshot regeneration, "
+            "got none"
+        )
+        blob = _captured_watcher_text(captured[-1])
+        assert "[conversation snapshot]" in blob, (
+            "post-snapshot watcher payload missing [CONVERSATION SNAPSHOT] "
+            "marker; regeneration should have populated layer 3."
+        )
+        assert "[conversation snapshot end]" in blob, (
+            "post-snapshot watcher payload missing "
+            "[CONVERSATION SNAPSHOT END] marker."
+        )
+    finally:
+        await _terminate_instance(client, instance_id)
+
+
+# --------------------------------------------------------------------------- #
+# Test 11: delta messages preserve original types
+# --------------------------------------------------------------------------- #
+async def test_e2e_delta_preserves_message_types(daemon_and_mock):
+    """Layer 4 delta messages preserve original message types (Human/AI/Tool)."""
+    client = daemon_and_mock
+    await set_scenario(client, "allow")
+
+    inst = await create_instance(client)
+    instance_id = inst["instance_id"]
+    logger.info(
+        "[test_e2e_delta_preserves_message_types] created instance=%s",
+        instance_id[:8],
+    )
+
+    try:
+        activation = await enable_watchover(client, instance_id)
+        assert activation.get("watchover_enabled") is True, (
+            f"enable_watchover returned watchover_enabled="
+            f"{activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {activation}"
+        )
+
+        # A single user message produces a full turn: user (human) -> agent
+        # tool call (ai) -> tool result (tool). The watcher evaluates the
+        # tool call, absorbing all three message types into the delta buffer.
+        await send_message(client, instance_id, "check cluster status")
+
+        # Wait for at least one captured watcher payload.
+        async def _payload_captured() -> bool:
+            data = await get_captured_requests(client)
+            return len(data.get("watcher_requests", [])) >= 1
+
+        ok = await wait_for_condition(
+            _payload_captured, timeout=WATCHER_TIMEOUT
+        )
+        data = await get_captured_requests(client)
+        captured = data.get("watcher_requests", [])
+        assert ok, (
+            f"no watcher payload captured within {WATCHER_TIMEOUT}s; "
+            f"stats={await get_stats(client)}"
+        )
+        assert captured, "expected captured watcher payload, got none"
+
+        payload = captured[-1]
+
+        # Locate the delta block: everything strictly between the
+        # [start of recent messages] and [end of recent messages] separators.
+        start_idx = end_idx = None
+        for i, msg in enumerate(payload):
+            content = (msg.get("content") or "").strip().lower()
+            if content == "[start of recent messages]":
+                start_idx = i
+            elif content == "[end of recent messages]":
+                end_idx = i
+                break  # first end marker closes the block
+        assert start_idx is not None, (
+            "delta block start separator [start of recent messages] not "
+            f"found in payload. Roles: {[m.get('role') for m in payload]}"
+        )
+        assert end_idx is not None, (
+            "delta block end separator [end of recent messages] not found "
+            f"in payload. Roles: {[m.get('role') for m in payload]}"
+        )
+        assert end_idx > start_idx, (
+            f"end separator (idx={end_idx}) must come after start separator "
+            f"(idx={start_idx})."
+        )
+
+        delta_messages = payload[start_idx + 1 : end_idx]
+        assert delta_messages, (
+            "delta block between the separators is empty; expected at least "
+            "one absorbed message (user / agent / tool)."
+        )
+        delta_roles = {m.get("role") for m in delta_messages}
+
+        # The delta preserves the original message TYPES as roles. A real
+        # turn always produces at least a human (user) message and an ai
+        # (assistant) tool call; tool results may or may not have been
+        # absorbed yet depending on timing. We assert the two guaranteed
+        # types and note the third as best-effort.
+        assert "user" in delta_roles or "human" in delta_roles, (
+            f"delta block missing a human/user message. Delta roles: "
+            f"{delta_roles}"
+        )
+        assert "assistant" in delta_roles or "ai" in delta_roles, (
+            f"delta block missing an ai/assistant message (the agent's tool "
+            f"call). Delta roles: {delta_roles}"
+        )
+        # Tool results (role 'tool') are expected over a full turn but are
+        # timing-dependent; log rather than hard-assert.
+        if "tool" not in delta_roles:
+            logger.info(
+                "[test_e2e_delta_preserves_message_types] "
+                "no 'tool' role in delta yet (timing); delta_roles=%s",
+                delta_roles,
+            )
+    finally:
+        await _terminate_instance(client, instance_id)

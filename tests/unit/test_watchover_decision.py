@@ -34,7 +34,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from daemon.graph import (
     SessionState,
@@ -706,23 +706,29 @@ class TestWatchoverEvaluatorEvaluate:
 class TestWatchoverMessageStructure:
     """``WatchoverEvaluator.evaluate(...)`` LLM payload structure.
 
-    The LLM payload is split into four messages (one ``SystemMessage`` +
-    three ``HumanMessage`` layers) so the provider's prefix cache can hit
-    on the stable layers across batches:
+    The LLM payload is split into FIVE logical layers (with two separator
+    markers around the delta block) so the provider's prefix cache can
+    hit on stable layers across a batch:
 
       1. ``SystemMessage(content=system_prompt)`` — watcher soul prompt,
          fully cached (loaded once via ``_load_watcher_soul_prompt``).
       2. ``HumanMessage(content="[WATCHOVER CONTEXT]... [WATCHOVER CONTEXT END]")``
          — semi-stable, cached until the user rotates the context.
-      3. ``HumanMessage(content="[RECENT MESSAGES BEGIN]... [RECENT MESSAGES END]")``
-         — prefix-cached (older messages stable; only the newest line
-         changes between checks).
-      4. ``HumanMessage(content="[WATCHOVER CHECK]...")`` — per-call, the
-         only fully uncached layer.
+      3. ``HumanMessage(content="[CONVERSATION SNAPSHOT]... [CONVERSATION SNAPSHOT END]")``
+         — present only once a snapshot has been generated (skip on
+         early turns when ``_snapshot`` is empty).
+      4. **Delta messages** — the original ``HumanMessage`` /
+         ``AIMessage`` / ``ToolMessage`` objects appended verbatim
+         (types preserved) between two separator ``HumanMessage``
+         markers ``[start of recent messages]`` and
+         ``[end of recent messages]``.
+      5. ``HumanMessage(content="[WATCHOVER CHECK]...")`` — per-call,
+         the only fully uncached layer.
 
-    Layers 1-3 are built ONCE outside the per-tool-call loop and
-    REUSED — they must be the SAME object instance across calls in a
-    batch. Layer 4 is rebuilt for every tool call.
+    Layers 1-3 + the two separators + the delta buffer are stable
+    across tool calls in a batch and are built ONCE outside the per-
+    tool-call loop — they MUST be the SAME object instances across
+    calls in a batch. Layer 5 is rebuilt for every tool call.
     """
 
     @staticmethod
@@ -736,15 +742,16 @@ class TestWatchoverMessageStructure:
               * ``llm_instance`` — the MagicMock with ``.invoke``.
               * ``captured`` — list of message-lists in invocation order.
                 Each entry is the messages list passed to ``invoke`` for
-                one call (so ``captured[0][2]`` is the
-                ``[WATCHOVER CHECK]`` HumanMessage on the first call).
+                one call. The LAST message in each entry is the per-call
+                ``[WATCHOVER CHECK]`` ``HumanMessage``; the preceding
+                messages are the stable prefix layers.
         """
         captured: list[list] = []
         queue = [_FakeLLMResult(content="Allowed")] * 100  # generous
 
         def _next(messages):
             # Record a copy of the messages reference (we want to assert
-            # object identity on layers 1-3 across calls).
+            # object identity on the stable prefix layers across calls).
             captured.append(messages)
             if not queue:
                 raise AssertionError("LLM mock exhausted")
@@ -758,8 +765,13 @@ class TestWatchoverMessageStructure:
 
         return _factory, llm_instance, captured
 
-    async def test_split_messages_structure(self, monkeypatch):
-        """LLM payload is split into 1 SystemMessage + 3 HumanMessages."""
+    async def test_five_layer_structure(self, monkeypatch):
+        """On the first call (no snapshot yet): System + Context + start marker
+        + delta messages (preserving types) + end marker + Check.
+
+        No ``[CONVERSATION SNAPSHOT]`` message is emitted when the
+        snapshot is empty.
+        """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
         manager = make_manager()
@@ -770,7 +782,9 @@ class TestWatchoverMessageStructure:
                 instance_id="iid",
             )
             await evaluator.evaluate(
-                tool_calls=[{"id": "tc-1", "name": "bash", "args": {"command": "ls"}}],
+                tool_calls=[
+                    {"id": "tc-1", "name": "bash", "args": {"command": "ls"}}
+                ],
                 messages=[],
                 watchover_context="be helpful",
             )
@@ -778,17 +792,24 @@ class TestWatchoverMessageStructure:
         assert len(captured) == 1, "expected exactly one LLM invoke call"
         messages = captured[0]
 
-        # 1 SystemMessage + 3 HumanMessages
-        assert len(messages) == 4, f"expected 4 messages, got {len(messages)}"
-        assert isinstance(messages[0], SystemMessage) or messages[0].__class__.__name__ == "SystemMessage"
-        assert all(isinstance(m, HumanMessage) for m in messages[1:]), (
-            f"messages[1:] must be HumanMessage, got {[type(m).__name__ for m in messages[1:]]}"
+        # 5-layer payload on a fresh evaluator with no messages:
+        #   [System, Context, start-marker, end-marker, Check]
+        # (No snapshot layer, no delta messages between markers.)
+        assert len(messages) == 5, (
+            f"expected 5 messages on first call with empty messages, "
+            f"got {len(messages)}: {[type(m).__name__ for m in messages]}"
         )
 
-        # Layer 1: system prompt (watcher soul).
+        # Layer 1: SystemMessage (watcher soul).
         from daemon.graph import _load_watcher_soul_prompt
+
+        assert isinstance(messages[0], SystemMessage) or messages[
+            0
+        ].__class__.__name__ == "SystemMessage"
         assert messages[0].content == _load_watcher_soul_prompt()
-        assert "Allowed" in messages[0].content or "Deny" in messages[0].content  # sanity
+        assert (
+            "Allowed" in messages[0].content or "Deny" in messages[0].content
+        )  # sanity
 
         # Layer 2: WATCHOVER CONTEXT (semi-stable, contains user context).
         ctx = messages[1].content
@@ -796,20 +817,373 @@ class TestWatchoverMessageStructure:
         assert "be helpful" in ctx
         assert ctx.endswith("\n[WATCHOVER CONTEXT END]"), ctx
 
-        # Layer 3: RECENT MESSAGES (prefix-cached history block).
-        rec = messages[2].content
-        assert rec.startswith("[RECENT MESSAGES BEGIN]\n"), rec
-        assert rec.endswith("\n[RECENT MESSAGES END]"), rec
+        # No [CONVERSATION SNAPSHOT] layer (snapshot is empty on first call).
+        assert "[CONVERSATION SNAPSHOT]" not in messages[2].content
 
-        # Layer 4: WATCHOVER CHECK (per-call tool call to evaluate).
-        chk = messages[3].content
+        # Layer 4a: [start of recent messages] separator.
+        start_marker = messages[2].content
+        assert start_marker == "[start of recent messages]"
+
+        # Layer 4b: delta messages (empty on first call with empty messages).
+        # Layer 4c: [end of recent messages] separator.
+        # So delta block is just start-marker + end-marker (no delta msgs).
+        end_marker = messages[3].content
+        assert end_marker == "[end of recent messages]"
+
+        # Layer 5: WATCHOVER CHECK (per-call tool call to evaluate).
+        chk = messages[4].content
         assert chk.startswith("[WATCHOVER CHECK]\n"), chk
         assert "Tool: bash" in chk
-        assert '"command": "ls"' in chk or '"command":"ls"' in chk  # JSON args
+        assert '"command": "ls"' in chk or '"command":"ls"' in chk
         assert "Respond with Allowed or Deny" in chk
 
-    async def test_recent_messages_human_readable_format(self, monkeypatch):
-        """``_format_recent_messages`` emits ``[role]: content`` lines."""
+    async def test_snapshot_message_present_when_populated(self, monkeypatch):
+        """When ``_snapshot`` is set, the ``[CONVERSATION SNAPSHOT]`` message
+        IS present between Context and the start marker.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+            )
+            # Pre-populate the snapshot (bypasses LLM summarisation so the
+            # test focuses on the populated-snapshot code path).
+            evaluator._snapshot = "Agent asked for the file. Allowed."
+            evaluator._snapshot_turn = 1
+            await evaluator.evaluate(
+                tool_calls=[
+                    {"id": "tc-1", "name": "bash", "args": {"command": "ls"}}
+                ],
+                messages=[],
+                watchover_context="be helpful",
+            )
+
+        assert len(captured) == 1
+        messages = captured[0]
+
+        # Expected layout with snapshot populated:
+        #   [System, Context, Snapshot, start-marker, end-marker, Check]
+        assert len(messages) == 6, (
+            f"expected 6 messages (snapshot layer added), got {len(messages)}: "
+            f"{[type(m).__name__ for m in messages]}"
+        )
+        assert isinstance(messages[0], SystemMessage)
+        assert messages[1].content.startswith("[WATCHOVER CONTEXT]\n")
+
+        # Layer 3 is the snapshot.
+        snap = messages[2].content
+        assert snap.startswith("[CONVERSATION SNAPSHOT]\n")
+        assert "Agent asked for the file. Allowed." in snap
+        assert snap.endswith("\n[CONVERSATION SNAPSHOT END]")
+
+        # start-marker is now at index 3, end-marker at 4.
+        assert messages[3].content == "[start of recent messages]"
+        assert messages[4].content == "[end of recent messages]"
+        assert messages[5].content.startswith("[WATCHOVER CHECK]\n")
+
+    async def test_delta_preserves_original_types(self, monkeypatch):
+        """Delta messages are appended with their ORIGINAL types
+        (``HumanMessage``, ``AIMessage``, ``ToolMessage``) — not
+        reformatted into ``[role]: content`` text.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+            )
+            await evaluator.evaluate(
+                tool_calls=[
+                    {"id": "tc-1", "name": "bash", "args": {"command": "ls"}}
+                ],
+                messages=[
+                    HumanMessage(content="please list files"),
+                    AIMessage(content="ok, running ls"),
+                    ToolMessage(
+                        content="file1.txt\nfile2.txt",
+                        tool_call_id="abc-123",
+                    ),
+                ],
+                watchover_context="be helpful",
+            )
+
+        assert len(captured) == 1
+        messages = captured[0]
+
+        # Find the delta block between the start- and end-markers.
+        start_idx = end_idx = None
+        for i, m in enumerate(messages):
+            if isinstance(m, HumanMessage) and m.content == "[start of recent messages]":
+                start_idx = i
+            elif isinstance(m, HumanMessage) and m.content == "[end of recent messages]":
+                end_idx = i
+        assert start_idx is not None and end_idx is not None
+        assert end_idx == start_idx + 1 + 3, (
+            f"expected exactly 3 delta messages between markers, got "
+            f"{end_idx - start_idx - 1}"
+        )
+
+        delta_block = messages[start_idx + 1 : end_idx]
+        assert isinstance(delta_block[0], HumanMessage)
+        assert delta_block[0].content == "please list files"
+        assert isinstance(delta_block[1], AIMessage)
+        assert delta_block[1].content == "ok, running ls"
+        assert isinstance(delta_block[2], ToolMessage)
+        assert delta_block[2].content == "file1.txt\nfile2.txt"
+        assert delta_block[2].tool_call_id == "abc-123"
+
+        # Sanity: no [role]: content text wrapping inside the delta block.
+        for m in delta_block:
+            content = m.content
+            assert not (isinstance(content, str) and content.startswith("[human]:"))
+            assert not (isinstance(content, str) and content.startswith("[ai]:"))
+            assert not (isinstance(content, str) and content.startswith("[tool]:"))
+
+    async def test_delta_grows_across_calls(self, monkeypatch):
+        """``_delta_messages`` grows across ``evaluate()`` calls as new
+        messages arrive — only the tail beyond ``_last_seen_count`` is
+        absorbed.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+                # Disable snapshot regeneration so we can observe delta growth.
+                watcher_config={"delta_max_messages": 100},
+            )
+
+            # First call: 2 messages in conversation → delta gets 2 messages.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="hello"),
+                    AIMessage(content="hi"),
+                ],
+                watchover_context="ctx",
+            )
+            assert len(evaluator._delta_messages) == 2
+            assert evaluator._last_seen_count == 2
+            assert evaluator._snapshot == ""
+
+            # Second call: same messages → no new messages absorbed, delta
+            # stays at 2 (this verifies the _last_seen_count tracking).
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-2", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="hello"),
+                    AIMessage(content="hi"),
+                ],
+                watchover_context="ctx",
+            )
+            assert len(evaluator._delta_messages) == 2
+            assert evaluator._last_seen_count == 2
+
+            # Third call: 2 NEW messages appended → delta grows to 4.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-3", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="hello"),
+                    AIMessage(content="hi"),
+                    HumanMessage(content="what's in dir1?"),
+                    AIMessage(content="listing..."),
+                ],
+                watchover_context="ctx",
+            )
+            assert len(evaluator._delta_messages) == 4
+            assert evaluator._last_seen_count == 4
+
+    async def test_snapshot_regeneration_at_delta_max(self, monkeypatch):
+        """When ``_delta_messages`` exceeds ``_delta_max``, snapshot
+        regeneration fires and the delta buffer resets.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            # delta_max=2: as soon as the 3rd message is absorbed,
+            # ``len(_delta_messages) > _delta_max`` triggers regeneration.
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+                watcher_config={"delta_max_messages": 2},
+            )
+
+            # 3 messages → delta would be 3 > 2 → regeneration fires.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="a"),
+                    AIMessage(content="b"),
+                    HumanMessage(content="c"),
+                ],
+                watchover_context="ctx",
+            )
+
+            # The mock returned "Allowed" — the regenerator treats ANY
+            # LLM response as a snapshot (it doesn't try to parse).
+            assert evaluator._snapshot == "Allowed"
+            assert evaluator._snapshot_turn == 1
+            # Delta is bounded to the LAST ``_delta_max`` messages (the
+            # sliding-window tail), not the entire overflow. With
+            # ``_delta_max=2`` and 3 input messages, the delta keeps the
+            # last 2 ("b" and "c") — "a" has been absorbed by the snapshot.
+            assert len(evaluator._delta_messages) == 2
+            assert evaluator._delta_messages[0].content == "b"
+            assert evaluator._delta_messages[1].content == "c"
+
+    async def test_delta_bounded_after_oversized_initial(self, monkeypatch):
+        """First call exceeds ``_delta_max`` → snapshot regenerates and the
+        delta is BOUND to the last ``_delta_max`` messages (not all of the
+        overflow). Regression guard for the unbounded-delta bug where the
+        delta kept ALL new messages and triggered regeneration on every
+        subsequent call.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+                watcher_config={"delta_max_messages": 3},
+            )
+
+            # 5 messages on the first call → 5 > 3 → regeneration fires.
+            input_messages = [
+                HumanMessage(content="msg-0"),
+                AIMessage(content="msg-1"),
+                HumanMessage(content="msg-2"),
+                AIMessage(content="msg-3"),
+                HumanMessage(content="msg-4"),
+            ]
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=input_messages,
+                watchover_context="ctx",
+            )
+
+            # Snapshot regeneration happened (the mock LLM returns "Allowed"
+            # for every invoke — both the per-tool-check and the regenerate).
+            assert evaluator._snapshot == "Allowed"
+            assert evaluator._snapshot_turn == 1
+
+            # Delta is bounded to the last ``_delta_max`` (3) messages —
+            # NOT all 5 overflow messages.
+            assert len(evaluator._delta_messages) == 3
+            # And it's specifically the TAIL of the input.
+            assert evaluator._delta_messages[0].content == "msg-2"
+            assert evaluator._delta_messages[1].content == "msg-3"
+            assert evaluator._delta_messages[2].content == "msg-4"
+
+    async def test_exactly_at_delta_max_does_not_regenerate(self, monkeypatch):
+        """Exactly ``_delta_max`` messages is the boundary — it does NOT
+        trigger regeneration. The trigger condition is ``len > _delta_max``
+        (strict), so the snapshot stays empty and the delta holds the full
+        batch.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, _captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+                watcher_config={"delta_max_messages": 3},
+            )
+
+            # Exactly 3 messages on first call — at the boundary, NOT over.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="a"),
+                    AIMessage(content="b"),
+                    HumanMessage(content="c"),
+                ],
+                watchover_context="ctx",
+            )
+
+            # No regeneration: snapshot stays empty, _snapshot_turn stays 0.
+            assert evaluator._snapshot == ""
+            assert evaluator._snapshot_turn == 0
+            # Delta holds all 3 messages (no truncation at the boundary).
+            assert len(evaluator._delta_messages) == 3
+            assert evaluator._delta_messages[0].content == "a"
+            assert evaluator._delta_messages[1].content == "b"
+            assert evaluator._delta_messages[2].content == "c"
+
+    async def test_no_repeated_regeneration(self, monkeypatch):
+        """After the first call regenerates and bounds the delta, the
+        NEXT call (with no new messages) must NOT re-trigger regeneration.
+        Regression guard for the unbounded-delta bug: previously the delta
+        retained ALL overflow messages, so the next call would immediately
+        regenerate again — forever.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, _captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+                watcher_config={"delta_max_messages": 2},
+            )
+
+            # First call: 5 messages with _delta_max=2 → regeneration fires,
+            # delta bounded to the last 2.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="a"),
+                    AIMessage(content="b"),
+                    HumanMessage(content="c"),
+                    AIMessage(content="d"),
+                    HumanMessage(content="e"),
+                ],
+                watchover_context="ctx",
+            )
+            assert evaluator._snapshot == "Allowed"
+            assert evaluator._snapshot_turn == 1
+            assert len(evaluator._delta_messages) == 2
+
+            # Second call: SAME messages (no new tail). The delta is already
+            # bounded to 2 (== _delta_max), so the strict-greater trigger
+            # ``len > _delta_max`` is false → no regeneration.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-2", "name": "bash", "args": {}}],
+                messages=[
+                    HumanMessage(content="a"),
+                    AIMessage(content="b"),
+                    HumanMessage(content="c"),
+                    AIMessage(content="d"),
+                    HumanMessage(content="e"),
+                ],
+                watchover_context="ctx",
+            )
+
+            # _snapshot_turn did NOT increment — proves no second
+            # regeneration was triggered by the bug.
+            assert evaluator._snapshot_turn == 1
+            assert len(evaluator._delta_messages) == 2
+
+    async def test_separators_present(self, monkeypatch):
+        """Verify the ``[start of recent messages]`` and
+        ``[end of recent messages]`` markers surround the delta block.
+        """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
         manager = make_manager()
@@ -821,24 +1195,40 @@ class TestWatchoverMessageStructure:
             )
             await evaluator.evaluate(
                 tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
-                messages=[HumanMessage(content="hello"), AIMessage(content="hi there")],
-                watchover_context="any",
+                messages=[
+                    HumanMessage(content="first"),
+                    AIMessage(content="second"),
+                ],
+                watchover_context="ctx",
             )
 
-        assert len(captured) == 1
-        recent_block = captured[0][2].content
-        assert "[human]: hello" in recent_block
-        assert "[ai]: hi there" in recent_block
-        # The block must START and END with the markers — no JSON wrapping.
-        assert recent_block.startswith("[RECENT MESSAGES BEGIN]\n")
-        assert recent_block.endswith("\n[RECENT MESSAGES END]")
+        messages = captured[0]
+        all_content = "\n".join(
+            m.content if isinstance(m.content, str) else str(m.content)
+            for m in messages
+        )
+        assert "[start of recent messages]" in all_content
+        assert "[end of recent messages]" in all_content
+
+        # The markers appear AS HUMANMESSAGES (not as text inside another
+        # message), sandwiching the delta block.
+        marker_indices = [
+            i
+            for i, m in enumerate(messages)
+            if isinstance(m, HumanMessage)
+            and m.content in ("[start of recent messages]", "[end of recent messages]")
+        ]
+        assert len(marker_indices) == 2, (
+            f"expected exactly 2 marker HumanMessages, found at indices {marker_indices}"
+        )
 
     async def test_stable_layers_reused_across_batch(self, monkeypatch):
-        """Context + recent layers are the SAME object across calls in a batch.
+        """Layers 1-4 + separators are the SAME object instances across
+        calls in a batch; only ``check_message`` differs.
 
-        Verifies the optimisation that the stable layers (system prompt,
-        context, recent messages) are built ONCE outside the per-call loop
-        and REUSED — only the per-call ``[WATCHOVER CHECK]`` is rebuilt.
+        Mirrors the old optimisation: the provider's prefix cache hits on
+        the stable prefix layers, so only the per-call
+        ``[WATCHOVER CHECK]`` is fully uncached.
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
@@ -855,35 +1245,67 @@ class TestWatchoverMessageStructure:
                     {"id": "tc-2", "name": "bash", "args": {"command": "pwd"}},
                     {"id": "tc-3", "name": "bash", "args": {"command": "whoami"}},
                 ],
-                messages=[],
+                # Non-empty delta so Layer 4 carries actual message objects
+                # — the prefix-cache reuse optimisation is meaningful only
+                # when there ARE delta messages to share across calls.
+                messages=[
+                    HumanMessage(content="hello"),
+                    AIMessage(content="hi"),
+                ],
                 watchover_context="be helpful",
             )
 
         assert len(captured) == 3, "expected one invoke per tool call"
 
-        # [WATCHOVER CONTEXT] HumanMessage must be the SAME object across all 3 calls
-        # (proves the stable layer is built once outside the per-call loop, not
-        # rebuilt per tool call).
+        # Each captured entry should have 7 messages on first call (no snapshot):
+        # [System, Context, start-marker, delta[0], delta[1], end-marker, Check].
+        for i in range(3):
+            assert len(captured[i]) == 7, (
+                f"call {i}: expected 7 messages, got {len(captured[i])}"
+            )
+
+        # Layer 1 (SystemMessage) MUST be the same object across calls.
+        for i in range(1, 3):
+            assert captured[i][0] is captured[0][0], (
+                f"SystemMessage at call {i} is not the same object as call 0"
+            )
+
+        # Layer 2 (WATCHOVER CONTEXT) MUST be the same object across calls.
         for i in range(1, 3):
             assert captured[i][1] is captured[0][1], (
                 f"[WATCHOVER CONTEXT] at call {i} is not the same object as call 0 — "
                 "stable layer is being rebuilt per call"
             )
-            # Sanity: the content starts with the WATCHOVER CONTEXT marker.
             assert captured[i][1].content.startswith("[WATCHOVER CONTEXT]\n")
 
-        # [RECENT MESSAGES BEGIN] HumanMessage must be the SAME object across
-        # all 3 calls (same optimisation rationale — recent history is
-        # prefix-cached and built once).
+        # Start- and end-markers MUST be the same objects across calls.
         for i in range(1, 3):
             assert captured[i][2] is captured[0][2], (
-                f"[RECENT MESSAGES BEGIN] at call {i} is not the same object as call 0 — "
-                "stable layer is being rebuilt per call"
+                f"[start of recent messages] at call {i} is not the same object"
             )
-            assert captured[i][2].content.startswith("[RECENT MESSAGES BEGIN]\n")
+            assert captured[i][5] is captured[0][5], (
+                f"[end of recent messages] at call {i} is not the same object"
+            )
+
+        # Layer 4 (delta messages) MUST be the same object instances across
+        # all tool-call captures in the batch — the prefix cache can only
+        # reuse them if the provider sees literally identical message
+        # objects, not rebuilt copies.
+        for i in range(1, 3):
+            assert captured[i][3] is captured[0][3], (
+                f"delta[0] at call {i} is not the same object as call 0 — "
+                "Layer 4 is being rebuilt per call"
+            )
+            assert captured[i][4] is captured[0][4], (
+                f"delta[1] at call {i} is not the same object as call 0 — "
+                "Layer 4 is being rebuilt per call"
+            )
+        # Delta preserves original types.
+        assert isinstance(captured[0][3], HumanMessage)
+        assert isinstance(captured[0][4], AIMessage)
 
         # Per-call [WATCHOVER CHECK] messages MUST differ (different tool args).
-        check_contents = [captured[i][3].content for i in range(3)]
+        check_contents = [captured[i][6].content for i in range(3)]
         assert check_contents[0] != check_contents[1]
         assert check_contents[1] != check_contents[2]
         assert check_contents[0] != check_contents[2]
@@ -893,7 +1315,9 @@ class TestWatchoverMessageStructure:
         assert '"command": "whoami"' in check_contents[2] or '"command":"whoami"' in check_contents[2]
 
     async def test_empty_messages_does_not_break_recent_block(self, monkeypatch):
-        """Empty ``messages`` produces an empty recent-messages block (no crash)."""
+        """Empty ``messages`` produces an empty delta block — start- and
+        end-markers are still present (no crash, no snapshot, no delta).
+        """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
         manager = make_manager()
@@ -908,8 +1332,12 @@ class TestWatchoverMessageStructure:
                 messages=[],
                 watchover_context="any",
             )
-        recent_block = captured[0][2].content
-        assert recent_block == "[RECENT MESSAGES BEGIN]\n\n[RECENT MESSAGES END]"
+        messages = captured[0]
+        # 5-message layout: System, Context, start, end, Check.
+        assert len(messages) == 5
+        assert messages[2].content == "[start of recent messages]"
+        assert messages[3].content == "[end of recent messages]"
+        assert messages[4].content.startswith("[WATCHOVER CHECK]\n")
 
 
 # =============================================================================

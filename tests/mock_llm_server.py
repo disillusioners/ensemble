@@ -112,10 +112,16 @@ class WatchoverTestState:
         self.watcher_call_count: int = 0
         self.builder_call_count: int = 0
         self.agent_call_count: int = 0
+        self.snapshot_call_count: int = 0
         self.scenario: str = "allow"
         self.active: bool = False  # set True when a scenario is activated via /scenario
         self._watcher_call_index: int = 0  # internal counter within scenario
         self._agent_call_index: int = 0
+        # Captured watcher-evaluator payloads (list of message dicts) so E2E
+        # tests can assert on the 5-layer message structure. Capped to avoid
+        # unbounded growth; older entries are dropped FIFO.
+        self.captured_watcher_requests: list[list[dict]] = []
+        self._capture_cap: int = 20
 
     def set_scenario(self, scenario: str) -> str:
         """Switch scenario and reset internal counters. Returns old scenario."""
@@ -125,9 +131,30 @@ class WatchoverTestState:
         self.watcher_call_count = 0
         self.builder_call_count = 0
         self.agent_call_count = 0
+        self.snapshot_call_count = 0
         self._watcher_call_index = 0
         self._agent_call_index = 0
+        self.captured_watcher_requests = []
         return old
+
+    def capture_watcher_request(self, messages: list) -> None:
+        """Append a snapshot of the watcher evaluator's message payload.
+
+        Each message is serialized to ``{"role": ..., "content": ...}`` (and
+        ``tool_calls`` when present) so the E2E tests can inspect the 5-layer
+        structure without needing the original Pydantic ``Message`` objects.
+        """
+        serialised: list[dict] = []
+        for msg in messages:
+            entry = {"role": msg.role, "content": msg.content or ""}
+            if msg.tool_calls is not None:
+                entry["tool_calls"] = msg.tool_calls
+            if msg.tool_call_id is not None:
+                entry["tool_call_id"] = msg.tool_call_id
+            serialised.append(entry)
+        self.captured_watcher_requests.append(serialised)
+        if len(self.captured_watcher_requests) > self._capture_cap:
+            self.captured_watcher_requests = self.captured_watcher_requests[-self._capture_cap:]
 
 
 watchover_state = WatchoverTestState()
@@ -140,8 +167,10 @@ def reset_watchover_state() -> None:
     watchover_state.watcher_call_count = 0
     watchover_state.builder_call_count = 0
     watchover_state.agent_call_count = 0
+    watchover_state.snapshot_call_count = 0
     watchover_state._watcher_call_index = 0
     watchover_state._agent_call_index = 0
+    watchover_state.captured_watcher_requests = []
 
 
 def build_watchover_response(
@@ -204,16 +233,31 @@ def _extract_message_text(req: ChatCompletionRequest) -> str:
 
 
 def _detect_call_type(req: ChatCompletionRequest) -> str:
-    """Classify an incoming LLM call into one of: watcher, builder, agent.
+    """Classify an incoming LLM call into one of: watcher, builder, agent, snapshot.
 
     Detection priority:
-      1. Any message contains '[WATCHOVER CHECK]' -> watcher evaluator
-      2. Any message contains '[WATCHOVER CONTEXT]' -> watcher evaluator
-      3. System message contains 'security-profile compiler',
+      1. '[CONVERSATION SNAPSHOT]' in any message AND 'summarize' in system
+         message -> snapshot (snapshot regeneration call). Checked FIRST
+         because snapshot payloads may also carry watchover-related text.
+      2. Any message contains '[WATCHOVER CHECK]' -> watcher evaluator
+      3. Any message contains '[WATCHOVER CONTEXT]' -> watcher evaluator
+      4. System message contains 'security-profile compiler',
          'Watcher Context Builder', or 'Build the watchover context' -> builder
-      4. Otherwise -> agent
+      5. Otherwise -> agent
     """
     text = _extract_message_text(req)
+
+    # Snapshot detection: requires BOTH the layer-3 marker AND a 'summarize'
+    # cue in the system message. Checked first so watchover text inside a
+    # snapshot payload does not get misclassified as a watcher call.
+    has_snapshot_marker = "[conversation snapshot]" in text
+    has_summarize_cue = False
+    for msg in req.messages:
+        if msg.role == "system" and msg.content and "summarize" in msg.content.lower():
+            has_summarize_cue = True
+            break
+    if has_snapshot_marker and has_summarize_cue:
+        return "snapshot"
 
     if "[watchover check]" in text:
         return "watcher"
@@ -246,8 +290,8 @@ def _has_watchover_markers(req: ChatCompletionRequest) -> bool:
     """Decide whether a request should be routed to the watchover handler.
 
     True when:
-      - The request carries explicit watchover markers (watcher evaluator
-        or context builder calls), OR
+      - The request carries explicit watchover markers (watcher evaluator,
+        context builder, or snapshot regeneration calls), OR
       - A scenario has been explicitly activated via ``POST /scenario`` and
         the request is an agent call (no markers but scenario expects agent
         responses).
@@ -257,7 +301,7 @@ def _has_watchover_markers(req: ChatCompletionRequest) -> bool:
     mock path.
     """
     call_type = _detect_call_type(req)
-    if call_type in ("watcher", "builder"):
+    if call_type in ("watcher", "builder", "snapshot"):
         return True
     # Agent calls route to the watchover handler only while a scenario is active
     return watchover_state.active
@@ -268,9 +312,29 @@ def _handle_watchover_request(req: ChatCompletionRequest) -> JSONResponse | Stre
     call_type = _detect_call_type(req)
     scenario = watchover_state.scenario
 
+    # ---- Snapshot regeneration -------------------------------------------
+    # Snapshot calls summarize recent conversation history into a fresh
+    # guardrail payload. Always deterministic regardless of scenario.
+    if call_type == "snapshot":
+        watchover_state.snapshot_call_count += 1
+        content = (
+            "Instance is performing kubectl operations on k3s cluster. "
+            "Previous commands: get nodes, get pods. All read-only so far."
+        )
+        if req.stream:
+            return StreamingResponse(
+                stream_response(req.model, "", content, "", req),
+                media_type="text/event-stream",
+            )
+        return build_watchover_response(content, None, req.model, "stop")
+
     # ---- Watcher evaluator ----------------------------------------------
     if call_type == "watcher":
         watchover_state.watcher_call_count += 1
+        # Capture the full message payload so E2E tests can verify the
+        # 5-layer message architecture (system, context, snapshot, delta,
+        # check). Serialised before any counter/index mutation.
+        watchover_state.capture_watcher_request(req.messages)
         idx = watchover_state._watcher_call_index
         watchover_state._watcher_call_index += 1
 
@@ -368,7 +432,27 @@ async def stats():
         "watcher_call_count": watchover_state.watcher_call_count,
         "builder_call_count": watchover_state.builder_call_count,
         "agent_call_count": watchover_state.agent_call_count,
+        "snapshot_call_count": watchover_state.snapshot_call_count,
         "current_scenario": watchover_state.scenario,
+        "captured_watcher_requests": watchover_state.captured_watcher_requests,
+    }
+
+
+@app.get("/requests")
+async def requests():
+    """Return captured watcher-evaluator payloads and call-type counters.
+
+    Each entry in ``watcher_requests`` is the full message list
+    (``[{"role": ..., "content": ...}, ...]``) the daemon sent to the
+    watcher evaluator. This lets E2E tests assert on the 5-layer message
+    architecture without coupling to the internal ``Message`` model.
+    """
+    return {
+        "watcher_requests": watchover_state.captured_watcher_requests,
+        "watcher_call_count": watchover_state.watcher_call_count,
+        "builder_call_count": watchover_state.builder_call_count,
+        "snapshot_call_count": watchover_state.snapshot_call_count,
+        "agent_call_count": watchover_state.agent_call_count,
     }
 
 
