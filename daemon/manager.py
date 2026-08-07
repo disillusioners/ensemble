@@ -2765,6 +2765,7 @@ class InstanceManager:
         *,
         requirement: str | None = None,
         user_context: str | None = None,
+        resume_message: str | None = None,
     ) -> dict[str, Any]:
         """Orchestrate watchover activation: pause → context → flag → resume.
 
@@ -2779,6 +2780,11 @@ class InstanceManager:
             user_context: Optional pre-built context string. Production
                 callers pass ``None`` and let the service build the
                 context via ``ContextCompactor``; tests pass a fixture.
+            resume_message: Optional custom message to deliver to the
+                target instance on the post-activation resume. The
+                target receives ``resume_message or "continue"``;
+                cascade children resume silently with ``"resume"``.
+                ``None`` (default) → target gets ``"continue"``.
 
         Returns:
             Dict with ``instance_id``, ``watchover_enabled``,
@@ -2793,6 +2799,7 @@ class InstanceManager:
             instance_id,
             requirement=requirement,
             user_context=user_context,
+            resume_message=resume_message,
         )
 
     async def disable_watchover_lifecycle(self, instance_id: str) -> dict[str, Any]:
