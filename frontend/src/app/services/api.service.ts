@@ -119,6 +119,16 @@ export class ApiService {
   }
 
   // Watchover — toggle security monitoring on/off for an instance.
+  //
+  // Body shape is { enabled, requirement, context, resume_message }.
+  // ``resume_message`` is forwarded to the watchover activation
+  // lifecycle so the target instance receives the operator-supplied
+  // message on the post-activation resume (or "continue" when null).
+  // Out of scope to surface a UI prompt for the message — the field
+  // is sent as ``null`` for now and the backend uses the default.
+  // The field is included in the body explicitly so the backend
+  // contract is stable and a future UI prompt can drop in without a
+  // body-shape change.
   setWatchover(
     instanceId: string,
     enabled: boolean,
@@ -126,7 +136,12 @@ export class ApiService {
   ): Observable<{ watchover_enabled: boolean; instance_id: string }> {
     return this.http.post<{ watchover_enabled: boolean; instance_id: string }>(
       `${this.API_BASE}/instances/${instanceId}/watchover`,
-      { enabled, requirement: requirement ?? null, context: null }
+      {
+        enabled,
+        requirement: requirement ?? null,
+        context: null,
+        resume_message: null,
+      }
     );
   }
 

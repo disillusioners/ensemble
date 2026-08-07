@@ -79,7 +79,27 @@ def make_full_manager() -> MagicMock:
     """
     manager = MagicMock()
     manager.pause_instance_cascade = AsyncMock()
-    manager.resume_instance_cascade = AsyncMock()
+    # ``resume_instance_cascade`` returns a dict with
+    # ``target_id`` and ``resumed_ids`` so the watchover resume
+    # helper can fan-out ``resume_processing_job`` over every
+    # resumed instance. Default = single-instance cascade (only
+    # the target, no children). Tests that exercise children
+    # override the return value.
+    manager.resume_instance_cascade = AsyncMock(
+        return_value={"target_id": "iid", "resumed_ids": ["iid"], "skipped_ids": []}
+    )
+    # ``resume_processing_job`` returns a non-None dict on the
+    # success path; returning ``None`` exercises the
+    # ``enqueue_message`` fallback in the helper. Tests that need
+    # either path set the return value explicitly.
+    manager.resume_processing_job = AsyncMock(
+        return_value={"status": "resumed", "instance_id": "iid"}
+    )
+    # ``enqueue_message`` is the fallback path when
+    # ``resume_processing_job`` returns None. Default = OK.
+    manager.enqueue_message = AsyncMock(
+        return_value=MagicMock(message_id="m1", job_id="j1")
+    )
     manager.wait_for_instance_quiescent = AsyncMock(return_value=True)
     manager.enable_watchover = MagicMock()
     manager.disable_watchover = MagicMock()
@@ -106,6 +126,12 @@ def make_full_manager() -> MagicMock:
 
     # Default — repo with no instance.
     manager._instance_repository = MagicMock()
+
+    # Default — message queue repository. The watchover resume
+    # helper dedupes against pending messages on this repo. Tests
+    # that need a non-empty queue override ``list_pending``.
+    manager._queue_repository = MagicMock()
+    manager._queue_repository.list_pending = MagicMock(return_value=[])
     return manager
 
 
@@ -1554,9 +1580,32 @@ class TestManagerLifecycleFacade:
         )
 
         manager._watchover_service.activate_watchover.assert_awaited_once_with(
-            "iid", requirement="r", user_context="c"
+            "iid",
+            requirement="r",
+            user_context="c",
+            resume_message=None,
         )
         assert result["watchover_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_enable_lifecycle_threads_resume_message(self):
+        """``resume_message`` is forwarded to the service. (resume-doesn't-restart-graph fix)"""
+        manager = make_bare_manager()
+        manager._watchover_service = MagicMock()
+        manager._watchover_service.activate_watchover = AsyncMock(
+            return_value={"instance_id": "iid", "watchover_enabled": True}
+        )
+
+        await manager.enable_watchover_lifecycle(
+            "iid", requirement="r", user_context="c", resume_message="go"
+        )
+
+        manager._watchover_service.activate_watchover.assert_awaited_once_with(
+            "iid",
+            requirement="r",
+            user_context="c",
+            resume_message="go",
+        )
 
     @pytest.mark.asyncio
     async def test_disable_lifecycle_delegates_to_service(self):
@@ -1605,7 +1654,10 @@ class TestWatchoverEndpoint:
         assert result["watchover_enabled"] is True
         assert result["instance_id"] == "iid"
         manager.enable_watchover_lifecycle.assert_awaited_once_with(
-            "iid", requirement="r", user_context=None
+            "iid",
+            requirement="r",
+            user_context=None,
+            resume_message=None,
         )
 
     @pytest.mark.asyncio
@@ -1700,8 +1752,488 @@ class TestWatchoverEndpoint:
         await toggle_watchover("iid", body, request)
 
         manager.enable_watchover_lifecycle.assert_awaited_once_with(
-            "iid", requirement="r", user_context="pre-built ctx"
+            "iid",
+            requirement="r",
+            user_context="pre-built ctx",
+            resume_message=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_enable_forwards_resume_message(self):
+        """``resume_message`` on the body is forwarded to the lifecycle. (resume-doesn't-restart-graph fix)"""
+        from daemon.routers.instances import (
+            WatchoverRequest,
+            toggle_watchover,
+        )
+
+        manager = MagicMock()
+        manager.is_write_paused = False
+        manager.get_instance = AsyncMock()
+        manager.enable_watchover_lifecycle = AsyncMock(
+            return_value={"instance_id": "iid", "watchover_enabled": True}
+        )
+
+        body = WatchoverRequest(
+            enabled=True, requirement="r", resume_message="custom"
+        )
+        request = MagicMock()
+        request.app.state.manager = manager
+
+        await toggle_watchover("iid", body, request)
+
+        manager.enable_watchover_lifecycle.assert_awaited_once_with(
+            "iid",
+            requirement="r",
+            user_context=None,
+            resume_message="custom",
+        )
+
+
+# =============================================================================
+# Resume-doesn't-restart-graph fix (2026-08-07)
+# =============================================================================
+#
+# Bug: ``watchover_service.activate_watchover`` (and
+# ``deactivate_watchover``) called only
+# ``manager.resume_instance_cascade`` — which only flips DB status
+# PAUSED → RUNNING. The graph re-trigger is the SEPARATE
+# ``manager.resume_processing_job`` call. Every other resume path in
+# the codebase pairs both calls (``/resume``, ``/answer``,
+# ``/question/dismiss``, ``POST /messages``-on-paused). The watchover
+# resume was the lone exception, leaving the instance in ``RUNNING``
+# with no Task being processed.
+#
+# Fix: a shared helper ``_resume_with_graph_restart`` pairs the
+# cascade with the graph re-trigger, falls back to
+# ``enqueue_message`` when ``resume_processing_job`` returns None,
+# and dedupes against a pending "continue" already in the message
+# queue so a double-tap does not enqueue a second copy of the same
+# message.
+
+
+def _queue_msg(content: str) -> MagicMock:
+    """Build a mock ``MessageQueue`` row with ``.content``."""
+    msg = MagicMock()
+    msg.content = content
+    return msg
+
+
+class TestResumeWithGraphRestart:
+    """The ``_resume_with_graph_restart`` helper at all 4 watchover resume sites."""
+
+    @pytest.mark.asyncio
+    async def test_activate_success_calls_resume_processing_job_after_cascade(self):
+        """The helper calls ``resume_processing_job`` AFTER the cascade.
+
+        Regression test for the resume-doesn't-restart-graph bug —
+        the watchover resume previously called only the cascade,
+        leaving the instance in RUNNING with no Task being
+        processed. The fix pairs both calls so the graph actually
+        restarts.
+        """
+        manager = make_full_manager()
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        # Shared ordering signal: side_effect on both mocks appends
+        # to a single list in the order the methods are awaited. This
+        # gives us a real ordering assertion (the previous
+        # ``rpj_call_order`` snippet only concatenated
+        # ``await_args_list`` and never asserted on it — a regression
+        # that called ``resume_processing_job`` BEFORE the cascade
+        # would still pass). We keep the mocks' default return values
+        # so the success path is otherwise unchanged.
+        call_order: list[str] = []
+
+        async def _track_cascade(*args, **kwargs):
+            call_order.append("cascade")
+            return {"target_id": "iid", "resumed_ids": ["iid"], "skipped_ids": []}
+
+        async def _track_rpj(*args, **kwargs):
+            call_order.append("rpj")
+            return {"status": "resumed", "instance_id": "iid"}
+
+        manager.resume_instance_cascade.side_effect = _track_cascade
+        manager.resume_processing_job.side_effect = _track_rpj
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        # Cascade was called exactly once.
+        manager.resume_instance_cascade.assert_awaited_once_with("iid")
+        # Graph re-trigger was called exactly once.
+        manager.resume_processing_job.assert_awaited_once()
+        # SSE was emitted last (on success).
+        assert manager._live_hub.stream_status_change.await_count == 1
+        # Real ordering assertion: cascade must precede resume_processing_job.
+        # If a regression causes the helper to call resume_processing_job
+        # before the cascade, ``call_order.index("rpj")`` will be < the
+        # cascade index and this assertion fails.
+        assert call_order.index("cascade") < call_order.index("rpj"), (
+            f"resume_processing_job must be called AFTER resume_instance_cascade; "
+            f"actual call order: {call_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_activate_success_target_gets_continue_children_get_resume(self):
+        """Target instance gets the resume_message; cascade children resume silently.
+
+        Mirrors the fan-out in ``POST /resume`` and ``POST /answer``:
+        target gets the user-supplied message (or ``"continue"``
+        default), children get the fixed token ``"resume"`` and
+        ``silent=True`` so their checkpoint is replayed without a
+        new message.
+        """
+        manager = make_full_manager()
+        # Cascade returns 3 resumed instances — 1 target + 2 children.
+        manager.resume_instance_cascade.return_value = {
+            "target_id": "iid",
+            "resumed_ids": ["iid", "child-1", "child-2"],
+            "skipped_ids": [],
+        }
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        # 3 instances resumed → 3 calls to resume_processing_job.
+        assert manager.resume_processing_job.await_count == 3
+
+        # Build a {(instance_id, message, silent): call} map.
+        calls = {}
+        for c in manager.resume_processing_job.await_args_list:
+            # Args: (instance_id, message, silent) — but the
+            # helper passes silent= as kwarg, so look at kwargs.
+            args, kwargs = c.args, c.kwargs
+            iid = args[0] if args else kwargs.get("instance_id")
+            msg = args[1] if len(args) > 1 else kwargs.get("message")
+            silent = kwargs.get("silent", False)
+            calls[iid] = (msg, silent)
+
+        # Target gets "continue" (default — no resume_message passed).
+        assert calls["iid"] == ("continue", False)
+        # Children get "resume" + silent=True.
+        assert calls["child-1"] == ("resume", True)
+        assert calls["child-2"] == ("resume", True)
+
+    @pytest.mark.asyncio
+    async def test_activate_success_target_gets_resume_message_when_provided(self):
+        """``resume_message`` arg is forwarded to the target's resume_processing_job call.
+
+        Threads through ``activate_watchover(..., resume_message=...)``:
+        target receives the user-supplied string instead of the
+        default ``"continue"``; children are unaffected.
+        """
+        manager = make_full_manager()
+        manager.resume_instance_cascade.return_value = {
+            "target_id": "iid",
+            "resumed_ids": ["iid", "child-1"],
+            "skipped_ids": [],
+        }
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover(
+            "iid",
+            requirement="r",
+            user_context="prebuilt",
+            resume_message="proceed with care",
+        )
+
+        # Two resumed → two calls.
+        assert manager.resume_processing_job.await_count == 2
+        target_call = next(
+            c for c in manager.resume_processing_job.await_args_list
+            if (c.args[0] if c.args else c.kwargs.get("instance_id")) == "iid"
+        )
+        target_msg = (
+            target_call.args[1]
+            if len(target_call.args) > 1
+            else target_call.kwargs.get("message")
+        )
+        assert target_msg == "proceed with care"
+
+    @pytest.mark.asyncio
+    async def test_activate_enqueue_fallback_when_resume_processing_job_returns_none(self):
+        """When ``resume_processing_job`` returns None, ``enqueue_message`` fires.
+
+        Mirrors the F10 ``api_resume_fallback`` path in
+        ``daemon/routers/messages.py``: the selector returns no
+        handle (e.g. WATCHOVER_SETUP did not persist a
+        ``resume_target_turn_id`` because the task was still
+        PENDING when pause fired). The fallback enqueues the
+        message directly via the message queue so the user's
+        intent is not silently dropped.
+        """
+        manager = make_full_manager()
+        # Selector returns None → enqueue_message fallback path.
+        manager.resume_processing_job.return_value = None
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        # resume_processing_job was called.
+        manager.resume_processing_job.assert_awaited_once()
+        # enqueue_message was called as the fallback.
+        manager.enqueue_message.assert_awaited_once()
+        enq_kwargs = manager.enqueue_message.call_args.kwargs
+        assert enq_kwargs["message"] == "continue"
+        assert enq_kwargs["source"] == "cascade_resume"
+
+    @pytest.mark.asyncio
+    async def test_activate_non_target_child_with_none_resume_skips_enqueue(self):
+        """When ``resume_processing_job`` returns None for a NON-TARGET child,
+        ``enqueue_message`` is NOT called for that child.
+
+        Mirrors the ``if is_target:`` gate in
+        ``daemon/routers/messages.py:248`` — the watchover resume
+        helper must match that gate. Non-target cascade children are
+        silent (§9.3 ``internal_child_noop`` contract in
+        ``daemon/manager.py``); fabricating a Task for them by
+        falling through to ``enqueue_message`` would violate the
+        silent-resume contract. The target's fallback enqueue is
+        preserved (the previous test's coverage); the fix is the
+        non-target gate.
+        """
+        manager = make_full_manager()
+        # Cascade returns 1 target + 2 children.
+        manager.resume_instance_cascade.return_value = {
+            "target_id": "iid",
+            "resumed_ids": ["iid", "child-1", "child-2"],
+            "skipped_ids": [],
+        }
+        # resume_processing_job returns None for ALL resumed
+        # instances — exercises the fallback enqueue path on the
+        # target and the silent-skip path on the children.
+        manager.resume_processing_job.return_value = None
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        # resume_processing_job was called for all 3 instances
+        # (target + 2 children).
+        assert manager.resume_processing_job.await_count == 3
+        # enqueue_message was called ONLY for the target. The two
+        # non-target children that returned None must NOT have
+        # triggered a fallback enqueue (silent-resume contract).
+        manager.enqueue_message.assert_awaited_once()
+        enq_kwargs = manager.enqueue_message.call_args.kwargs
+        assert enq_kwargs["instance_id"] == "iid"
+        assert enq_kwargs["message"] == "continue"
+        assert enq_kwargs["source"] == "cascade_resume"
+        # No enqueue_message call for child-1 or child-2.
+        called_iids = [
+            (c.args[0] if c.args else c.kwargs.get("instance_id"))
+            for c in manager.enqueue_message.await_args_list
+        ]
+        assert "child-1" not in called_iids
+        assert "child-2" not in called_iids
+
+    @pytest.mark.asyncio
+    async def test_activate_dedupes_against_pending_resume_message(self):
+        """When a "continue" is already pending, the enqueue fallback is skipped.
+
+        The duplicate-message prevention: if the message queue
+        already has a "continue" (or "resume") pending for the
+        instance, do NOT enqueue a second copy. The dedup check is
+        case-insensitive substring match on the content.
+        """
+        manager = make_full_manager()
+        manager.resume_processing_job.return_value = None
+        # Pending message: a "continue" already in the queue.
+        manager._queue_repository.list_pending.return_value = [
+            _queue_msg("please continue from where you left off")
+        ]
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        # resume_processing_job was called (it returned None).
+        manager.resume_processing_job.assert_awaited_once()
+        # enqueue_message was NOT called because a "continue" is
+        # already pending — dedup hit.
+        manager.enqueue_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_dedup_against_resume_message_variant(self):
+        """Dedup also catches a custom ``resume_message`` already in the queue.
+
+        The candidate-message parameter is matched: a pending
+        message containing the exact candidate string is treated
+        as a duplicate even if it does not literally say
+        "continue" or "resume".
+        """
+        manager = make_full_manager()
+        manager.resume_processing_job.return_value = None
+        manager._queue_repository.list_pending.return_value = [
+            _queue_msg("proceed with care please")
+        ]
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover(
+            "iid",
+            requirement="r",
+            user_context="prebuilt",
+            resume_message="proceed with care",
+        )
+
+        manager.enqueue_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_enqueue_fires_when_no_pending_message(self):
+        """No pending message → enqueue fallback runs as expected.
+
+        Counterpart to the dedup test: when the queue is empty,
+        the fallback enqueue is NOT blocked.
+        """
+        manager = make_full_manager()
+        manager.resume_processing_job.return_value = None
+        manager._queue_repository.list_pending.return_value = []  # empty
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_activate_dedup_failure_skips_dedup_not_resume(self):
+        """When ``list_pending`` raises, dedup is skipped (resume proceeds).
+
+        Conservative on query failure: a transient DB error must
+        not block the resume. False negatives (skipping dedup
+        when a pending message exists) are preferable to false
+        positives (blocking a real resume because dedup cannot
+        query).
+        """
+        manager = make_full_manager()
+        manager.resume_processing_job.return_value = None
+        manager._queue_repository.list_pending.side_effect = RuntimeError("db down")
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        # The dedup error was swallowed; the enqueue fallback
+        # proceeded.
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_activate_dedup_no_queue_repo_skips_dedup(self):
+        """When ``_queue_repository`` is missing, dedup is skipped (no AttributeError).
+
+        Defensive against a misconfigured manager: missing
+        ``_queue_repository`` (None) must not crash the resume.
+        """
+        manager = make_full_manager()
+        manager.resume_processing_job.return_value = None
+        manager._queue_repository = None
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        # No exception raised.
+        await svc.activate_watchover("iid", requirement="r", user_context="prebuilt")
+
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deactivate_success_calls_resume_processing_job(self):
+        """Deactivation: helper pairs the cascade with resume_processing_job.
+
+        Symmetric with the activation path — the bug applies to
+        both the activation and deactivation lifecycle.
+        """
+        manager = make_full_manager()
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        await svc.deactivate_watchover("iid")
+
+        manager.resume_instance_cascade.assert_awaited_once_with("iid")
+        manager.resume_processing_job.assert_awaited_once()
+        # Deactivation target gets "continue" by default.
+        target_call = manager.resume_processing_job.call_args
+        msg = (
+            target_call.args[1]
+            if len(target_call.args) > 1
+            else target_call.kwargs.get("message")
+        )
+        assert msg == "continue"
+
+    @pytest.mark.asyncio
+    async def test_activate_rollback_also_pairs_cascade_with_resume(self):
+        """The rollback resume path also pairs both calls (not just success)."""
+        manager = make_full_manager()
+        manager.enable_watchover.side_effect = RuntimeError("write fail")
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+        with pytest.raises(RuntimeError, match="write fail"):
+            await svc.activate_watchover("iid", requirement="r")
+
+        # Rollback: 1 cascade call + 1 resume_processing_job call.
+        manager.resume_instance_cascade.assert_awaited_once_with("iid")
+        manager.resume_processing_job.assert_awaited_once()
+
+
+class TestResumeMessageFieldOnRequest:
+    """The ``WatchoverRequest.resume_message`` field is accepted and forwarded."""
+
+    @pytest.mark.asyncio
+    async def test_watchover_request_accepts_resume_message(self):
+        """The Pydantic field accepts a string up to 2000 chars."""
+        from daemon.routers.instances import WatchoverRequest
+
+        body = WatchoverRequest(
+            enabled=True, requirement="r", resume_message="custom prompt"
+        )
+        assert body.resume_message == "custom prompt"
+
+    @pytest.mark.asyncio
+    async def test_watchover_request_resume_message_optional(self):
+        """The Pydantic field defaults to None (backwards-compatible)."""
+        from daemon.routers.instances import WatchoverRequest
+
+        body = WatchoverRequest(enabled=True, requirement="r")
+        assert body.resume_message is None
+
+    @pytest.mark.asyncio
+    async def test_watchover_request_resume_message_max_length(self):
+        """The Pydantic field enforces the 2000-char cap (Pydantic ValidationError)."""
+        from pydantic import ValidationError
+
+        from daemon.routers.instances import WatchoverRequest
+
+        with pytest.raises(ValidationError):
+            WatchoverRequest(
+                enabled=True, requirement="r", resume_message="x" * 2001
+            )
 
 
 # =============================================================================

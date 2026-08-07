@@ -171,6 +171,12 @@ class WatchoverRequest(BaseModel):
             Tests / advanced callers may inject a context string
             directly. Stored on the instance as
             ``watchover_context``.
+        resume_message: Optional custom message to deliver to the
+            target instance on the post-activation resume. When
+            ``None`` or empty (default), the target receives
+            ``"continue"`` and cascade children resume silently with
+            ``"resume"`` — same fan-out as ``POST /resume`` and
+            ``POST /answer``. Maximum 2000 characters.
     """
 
     enabled: bool = Field(
@@ -198,6 +204,20 @@ class WatchoverRequest(BaseModel):
             "characters (the raw-tail fallback keeps the last 10 "
             "messages; the upper bound is set so a caller-supplied "
             "context cannot blow up the watcher's prompt)."
+        ),
+    )
+    resume_message: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Custom message to send when resuming the watched "
+            "instance after the activation lifecycle completes. The "
+            "target (watched) instance receives this message; "
+            "children of the cascade resume silently with the fixed "
+            "token 'resume'. When None (default) or empty, the "
+            "target receives 'continue'. Mirrors the resume fan-out "
+            "pattern in POST /instances/{id}/resume and "
+            "POST /instances/{id}/answer. Maximum 2000 characters."
         ),
     )
     # SECURITY NOTE (W2 / defense-in-depth): The ``context`` field is
@@ -719,6 +739,17 @@ async def toggle_watchover(
     ``status_change`` SSE event (``watchover_active`` /
     ``watchover_inactive``) so the frontend can reflect the toggle.
 
+    The post-activation resume pairs the cascade
+    (``resume_instance_cascade``) with the graph re-trigger
+    (``resume_processing_job``) so the watched instance is not
+    left in ``RUNNING`` with no Task being processed (the
+    "resume-doesn't-restart-graph" bug). The target instance
+    receives ``body.resume_message`` (or ``"continue"`` when
+    ``None``); cascade children resume silently with
+    ``"resume"`` — mirroring the fan-out of ``POST /resume``,
+    ``POST /answer``, and the PAUSED branch of
+    ``POST /messages``.
+
     Phase 1 descope (FR-27/TD-9): manager-internal authorization only
     — every authenticated caller can toggle any instance's watchover
     flag. Full cross-session ownership check deferred to a future
@@ -733,7 +764,8 @@ async def toggle_watchover(
     Args:
         instance_id: Owning instance identifier (path param).
         body: :class:`WatchoverRequest` with ``enabled`` (required),
-            ``requirement`` (optional), ``context`` (optional).
+            ``requirement`` (optional), ``context`` (optional),
+            ``resume_message`` (optional).
         request: FastAPI request — used to reach the manager from
             ``app.state``.
 
@@ -773,11 +805,19 @@ async def toggle_watchover(
 
     try:
         if body.enabled:
+            # Thread ``resume_message`` through the activation
+            # lifecycle so the watched instance receives the
+            # operator-supplied message (or "continue" when None)
+            # on the post-activation resume. The deactivation path
+            # is a transition window, not a message-passing scenario,
+            # so it does not accept a custom message and uses the
+            # default "continue" / "resume" fan-out.
             result = await asyncio.wait_for(
                 manager.enable_watchover_lifecycle(
                     instance_id,
                     requirement=body.requirement,
                     user_context=body.context,
+                    resume_message=body.resume_message,
                 ),
                 timeout=_ACTIVATION_TIMEOUT_SECONDS,
             )

@@ -366,12 +366,301 @@ class WatchoverService:
     # T3.5 — activation lifecycle
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Resume-doesn't-restart-graph fix helpers (2026-08-07)
+    # ------------------------------------------------------------------
+    #
+    # The previous watchover pause/resume lifecycle ONLY called
+    # ``manager.resume_instance_cascade`` — which flips the DB status
+    # PAUSED → RUNNING but does NOT restart the LangGraph execution.
+    # The graph re-trigger is the SEPARATE
+    # ``manager.resume_processing_job`` call, paired with the cascade
+    # by every other resume path in the codebase (``/resume``,
+    # ``/answer``, ``/question/dismiss``, ``POST /messages``-on-paused).
+    # Without ``resume_processing_job`` the instance is left in
+    # ``RUNNING`` with no Task being processed — a "stuck" state.
+    #
+    # These two helpers are the shared seam used by all 4 watchover
+    # resume sites (activate success, activate rollback, deactivate
+    # success, deactivate rollback). The dedup helper exists so the
+    # fallback ``enqueue_message`` path does not enqueue a second
+    # "continue" if one is already pending in the message queue.
+
+    async def _resume_with_graph_restart(
+        self,
+        instance_id: str,
+        manager: "InstanceManager",
+        *,
+        resume_message: str | None = None,
+    ) -> None:
+        """Resume an instance and re-trigger the graph in a single seam.
+
+        Phase 5 fix (resume-doesn't-restart-graph bug): the watchover
+        resume lifecycle previously called only
+        ``manager.resume_instance_cascade`` — which only flips DB
+        status PAUSED → RUNNING. The graph re-trigger is the
+        SEPARATE ``manager.resume_processing_job`` call. This helper
+        pairs both calls per the pattern in
+        ``daemon.routers.instances.resume_instance``,
+        ``/answer``, ``/question/dismiss``, and
+        ``daemon.routers.messages.send_message`` (PAUSED branch).
+
+        For each resumed instance (target + cascade children):
+
+          * If ``rid == target_id`` → ``resume_message or "continue"``
+            and ``silent=False`` (the message is delivered to the
+            watched instance's graph).
+          * Else → ``"resume"`` and ``silent=True`` (cascade children
+            resume silently from their checkpoint).
+
+        If ``resume_processing_job`` returns ``None`` (no
+        suspended turn handle, e.g. WATCHOVER_SETUP did not write a
+        ``resume_target_turn_id`` because the task was still PENDING
+        when pause fired) the helper falls back to
+        ``manager.enqueue_message(source="cascade_resume")`` so the
+        user's message is not silently dropped — mirroring the F10
+        ``api_resume_fallback`` path in
+        ``daemon.routers.messages.send_message``. The fallback is
+        deduped against a pending "continue" already in the queue to
+        avoid double-enqueue on a fast double-tap.
+
+        Both the primary and the fallback paths are wrapped in
+        per-instance try/except so a failure on one resumed child
+        does not abort the rest of the fan-out. Per-instance
+        ``resume_processing_job`` / ``enqueue_message`` errors are
+        logged and swallowed; cascade (``resume_instance_cascade``)
+        errors are re-raised so callers' rollback/re-raise contracts
+        hold — the watchover resume is always best-effort at the
+        per-instance level (the user-facing activation has already
+        succeeded at the DB level; the graph restart is a recovery
+        aid, not a load-bearing step for the API response).
+
+        Args:
+            instance_id: Target instance identifier (the watched
+                instance, not a child).
+            manager: The :class:`InstanceManager` facade.
+            resume_message: Optional custom message for the target
+                instance. ``None``/empty → ``"continue"``.
+        """
+        try:
+            result = await manager.resume_instance_cascade(instance_id)
+        except (Exception, asyncio.CancelledError):
+            # Do NOT swallow the cascade error — let it propagate to
+            # the caller's exception handler. The activate / deactivate
+            # success paths catch it in their `except` block and run
+            # rollback; the rollback paths catch it in their own
+            # `except` block and log+swallow so the original error
+            # surfaces. Suppressing here would break the original
+            # re-raise contract (the cascade error IS the original
+            # error in the rollback-on-resume-failure test).
+            raise
+
+        if not isinstance(result, dict):
+            # Defensive: in case a future change returns a non-dict
+            # shape, fall back to the single-instance contract.
+            resumed_ids: list[str] = [instance_id]
+            target_id = instance_id
+        else:
+            target_id = result.get("target_id", instance_id)
+            resumed_ids = result.get("resumed_ids") or [instance_id]
+
+        for rid in resumed_ids:
+            is_target = rid == target_id
+            # Target gets the user-supplied message (or default
+            # "continue"); cascade children always resume silently
+            # with the fixed token "resume" — matches the
+            # ``/resume`` / ``/answer`` fan-out in
+            # ``daemon.routers.instances``.
+            resume_msg = (resume_message or "continue") if is_target else "resume"
+            try:
+                handle_result = await manager.resume_processing_job(
+                    rid,
+                    message=resume_msg,
+                    silent=not is_target,
+                )
+                if handle_result is None:
+                    if is_target:
+                        # Fallback (mirrors ``daemon/routers/messages.py``
+                        # ``api_resume_fallback``): if the selector
+                        # returned no handle (e.g. the
+                        # WATCHOVER_SETUP-suspended turn is not in the
+                        # filter set), enqueue the message directly so
+                        # the user's intent is not silently dropped.
+                        # Deduped against a pending "continue" already
+                        # in the queue. ONLY applies to the target —
+                        # non-target cascade children are silent
+                        # (§9.3 ``internal_child_noop`` contract in
+                        # ``daemon/manager.py``); fabricating a Task
+                        # for them would violate the silent-resume
+                        # contract that mirrors the ``if is_target:``
+                        # gate in ``daemon/routers/messages.py``.
+                        logger.info(
+                            "watchover_service._resume_with_graph_restart(%s): "
+                            "resume_processing_job returned None; falling "
+                            "through to enqueue_message (cascade_resume) for %s",
+                            instance_id,
+                            rid,
+                        )
+                        if not self._has_pending_resume_message(rid, resume_msg):
+                            try:
+                                await manager.enqueue_message(
+                                    instance_id=rid,
+                                    message=resume_msg,
+                                    source="cascade_resume",
+                                )
+                            except (Exception, asyncio.CancelledError) as enq_exc:
+                                logger.error(
+                                    "watchover_service._resume_with_graph_restart"
+                                    "(%s): fallback enqueue_message failed for "
+                                    "%s (%s); user message NOT delivered",
+                                    instance_id,
+                                    rid,
+                                    enq_exc,
+                                )
+                    else:
+                        # Non-target cascade child: silent resume
+                        # contract — do NOT enqueue. The selector
+                        # returning None (no suspended turn handle)
+                        # for a silent child is the expected outcome;
+                        # the child resumes from its checkpoint via
+                        # the cascade's status flip alone. Mirrors
+                        # the ``else: logger.debug(...)`` branch in
+                        # ``daemon/routers/messages.py:296-301``.
+                        logger.debug(
+                            "watchover_service._resume_with_graph_restart(%s): "
+                            "resume_processing_job returned None for non-target "
+                            "%s; skipping enqueue (silent resume per §9.3 "
+                            "internal_child_noop)",
+                            instance_id,
+                            rid,
+                        )
+            except (Exception, asyncio.CancelledError) as exc:
+                if is_target:
+                    # ``resume_processing_job`` itself raised on the
+                    # target — log and try the enqueue fallback so the
+                    # user's message is not silently dropped.
+                    logger.warning(
+                        "watchover_service._resume_with_graph_restart(%s): "
+                        "resume_processing_job raised for %s (%s); attempting "
+                        "enqueue_message fallback",
+                        instance_id,
+                        rid,
+                        exc,
+                    )
+                    try:
+                        if not self._has_pending_resume_message(rid, resume_msg):
+                            await manager.enqueue_message(
+                                instance_id=rid,
+                                message=resume_msg,
+                                source="cascade_resume",
+                            )
+                    except (Exception, asyncio.CancelledError) as enq_exc:
+                        logger.error(
+                            "watchover_service._resume_with_graph_restart(%s): "
+                            "both resume_processing_job and enqueue_message "
+                            "failed for %s (rpj=%s, enq=%s); user message NOT "
+                            "delivered",
+                            instance_id,
+                            rid,
+                            exc,
+                            enq_exc,
+                        )
+                else:
+                    # Non-target cascade child: per-rid failures are
+                    # logged and swallowed WITHOUT enqueue. The silent
+                    # resume contract forbids fabricating a Task for a
+                    # silent child even on the recovery path — the
+                    # cascade's PAUSED → RUNNING flip is the only
+                    # signal the child needs to replay its checkpoint.
+                    logger.warning(
+                        "watchover_service._resume_with_graph_restart(%s): "
+                        "resume_processing_job raised for non-target %s (%s); "
+                        "skipping enqueue fallback (silent resume per §9.3 "
+                        "internal_child_noop)",
+                        instance_id,
+                        rid,
+                        exc,
+                    )
+
+    def _has_pending_resume_message(
+        self, instance_id: str, candidate_message: str | None = None
+    ) -> bool:
+        """Check whether ``instance_id`` already has a pending resume message.
+
+        Used to dedupe the watchover ``enqueue_message`` fallback
+        path: if a "continue" or "resume" message is already pending
+        (status ``READY`` or ``PROCESSING``) for this instance, do
+        NOT enqueue a duplicate. The check is case-insensitive
+        substring match on the message content.
+
+        Conservative on query failure: if the message queue
+        repository is not reachable, or the engine is not initialised,
+        or the SELECT itself raises, the method logs a warning and
+        returns ``False`` so the resume is not BLOCKED by a transient
+        dedup-query failure. False negatives (skipping dedup when a
+        pending message exists) are preferable to false positives
+        (blocking a real resume because dedup cannot query).
+
+        Args:
+            instance_id: The instance to check.
+            candidate_message: Optional message text being considered
+                for enqueue. When supplied, the check is restricted
+                to messages whose content contains it (case-insensitive).
+                When ``None`` (default), any message whose content
+                contains ``"continue"`` or ``"resume"`` is treated as
+                a pending resume.
+
+        Returns:
+            ``True`` if a pending resume-shaped message already
+            exists for ``instance_id``; ``False`` otherwise (including
+            on query failure).
+        """
+        try:
+            repo = getattr(self._manager, "_queue_repository", None)
+            if repo is None:
+                logger.warning(
+                    "watchover_service._has_pending_resume_message(%s): "
+                    "no _queue_repository on manager; skipping dedup",
+                    instance_id,
+                )
+                return False
+            pending = repo.list_pending(instance_id=instance_id, limit=100)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "watchover_service._has_pending_resume_message(%s): "
+                "list_pending failed (%s); skipping dedup (false "
+                "negative is preferable to blocking the resume)",
+                instance_id,
+                exc,
+            )
+            return False
+
+        needle = (candidate_message or "").strip().lower() or None
+        # Default needles — match the messages the watchover resume
+        # path enqueues ("continue" for the target, "resume" for
+        # cascade children) plus the message text itself for any
+        # caller-supplied ``resume_message``.
+        needles: tuple[str, ...]
+        if needle:
+            needles = (needle,)
+        else:
+            needles = ("continue", "resume")
+
+        for msg in pending:
+            content = (getattr(msg, "content", "") or "").strip().lower()
+            if not content:
+                continue
+            if any(n in content for n in needles):
+                return True
+        return False
+
     async def activate_watchover(
         self,
         instance_id: str,
         *,
         requirement: str | None,
         user_context: str | None = None,
+        resume_message: str | None = None,
     ) -> dict[str, Any]:
         """Run the activation lifecycle: pause → bounded_barrier → context → flag → resume.
 
@@ -444,6 +733,15 @@ class WatchoverService:
                 ``_build_watchover_context`` step when supplied).
                 Used by tests and by callers that already have the
                 context — production callers pass ``None``.
+            resume_message: Optional custom message to deliver to the
+                target instance on the post-activation resume. The
+                target (watched) instance receives
+                ``resume_message or "continue"``; children of the
+                cascade resume silently from checkpoint with the
+                fixed string ``"resume"``. Mirrors the resume fan-out
+                in :meth:`daemon.routers.instances.resume_instance`
+                and ``/answer``. Default ``None`` → target gets
+                ``"continue"``.
 
         Returns:
             Dict with the activation outcome:
@@ -541,8 +839,24 @@ class WatchoverService:
                 context=context_text,
             )
 
-            # Step 5 — resume.
-            await manager.resume_instance_cascade(instance_id)
+            # Step 5 — resume + graph restart.
+            #
+            # ``resume_instance_cascade`` only flips DB status
+            # PAUSED → RUNNING; the actual graph re-trigger is the
+            # SEPARATE ``resume_processing_job`` call (see
+            # :meth:`InstanceManager.resume_processing_job`). The
+            # helper pairs both calls and falls back to
+            # ``enqueue_message`` when ``resume_processing_job``
+            # returns ``None`` (e.g. WATCHOVER_SETUP-suspended turn
+            # not present in the selector's filter set). It also
+            # dedupes against a pending "continue" already in the
+            # message queue so a double-tap does not enqueue a second
+            # copy of the same message.
+            await self._resume_with_graph_restart(
+                instance_id,
+                manager,
+                resume_message=resume_message,
+            )
 
         except (Exception, asyncio.CancelledError) as exc:
             # Rollback (W-8 + H1 + M5 + M4): clear any partial flag
@@ -598,8 +912,14 @@ class WatchoverService:
             # but NEVER raised.
             # CancelledError-safe: must run on the route's timeout
             # cancel path so the instance is not left PAUSED.
+            # Rollback uses the SAME two-step helper as the success
+            # path so the graph also restarts after a partial
+            # activation; the user-supplied ``resume_message`` is
+            # NOT threaded into the rollback (the rollback's job is
+            # recovery, not custom-message delivery) — the target
+            # gets the default "continue" and children get "resume".
             try:
-                await manager.resume_instance_cascade(instance_id)
+                await self._resume_with_graph_restart(instance_id, manager)
             except (Exception, asyncio.CancelledError) as resume_exc:
                 logger.error(
                     "watchover_service.activate_watchover(%s): rollback "
@@ -712,7 +1032,14 @@ class WatchoverService:
 
         try:
             manager.disable_watchover(instance_id)
-            await manager.resume_instance_cascade(instance_id)
+            # ``disable_watchover`` is symmetric with activation: the
+            # bare ``resume_instance_cascade`` only flips the DB
+            # status; the helper pairs it with
+            # ``resume_processing_job`` (+ ``enqueue_message``
+            # fallback) so the graph actually restarts. Deactivation
+            # has no user-supplied resume message, so the target gets
+            # the default "continue" and children get "resume".
+            await self._resume_with_graph_restart(instance_id, manager)
         except (Exception, asyncio.CancelledError) as exc:
             # Rollback (H2): the disable or resume step failed. We must
             # still attempt to unpause the instance so it is never left
@@ -731,11 +1058,16 @@ class WatchoverService:
                 exc,
             )
             try:
-                await manager.resume_instance_cascade(instance_id)
+                # Rollback uses the same two-step helper so the
+                # graph also restarts on the best-effort recovery
+                # path — the bare ``resume_instance_cascade`` was
+                # insufficient to unstick a paused instance because
+                # it does not re-trigger the graph.
+                await self._resume_with_graph_restart(instance_id, manager)
             except (Exception, asyncio.CancelledError) as resume_exc:
                 logger.error(
                     "watchover_service.deactivate_watchover(%s): rollback "
-                    "resume_instance_cascade also failed (%s); instance may "
+                    "resume also failed (%s); instance may "
                     "be left PAUSED — operator must inspect manually",
                     instance_id,
                     resume_exc,

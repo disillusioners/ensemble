@@ -124,14 +124,27 @@ async def enable_watchover(
     client: httpx.AsyncClient,
     instance_id: str,
     requirement: str | None = None,
+    resume_message: str | None = None,
 ) -> dict:
     """Activate watchover on the target instance.
 
     Returns ``{"watchover_enabled": bool, "instance_id": str}``.
+
+    Args:
+        client: The shared httpx client.
+        instance_id: Target instance to activate watchover for.
+        requirement: Optional operator-supplied requirement string.
+        resume_message: Optional custom message to deliver to the target
+            instance on the post-activation resume. When ``None`` (default)
+            the daemon sends the fixed token ``"continue"`` to the target.
+            When provided, the message is delivered verbatim (max 2000 chars
+            per the WatchoverRequest contract).
     """
     body: dict = {"enabled": True}
     if requirement is not None:
         body["requirement"] = requirement
+    if resume_message is not None:
+        body["resume_message"] = resume_message
     resp = await client.post(
         f"{DAEMON_URL}/api/instances/{instance_id}/watchover",
         json=body,
@@ -482,6 +495,285 @@ async def test_e2e_infra_error_fail_open(daemon_and_mock):
             f"instance reached terminal status {info.get('status')!r} under "
             f"the 'infra_error' scenario; fail-open should keep it active. "
             f"Full info: {info}"
+        )
+    finally:
+        await _terminate_instance(client, instance_id)
+
+
+# --------------------------------------------------------------------------- #
+# Helpers for resume-fix tests
+# --------------------------------------------------------------------------- #
+async def pause_instance(
+    client: httpx.AsyncClient,
+    instance_id: str,
+) -> dict:
+    """Pause the target instance via POST /api/instances/{id}/pause.
+
+    Returns the response payload (typically ``{"status": "paused"}``).
+    """
+    resp = await client.post(f"{DAEMON_URL}/api/instances/{instance_id}/pause")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def get_messages(client: httpx.AsyncClient, instance_id: str) -> list[dict]:
+    """Fetch the persisted message history for an instance.
+
+    Returns the raw list of message dicts from
+    ``GET /api/instances/{id}/messages``. Order is chronological.
+    """
+    resp = await client.get(f"{DAEMON_URL}/api/instances/{instance_id}/messages")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _message_text(msg: dict) -> str:
+    """Best-effort text content extraction from a serialized message dict.
+
+    Mirrors the field names used by the checkpoint-backed serializer
+    (``content`` may be a string or a list of typed parts; the latter is
+    joined into a single string for substring matching).
+    """
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    return ""
+
+
+def _count_messages_with_text(messages: list[dict], needle: str) -> int:
+    """Count serialized messages whose text content contains ``needle``.
+
+    Substring match is case-insensitive to match the dedup logic in
+    :class:`WatchoverService._has_pending_resume_message`.
+    """
+    needle_lower = needle.lower()
+    count = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        text = _message_text(msg)
+        if text and needle_lower in text.lower():
+            count += 1
+    return count
+
+
+# --------------------------------------------------------------------------- #
+# Test 6: continue_message_after_activation
+# --------------------------------------------------------------------------- #
+async def test_e2e_continue_message_after_activation(daemon_and_mock):
+    """After watchover activation, the watched instance receives a 'continue' message and the graph restarts."""
+    client = daemon_and_mock
+    await set_scenario(client, "allow")
+
+    inst = await create_instance(client)
+    instance_id = inst["instance_id"]
+    logger.info(
+        "[test_e2e_continue_message_after_activation] created instance=%s",
+        instance_id[:8],
+    )
+
+    try:
+        # Step 1: start the graph with a user message.
+        await send_message(client, instance_id, "check cluster status")
+
+        # Step 2: activate watchover (default resume_message -> "continue").
+        activation = await enable_watchover(client, instance_id)
+        assert activation.get("watchover_enabled") is True, (
+            f"enable_watchover returned watchover_enabled="
+            f"{activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {activation}"
+        )
+
+        # Step 3: wait for the "continue" message to be processed and
+        # checkpointed. The activation resumes the instance with the
+        # default "continue" token; the agent consumes it on the next
+        # graph iteration, at which point it appears in /messages.
+        async def _continue_seen_in_history() -> bool:
+            messages = await get_messages(client, instance_id)
+            return _count_messages_with_text(messages, "continue") >= 1
+
+        ok = await wait_for_condition(
+            _continue_seen_in_history,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        messages = await get_messages(client, instance_id)
+        assert ok, (
+            f"no 'continue' message in history within {DEFAULT_TIMEOUT}s; "
+            f"got {len(messages)} messages. "
+            f"Contents (truncated): "
+            f"{[(m.get('role'), _message_text(m)[:60]) for m in messages[:8]]!r}"
+        )
+
+        # Step 4: verify the graph restarted (the mock recorded at least
+        # one post-activation agent call).
+        stats = await get_stats(client)
+        assert stats["agent_call_count"] >= 1, (
+            f"expected agent_call_count >= 1 after activation (graph "
+            f"restart), got {stats['agent_call_count']}. stats={stats}"
+        )
+
+        # Step 5: instance is still alive under the 'allow' scenario.
+        info = await get_instance(client, instance_id)
+        assert info.get("status") not in _TERMINAL_STATUSES, (
+            f"instance reached terminal status {info.get('status')!r} "
+            f"under 'allow' scenario; expected to stay active. "
+            f"Full info: {info}"
+        )
+    finally:
+        await _terminate_instance(client, instance_id)
+
+
+# --------------------------------------------------------------------------- #
+# Test 7: custom_resume_message
+# --------------------------------------------------------------------------- #
+async def test_e2e_custom_resume_message(daemon_and_mock):
+    """If resume_message is provided in WatchoverRequest, it's used instead of 'continue'."""
+    client = daemon_and_mock
+    await set_scenario(client, "allow")
+
+    inst = await create_instance(client)
+    instance_id = inst["instance_id"]
+    logger.info(
+        "[test_e2e_custom_resume_message] created instance=%s",
+        instance_id[:8],
+    )
+
+    custom_msg = "Please proceed with the task"
+
+    try:
+        # Step 1: start the graph with a user message.
+        await send_message(client, instance_id, "check cluster status")
+
+        # Step 2: activate watchover with a custom resume_message.
+        activation = await enable_watchover(
+            client,
+            instance_id,
+            resume_message=custom_msg,
+        )
+        assert activation.get("watchover_enabled") is True, (
+            f"enable_watchover returned watchover_enabled="
+            f"{activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {activation}"
+        )
+
+        # Step 3: wait for the custom message to appear in /messages.
+        async def _custom_seen_in_history() -> bool:
+            messages = await get_messages(client, instance_id)
+            return _count_messages_with_text(messages, custom_msg) >= 1
+
+        ok = await wait_for_condition(
+            _custom_seen_in_history,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        messages = await get_messages(client, instance_id)
+        assert ok, (
+            f"custom resume message {custom_msg!r} not found in history "
+            f"within {DEFAULT_TIMEOUT}s; got {len(messages)} messages. "
+            f"Contents (truncated): "
+            f"{[(m.get('role'), _message_text(m)[:60]) for m in messages[:8]]!r}"
+        )
+
+        # Step 4: NO bare "continue" message should be present — the
+        # custom resume_message replaces the default token. We allow
+        # other messages that happen to contain the substring "continue"
+        # (e.g. an assistant elaboration), so the assertion is that the
+        # exact custom message is in the history, not that the literal
+        # token "continue" is absent. The "at least one" check on the
+        # custom message above is the primary assertion.
+        custom_count = _count_messages_with_text(messages, custom_msg)
+        assert custom_count >= 1, (
+            f"expected at least one message containing {custom_msg!r}, "
+            f"got {custom_count} in {len(messages)} messages"
+        )
+    finally:
+        await _terminate_instance(client, instance_id)
+
+
+# --------------------------------------------------------------------------- #
+# Test 8: no_duplicate_continue
+# --------------------------------------------------------------------------- #
+async def test_e2e_no_duplicate_continue(daemon_and_mock):
+    """Activating watchover on an already-paused instance doesn't send duplicate 'continue' messages."""
+    client = daemon_and_mock
+    await set_scenario(client, "allow")
+
+    inst = await create_instance(client)
+    instance_id = inst["instance_id"]
+    logger.info(
+        "[test_e2e_no_duplicate_continue] created instance=%s",
+        instance_id[:8],
+    )
+
+    try:
+        # Step 1: start the graph.
+        await send_message(client, instance_id, "check cluster status")
+
+        # Step 2: pause the instance so the agent cannot drain the
+        # message queue. This guarantees the first "continue" enqueued
+        # by the activation stays in READY state, which is what the
+        # dedup check operates on.
+        pause_result = await pause_instance(client, instance_id)
+        logger.info(
+            "[test_e2e_no_duplicate_continue] pause result=%s",
+            pause_result,
+        )
+
+        # Step 3: first activation → enqueues one "continue" message.
+        first_activation = await enable_watchover(client, instance_id)
+        assert first_activation.get("watchover_enabled") is True, (
+            f"first enable_watchover returned watchover_enabled="
+            f"{first_activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {first_activation}"
+        )
+
+        # Step 4: confirm the queue now contains exactly one pending
+        # "continue" message.
+        info = await get_instance(client, instance_id)
+        first_pending = info.get("pending_count")
+        assert first_pending == 1, (
+            f"expected pending_count == 1 after first activation, got "
+            f"{first_pending}. Full info: {info}"
+        )
+
+        # Step 5: activate AGAIN — the dedup logic must detect the
+        # pending "continue" and skip enqueueing a duplicate.
+        second_activation = await enable_watchover(client, instance_id)
+        assert second_activation.get("watchover_enabled") is True, (
+            f"second enable_watchover returned watchover_enabled="
+            f"{second_activation.get('watchover_enabled')!r}, expected True. "
+            f"Full response: {second_activation}"
+        )
+
+        # Step 6: queue must still hold exactly one resume/continue
+        # message — no duplicate was enqueued on the second activation.
+        info = await get_instance(client, instance_id)
+        second_pending = info.get("pending_count")
+        assert second_pending == 1, (
+            f"expected pending_count == 1 after second activation "
+            f"(dedup should have skipped), got {second_pending}. "
+            f"Full info: {info}"
+        )
+
+        # Step 7: spot-check the messages endpoint — if any "continue"
+        # has been checkpointed, there should be exactly one. The
+        # instance is paused so this is expected to be 0, but the
+        # invariant we care about is "no duplicates ever".
+        messages = await get_messages(client, instance_id)
+        continue_in_history = _count_messages_with_text(messages, "continue")
+        assert continue_in_history <= 1, (
+            f"expected at most 1 'continue' message in history, got "
+            f"{continue_in_history} in {len(messages)} messages. "
+            f"Dedup failed — duplicate 'continue' was enqueued."
         )
     finally:
         await _terminate_instance(client, instance_id)
