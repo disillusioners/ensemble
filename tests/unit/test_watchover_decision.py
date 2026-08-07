@@ -34,6 +34,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from daemon.graph import (
     SessionState,
@@ -695,6 +696,220 @@ class TestWatchoverEvaluatorEvaluate:
             )
         assert e_default.max_denials == 3
         assert e_custom.max_denials == 5
+
+
+# =============================================================================
+# WatchoverEvaluator — split-message structure (prefix-cache optimisation)
+# =============================================================================
+
+
+class TestWatchoverMessageStructure:
+    """``WatchoverEvaluator.evaluate(...)`` LLM payload structure.
+
+    The LLM payload is split into four messages (one ``SystemMessage`` +
+    three ``HumanMessage`` layers) so the provider's prefix cache can hit
+    on the stable layers across batches:
+
+      1. ``SystemMessage(content=system_prompt)`` — watcher soul prompt,
+         fully cached (loaded once via ``_load_watcher_soul_prompt``).
+      2. ``HumanMessage(content="[WATCHOVER CONTEXT]... [WATCHOVER CONTEXT END]")``
+         — semi-stable, cached until the user rotates the context.
+      3. ``HumanMessage(content="[RECENT MESSAGES BEGIN]... [RECENT MESSAGES END]")``
+         — prefix-cached (older messages stable; only the newest line
+         changes between checks).
+      4. ``HumanMessage(content="[WATCHOVER CHECK]...")`` — per-call, the
+         only fully uncached layer.
+
+    Layers 1-3 are built ONCE outside the per-tool-call loop and
+    REUSED — they must be the SAME object instance across calls in a
+    batch. Layer 4 is rebuilt for every tool call.
+    """
+
+    @staticmethod
+    def _capture_llm_factory():
+        """Build a fake ``ThinkingChatOpenAI`` factory that records ``invoke`` calls.
+
+        Returns:
+            ``(factory, llm_instance, captured)``:
+
+              * ``factory`` — patched constructor returning ``llm_instance``.
+              * ``llm_instance`` — the MagicMock with ``.invoke``.
+              * ``captured`` — list of message-lists in invocation order.
+                Each entry is the messages list passed to ``invoke`` for
+                one call (so ``captured[0][2]`` is the
+                ``[WATCHOVER CHECK]`` HumanMessage on the first call).
+        """
+        captured: list[list] = []
+        queue = [_FakeLLMResult(content="Allowed")] * 100  # generous
+
+        def _next(messages):
+            # Record a copy of the messages reference (we want to assert
+            # object identity on layers 1-3 across calls).
+            captured.append(messages)
+            if not queue:
+                raise AssertionError("LLM mock exhausted")
+            return queue.pop(0)
+
+        llm_instance = MagicMock()
+        llm_instance.invoke.side_effect = _next
+
+        def _factory(**kwargs):
+            return llm_instance
+
+        return _factory, llm_instance, captured
+
+    async def test_split_messages_structure(self, monkeypatch):
+        """LLM payload is split into 1 SystemMessage + 3 HumanMessages."""
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+            )
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {"command": "ls"}}],
+                messages=[],
+                watchover_context="be helpful",
+            )
+
+        assert len(captured) == 1, "expected exactly one LLM invoke call"
+        messages = captured[0]
+
+        # 1 SystemMessage + 3 HumanMessages
+        assert len(messages) == 4, f"expected 4 messages, got {len(messages)}"
+        assert isinstance(messages[0], SystemMessage) or messages[0].__class__.__name__ == "SystemMessage"
+        assert all(isinstance(m, HumanMessage) for m in messages[1:]), (
+            f"messages[1:] must be HumanMessage, got {[type(m).__name__ for m in messages[1:]]}"
+        )
+
+        # Layer 1: system prompt (watcher soul).
+        from daemon.graph import _load_watcher_soul_prompt
+        assert messages[0].content == _load_watcher_soul_prompt()
+        assert "Allowed" in messages[0].content or "Deny" in messages[0].content  # sanity
+
+        # Layer 2: WATCHOVER CONTEXT (semi-stable, contains user context).
+        ctx = messages[1].content
+        assert ctx.startswith("[WATCHOVER CONTEXT]\n"), ctx
+        assert "be helpful" in ctx
+        assert ctx.endswith("\n[WATCHOVER CONTEXT END]"), ctx
+
+        # Layer 3: RECENT MESSAGES (prefix-cached history block).
+        rec = messages[2].content
+        assert rec.startswith("[RECENT MESSAGES BEGIN]\n"), rec
+        assert rec.endswith("\n[RECENT MESSAGES END]"), rec
+
+        # Layer 4: WATCHOVER CHECK (per-call tool call to evaluate).
+        chk = messages[3].content
+        assert chk.startswith("[WATCHOVER CHECK]\n"), chk
+        assert "Tool: bash" in chk
+        assert '"command": "ls"' in chk or '"command":"ls"' in chk  # JSON args
+        assert "Respond with Allowed or Deny" in chk
+
+    async def test_recent_messages_human_readable_format(self, monkeypatch):
+        """``_format_recent_messages`` emits ``[role]: content`` lines."""
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+            )
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[HumanMessage(content="hello"), AIMessage(content="hi there")],
+                watchover_context="any",
+            )
+
+        assert len(captured) == 1
+        recent_block = captured[0][2].content
+        assert "[human]: hello" in recent_block
+        assert "[ai]: hi there" in recent_block
+        # The block must START and END with the markers — no JSON wrapping.
+        assert recent_block.startswith("[RECENT MESSAGES BEGIN]\n")
+        assert recent_block.endswith("\n[RECENT MESSAGES END]")
+
+    async def test_stable_layers_reused_across_batch(self, monkeypatch):
+        """Context + recent layers are the SAME object across calls in a batch.
+
+        Verifies the optimisation that the stable layers (system prompt,
+        context, recent messages) are built ONCE outside the per-call loop
+        and REUSED — only the per-call ``[WATCHOVER CHECK]`` is rebuilt.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+            )
+            await evaluator.evaluate(
+                tool_calls=[
+                    {"id": "tc-1", "name": "bash", "args": {"command": "ls"}},
+                    {"id": "tc-2", "name": "bash", "args": {"command": "pwd"}},
+                    {"id": "tc-3", "name": "bash", "args": {"command": "whoami"}},
+                ],
+                messages=[],
+                watchover_context="be helpful",
+            )
+
+        assert len(captured) == 3, "expected one invoke per tool call"
+
+        # [WATCHOVER CONTEXT] HumanMessage must be the SAME object across all 3 calls
+        # (proves the stable layer is built once outside the per-call loop, not
+        # rebuilt per tool call).
+        for i in range(1, 3):
+            assert captured[i][1] is captured[0][1], (
+                f"[WATCHOVER CONTEXT] at call {i} is not the same object as call 0 — "
+                "stable layer is being rebuilt per call"
+            )
+            # Sanity: the content starts with the WATCHOVER CONTEXT marker.
+            assert captured[i][1].content.startswith("[WATCHOVER CONTEXT]\n")
+
+        # [RECENT MESSAGES BEGIN] HumanMessage must be the SAME object across
+        # all 3 calls (same optimisation rationale — recent history is
+        # prefix-cached and built once).
+        for i in range(1, 3):
+            assert captured[i][2] is captured[0][2], (
+                f"[RECENT MESSAGES BEGIN] at call {i} is not the same object as call 0 — "
+                "stable layer is being rebuilt per call"
+            )
+            assert captured[i][2].content.startswith("[RECENT MESSAGES BEGIN]\n")
+
+        # Per-call [WATCHOVER CHECK] messages MUST differ (different tool args).
+        check_contents = [captured[i][3].content for i in range(3)]
+        assert check_contents[0] != check_contents[1]
+        assert check_contents[1] != check_contents[2]
+        assert check_contents[0] != check_contents[2]
+        # Each check message mentions the right command.
+        assert '"command": "ls"' in check_contents[0] or '"command":"ls"' in check_contents[0]
+        assert '"command": "pwd"' in check_contents[1] or '"command":"pwd"' in check_contents[1]
+        assert '"command": "whoami"' in check_contents[2] or '"command":"whoami"' in check_contents[2]
+
+    async def test_empty_messages_does_not_break_recent_block(self, monkeypatch):
+        """Empty ``messages`` produces an empty recent-messages block (no crash)."""
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm, captured = self._capture_llm_factory()
+        manager = make_manager()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "test"},
+                instance_id="iid",
+            )
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[],
+                watchover_context="any",
+            )
+        recent_block = captured[0][2].content
+        assert recent_block == "[RECENT MESSAGES BEGIN]\n\n[RECENT MESSAGES END]"
 
 
 # =============================================================================

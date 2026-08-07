@@ -3842,13 +3842,27 @@ class WatchoverEvaluator:
                 node can match it with the corresponding ``ToolMessage``.
             messages: Full conversation history (oldest-first). Only the
                 last ``mirror_message_count`` entries are serialised into
-                the user-message payload (mirrors the
-                ``LoopRepairer._build_excerpt`` pattern).
+                the ``[RECENT MESSAGES BEGIN]`` layer (mirrors the
+                ``LoopRepairer._build_excerpt`` pattern). The excerpt is
+                formatted as readable ``[role]: content`` lines via
+                :meth:`_format_recent_messages` so the LLM provider's
+                prefix cache can reuse the older messages across checks.
             watchover_context: The user-supplied requirement / context
                 for the watchover session. ``None`` or empty string is
                 acceptable — the watcher is told the context is empty and
                 is expected to deny every call as "no context to evaluate
-                against" (judgment error path).
+                against" (judgment error path). The context is wrapped in
+                its own ``[WATCHOVER CONTEXT]`` layer so the provider can
+                cache it across calls until the user rotates it.
+
+        Note:
+            The LLM payload is split into four messages — one
+            ``SystemMessage`` (watcher soul prompt, fully cached) plus
+            three ``HumanMessage`` layers (``[WATCHOVER CONTEXT]``,
+            ``[RECENT MESSAGES BEGIN]``, ``[WATCHOVER CHECK]``). The
+            first three are stable across tool calls in the batch and
+            are built once outside the loop — only the per-call
+            ``[WATCHOVER CHECK]`` is uncached.
 
         Returns:
             A list of :class:`WatcherVerdict` of the same length as
@@ -3864,6 +3878,20 @@ class WatchoverEvaluator:
 
         system_prompt = _load_watcher_soul_prompt()
         excerpt = self._build_excerpt(messages, max_messages=self._mirror_message_count)
+
+        # Build the stable LLM layers ONCE — reused across every tool call
+        # in the batch. Splitting the payload into separate messages lets the
+        # LLM provider's prefix cache hit on the stable layers (system
+        # prompt + watchover context + recent messages); only the per-call
+        # ``[WATCHOVER CHECK]`` is fully uncached.
+        context_text = watchover_context or "(no watchover context provided)"
+        context_message = HumanMessage(
+            content=f"[WATCHOVER CONTEXT]\n{context_text}\n[WATCHOVER CONTEXT END]"
+        )
+        recent_text = self._format_recent_messages(excerpt)
+        recent_message = HumanMessage(
+            content=f"[RECENT MESSAGES BEGIN]\n{recent_text}\n[RECENT MESSAGES END]"
+        )
 
         results: list[WatcherVerdict] = []
         infra_error_seen = False
@@ -3884,16 +3912,21 @@ class WatchoverEvaluator:
                 else getattr(tc, "args", {})
             )
 
-            user_payload = {
-                "context": watchover_context or "",
-                "tool_call": {
-                    "id": tc_id,
-                    "name": tc_name,
-                    "args": tc_args,
-                },
-                "recent_messages": excerpt,
-            }
-            user_text = json.dumps(user_payload, ensure_ascii=False)
+            # Per-call layer — only the watchover check itself is uncached.
+            # Args are dumped as readable JSON with a ``str()`` fallback for
+            # non-serialisable values; ``repr`` is the last-resort fallback
+            # when JSON itself raises (deeply nested / exotic objects).
+            try:
+                args_repr = json.dumps(tc_args, ensure_ascii=False, default=str)
+            except Exception:
+                args_repr = repr(tc_args)
+            check_message = HumanMessage(
+                content=(
+                    f"[WATCHOVER CHECK]\nEvaluate this tool call:\n"
+                    f"Tool: {tc_name}\nArguments: {args_repr}\n\n"
+                    f"Respond with Allowed or Deny: <reason>"
+                )
+            )
 
             try:
                 llm = self._get_llm()
@@ -3902,7 +3935,9 @@ class WatchoverEvaluator:
                         llm.invoke,
                         [
                             SystemMessage(content=system_prompt),
-                            HumanMessage(content=user_text),
+                            context_message,
+                            recent_message,
+                            check_message,
                         ],
                     ),
                     timeout=self._timeout_seconds,
@@ -4003,6 +4038,48 @@ class WatchoverEvaluator:
                 text = str(content)
             out.append({"role": role, "content": text})
         return out
+
+    @staticmethod
+    def _format_recent_messages(excerpt: list[dict]) -> str:
+        """Format the ``_build_excerpt`` output as readable multi-line text.
+
+        Complements :meth:`_build_excerpt`: the excerpt produces
+        ``{"role": str, "content": str}`` dicts; this formats them as
+        ``[role]: content`` lines for the ``[RECENT MESSAGES BEGIN]``
+        block. Readable text (not JSON) lets the LLM provider
+        prefix-cache the older messages — only the newest line differs
+        between checks.
+
+        Args:
+            excerpt: List of ``{"role": str, "content": str}`` dicts
+                (output of :meth:`_build_excerpt`). Empty list → empty
+                string.
+
+        Returns:
+            Newline-joined ``[role]: content`` lines. Empty string when
+            ``excerpt`` is empty.
+        """
+        if not excerpt:
+            return ""
+        # Map raw LangGraph message types to concise human-readable
+        # labels so the watcher never sees ``"HumanMessage"`` /
+        # ``"AIMessage"`` style technical noise in the recent-history
+        # block.
+        role_map = {
+            "human": "human",
+            "user": "human",
+            "ai": "ai",
+            "assistant": "ai",
+            "tool": "tool",
+            "system": "system",
+        }
+        lines: list[str] = []
+        for entry in excerpt:
+            raw_role = entry.get("role", "human")
+            role = role_map.get(raw_role, raw_role)
+            content = entry.get("content", "")
+            lines.append(f"[{role}]: {content}")
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
