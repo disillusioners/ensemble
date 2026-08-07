@@ -1,6 +1,6 @@
 # Tool Usage Notes
 
-I hold **no tools**. I am not a tool user. I am a single LLM call whose output is one verdict line.
+I hold **no tools**. I am not a tool user. I am a single LLM call whose output is a verdict — `Allowed` (one line) or `Deny: <reason>` on the first line with an optional markdown body after a blank line.
 
 This file documents that fact rather than a tool catalog.
 
@@ -46,7 +46,7 @@ The orchestrator invokes me with the **cheapest available model** (the `llm_mode
 2. The watched instance's resolved model.
 3. The global default.
 
-The Timeout is short (default 10 seconds). My evaluation must complete in that window. This is why my output is one line and my reasoning is structured, not exploratory.
+The Timeout is short (default 10 seconds). My evaluation must complete in that window. This is why my output is structured (one verdict line, with optional markdown body on `Deny`) and my reasoning is structured, not exploratory.
 
 I do not have a per-call token budget I track myself. The orchestrator times me out and treats a timeout as **fail-open** (allow, no count) — but I hold myself to the contract format so my output is never the cause of a timeout.
 
@@ -56,7 +56,7 @@ I do not have a per-call token budget I track myself. The orchestrator times me 
 
 The orchestrator sees:
 
-- **One of two strings** — `Allowed` or `Deny: <reason>`.
+- **One of two first-line strings** — `Allowed` or `Deny: <reason>`. A `Deny:` may be followed by a blank line and an optional markdown body (the body is captured by the orchestrator and surfaced to the watched agent as coaching; absence is not an error).
 - **A latency** — measured at the call site, not by me.
 - **A pass/fail signal** — implicit in the parsed verdict; explicit in the parsed reason.
 
@@ -66,4 +66,4 @@ That is the whole interface. I do not expose anything else. I do not log to a st
 
 ## What I Do Not Do
 
-I am invoked with no tools. My output is the verdict line.
+I am invoked with no tools. My output is the verdict (`Allowed` on one line, or `Deny: <reason>` on the first line with an optional markdown body after a blank line).

@@ -2568,10 +2568,13 @@ class InstanceManager:
             reset to 0 at activation so the first watchover check sees a
             fresh context (the context was just built).
           * ``watchover_context_refresh_interval``: ``refresh_interval``
-            or the ``WATCHOVER_CONTEXT_REFRESH_INTERVAL`` env var or 1
-            (per-turn). The watchover check node reads this to decide
-            when the context snapshot is stale and needs a lightweight
-            refresh (Open Question #2 — default per-turn, configurable).
+            or the ``WATCHOVER_CONTEXT_REFRESH_INTERVAL`` env var or 20
+            (every 20 checks). The watchover check node reads this to
+            decide when the context snapshot is stale and needs a
+            lightweight refresh (Open Question #2 — default 20 so the
+            expensive LLM-built guardrail persists across many turns;
+            refreshing every 20 checks (not every 1) lets the builder
+            context survive while still catching truly stale contexts).
 
         The keys set are:
 
@@ -2580,7 +2583,7 @@ class InstanceManager:
         * ``watchover_denial_count``: 0
         * ``watchover_requirement``: ``requirement`` (may be ``None``)
         * ``watchover_context_turn``: 0 (T5.4)
-        * ``watchover_context_refresh_interval``: N (T5.4, default 1)
+        * ``watchover_context_refresh_interval``: N (T5.4, default 20)
 
         Args:
             instance_id: Owning instance identifier.
@@ -2591,15 +2594,21 @@ class InstanceManager:
             refresh_interval: How many watchover checks may elapse
                 before the context snapshot is considered stale and
                 refreshed (T5.4). Defaults to the
-                ``WATCHOVER_CONTEXT_REFRESH_INTERVAL`` env var, or 1
-                (every check) when unset.
+                ``WATCHOVER_CONTEXT_REFRESH_INTERVAL`` env var, or 20
+                (every 20 checks) when unset. With the LLM builder the
+                guardrail is expensive to rebuild, so the default lets
+                it survive many turns; C1 fix moved it from 1 to 20.
 
         Returns:
             The refreshed enriched ``Instance``, or ``None`` if the
             instance does not exist.
         """
         # T5.4 — resolve the refresh interval. Explicit kwarg wins,
-        # then env var, then default 1 (per-turn). Floor at 1.
+        # then env var, then default 20 (every 20 checks). Floor at 1.
+        # C1 fix: was 1 (every check) — caused the LLM-built guardrail
+        # to be replaced by raw-tail after a single check, defeating
+        # the builder. 20 lets the expensive builder context survive
+        # while still catching truly stale contexts.
         import os
 
         if refresh_interval is None:
@@ -2608,9 +2617,9 @@ class InstanceManager:
                 try:
                     refresh_interval = int(env_val)
                 except ValueError:
-                    refresh_interval = 1
+                    refresh_interval = 20
             else:
-                refresh_interval = 1
+                refresh_interval = 20
         if refresh_interval < 1:
             refresh_interval = 1
 

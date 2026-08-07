@@ -1,5 +1,6 @@
 """Instance management API endpoints."""
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -147,7 +148,8 @@ class AnswerRequest(BaseModel):
 class WatchoverRequest(BaseModel):
     """Request body for ``POST /api/instances/{id}/watchover``.
 
-    Phase 3 / Watchover (2026-08-05). Toggles the watchover flag
+    Phase 3 / Watchover (2026-08-05) + Phase 4 / Watcher Context
+    Builder (2026-08-07). Toggles the watchover flag
     (``watchover_enabled`` in ``instance_metadata`` JSONB) for the
     target instance and supplies the operator-defined requirement /
     context that drives the watcher's Allow/Deny prompt.
@@ -164,9 +166,10 @@ class WatchoverRequest(BaseModel):
             ``watchover_requirement``.
         context: Optional pre-built context string. Production
             callers pass ``None`` and let the service build the
-            context via ``ContextCompactor`` (compaction summary or
-            raw-tail fallback). Tests / advanced callers may inject
-            a context string directly. Stored on the instance as
+            context via the WatcherContextBuilder (LLM-built markdown
+            document with raw-tail + static guardrail fallback).
+            Tests / advanced callers may inject a context string
+            directly. Stored on the instance as
             ``watchover_context``.
     """
 
@@ -756,14 +759,45 @@ async def toggle_watchover(
     # instance-scoped endpoint uses (M1).
     await _check_instance_exists(manager, instance_id)
 
-    if body.enabled:
-        result = await manager.enable_watchover_lifecycle(
+    # Phase 4 / R-1: activation now includes a builder LLM call that
+    # can take up to 15s (the builder_timeout_seconds default) plus
+    # lifecycle steps. Wrap the activation in ``asyncio.wait_for``
+    # with a 30s ceiling so a hung builder does not leave the client
+    # blocking on a long-tail LLM call. The activation lifecycle has
+    # its own rollback path; if we timeout here the lifecycle may
+    # still be running in the background — the rollback will clear
+    # the partial flags and resume the instance. The 504 surfaces a
+    # clean error to the operator.
+    _ACTIVATION_TIMEOUT_SECONDS = 30
+
+    try:
+        if body.enabled:
+            result = await asyncio.wait_for(
+                manager.enable_watchover_lifecycle(
+                    instance_id,
+                    requirement=body.requirement,
+                    user_context=body.context,
+                ),
+                timeout=_ACTIVATION_TIMEOUT_SECONDS,
+            )
+        else:
+            result = await asyncio.wait_for(
+                manager.disable_watchover_lifecycle(instance_id),
+                timeout=_ACTIVATION_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "instances.toggle_watchover(%s): lifecycle timed out after %ds",
             instance_id,
-            requirement=body.requirement,
-            user_context=body.context,
+            _ACTIVATION_TIMEOUT_SECONDS,
         )
-    else:
-        result = await manager.disable_watchover_lifecycle(instance_id)
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Watchover lifecycle timed out after "
+                f"{_ACTIVATION_TIMEOUT_SECONDS}s"
+            ),
+        )
 
     return {
         "watchover_enabled": result.get("watchover_enabled", body.enabled),

@@ -222,7 +222,15 @@ def _make_fake_llm_class(
 
 
 class TestWatcherVerdictParsing:
-    """Static-method tests for ``WatchoverEvaluator._parse_verdict``."""
+    """Static-method tests for ``WatchoverEvaluator._parse_verdict``.
+
+    Phase 4 update: the verdict format now allows an optional markdown
+    body after a ``Deny:`` verdict line. The parser is STRICT on the
+    first non-empty line (the verdict token) and LENIENT on the body
+    (absence is not an error). Bifurcated failure handling (AD-6 /
+    LD-2) is preserved — the body's presence does not affect parse
+    success.
+    """
 
     def test_parses_bare_allowed(self):
         """``"Allowed"`` → verdict='allow'."""
@@ -230,6 +238,7 @@ class TestWatcherVerdictParsing:
         assert v is not None
         assert v.verdict == "allow"
         assert v.reason == ""
+        assert v.body is None  # Allowed never has a body
 
     def test_parses_allowed_with_trailing_whitespace(self):
         """``"Allowed "`` (trailing whitespace) still parses as allow."""
@@ -243,12 +252,13 @@ class TestWatcherVerdictParsing:
         assert v is not None
         assert v.verdict == "deny"
         assert v.reason == "reads /etc/shadow"
+        assert v.body is None  # No body when only one line
 
     def test_multiline_with_verdict_on_second_line_is_strictly_rejected(self):
         """Strict contract — preamble on first line is rejected (judgment error).
 
-        The watcher soul explicitly says "no preamble, no markdown, no
-        explanation" — anything other than the bare ``Allowed`` /
+        The watcher soul explicitly says "first line is the machine
+        verdict" — anything other than the bare ``Allowed`` /
         ``Deny: <reason>`` on the first non-empty line is a judgment
         error. This keeps the contract strict so a flaky LLM that adds
         preamble is detected instead of silently accepted.
@@ -285,6 +295,155 @@ class TestWatcherVerdictParsing:
         v = WatchoverEvaluator._parse_verdict("  Deny: trimmed  ")
         assert v is not None
         assert v.reason == "trimmed"
+
+    # ----- Phase 4 / Verdict format evolution tests -----
+
+    def test_deny_with_markdown_body_extracts_body(self):
+        """``Deny: <reason>`` followed by a blank line + body → body captured."""
+        raw = (
+            "Deny: reads /etc/shadow\n"
+            "\n"
+            "Use a non-privileged test fixture instead.\n"
+            "- Suggestion 1\n"
+            "- Suggestion 2"
+        )
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "deny"
+        assert v.reason == "reads /etc/shadow"
+        assert v.body is not None
+        assert "Use a non-privileged test fixture" in v.body
+        assert "- Suggestion 1" in v.body
+        assert "- Suggestion 2" in v.body
+
+    def test_deny_with_body_no_blank_line_still_parses_body(self):
+        """Body without a separating blank line IS now extracted (W4 fix).
+
+        W4 fix: the body is OPTIONAL and the LLM is allowed to omit
+        the blank line between the verdict and the body. The parser
+        uses a two-pass approach — preferred blank-line separation
+        (matches the ``soul.md``-documented format) and an immediate
+        next-line fallback. The fallback prevents legitimate bodies
+        from being silently discarded when the LLM forgets the blank
+        line.
+        """
+        raw = "Deny: too sensitive\nMore prose here without a blank line"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "deny"
+        assert v.reason == "too sensitive"
+        # W4 fix: no blank line → body IS captured (fallback path).
+        assert v.body is not None
+        assert "More prose here without a blank line" in v.body
+
+    def test_deny_with_body_immediate_next_line_no_blank(self):
+        """``Deny: reason\\nbody text here`` captures the body via the W4 fallback.
+
+        Regression test for the W4 fix — when the LLM returns a
+        verdict with a body on the very next line (no blank-line
+        separator), the fallback extraction must capture it. Without
+        the fix the body would be silently discarded.
+        """
+        raw = "Deny: too sensitive\nbody text here"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "deny"
+        assert v.reason == "too sensitive"
+        assert v.body is not None
+        assert "body text here" in v.body
+
+    def test_deny_with_blank_line_but_no_body_returns_none_body(self):
+        """A trailing blank line after the verdict is treated as no body."""
+        raw = "Deny: too sensitive\n\n"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "deny"
+        assert v.reason == "too sensitive"
+        assert v.body is None  # Trailing whitespace → empty body → None
+
+    def test_deny_with_body_is_not_a_judgment_error(self):
+        """A Deny with a body is NOT a judgment error — body is allowed.
+
+        Bifurcated failure handling (AD-6 / LD-2) preserved: the
+        parser is strict on the first line, lenient on the body.
+        Body presence does NOT change the parse outcome.
+        """
+        raw = (
+            "Deny: targets database\n"
+            "\n"
+            "DROP TABLE requires pre-approval. See migration plan."
+        )
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "deny"
+        assert v.error_type is None  # Not a judgment error
+        assert v.body is not None
+        assert "DROP TABLE" in v.body
+
+    def test_deny_with_body_truncated_at_1500_chars(self):
+        """Bodies longer than 1500 chars are truncated with ``…(truncated)`` marker."""
+        # Construct a body just over the 1500-char limit.
+        long_body = "X" * 1500 + "YYY"
+        raw = f"Deny: too sensitive\n\n{long_body}"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "deny"
+        assert v.body is not None
+        # Body is capped at 1500 + the truncation marker.
+        assert len(v.body) <= 1500 + len("\n…(truncated)") + 5
+        assert "…(truncated)" in v.body
+        # The first 1500 chars are preserved.
+        assert v.body.startswith("X" * 1500)
+
+    def test_deny_with_body_exactly_1500_chars_no_truncation(self):
+        """Body of exactly 1500 chars is NOT truncated."""
+        body = "X" * 1500
+        raw = f"Deny: too sensitive\n\n{body}"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.body is not None
+        assert "…(truncated)" not in v.body
+        assert v.body == body
+
+    def test_allowed_with_body_like_text_still_parses_allow(self):
+        """``Allowed`` followed by prose on subsequent lines is allow with no body."""
+        raw = "Allowed\n\nSome prose after a blank line"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "allow"
+        # ``Allowed`` is always bare — no body, even if there's prose after.
+        assert v.body is None
+
+    def test_extract_body_utility(self):
+        """The static ``_extract_body`` helper returns the body slice verbatim."""
+        lines = [
+            "Deny: too sensitive",
+            "",
+            "First body line",
+            "Second body line",
+        ]
+        body = WatchoverEvaluator._extract_body(lines, 0)
+        assert body == "First body line\nSecond body line"
+
+    def test_extract_body_no_blank_line_fallback(self):
+        """``_extract_body`` falls back to the immediate next line when no blank line.
+
+        W4 fix: the body is OPTIONAL and the LLM is allowed to omit
+        the blank line. When there is no blank line but content
+        follows immediately after the verdict, that content is
+        captured as the body (fallback path).
+        """
+        lines = ["Deny: too sensitive", "More prose"]
+        body = WatchoverEvaluator._extract_body(lines, 0)
+        assert body == "More prose"
+
+    def test_extract_body_empty_lines_after_blank(self):
+        """``_extract_body`` returns empty when only whitespace follows the blank."""
+        lines = ["Deny: too sensitive", "", "   ", ""]
+        body = WatchoverEvaluator._extract_body(lines, 0)
+        # After the blank line, the remaining content is whitespace-only.
+        # Stripping gives empty.
+        assert body == ""
 
 
 # =============================================================================
@@ -618,6 +777,86 @@ class TestCheckNodeDenyPath:
         # Router: agent.
         route = should_end_watchover(result, config=_config("iid"))
         assert route == "agent"
+
+    async def test_deny_with_body_includes_body_in_tool_message(self, monkeypatch):
+        """A ``Deny:`` verdict with a markdown body surfaces the body in the ToolMessage.
+
+        Phase 4 verdict format evolution: the watcher LLM may emit an
+        optional markdown body after the ``Deny:`` verdict line. The
+        graph node includes this body in the ToolMessage content so
+        the watched agent sees concrete coaching on how to adjust its
+        approach.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        # Verdict line + blank line + markdown body.
+        deny_with_body = (
+            "Deny: reads /etc/shadow\n"
+            "\n"
+            "Use a non-privileged test fixture instead.\n"
+            "- Suggestion A\n"
+            "- Suggestion B"
+        )
+        factory, _ = _make_fake_llm_class([deny_with_body])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(
+                    calls=[{"id": "tc-1", "name": "read_file", "args": {"path": "/etc/shadow"}}]
+                ),
+                config=_config("iid"),
+            )
+
+        msgs = result["messages"]
+        from langchain_core.messages import ToolMessage
+
+        assert isinstance(msgs[0], ToolMessage)
+        content = msgs[0].content
+        # The first line is the reason-bearing denial.
+        assert "Watchover denied this tool call: reads /etc/shadow" in content
+        # The body is present.
+        assert "Use a non-privileged test fixture" in content
+        assert "- Suggestion A" in content
+        assert "- Suggestion B" in content
+        # The closing line is still the adjust prompt.
+        assert "Please adjust your approach" in content
+        # Loop-breaker exclusion flag preserved.
+        assert msgs[0].additional_kwargs.get("watchover_denial") is True
+
+    async def test_deny_without_body_no_blank_line_after(self, monkeypatch):
+        """A ``Deny:`` with no body (no blank line after) → no body in ToolMessage."""
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        # Single-line Deny with no body.
+        factory, _ = _make_fake_llm_class(["Deny: too sensitive"])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(
+                    calls=[{"id": "tc-1", "name": "bash", "args": {"command": "ls"}}]
+                ),
+                config=_config("iid"),
+            )
+
+        msgs = result["messages"]
+        content = msgs[0].content
+        # Just the first line + closing prompt — no body section.
+        assert "Watchover denied this tool call: too sensitive" in content
+        assert "Please adjust your approach" in content
+        # No blank-line separator was inserted (no body to separate).
+        lines = content.split("\n")
+        # The blank line before "Please adjust" is NOT inserted.
+        assert lines[-1] == "Please adjust your approach."
 
 
 # =============================================================================

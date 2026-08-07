@@ -3388,7 +3388,7 @@ WATCHOVER_TIMEOUT_SECONDS_DEFAULT = 10
 _WATCHER_SOUL_PROMPT_CACHE: str | None = None
 _WATCHER_SOUL_PROMPT_PATH = (
     os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "agents",
         "watcher",
         "soul.md",
@@ -3401,7 +3401,7 @@ _WATCHER_SOUL_PROMPT_PATH = (
 _WATCHER_META_CACHE: dict | None = None
 _WATCHER_META_PATH = (
     os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "agents",
         "watcher",
         "meta.json",
@@ -3433,6 +3433,54 @@ def _load_watcher_soul_prompt() -> str:
         )
         _WATCHER_SOUL_PROMPT_CACHE = fallback
     return _WATCHER_SOUL_PROMPT_CACHE
+
+
+# Phase 4 — Watcher Context Builder. The builder is a separate persona
+# (``builder-prompt.md``) from the soul (``soul.md``) — the soul is the
+# tool-call evaluator, the builder is the context compiler. Two roles,
+# two files. Mirrors the soul-prompt cache pattern above.
+_WATCHER_BUILDER_PROMPT_CACHE: str | None = None
+_WATCHER_BUILDER_PROMPT_PATH = (
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "agents",
+        "watcher",
+        "builder-prompt.md",
+    )
+)
+
+
+def _load_watcher_builder_prompt() -> str:
+    """Load and cache the watcher builder prompt from disk.
+
+    Mirrors :func:`_load_watcher_soul_prompt` — module-level cache so
+    the file is read ONCE at module load. The builder LLM call is
+    activation-blocking, so re-reading the prompt on every call would
+    be wasteful (the file is static).
+
+    The fallback string below is a minimal "produce a security
+    guardrail" stub so a deployment without the builder prompt file
+    still loads. It is intentionally permissive — the builder call
+    is best-effort and the watcher has its own fallback chain.
+    """
+    global _WATCHER_BUILDER_PROMPT_CACHE
+    if _WATCHER_BUILDER_PROMPT_CACHE is not None:
+        return _WATCHER_BUILDER_PROMPT_CACHE
+    fallback = (
+        "You are a security-profile compiler. Analyze the conversation "
+        "and return a markdown document with sections: ## Agent Activity, "
+        "## Available Tools, ## Allowed, ## Forbidden, ## Requirement."
+    )
+    try:
+        with open(_WATCHER_BUILDER_PROMPT_PATH, "r", encoding="utf-8") as f:
+            _WATCHER_BUILDER_PROMPT_CACHE = f.read()
+    except Exception as exc:
+        logger.warning(
+            f"[Watchover] Could not read {_WATCHER_BUILDER_PROMPT_PATH}: "
+            f"{type(exc).__name__}: {exc} — using minimal fallback prompt"
+        )
+        _WATCHER_BUILDER_PROMPT_CACHE = fallback
+    return _WATCHER_BUILDER_PROMPT_CACHE
 
 
 def _load_watcher_meta_config() -> dict:
@@ -3508,6 +3556,15 @@ class WatcherVerdict:
             watcher is a binary gate, not a graded reviewer.
         reason: Free-form short reason (only meaningful when
             ``verdict == "deny"``). Always empty string for allow.
+        body: Optional markdown body after the first blank line
+            following the ``Deny:`` verdict line. Captured verbatim
+            (capped at 1500 chars with a ``…(truncated)`` marker) so
+            the watched agent can read concrete guidance on how to
+            adjust its approach. ``None`` when absent or when the
+            verdict is ``"allow"``. Bifurcated failure handling
+            (AD-6 / LD-2) is preserved — body absence is NOT an
+            error; the parser is strict on the first line and lenient
+            on the body.
         error_type: ``None`` for the success path, ``"infra"`` for
             infrastructure failures (timeout / 5xx / network), or
             ``"judgment"`` for malformed/unparseable responses. The
@@ -3521,6 +3578,7 @@ class WatcherVerdict:
 
     verdict: str  # "allow" | "deny"
     reason: str = ""
+    body: str | None = None  # optional markdown body after Deny verdict
     error_type: str | None = None  # "infra" | "judgment" | None
     tool_call_id: str = ""
 
@@ -3642,9 +3700,26 @@ class WatchoverEvaluator:
 
         Accepts the contract strings ``"Allowed"`` and
         ``"Deny: <reason>"`` with leading/trailing whitespace ignored.
-        Also accepts a leading-line match when the model adds a short
-        preamble (a common failure mode). Returns ``None`` for
-        unparseable text — the caller converts that to a judgment error.
+        After a ``Deny:`` verdict an optional markdown body may follow
+        — separated from the verdict line by a single blank line.
+        Anything else is a judgment error and fails CLOSED.
+
+        Body parsing (Phase 4 verdict format evolution):
+
+        * The parser is strict on the FIRST non-empty line — anything
+          other than ``Allowed`` or ``Deny: <reason>`` is rejected
+          (preserves AD-6 / LD-2 bifurcated failure handling).
+        * The body is captured VERBATIM from the line after the first
+          blank line following the verdict line, until end-of-input.
+        * Body is capped at 1500 chars with a ``…(truncated)`` marker
+          to prevent ToolMessage token bloat in the watched agent's
+          context.
+        * Body absence is NOT an error — ``Allowed`` stays bare with
+          no body expected; ``Deny`` with no body is valid (the
+          reason on the first line is sufficient).
+
+        Returns ``None`` for unparseable text — the caller converts
+        that to a judgment error.
         """
         if not raw_text:
             return None
@@ -3652,27 +3727,80 @@ class WatchoverEvaluator:
         if not text:
             return None
 
-        # Take the first non-empty line (the watcher may emit a short
-        # preamble line followed by the verdict on the next line).
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Allowed — accept the bare token or a single-line response
-            # whose first non-empty word is "Allowed".
-            if line == "Allowed" or line.startswith("Allowed "):
-                return WatcherVerdict(verdict="allow")
-            if line.startswith("Deny:"):
-                reason = line[len("Deny:"):].strip()
-                # Empty reason is a judgment error — the contract
-                # requires a concrete reason. We do NOT auto-fail-closed
-                # here; the caller sees ``None`` and decides.
-                if not reason:
-                    return None
-                return WatcherVerdict(verdict="deny", reason=reason)
-            # First non-empty line was something else — bail out.
-            return None
-        return None
+        # Parse ONLY the first non-empty line for the verdict.
+        lines = text.splitlines()
+        first_line = ""
+        first_line_idx = 0
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped:
+                first_line = stripped
+                first_line_idx = idx
+                break
+
+        if first_line == "Allowed" or first_line.startswith("Allowed "):
+            return WatcherVerdict(verdict="allow")
+
+        if first_line.startswith("Deny:"):
+            reason = first_line[len("Deny:"):].strip()
+            if not reason:
+                return None  # judgment error — fail-closed
+
+            # Extract optional markdown body after the first blank line
+            # following the verdict line. Body is OPTIONAL, absence is
+            # not an error.
+            body = WatchoverEvaluator._extract_body(lines, first_line_idx)
+            if body and len(body) > 1500:
+                body = body[:1500] + "\n…(truncated)"
+            return WatcherVerdict(verdict="deny", reason=reason, body=body or None)
+
+        return None  # judgment error — fail-closed
+
+    @staticmethod
+    def _extract_body(lines: list[str], verdict_line_idx: int) -> str:
+        """Extract markdown body after the verdict line.
+
+        Phase 4 verdict format evolution (W4 fix). The body is OPTIONAL
+        and the LLM is allowed to omit the blank line that separates
+        the verdict from the body. Two-pass extraction:
+
+          1. **Preferred (blank-line separation):** look for a blank
+             line after the verdict line. If found, collect everything
+             after the blank (current behaviour, matches the
+             ``soul.md``-documented format).
+          2. **Fallback (immediate next line):** if NO blank line was
+             found but there IS content on the line immediately after
+             the verdict, treat everything from that line onward as
+             the body. LLMs sometimes omit the blank-line separator.
+
+        Returns ``""`` only if neither pattern yields content (i.e.
+        the verdict line is the last line in the input).
+
+        Args:
+            lines: Full ``text.splitlines()`` list.
+            verdict_line_idx: Index of the verdict line in ``lines``.
+
+        Returns:
+            The body text (already stripped of leading/trailing
+            whitespace), or ``""`` if no body is present.
+        """
+        # Phase 4 verdict format evolution (W4 fix). The body is OPTIONAL.
+        # Two-pass extraction:
+        #   1. Preferred: blank line after verdict, then body after the blank.
+        #   2. Fallback: if no blank line but content follows immediately,
+        #      treat the line right after the verdict as the body start.
+        #      (LLMs sometimes omit the blank line.)
+        # Returns "" if neither pattern yields content.
+        for idx in range(verdict_line_idx + 1, len(lines)):
+            if not lines[idx].strip():
+                body_lines = lines[idx + 1:]
+                return "\n".join(body_lines).strip()
+        # Fallback: no blank line found — treat immediate next line as body.
+        if verdict_line_idx + 1 < len(lines):
+            body_lines = lines[verdict_line_idx + 1:]
+            joined = "\n".join(body_lines).strip()
+            return joined
+        return ""
 
     async def _emit_degraded_sse(self, reason: str) -> None:
         """Best-effort degraded-mode SSE notification.
@@ -4045,12 +4173,22 @@ def create_watchover_check_node(
         # Phase 5 (T5.4): also read ``watchover_context_turn`` (checks
         # since the context was last refreshed) and
         # ``watchover_context_refresh_interval`` (how many checks may
-        # elapse before a refresh is triggered; default 1 = every turn)
+        # elapse before a refresh is triggered; effective default 20
+        # set by ``enable_watchover`` — C1 fix; the ``= 1`` local
+        # annotation is a safety floor only)
         # so the freshness check below can detect a stale context after
         # compaction. ``watchover_requirement`` is read so a refresh can
         # re-splice the requirement into the fresh tail.
         watchover_context: str | None = None
         context_turn: int = 0
+        # C1 fix: the EFFECTIVE default for ``refresh_interval`` is 20
+        # (set by ``enable_watchover`` in ``daemon/manager.py``). The
+        # ``= 1`` here is a SAFETY FLOOR only — used when the metadata
+        # read returns ``None`` / missing / non-integer (the try/except
+        # below applies the same floor via ``if refresh_interval < 1``).
+        # We keep ``1`` as the Python annotation because the floor is
+        # also 1; a value of 0 would trigger refresh every turn, which
+        # would replace the LLM-built guardrail with raw-tail.
         refresh_interval: int = 1
         watchover_requirement: str | None = None
         meta_repo: Any = None
@@ -4118,22 +4256,31 @@ def create_watchover_check_node(
                     DEFAULT_RAW_TAIL_MESSAGES,
                     _format_raw_tail,
                 )
+                from .services.watcher_context_builder import (
+                    _FALLBACK_GUARDRAIL_PREFIX,
+                )
 
                 fresh_tail = _format_raw_tail(
                     messages, DEFAULT_RAW_TAIL_MESSAGES
                 )
                 if fresh_tail:
-                    # Re-splice the requirement so the watcher still
-                    # sees the operator's intent alongside the refreshed
-                    # activity tail (matches the activate_watchover
-                    # splicing format).
+                    # Prepend the static guardrail prefix so the
+                    # watcher ALWAYS has the universal deny categories
+                    # as a baseline, even when the builder-built
+                    # markdown guardrail is overwritten by the
+                    # raw-tail refresh (C1 fix). The builder's static
+                    # prefix covers system files, credentials,
+                    # destructive writes, production surfaces — these
+                    # must survive every refresh.
+                    parts = [_FALLBACK_GUARDRAIL_PREFIX.rstrip()]
                     if watchover_requirement:
-                        watchover_context = (
+                        parts.append(
                             f"[Requirement] {watchover_requirement}\n\n"
                             f"[Recent activity]\n{fresh_tail}"
                         )
                     else:
-                        watchover_context = fresh_tail
+                        parts.append(f"[Recent activity]\n{fresh_tail}")
+                    watchover_context = "\n".join(parts)
                     # Reset the turn counter — the context is now fresh.
                     context_turn = 0
                     # Persist the refreshed context + reset counter
@@ -4271,14 +4418,25 @@ def create_watchover_check_node(
         # verdict. For denied calls the message carries the reason; for
         # allowed-but-not-executed calls (because the batch was
         # wholesale-denied) the message says so.
+        #
+        # Phase 4 verdict format evolution: when the watcher supplied
+        # an optional markdown ``body`` after the ``Deny:`` line, the
+        # body is included in the ToolMessage so the watched agent
+        # sees concrete guidance on how to adjust its approach. The
+        # body is captured verbatim from the watcher LLM output
+        # (capped at 1500 chars by the parser). The
+        # ``additional_kwargs={"watchover_denial": True}`` tag stays
+        # unchanged — LoopDetector exclusion depends on it.
         injected: list[ToolMessage] = []
         for tc, verdict in zip(normalized, verdicts):
             tc_id = tc.get("id", "")
             if verdict.verdict == "deny":
-                content = (
-                    f"Watchover denied this tool call: {verdict.reason}. "
-                    f"Please adjust your approach."
-                )
+                parts = [f"Watchover denied this tool call: {verdict.reason}."]
+                if verdict.body:
+                    parts.append("")  # blank line separator
+                    parts.append(verdict.body)
+                parts.append("Please adjust your approach.")
+                content = "\n".join(parts)
             else:
                 # Allow verdict, but the batch was denied by another
                 # call. Surface a "deferred — try again" notice so the

@@ -121,6 +121,40 @@ def make_mock_compactor() -> MagicMock:
     return compactor
 
 
+def make_mock_builder(
+    *,
+    response: str = "## Agent Activity\nTest\n\n## Available Tools\n\n## Allowed\n- test\n\n## Forbidden\n- test\n\n## Requirement\n(none provided)",
+    side_effect: Any = None,
+) -> MagicMock:
+    """Build a mock :class:`WatcherContextBuilder`.
+
+    Phase 4: replaces the compactor fixture for the activation
+    lifecycle tests. The builder is patched at the import path
+    :func:`daemon.services.watchover_service` uses. Returns a
+    :class:`MagicMock` whose ``build`` is an ``AsyncMock`` that
+    defaults to returning ``response`` (a stub markdown document).
+    Pass ``side_effect`` to simulate builder failure (the activation
+    lifecycle expects the builder to swallow its own errors and
+    return the fallback — see :class:`WatcherContextBuilder.build`).
+
+    Args:
+        response: Markdown string returned by ``build`` when no
+            ``side_effect`` is supplied.
+        side_effect: Optional exception or callable for the
+            ``AsyncMock`` — when set, ``build`` raises instead of
+            returning ``response``.
+
+    Returns:
+        A ``MagicMock`` whose ``build`` is an ``AsyncMock``.
+    """
+    builder = MagicMock()
+    if side_effect is not None:
+        builder.build = AsyncMock(side_effect=side_effect)
+    else:
+        builder.build = AsyncMock(return_value=response)
+    return builder
+
+
 def make_mock_graph_state(messages: list[Any] | None = None) -> MagicMock:
     """Build a mock compiled graph with a state snapshot.
 
@@ -321,6 +355,9 @@ class TestManagerFlagManagement:
         ``watchover_context_refresh_interval`` are always written (the
         freshness check requires them even when context/requirement are
         absent).
+
+        C1 fix: the default ``refresh_interval`` is 20 (was 1) so the
+        LLM-built guardrail survives many turns.
         """
         manager = make_bare_manager()
         repo = MagicMock()
@@ -333,7 +370,7 @@ class TestManagerFlagManagement:
             "watchover_enabled": True,
             "watchover_denial_count": 0,
             "watchover_context_turn": 0,
-            "watchover_context_refresh_interval": 1,
+            "watchover_context_refresh_interval": 20,
         }
 
     def test_disable_watchover_only_clears_enabled(self):
@@ -539,7 +576,16 @@ class TestActivateWatchover:
 
     @pytest.mark.asyncio
     async def test_activate_runs_correct_sequence(self):
-        """Pause happens before enable; resume happens after enable."""
+        """Pause happens before enable; resume happens after enable.
+
+        Phase 4 update: the activation lifecycle uses the
+        ``WatcherContextBuilder`` instead of the compactor. When a
+        ``user_context`` is supplied the builder is bypassed entirely
+        and the requirement is NOT post-spliced into the user-supplied
+        context (the requirement is woven into the builder's output
+        only on the builder path). The lifecycle ordering — quiesce →
+        pause → enable → resume → SSE — is unchanged.
+        """
         manager = make_full_manager()
         manager.get_instance.return_value = make_mock_graph_state(messages=[])
 
@@ -558,15 +604,6 @@ class TestActivateWatchover:
         assert result["quiescent"] is True
 
         # Order: quiesce → pause → enable → resume → SSE.
-        call_names = [
-            c[0] for c in [
-                manager.wait_for_instance_quiescent.call_args,
-                manager.pause_instance_cascade.call_args,
-                manager.enable_watchover.call_args,
-                manager.resume_instance_cascade.call_args,
-                manager._live_hub.stream_status_change.call_args,
-            ]
-        ]
         assert manager.wait_for_instance_quiescent.await_count == 1
         assert manager.pause_instance_cascade.await_count == 1
         manager.pause_instance_cascade.assert_awaited_once_with(
@@ -581,135 +618,224 @@ class TestActivateWatchover:
             "watchover_active",
         )
 
-        # enable_watchover got the requirement + combined context.
+        # enable_watchover got the requirement + user-supplied context.
+        # Phase 4: requirement is NOT spliced into a user-supplied
+        # context — the requirement is a builder INPUT, applied only
+        # when the builder runs.
         enable_kwargs = manager.enable_watchover.call_args.kwargs
         assert enable_kwargs["requirement"] == "no rm -rf"
-        assert "no rm -rf" in enable_kwargs["context"]
-        assert "user-supplied" in enable_kwargs["context"]
+        assert enable_kwargs["context"] == "user-supplied"
 
     @pytest.mark.asyncio
     async def test_activate_combines_requirement_with_built_context(self):
-        """When ``user_context`` is None, the service builds one and combines it."""
+        """When ``user_context`` is None, the service invokes the builder.
+
+        Phase 4 update: the builder receives ``requirement`` as an
+        INPUT, not a post-splice. The returned markdown guardrail
+        document contains the requirement verbatim (the builder
+        echoes it into ``## Requirement``) and the raw-tail snapshot
+        of recent activity.
+        """
         manager = make_full_manager()
-        manager._compactor = make_mock_compactor()
         manager.get_instance.return_value = make_mock_graph_state(
             messages=[_msg("hello", role="user"), _msg("hi", role="assistant")]
         )
 
         from daemon.services.watchover_service import WatchoverService
-
-        svc = WatchoverService(manager)
-
-        result = await svc.activate_watchover(
-            "iid", requirement="be nice", user_context=None
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
         )
+
+        # Builder returns a stub markdown document that echoes the
+        # requirement. The activation lifecycle passes the requirement
+        # as an INPUT to ``builder.build`` — assert it was forwarded.
+        builder_response = (
+            "## Agent Activity\nTest\n\n"
+            "## Allowed\n- test\n\n"
+            "## Forbidden\n- test\n\n"
+            "## Requirement\nbe nice"
+        )
+        with patch.object(
+            WatcherContextBuilder,
+            "build",
+            AsyncMock(return_value=builder_response),
+        ) as patched_build:
+            svc = WatchoverService(manager)
+            result = await svc.activate_watchover(
+                "iid", requirement="be nice", user_context=None
+            )
+
+            # Builder was invoked with the requirement as input.
+            patched_build.assert_awaited_once()
+            build_args = patched_build.call_args.args
+            # Positional: (messages, requirement); the 2nd positional is
+            # the requirement (the lifecycle forwards it directly).
+            assert build_args[1] == "be nice"
 
         assert result["watchover_enabled"] is True
         enable_kwargs = manager.enable_watchover.call_args.kwargs
         ctx = enable_kwargs["context"]
-        assert "[Requirement] be nice" in ctx
-        assert "hello" in ctx  # raw-tail includes the messages
+        # Builder's output is the watchover_context — requirement is
+        # woven into it, not appended.
+        assert ctx == builder_response
+        assert "be nice" in ctx
 
     @pytest.mark.asyncio
-    async def test_activate_uses_compactor_when_available(self):
-        """When the compactor returns a summary, the summary is used."""
+    async def test_activate_uses_builder_when_available(self):
+        """The WatcherContextBuilder produces the markdown guardrail document.
+
+        Phase 4: the activation lifecycle delegates context-building
+        to the LLM-driven builder. The returned markdown is stored
+        verbatim on ``watchover_context``.
+        """
         manager = make_full_manager()
-        compactor = make_mock_compactor()
-        compactor.compact_state = AsyncMock(
-            return_value=MagicMock(replacement_messages=[_system_msg("summary text")])
-        )
-        manager._compactor = compactor
         manager.get_instance.return_value = make_mock_graph_state(
             messages=[_msg("hi")] * 20
         )
 
         from daemon.services.watchover_service import WatchoverService
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
+        )
 
-        svc = WatchoverService(manager)
-        result = await svc.activate_watchover("iid", requirement="r")
+        builder_response = (
+            "## Agent Activity\nRefactor auth module.\n\n"
+            "## Allowed\n- read auth/\n\n"
+            "## Forbidden\n- rm -rf\n\n"
+            "## Requirement\nr"
+        )
+        with patch.object(
+            WatcherContextBuilder,
+            "build",
+            AsyncMock(return_value=builder_response),
+        ) as patched_build:
+            svc = WatchoverService(manager)
+            result = await svc.activate_watchover("iid", requirement="r")
 
-        # Summary was used.
-        compactor.compact_state.assert_awaited_once()
+            # Builder was invoked once with the requirement as input.
+            patched_build.assert_awaited_once()
+            # Positional: (messages, requirement); the 2nd positional is
+            # the requirement (the lifecycle forwards it directly).
+            assert patched_build.call_args.args[1] == "r"
+
         ctx = manager.enable_watchover.call_args.kwargs["context"]
-        assert "summary text" in ctx
+        # Builder output is stored verbatim — no post-splice.
+        assert ctx == builder_response
 
     @pytest.mark.asyncio
     async def test_activate_falls_back_to_raw_tail(self):
-        """When compactor returns ``None``, raw-tail is used (TD-6 / AC-EC.7)."""
+        """When the builder returns a degraded fallback, that fallback is used.
+
+        Phase 4: the builder's internal fallback (raw-tail + static
+        guardrail prefix) replaces the compactor's role. When the
+        builder returns the fallback string, the activation lifecycle
+        stores it verbatim on ``watchover_context`` — the watcher
+        still sees structured guidance even on degraded mode.
+        """
         manager = make_full_manager()
-        compactor = make_mock_compactor()  # default returns None
-        manager._compactor = compactor
         manager.get_instance.return_value = make_mock_graph_state(
-            messages=[
-                _msg(f"msg-{i}", role="user") for i in range(15)
-            ]
+            messages=[_msg(f"msg-{i}", role="user") for i in range(15)]
         )
 
         from daemon.services.watchover_service import WatchoverService
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
+        )
 
-        svc = WatchoverService(manager)
-        result = await svc.activate_watchover("iid", requirement="r")
+        fallback_response = (
+            "## Static Guardrail (degraded mode)\n"
+            "## Forbidden\n- rm -rf\n\n"
+            "[Requirement] r\n\n"
+            "[Recent activity]\nmsg-5 ... msg-14"
+        )
+        with patch.object(
+            WatcherContextBuilder,
+            "build",
+            AsyncMock(return_value=fallback_response),
+        ):
+            svc = WatchoverService(manager)
+            result = await svc.activate_watchover("iid", requirement="r")
 
         ctx = manager.enable_watchover.call_args.kwargs["context"]
-        # Raw-tail is the LAST 10 of 15 messages → msg-5 .. msg-14.
-        # msg-4 and earlier must NOT appear.
-        assert "msg-4" not in ctx
+        # Builder's degraded-mode output is stored verbatim.
+        assert ctx == fallback_response
+        assert "Static Guardrail" in ctx
         assert "msg-5" in ctx
-        assert "msg-14" in ctx
 
     @pytest.mark.asyncio
     async def test_activate_with_empty_messages_works(self):
-        """Empty conversation → raw-tail is empty; requirement-only context."""
+        """Empty conversation → builder returns a sentinel; activation still writes."""
         manager = make_full_manager()
-        manager._compactor = make_mock_compactor()
         manager.get_instance.return_value = make_mock_graph_state(messages=[])
 
         from daemon.services.watchover_service import WatchoverService
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
+        )
 
-        svc = WatchoverService(manager)
-        result = await svc.activate_watchover("iid", requirement="no rm -rf")
+        # Builder returns an empty response — the lifecycle applies
+        # the empty-context guard.
+        with patch.object(
+            WatcherContextBuilder, "build", AsyncMock(return_value="")
+        ):
+            svc = WatchoverService(manager)
+            result = await svc.activate_watchover("iid", requirement="no rm -rf")
 
+        assert result["watchover_enabled"] is True
         ctx = manager.enable_watchover.call_args.kwargs["context"]
-        assert "[Requirement] no rm -rf" in ctx
+        # Empty-context guard: when the builder returns empty AND a
+        # requirement was supplied, the context falls back to a
+        # ``[Requirement]`` line so the watcher sees SOMETHING.
+        assert "no rm -rf" in ctx
 
     @pytest.mark.asyncio
-    async def test_activate_rollback_on_compaction_failure(self):
-        """Compaction raises → flags cleared + best-effort resume → re-raised (W-8 + H1 + M5).
+    async def test_activate_rollback_on_builder_unavailability(self):
+        """Builder class unimportable → belt-and-suspenders fallback runs.
 
-        The compaction failure happens BEFORE step 4 (the flag write),
-        so logically there is nothing to roll back — but the new
-        rollback block runs anyway and attempts a best-effort resume
-        so the instance is never left in an inconsistent state (H1).
-        The rollback ``set_metadata_many`` also clears any stale
-        ``watchover_context`` / ``watchover_requirement`` (M5).
+        Phase 4 update: the builder is designed to NEVER propagate
+        failures (its internal fallback chain handles timeouts,
+        infra errors, and judgment errors). The activation lifecycle
+        therefore does NOT see a builder error — it sees the
+        builder's degraded-mode output, and the activation succeeds.
+
+        The belt-and-suspenders fallback in
+        :meth:`WatchoverService._build_watchover_context` only triggers
+        when the BUILDER ITSELF cannot be imported (a programmer
+        mistake, not a runtime failure). In that rare case the
+        service falls back to a static guardrail + raw-tail, and the
+        activation still succeeds — the rollback path is NOT taken
+        because the fallback produced a usable context.
         """
         manager = make_full_manager()
-        compactor = make_mock_compactor()
-        compactor.compact_state = AsyncMock(side_effect=RuntimeError("compaction fail"))
-        manager._compactor = compactor
         manager.get_instance.return_value = make_mock_graph_state(
             messages=[_msg("hi")] * 20
         )
 
+        import sys
+        from daemon.services import watchover_service as ws_module
         from daemon.services.watchover_service import WatchoverService
 
-        svc = WatchoverService(manager)
+        # Simulate builder module being unimportable — patch
+        # ``__import__`` for the builder path. Cleaner: hide the
+        # builder module so the local import in
+        # ``_build_watchover_context`` raises ImportError.
+        real_import = ws_module.__builtins__["__import__"] if hasattr(
+            ws_module, "__builtins__"
+        ) else None
 
-        with pytest.raises(RuntimeError, match="compaction fail"):
-            await svc.activate_watchover("iid", requirement="r")
+        def _raise_on_builder_import(name, *args, **kwargs):
+            if "watcher_context_builder" in name:
+                raise ImportError("simulated builder unavailable")
+            return real_import(name, *args, **kwargs) if real_import else __import__(name, *args, **kwargs)
 
-        # Rollback wrote watchover_enabled=False + cleared context/
-        # requirement + audit marker (M5).
-        rollback_call = manager.set_metadata_many.call_args
-        assert rollback_call is not None
-        updates = rollback_call.args[1]
-        assert updates["watchover_enabled"] is False
-        assert updates["watchover_context"] is None
-        assert updates["watchover_requirement"] is None
-        assert updates["watchover_transition"] == "rollback"
+        with patch.object(ws_module, "__builtins__", {"__import__": _raise_on_builder_import}):
+            svc = WatchoverService(manager)
+            result = await svc.activate_watchover("iid", requirement="r")
 
-        # H1 — best-effort resume IS called in the rollback path so
-        # the instance is never left PAUSED with the flag cleared.
+        # Activation still succeeds with the belt-and-suspenders fallback.
+        assert result["watchover_enabled"] is True
+        # No rollback — the lifecycle produced a usable context.
+        manager.set_metadata_many.assert_not_called()
         manager.resume_instance_cascade.assert_awaited_once_with("iid")
 
     @pytest.mark.asyncio
@@ -786,6 +912,57 @@ class TestActivateWatchover:
         # The call_args list may include both the rollback SSE and the
         # would-be success SSE — in this failure path only the
         # rollback SSE should have been emitted.
+        sse_calls = manager._live_hub.stream_status_change.await_args_list
+        rollback_sse = [
+            c for c in sse_calls if c.args == ("iid", "watchover_failed")
+        ]
+        assert len(rollback_sse) == 1
+
+    @pytest.mark.asyncio
+    async def test_activate_rollback_on_cancelled_error(self):
+        """W1 fix: ``asyncio.CancelledError`` triggers the rollback path.
+
+        On Python 3.13+ ``CancelledError`` inherits from
+        ``BaseException`` (not ``Exception``). The route layer
+        ``routers/instances.py`` wraps activation in
+        ``asyncio.wait_for(timeout=30)`` and on timeout cancels the
+        inner task with ``CancelledError``. Without the W1 fix the
+        ``except Exception`` clause did NOT catch ``CancelledError``
+        and the rollback (clear flags + resume + SSE) was skipped —
+        the instance was left PAUSED with no recovery path.
+
+        Regression test: when ``enable_watchover`` raises
+        ``CancelledError``, the rollback path must fire and the
+        original ``CancelledError`` must be re-raised.
+        """
+        import asyncio
+
+        manager = make_full_manager()
+        manager.enable_watchover.side_effect = asyncio.CancelledError()
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+
+        with pytest.raises(asyncio.CancelledError):
+            await svc.activate_watchover("iid", requirement="r")
+
+        # W1 fix: the rollback path must fire on CancelledError —
+        # clear the flag + context/requirement + audit marker.
+        manager.set_metadata_many.assert_called_once()
+        updates = manager.set_metadata_many.call_args.args[1]
+        assert updates["watchover_enabled"] is False
+        assert updates["watchover_context"] is None
+        assert updates["watchover_requirement"] is None
+        assert updates["watchover_transition"] == "rollback"
+
+        # H1 — best-effort resume in the rollback path so the
+        # instance is not left PAUSED.
+        manager.resume_instance_cascade.assert_awaited_once_with("iid")
+
+        # M4 — rollback emits a watchover_failed SSE so the frontend
+        # is not stuck in a stale state.
         sse_calls = manager._live_hub.stream_status_change.await_args_list
         rollback_sse = [
             c for c in sse_calls if c.args == ("iid", "watchover_failed")

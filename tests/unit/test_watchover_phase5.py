@@ -293,6 +293,14 @@ class TestContextFreshnessRefresh:
         assert "OLD STALE CONTEXT" not in new_context
         # The new context should contain the tail content.
         assert "do something safe" in new_context
+        # C1 fix: the refreshed context PREPENDS the static guardrail
+        # prefix so the watcher always has the universal deny
+        # categories as a baseline even when the builder-built
+        # markdown guardrail is overwritten by the raw-tail refresh.
+        from daemon.services.watcher_context_builder import (
+            _FALLBACK_GUARDRAIL_PREFIX,
+        )
+        assert _FALLBACK_GUARDRAIL_PREFIX.rstrip() in new_context
         # Turn counter reset to 0 in the same atomic write.
         assert refreshed_calls[0].args[1]["watchover_context_turn"] == 0
 
@@ -334,6 +342,13 @@ class TestContextFreshnessRefresh:
         ][0]
         new_context = refreshed.args[1]["watchover_context"]
         assert "[Requirement] do not delete files" in new_context
+        # C1 fix: the refreshed context PREPENDS the static guardrail
+        # prefix so the watcher always has the universal deny
+        # categories as a baseline.
+        from daemon.services.watcher_context_builder import (
+            _FALLBACK_GUARDRAIL_PREFIX,
+        )
+        assert _FALLBACK_GUARDRAIL_PREFIX.rstrip() in new_context
 
     async def test_fresh_context_not_refreshed(self, monkeypatch):
         """context_turn=0, interval=99 → not stale → no refresh write."""
@@ -410,7 +425,10 @@ class TestEnableWatchoverWritesFreshnessKeys:
         )
 
         assert captured["watchover_context_turn"] == 0
-        assert captured["watchover_context_refresh_interval"] == 1
+        # C1 fix: default refresh_interval moved from 1 to 20 so the
+        # LLM-built guardrail survives many turns instead of being
+        # replaced by raw-tail on the second check.
+        assert captured["watchover_context_refresh_interval"] == 20
         assert captured["watchover_enabled"] is True
         assert captured["watchover_context"] == "ctx"
 
@@ -446,7 +464,9 @@ class TestEnableWatchoverWritesFreshnessKeys:
         manager.set_metadata_many = lambda iid, updates: captured.update(updates)
 
         manager.enable_watchover("iid", requirement="req", context="ctx")
-        assert captured["watchover_context_refresh_interval"] == 1
+        # C1 fix: invalid env-var fallback now uses the new default
+        # of 20 (was 1 before C1).
+        assert captured["watchover_context_refresh_interval"] == 20
 
     def test_zero_interval_floored_to_one(self):
         from daemon.manager import InstanceManager

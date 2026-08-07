@@ -28,6 +28,10 @@
     "max_denials_per_turn": 3,
     "mirror_message_count": 5,
     "failure_mode": "bifurcated",
-    "context_refresh_interval": 1
+    "context_refresh_interval": 20,
+    "context_builder": "llm",
+    "builder_llm_model": "quick",
+    "builder_timeout_seconds": 15,
+    "builder_message_window": 40
   }
 }

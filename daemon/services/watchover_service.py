@@ -51,6 +51,7 @@ Phase 5 (H3 — DONE):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -171,11 +172,11 @@ def _summary_from_compaction_result(
 ) -> str:
     """Extract a human-readable summary from a :class:`CompactionResult`.
 
-    The compactor returns a list containing ``RemoveMessage`` markers
-    plus a single ``SystemMessage`` summary. We pull the summary text
-    out; if the compactor didn't produce one (e.g. emergency
-    truncation path) we fall back to the retained tail of the
-    original messages so the watcher always sees SOMETHING.
+    NOTE: retained for backwards compatibility — the builder path no
+    longer calls this function, but the helper remains importable for
+    tests and any external callers. The Phase 4 builder replaces
+    compaction in the activation path; this helper is dormant unless
+    a non-builder strategy is configured.
 
     Args:
         replacement_messages: ``result.replacement_messages`` from the
@@ -256,24 +257,34 @@ class WatchoverService:
     # T3.4 — context construction
     # ------------------------------------------------------------------
 
-    async def _build_watchover_context(self, instance_id: str) -> str:
+    async def _build_watchover_context(
+        self, instance_id: str, *, requirement: str | None
+    ) -> str:
         """Construct the ``watchover_context`` string for ``instance_id``.
 
-        Tries :class:`ContextCompactor.compact_state` first. If that
-        returns ``None`` (history below the minimum-messages threshold,
-        every message is injection-flagged, recently compacted, etc.)
-        the raw-tail fallback (TD-6) is used so the watcher always
-        has SOME context — guaranteeing AC-EC.7 ("the watcher always
-        has context, even on fresh instances").
+        Phase 4 builder path: reads the conversation from the
+        checkpoint state and delegates to
+        :class:`WatcherContextBuilder`, which issues a single LLM call
+        that produces a structured markdown guardrail document. The
+        ``requirement`` is passed as an INPUT to the builder so the
+        LLM can weave it into ``## Requirement`` rather than being
+        appended as a hybrid post-splice.
 
-        The returned string always combines the summary (or raw tail)
-        with the user requirement so the watcher's Allow/Deny prompt
-        includes both the agent's recent activity and the operator's
-        intent. When no user requirement was supplied the requirement
-        line is omitted (not added as an empty section).
+        Fallback chain:
+
+        1. Builder LLM call succeeds → return markdown guardrail.
+        2. Builder LLM call fails (timeout / infra / judgment) →
+           builder's internal fallback (raw-tail + static guardrail +
+           requirement splice) runs and returns the degraded context.
+        3. Builder is unavailable (import error, manager
+           misconfigured) → belt-and-suspenders raw-tail fallback here
+           so the activation lifecycle always produces SOMETHING.
 
         Args:
             instance_id: Owning instance identifier.
+            requirement: Operator-supplied requirement string. Passed
+                to the builder as a JSON input field so the LLM can
+                weave it into ``## Requirement``.
 
         Returns:
             A non-empty context string. If the conversation is empty
@@ -287,40 +298,69 @@ class WatchoverService:
         current_state = await graph.aget_state(thread_config)
         state_values = current_state.values if current_state else {}
         messages = state_values.get("messages", []) if state_values else []
-        last_compacted_at = (
-            state_values.get("compacted_at") if state_values else None
-        )
 
-        summary_text: str = ""
-        # Only attempt compaction if a compactor is configured and
-        # there is at least one message to compact.
-        if manager._compactor is not None and messages:
-            ctx = _build_compaction_context(
-                manager=manager,
-                instance_id=instance_id,
-                messages=messages,
-                last_compacted_at=last_compacted_at,
+        # Try the LLM-driven builder first. If the builder is not
+        # importable or the manager is missing the LLM config the
+        # exception path below falls back to the raw-tail.
+        try:
+            from daemon.services.watcher_context_builder import (
+                WatcherContextBuilder,
             )
-            # Do NOT swallow exceptions here — a compactor failure must
-            # propagate to the activation lifecycle's outer try/except
-            # (T3.5 / W-8) so the partial state is rolled back. The
-            # raw-tail fallback (TD-6) below handles the case where the
-            # compactor returns None (short / fresh history).
-            result = await manager._compactor.compact_state(ctx)
+            from daemon.graph import (
+                _load_watcher_builder_prompt,
+                _load_watcher_meta_config,
+            )
 
-            if result is not None:
-                summary_text = _summary_from_compaction_result(
-                    result.replacement_messages, messages
+            # W2 fix: read ``builder_timeout_seconds`` and
+            # ``builder_message_window`` from the watcher's
+            # ``meta.json`` ``watchover`` section so the meta values
+            # are honored (previously the builder used its hardcoded
+            # defaults and the meta entries were dead config).
+            # ``builder_llm_model`` is intentionally NOT read here —
+            # the model source is ``_llm_config_from_manager(manager)``
+            # which already reads ``manager.config.llm.model``. The
+            # ``builder_llm_model`` meta entry remains documentation
+            # only.
+            watcher_meta = _load_watcher_meta_config()
+            builder = WatcherContextBuilder(
+                manager=manager,
+                llm_config=_llm_config_from_manager(manager),
+                builder_prompt=_load_watcher_builder_prompt(),
+                timeout_seconds=int(
+                    watcher_meta.get("builder_timeout_seconds", 15)
+                ),
+                message_window=int(
+                    watcher_meta.get("builder_message_window", 40)
+                ),
+            )
+            markdown = await builder.build(messages, requirement)
+            return markdown
+        except Exception as exc:
+            # Belt-and-suspenders fallback — the builder has its own
+            # internal fallback, but if it could not even be imported
+            # (test environment, missing module) we still need to
+            # produce SOMETHING so the watcher has context.
+            logger.warning(
+                f"watchover_service._build_watchover_context({instance_id}): "
+                f"builder path unavailable ({type(exc).__name__}: {exc}); "
+                f"falling back to raw-tail + static guardrail"
+            )
+            from daemon.services.watcher_context_builder import (
+                _FALLBACK_GUARDRAIL_PREFIX,
+            )
+
+            raw_tail = _format_raw_tail(messages, DEFAULT_RAW_TAIL_MESSAGES)
+            parts: list[str] = [_FALLBACK_GUARDRAIL_PREFIX.rstrip()]
+            if requirement:
+                parts.append(
+                    f"[Requirement] {requirement}\n\n"
+                    f"[Recent activity]\n{raw_tail}"
                 )
-
-        # Raw-tail fallback when compactor returned None (or failed).
-        if not summary_text:
-            summary_text = _format_raw_tail(messages, DEFAULT_RAW_TAIL_MESSAGES)
-
-        # Caller (activate_watchover) will splice the requirement in;
-        # return the summary-only portion here so the public API can
-        # decide whether to add the requirement line.
-        return summary_text
+            elif raw_tail:
+                parts.append(raw_tail)
+            else:
+                parts.append("[Recent activity] (no prior activity)")
+            return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # T3.5 — activation lifecycle
@@ -456,19 +496,23 @@ class WatchoverService:
             if user_context is not None:
                 context_text = user_context
             else:
-                context_text = await self._build_watchover_context(instance_id)
+                # Phase 4: pass ``requirement`` into the builder so the
+                # LLM can weave it into ``## Requirement`` of the
+                # markdown guardrail. No more post-splice — the
+                # builder's fallback path also splices the requirement
+                # into the degraded output, so it always appears.
+                context_text = await self._build_watchover_context(
+                    instance_id, requirement=requirement
+                )
 
-            # Combine with the requirement so the watcher sees both.
-            if requirement:
-                context_text = (
-                    f"[Requirement] {requirement}\n\n"
-                    f"[Recent activity]\n{context_text or '(no prior activity)'}"
-                )
-            elif not context_text:
-                context_text = (
-                    "[Requirement] (none provided)\n\n"
-                    "[Recent activity] (no prior activity)"
-                )
+            # Empty-context guard: if the builder returned empty AND
+            # no requirement was supplied, use a sentinel so the
+            # activation lifecycle can still write SOMETHING.
+            if not context_text:
+                if requirement:
+                    context_text = f"[Requirement] {requirement}"
+                else:
+                    context_text = "[Recent activity] (no prior activity)"
 
             # Step 4 — atomic flag write.
             manager.enable_watchover(
@@ -480,7 +524,7 @@ class WatchoverService:
             # Step 5 — resume.
             await manager.resume_instance_cascade(instance_id)
 
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             # Rollback (W-8 + H1 + M5 + M4): clear any partial flag
             # state (including stale context/requirement), best-effort
             # resume the instance so it is never left PAUSED with the
@@ -489,6 +533,16 @@ class WatchoverService:
             # the ORIGINAL activation error. None of the rollback
             # sub-steps may raise — they are nested in their own
             # try/except so the re-raise is always the original.
+            #
+            # W1 fix: also catch ``asyncio.CancelledError``. Python
+            # 3.13+ promotes ``CancelledError`` to a ``BaseException``
+            # subclass, so a plain ``except Exception`` does NOT catch
+            # it. The route layer (``routers/instances.py``) wraps
+            # activation in ``asyncio.wait_for(timeout=30)`` and on
+            # timeout cancels the inner task with ``CancelledError``.
+            # Without this clause the rollback (clear flags + resume)
+            # is skipped and the instance is left PAUSED with no
+            # recovery path.
             logger.error(
                 "watchover_service.activate_watchover(%s): activation failed "
                 "(%s); rolling back partial state and re-raising",
@@ -697,6 +751,21 @@ def _build_compaction_context(
     # Local import to avoid a module-level cycle: compaction imports
     # nothing from manager, but importing it here keeps the service
     # importable even when the compactor module is mocked.
+    from daemon.compaction import CompactionContext
+
+    return CompactionContext(
+        messages=messages,
+        system_prompt_tokens=0,
+        model_name=manager.config.llm.model,
+        # NOTE: manager.config (PUBLIC attribute) is correct. The earlier
+        # ``manager._config`` typo passed CI only because MagicMock
+        # auto-creates missing attributes — production crash on first
+        # activation with compaction enabled (C1 fix).
+        config=manager.config.compaction,
+        llm_config=_llm_config_from_manager(manager),
+        last_compacted_at=last_compacted_at,
+    )
+
     from daemon.compaction import CompactionContext
 
     return CompactionContext(

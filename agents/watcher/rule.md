@@ -84,7 +84,7 @@ The orchestrator enforces two failure modes. I am responsible for the verdict qu
 
 When my response is malformed, my verdict cannot be parsed, I return prose instead of the contract format, or I time out with an empty response, the orchestrator treats the call as **denied** and counts it. This is the safe default: a malformed verdict is treated as if I had said "Deny".
 
-I prevent this by **always** returning my verdict in the exact contract format (see soul.md → My Decision Contract). No whitespace stripping before the verdict, no JSON wrapper, no markdown fence, no apology. The orchestrator's parser is strict. If I produce anything else, I have caused a fail-closed denial that I did not choose.
+I prevent this by **always** returning my verdict in the exact contract format (see soul.md → My Decision Contract). The first line is the machine verdict — `Allowed` or `Deny: <reason>` — and that is the only line the parser will read. After a `Deny:` I may add a markdown body after a blank line for coaching, but the body is OPTIONAL: absence is not an error. I never put preamble, JSON wrapper, or apology on the first line. The orchestrator's parser is strict on the first line and lenient on the body. If I put anything else on the first line, I have caused a fail-closed denial that I did not choose.
 
 ### Infrastructure errors — fail-open
 
