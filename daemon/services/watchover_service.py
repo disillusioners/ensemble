@@ -327,7 +327,7 @@ class WatchoverService:
                 llm_config=_llm_config_from_manager(manager),
                 builder_prompt=_load_watcher_builder_prompt(),
                 timeout_seconds=int(
-                    watcher_meta.get("builder_timeout_seconds", 15)
+                    watcher_meta.get("builder_timeout_seconds", 300)
                 ),
                 message_window=int(
                     watcher_meta.get("builder_message_window", 40)
@@ -373,19 +373,28 @@ class WatchoverService:
         requirement: str | None,
         user_context: str | None = None,
     ) -> dict[str, Any]:
-        """Run the activation lifecycle: quiesce → pause → context → flag → resume.
+        """Run the activation lifecycle: pause → bounded_barrier → context → flag → resume.
 
         Phase 3 (T3.5) orchestration. The sequence is:
 
-          1. ``wait_for_instance_quiescent`` (T3.5b) — best-effort
-             barrier against in-flight graph tasks so the context
-             snapshot is consistent. **Runs BEFORE pause** (see
-             "Quiesce-first rationale" below).
-          2. ``pause_instance_cascade`` — soft-pause the instance +
-             children so the config flip is atomic from the agent's
-             perspective.
+          1. ``pause_instance_cascade`` — cancel the in-flight graph
+             task (Checkpoint-safe; resume replays from the last
+             committed LangGraph node boundary). This makes the user
+             immediately see the instance as ``PAUSED`` while the
+             context snapshot is built — the bug fix for the M-2
+             "no visible pause" report.
+          2. ``wait_for_instance_quiescent(timeout=2.0)`` — a short
+             bounded barrier that just confirms the graph task
+             cancellation has settled. ``pause_instance_cascade`` above
+             already cancelled the task, so this barrier is a quick
+             sanity check (not a strategy). It returns ``True`` in
+             the common case; a ``False`` is logged but does not
+             abort because the task was already cancelled upstream.
           3. ``_build_watchover_context`` (T3.4) — summarise the
-             recent conversation (compaction + raw-tail fallback).
+             recent conversation via the LLM builder (with a 300s
+             timeout because devops/ops conversations can be very
+             long). Runs AFTER pause so the instance is visibly
+             paused while the snapshot is built.
           4. ``enable_watchover`` — atomic ``set_metadata_many``
              writes the full flag set.
           5. ``resume_instance_cascade`` — resume the instance.
@@ -393,22 +402,25 @@ class WatchoverService:
              ``LiveEventHub.stream_status_change`` so the frontend
              sees the transition.
 
-        Quiesce-first rationale (H4 deviation from T3.5 plan wording):
-            The quiescence barrier observes ``manager._graph_tasks`` —
-            it awaits in-flight tool threads so the subsequent
-            ``aget_state`` snapshot is consistent. ``pause_instance_cascade``
-            *cancels* the graph task that the barrier awaits. If pause
-            ran first, the task would be cancelled/removed BEFORE the
-            barrier could observe and await it, making the barrier a
-            no-op (always returns ``True`` because there is no task
-            to wait for). Keeping the quiescence-first order lets the
-            barrier await real in-flight tool threads; pause then
-            cancels any straggler. The TOCTOU window between the
-            quiescence barrier returning and pause actually landing
-            is the accepted LD-4 limitation (a tool call that
-            starts AFTER the barrier but BEFORE pause may still race;
-            watchover docs advise operators to pause manually before
-            activating on a busy instance).
+        Pause-first rationale (replaces the earlier "Quiesce-first
+        rationale" which observed an in-flight hang):
+            The original ordering was ``quiesce → pause → context → flag
+            → resume``. The quiescence barrier uses a 30s default
+            timeout and runs FIRST. When the instance was mid-LLM-call
+            (the normal case for an active devops instance), the
+            barrier blocked the full 30s, eating the route-level
+            ``asyncio.wait_for(timeout=30)`` budget and producing a
+            504 — and the user never saw the pause because pause
+            came AFTER the barrier. The fix: pause FIRST. ``pause_instance_cascade``
+            cancels the in-flight graph task (checkpoint-safe — the
+            resume path replays from the last committed LangGraph
+            node boundary, verified by the LD-4 stability tests).
+            The 2s post-pause barrier is a tiny confirmation that
+            cancellation settled; it is NOT a strategy. This resolves
+            the LD-4 in-flight limitation in the normal-activation
+            path: the user now sees the instance flip to ``PAUSED``
+            immediately and the activation completes in well under
+            the route ceiling.
 
         Rollback (W-8): if step 3, 4, or 5 raises, the partial state
         is cleared (``watchover_enabled=false`` + ``watchover_context=None``
@@ -449,33 +461,19 @@ class WatchoverService:
         """
         manager = self._manager
 
-        # Step 1 — quiescence barrier (best-effort; never raises).
+        # Step 1 — PAUSE FIRST (bug fix for the M-2 in-flight hang).
         #
-        # Quiesce-FIRST (H4, deviation from the original T3.5 plan
-        # wording "pause → quiesce → context → flag → resume"):
-        #   ``pause_instance_cascade`` cancels the graph task that
-        #   the barrier observes (via ``manager._graph_tasks``). If
-        #   pause ran first, the task would be removed BEFORE the
-        #   barrier could observe and await it — the barrier would
-        #   be a silent no-op. Quiesce-first lets the barrier await
-        #   in-flight tool threads; pause then cancels any straggler.
-        #   The TOCTOU window between quiescence returning and pause
-        #   landing is the accepted LD-4 limitation (W-9 / CR-3).
-        quiescent = await manager.wait_for_instance_quiescent(instance_id)
-
-        # M3 — promote the timeout to a service-level warning so the
-        # operator sees the LD-4 limitation in the logs even though
-        # the barrier itself lives in manager.py (out of scope for
-        # Phase 3 to modify).
-        if not quiescent:
-            logger.warning(
-                "watchover_service.activate_watchover(%s): quiescence barrier "
-                "timed out; context snapshot may be inconsistent (LD-4)",
-                instance_id,
-            )
-
-        # Step 2 — pause and persist the watchover setup reason on any
-        # in-flight task turn suspended by the cascade (Phase 5 / H3).
+        # The previous ordering ran ``wait_for_instance_quiescent``
+        # (30s default) BEFORE pause. When the instance was mid-LLM-call
+        # the barrier blocked the full 30s, eating the route-level
+        # ``asyncio.wait_for(timeout=30)`` budget and producing a 504
+        # — and the user never saw the pause because pause came after
+        # the barrier. The fix: pause FIRST. ``pause_instance_cascade``
+        # cancels the in-flight graph task (checkpoint-safe; the
+        # resume path replays from the last committed LangGraph node
+        # boundary, verified by the LD-4 stability tests). The
+        # 2s post-pause barrier is a tiny confirmation that
+        # cancellation settled — it is NOT a strategy.
         try:
             await manager.pause_instance_cascade(
                 instance_id,
@@ -489,6 +487,28 @@ class WatchoverService:
                 exc,
             )
             raise
+
+        # Step 2 — bounded barrier (confirmation, not strategy).
+        #
+        # Pause already cancelled the graph task. The 2s barrier just
+        # confirms the cancellation has settled before we read state.
+        # ``wait_for_instance_quiescent`` is itself best-effort (never
+        # raises) and returns the result of an internal ``wait_for``;
+        # ``False`` here means the cancellation has not settled yet
+        # but is in progress — we proceed anyway.
+        quiescent = await manager.wait_for_instance_quiescent(
+            instance_id, timeout=2.0
+        )
+
+        # Soft warning so operators see the LD-4-style edge case in the
+        # logs even though the activation proceeds regardless.
+        if not quiescent:
+            logger.warning(
+                "watchover_service.activate_watchover(%s): post-pause "
+                "barrier settled with timeout (2s); proceeding — the "
+                "graph task was already cancelled by pause_instance_cascade",
+                instance_id,
+            )
 
         context_text: str | None = None
         try:
@@ -551,6 +571,9 @@ class WatchoverService:
             )
             # (1) Clear flags + stale context/requirement + audit
             # marker (M5).
+            # CancelledError-safe: the route's outer ``wait_for`` may
+            # cancel the inner task on timeout and we still need
+            # rollback to fire so the instance is never left PAUSED.
             try:
                 manager.set_metadata_many(
                     instance_id,
@@ -561,7 +584,7 @@ class WatchoverService:
                         "watchover_transition": "rollback",
                     },
                 )
-            except Exception as rollback_exc:
+            except (Exception, asyncio.CancelledError) as rollback_exc:
                 logger.error(
                     "watchover_service.activate_watchover(%s): rollback "
                     "set_metadata_many also failed (%s); operator must "
@@ -573,9 +596,11 @@ class WatchoverService:
             # attempt to unpause so the instance is never left PAUSED
             # with the flag cleared (H1). Resume failure is logged
             # but NEVER raised.
+            # CancelledError-safe: must run on the route's timeout
+            # cancel path so the instance is not left PAUSED.
             try:
                 await manager.resume_instance_cascade(instance_id)
-            except Exception as resume_exc:
+            except (Exception, asyncio.CancelledError) as resume_exc:
                 logger.error(
                     "watchover_service.activate_watchover(%s): rollback "
                     "resume_instance_cascade also failed (%s); instance "
@@ -586,11 +611,13 @@ class WatchoverService:
             # (3) Best-effort SSE emit so the frontend does not see a
             # stuck "activating" state (M4). SSE failure is logged
             # but NEVER raised.
+            # CancelledError-safe: must run on the route's timeout
+            # cancel path so the frontend sees the rollback state.
             try:
                 await manager._live_hub.stream_status_change(
                     instance_id, "watchover_failed"
                 )
-            except Exception as sse_exc:
+            except (Exception, asyncio.CancelledError) as sse_exc:
                 logger.warning(
                     "watchover_service.activate_watchover(%s): rollback "
                     "SSE emit also failed (%s); frontend may see stale state",
@@ -665,6 +692,10 @@ class WatchoverService:
         """
         manager = self._manager
 
+        # Step 1 — pause. ``Exception`` only — this is NOT a rollback
+        # path (no partial state pending). If the route's outer
+        # ``wait_for`` cancels on timeout, ``CancelledError`` here
+        # should propagate (no state to clean up).
         try:
             await manager.pause_instance_cascade(
                 instance_id,
@@ -682,13 +713,17 @@ class WatchoverService:
         try:
             manager.disable_watchover(instance_id)
             await manager.resume_instance_cascade(instance_id)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             # Rollback (H2): the disable or resume step failed. We must
             # still attempt to unpause the instance so it is never left
             # PAUSED after a deactivation attempt. This mirrors the
             # activation rollback (H1) symmetrically. The resume is
             # best-effort — if it ALSO fails, log but do NOT raise; the
             # original disable/resume error must propagate.
+            #
+            # CancelledError-safe: the route's outer ``wait_for`` may
+            # cancel the inner task on timeout and we still need
+            # rollback to fire so the instance is never left PAUSED.
             logger.error(
                 "watchover_service.deactivate_watchover(%s): clear/resume "
                 "failed: %s; attempting best-effort rollback resume",
@@ -697,7 +732,7 @@ class WatchoverService:
             )
             try:
                 await manager.resume_instance_cascade(instance_id)
-            except Exception as resume_exc:
+            except (Exception, asyncio.CancelledError) as resume_exc:
                 logger.error(
                     "watchover_service.deactivate_watchover(%s): rollback "
                     "resume_instance_cascade also failed (%s); instance may "
@@ -711,7 +746,7 @@ class WatchoverService:
             await manager._live_hub.stream_status_change(
                 instance_id, "watchover_inactive"
             )
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             logger.warning(
                 "watchover_service.deactivate_watchover(%s): SSE emit failed: %s",
                 instance_id,

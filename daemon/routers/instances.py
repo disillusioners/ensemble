@@ -759,16 +759,17 @@ async def toggle_watchover(
     # instance-scoped endpoint uses (M1).
     await _check_instance_exists(manager, instance_id)
 
-    # Phase 4 / R-1: activation now includes a builder LLM call that
-    # can take up to 15s (the builder_timeout_seconds default) plus
-    # lifecycle steps. Wrap the activation in ``asyncio.wait_for``
-    # with a 30s ceiling so a hung builder does not leave the client
-    # blocking on a long-tail LLM call. The activation lifecycle has
-    # its own rollback path; if we timeout here the lifecycle may
-    # still be running in the background — the rollback will clear
-    # the partial flags and resume the instance. The 504 surfaces a
-    # clean error to the operator.
-    _ACTIVATION_TIMEOUT_SECONDS = 30
+    # Phase 4 / R-1 + pause-first hang fix: activation now includes a
+    # builder LLM call that can take up to 300s (the
+    # builder_timeout_seconds default) plus lifecycle steps for
+    # pause / bounded-barrier / flag-write / resume. Wrap the
+    # activation in ``asyncio.wait_for`` with a 330s ceiling so the
+    # builder has 300s headroom + 30s for the lifecycle steps. The
+    # activation lifecycle has its own rollback path; if we timeout
+    # here the lifecycle may still be running in the background — the
+    # rollback will clear the partial flags and resume the instance.
+    # The 504 surfaces a clean error to the operator.
+    _ACTIVATION_TIMEOUT_SECONDS = 330
 
     try:
         if body.enabled:

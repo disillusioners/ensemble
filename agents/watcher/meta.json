@@ -31,7 +31,7 @@
     "context_refresh_interval": 20,
     "context_builder": "llm",
     "builder_llm_model": "quick",
-    "builder_timeout_seconds": 15,
+    "builder_timeout_seconds": 300,
     "builder_message_window": 40
   }
 }

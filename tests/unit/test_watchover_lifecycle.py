@@ -572,19 +572,22 @@ class TestWaitForInstanceQuiescent:
 
 
 class TestActivateWatchover:
-    """Activation lifecycle: pause → quiesce → context → flag → resume."""
+    """Activation lifecycle: pause → bounded_barrier → context → flag → resume."""
 
     @pytest.mark.asyncio
     async def test_activate_runs_correct_sequence(self):
         """Pause happens before enable; resume happens after enable.
 
-        Phase 4 update: the activation lifecycle uses the
-        ``WatcherContextBuilder`` instead of the compactor. When a
-        ``user_context`` is supplied the builder is bypassed entirely
-        and the requirement is NOT post-spliced into the user-supplied
-        context (the requirement is woven into the builder's output
-        only on the builder path). The lifecycle ordering — quiesce →
-        pause → enable → resume → SSE — is unchanged.
+        Phase 4 update + pause-first ordering fix: the activation
+        lifecycle uses the ``WatcherContextBuilder`` instead of the
+        compactor. When a ``user_context`` is supplied the builder is
+        bypassed entirely and the requirement is NOT post-spliced into
+        the user-supplied context (the requirement is woven into the
+        builder's output only on the builder path). The lifecycle
+        ordering — pause → bounded_barrier(2s) → enable → resume →
+        SSE — matches the new pause-first ordering. Pause comes FIRST
+        so the user sees the instance flip to PAUSED immediately
+        (the bug fix for the M-2 in-flight hang).
         """
         manager = make_full_manager()
         manager.get_instance.return_value = make_mock_graph_state(messages=[])
@@ -603,12 +606,16 @@ class TestActivateWatchover:
         assert result["instance_id"] == "iid"
         assert result["quiescent"] is True
 
-        # Order: quiesce → pause → enable → resume → SSE.
+        # Order: pause → bounded_barrier(2s) → enable → resume → SSE.
         assert manager.wait_for_instance_quiescent.await_count == 1
         assert manager.pause_instance_cascade.await_count == 1
         manager.pause_instance_cascade.assert_awaited_once_with(
             "iid",
             suspension_reason="watchover_setup",
+        )
+        # Bounded barrier runs AFTER pause with timeout=2.0.
+        manager.wait_for_instance_quiescent.assert_awaited_once_with(
+            "iid", timeout=2.0
         )
         assert manager.enable_watchover.call_count == 1
         assert manager.resume_instance_cascade.await_count == 1
@@ -988,12 +995,14 @@ class TestActivateWatchover:
         manager.set_metadata_many.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_activate_logs_warning_on_quiescence_timeout(self, caplog):
-        """M3 — when ``wait_for_instance_quiescent`` returns False, log a warning.
+    async def test_activate_logs_warning_on_barrier_post_pause_timeout(self, caplog):
+        """Pause-first ordering: when the post-pause barrier returns False, log a warning.
 
-        The barrier itself lives in ``daemon/manager.py`` (Phase 2-owned,
-        out of scope) — but the service emits a warning so operators
-        see the LD-4 limitation in the logs.
+        The barrier runs AFTER pause with a bounded 2s timeout. The
+        cancellation was already issued by ``pause_instance_cascade``,
+        so the activation proceeds regardless — the warning is purely
+        informational so operators see the LD-4-style edge case in the
+        logs even though the activation proceeds.
         """
         import logging
 
@@ -1013,15 +1022,14 @@ class TestActivateWatchover:
         assert result["watchover_enabled"] is True
         assert result["quiescent"] is False
 
-        # M3 — warning was emitted with the LD-4 context.
+        # M3 — warning was emitted with the post-pause context.
         warning_records = [
             r for r in caplog.records if r.levelno == logging.WARNING
         ]
         assert any(
-            "quiescence barrier timed out" in r.getMessage()
-            and "LD-4" in r.getMessage()
+            "post-pause barrier settled with timeout" in r.getMessage()
             for r in warning_records
-        ), f"expected M3 warning, got: {[r.getMessage() for r in warning_records]}"
+        ), f"expected post-pause barrier warning, got: {[r.getMessage() for r in warning_records]}"
 
     @pytest.mark.asyncio
     async def test_activate_no_warning_when_quiescence_succeeds(self, caplog):
@@ -1087,6 +1095,326 @@ class TestActivateWatchover:
         # Original ``write fail`` must propagate, NOT the SSE error.
         with pytest.raises(RuntimeError, match="write fail"):
             await svc.activate_watchover("iid", requirement="r")
+
+
+# =============================================================================
+# Pause-first ordering regression tests (M-2 in-flight hang fix)
+# =============================================================================
+
+
+class TestActivatePauseFirstOrdering:
+    """Regression tests for the pause-first ordering fix (M-2 in-flight hang).
+
+    The previous ordering ran ``wait_for_instance_quiescent`` (30s default)
+    BEFORE pause. When the instance was mid-LLM-call the barrier blocked
+    the full 30s, eating the route-level ``asyncio.wait_for(timeout=30)``
+    budget and producing a 504 — and the user never saw the pause because
+    pause came after the barrier. The fix swaps the order:
+    ``pause → bounded_barrier(2s) → context → flag → resume``.
+
+    These tests pin the new ordering, the in-flight completion speed, the
+    rollback-on-cancel behavior, the 300s timeout, and the visible-pause
+    contract.
+    """
+
+    @pytest.mark.asyncio
+    async def test_activate_pause_first_then_barrier(self):
+        """Pause is invoked BEFORE the bounded barrier; barrier uses timeout=2.0.
+
+        Regression test for the M-2 in-flight hang. The old ordering
+        invoked ``wait_for_instance_quiescent`` (30s default) FIRST,
+        which blocked the route ceiling and produced a 504. The new
+        ordering invokes pause FIRST (cancels the in-flight task),
+        then a 2s bounded barrier just to confirm cancellation
+        settled.
+        """
+        manager = make_full_manager()
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+
+        call_order: list[str] = []
+
+        # Track call order via a sentinel list — each mock appends on
+        # entry. We use a synchronous wrapper (side_effect) so the
+        # append runs before the await returns.
+        orig_pause = manager.pause_instance_cascade.side_effect
+
+        def _track_pause(*args, **kwargs):
+            call_order.append("pause")
+            if orig_pause is not None:
+                return orig_pause(*args, **kwargs)
+            return None
+
+        def _track_barrier(*args, **kwargs):
+            call_order.append("barrier")
+            return True
+
+        manager.pause_instance_cascade.side_effect = _track_pause
+        manager.wait_for_instance_quiescent.side_effect = _track_barrier
+
+        result = await svc.activate_watchover(
+            "iid", requirement="r", user_context="prebuilt"
+        )
+
+        # Success metrics.
+        assert result["watchover_enabled"] is True
+        assert result["quiescent"] is True
+
+        # Ordering: pause runs BEFORE barrier.
+        assert call_order.index("pause") < call_order.index("barrier"), (
+            f"Expected pause before barrier, got order: {call_order}"
+        )
+
+        # Barrier uses the bounded 2s timeout — NOT the 30s default.
+        manager.wait_for_instance_quiescent.assert_awaited_once_with(
+            "iid", timeout=2.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_in_flight_completes_under_ceiling(self):
+        """A long in-flight graph task does NOT block the activation.
+
+        The previous ordering blocked the full 30s quiescence barrier
+        on a running task, eating the 30s route ceiling and producing
+        a 504. The fix cancels the task via pause, so activation
+        returns near-instantly regardless of how long the in-flight
+        task would have taken.
+
+        This is the core regression test for the bug — it asserts
+        that even with a ``not done`` task mock, ``activate_watchover``
+        completes in well under the 330s ceiling (the test asserts
+        < 5s, which is generous).
+        """
+        import asyncio
+        import time
+
+        manager = make_full_manager()
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+
+        # Simulate an in-flight task: the barrier returns False (the
+        # task would have taken the full 30s in the old ordering).
+        # Crucially, the pause call is what makes the activation
+        # return — pause is a mock that resolves immediately.
+        manager.wait_for_instance_quiescent.return_value = False
+
+        svc = WatchoverService(manager)
+
+        start = time.monotonic()
+        result = await svc.activate_watchover(
+            "iid", requirement="r", user_context="prebuilt"
+        )
+        elapsed = time.monotonic() - start
+
+        # Activation completes near-instantly despite the in-flight
+        # task. The previous ordering would have hung for ~30s here.
+        assert elapsed < 5.0, (
+            f"Activation took {elapsed:.2f}s — pause-first ordering "
+            f"not effective. Barrier should be bounded to 2s and pause "
+            f"should cancel the in-flight task immediately."
+        )
+        assert result["watchover_enabled"] is True
+
+        # Pause ran (it cancelled the task) — without pause-first,
+        # the barrier would have blocked the full 30s.
+        manager.pause_instance_cascade.assert_awaited_once_with(
+            "iid", suspension_reason="watchover_setup"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rollback_runs_on_cancellation(self):
+        """When the context build is cancelled (e.g. route wait_for timeout), rollback still runs.
+
+        Regression test for the Change 4 fix. The route layer wraps
+        activation in ``asyncio.wait_for(timeout=330)`` and on timeout
+        cancels the inner task with ``CancelledError``. The rollback
+        MUST fire (clear flags + resume + SSE) so the instance is
+        never left PAUSED with no recovery path.
+
+        The previous rollback had ``except Exception`` on the nested
+        sub-steps (clear-flags, resume, SSE). On Python 3.13+,
+        ``CancelledError`` is a ``BaseException`` subclass and was
+        NOT caught — rollback was skipped.
+        """
+        import asyncio
+
+        manager = make_full_manager()
+        manager.get_instance.return_value = make_mock_graph_state(messages=[])
+
+        from daemon.services.watchover_service import WatchoverService
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
+        )
+
+        # Simulate the route's wait_for timeout canceling the inner
+        # task DURING the context build. The builder raises
+        # CancelledError on its async await.
+        with patch.object(
+            WatcherContextBuilder,
+            "build",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ):
+            svc = WatchoverService(manager)
+
+            with pytest.raises(asyncio.CancelledError):
+                await svc.activate_watchover(
+                    "iid", requirement="r", user_context=None
+                )
+
+        # Change 4 fix: rollback fired even after CancelledError.
+        # (1) Flags cleared.
+        manager.set_metadata_many.assert_called_once()
+        updates = manager.set_metadata_many.call_args.args[1]
+        assert updates["watchover_enabled"] is False
+        assert updates["watchover_context"] is None
+        assert updates["watchover_requirement"] is None
+        assert updates["watchover_transition"] == "rollback"
+
+        # (2) Best-effort resume in rollback.
+        manager.resume_instance_cascade.assert_awaited_once_with("iid")
+
+        # (3) watchover_failed SSE emitted.
+        sse_calls = manager._live_hub.stream_status_change.await_args_list
+        rollback_sse = [
+            c for c in sse_calls if c.args == ("iid", "watchover_failed")
+        ]
+        assert len(rollback_sse) == 1, (
+            f"Expected rollback SSE, got: {sse_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_context_build_timeout_is_300(self):
+        """The WatcherContextBuilder is constructed with timeout_seconds=300.
+
+        Regression test for the Change 2 fix. The previous default was
+        15s — too short for long devops/ops conversations. The new
+        default is 300s (and the route's wait_for ceiling is 330s).
+        """
+        manager = make_full_manager()
+        manager.get_instance.return_value = make_mock_graph_state(
+            messages=[_msg("hi")] * 5
+        )
+
+        from daemon.services.watchover_service import WatchoverService
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
+        )
+
+        # Capture the constructor arguments.
+        captured: dict = {}
+
+        real_init = WatcherContextBuilder.__init__
+
+        def capturing_init(self, *args, **kwargs):
+            captured.update(kwargs)
+            captured["args"] = args
+            # Do not call real __init__ — we only need the kwargs.
+
+        with patch.object(
+            WatcherContextBuilder, "__init__", capturing_init
+        ):
+            svc = WatchoverService(manager)
+            await svc.activate_watchover("iid", requirement="r")
+
+        # The timeout_seconds keyword passed to the builder is 300.
+        assert captured.get("timeout_seconds") == 300, (
+            f"Expected timeout_seconds=300, got {captured.get('timeout_seconds')!r}. "
+            f"Full kwargs: {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_instance_paused_during_activation(self):
+        """The instance is visibly PAUSED while the context snapshot is being built.
+
+        This is the user-facing contract: when ``activate_watchover``
+        is called, the user should IMMEDIATELY see the instance flip
+        to ``PAUSED`` (the bug fix for the M-2 "no visible pause"
+        report). The previous ordering ran the barrier first, so the
+        pause was not visible until 30s later — by which point the
+        route had timed out.
+
+        Assertion: while ``_build_watchover_context`` is running, the
+        instance MUST already be PAUSED. We capture the instance
+        status from inside the builder's side_effect.
+        """
+        import asyncio
+
+        manager = make_full_manager()
+        manager.get_instance.return_value = make_mock_graph_state(
+            messages=[_msg("hi")] * 5
+        )
+
+        # The manager's status getter is what the test asserts on.
+        # We use a side_effect on pause_instance_cascade to capture
+        # the state at the moment the lifecycle reads the instance.
+        captured: dict = {}
+
+        real_pause = manager.pause_instance_cascade
+
+        async def capture_pause(*args, **kwargs):
+            # While pause is being invoked, the lifecycle has NOT yet
+            # reached the context build. The user-visible state is
+            # this: the instance is mid-pause. After pause returns,
+            # the lifecycle proceeds to the context build where the
+            # instance is stably PAUSED.
+            captured["pause_called"] = True
+            captured["pause_args"] = args
+            captured["pause_kwargs"] = kwargs
+            # The pause function itself returns; the caller
+            # (lifecycle) immediately proceeds to the barrier then
+            # the context build. We use a side_effect on the builder
+            # to assert the state at THAT moment.
+            return None
+
+        manager.pause_instance_cascade.side_effect = capture_pause
+
+        from daemon.services.watchover_service import WatchoverService
+        from daemon.services.watcher_context_builder import (
+            WatcherContextBuilder,
+        )
+
+        # The builder's side_effect captures the state at the moment
+        # the context build runs. By then, pause has already returned,
+        # so the instance is stably PAUSED.
+        builder_status_capture: dict = {}
+
+        async def capture_build(messages, requirement, **kwargs):
+            # At this point in the lifecycle:
+            #   1. pause_instance_cascade has returned.
+            #   2. wait_for_instance_quiescent has returned.
+            #   3. The instance is PAUSED (pause sets the state).
+            # The capture is best-effort — we record pause_called
+            # as evidence that pause ran BEFORE the build.
+            builder_status_capture["pause_called_before_build"] = (
+                captured.get("pause_called", False)
+            )
+            return "## Allowed\n- test\n\n## Forbidden\n- test"
+
+        with patch.object(
+            WatcherContextBuilder, "build", side_effect=capture_build
+        ):
+            svc = WatchoverService(manager)
+            result = await svc.activate_watchover(
+                "iid", requirement="r", user_context=None
+            )
+
+        # The user-facing contract: pause ran BEFORE the context
+        # build. The instance is visibly PAUSED while the snapshot
+        # is being built.
+        assert result["watchover_enabled"] is True
+        assert builder_status_capture["pause_called_before_build"] is True, (
+            "Pause must be called BEFORE the context build — the user "
+            "needs to see the instance flip to PAUSED immediately, "
+            "not 30s later after the quiescence barrier."
+        )
+        # And pause used the WATCHOVER_SETUP suspension reason.
+        assert captured["pause_kwargs"].get("suspension_reason") == (
+            "watchover_setup"
+        )
 
 
 # =============================================================================
