@@ -49,10 +49,14 @@ logger = logging.getLogger(__name__)
 # within a cheap model's context budget.
 DEFAULT_BUILDER_MESSAGE_WINDOW = 40
 
-# Default timeout for the builder LLM call. Higher than the watcher's
-# ``timeout_seconds`` (10s) because the builder produces more output
-# (a structured markdown document, not a single verdict line).
-DEFAULT_BUILDER_TIMEOUT_SECONDS = 15
+# Default timeout for the builder LLM call. Set to 300 seconds because
+# the builder summarizes potentially long devops/ops conversations
+# (the watcher context is a structured markdown document, not a
+# single-line verdict). This INDEPENDENT of the watcher's own per-call
+# ``timeout_seconds`` (10s) — the watcher evaluates individual tool
+# calls quickly, while the builder builds the security profile once
+# per activation and may iterate over thousands of messages.
+DEFAULT_BUILDER_TIMEOUT_SECONDS = 300
 
 # Fallback prefix applied when the builder LLM call fails or times out.
 # Covers the common deny categories from ``agents/watcher/rule.md``
@@ -98,8 +102,12 @@ class WatcherContextBuilder:
             responsible for loading — the builder does not touch the
             filesystem.
         timeout_seconds: Hard ceiling for the builder LLM call
-            (default 15s). Activation is a blocking path, but the
-            builder must not stall the entire route.
+            (default 300s). The builder summarizes potentially long
+            devops/ops conversations into a structured markdown
+            guardrail document — the cycle can take a few minutes on
+            long histories. Activation is a blocking path, but the
+            route's outer ``asyncio.wait_for`` (330s) gives the
+            builder a 300s headroom + 30s for lifecycle steps.
         message_window: Number of trailing messages to feed the builder
             (default 40). System messages are always retained even
             when the window clips non-system messages.
