@@ -859,6 +859,69 @@ class InstanceMessagingService:
         )
         logger.debug(f"Initiative message stored for instance {instance_id[:8]}...")
 
+    async def _drain_deferred_watchover_terminate(self, instance_id: str) -> None:
+        """Drain the deferred watchover termination marker set by the graph task.
+
+        Consolidates the C2-safe deferred-termination cascade that used to be
+        duplicated at the ``send_message`` and ``_process_message_with_tracking``
+        ``finally`` blocks. The ``watchover_terminate_node`` graph node ran
+        INSIDE the graph task and set a marker via
+        ``slot.set_deferred_terminate(instance_id)`` rather than calling
+        ``terminate_instance`` directly (to avoid the self-cancel / torn-state
+        bug). The cascade runs from this post-graph completion path AFTER
+        ``_graph_tasks`` is popped — at that point there is no graph task to
+        self-cancel, so the DB write proceeds cleanly.
+
+        ``terminal_reason="watchover_terminated"`` threads through
+        ``terminate_instance`` to the JobItem ``terminal_reason`` column
+        (TD-3/TD-4) so the work API surfaces the watchover reason via
+        ``canonicalize_status`` rather than the generic ``"aborted"``.
+
+        SHIELDED against double-cancel: a second ``task.cancel()`` arriving
+        during the ``await`` would raise ``CancelledError`` (a
+        ``BaseException`` in 3.8+, NOT caught by ``except Exception``).
+        ``asyncio.shield`` protects the DB write so a transient cancel during
+        the termination cascade does not corrupt instance state.
+
+        H2 retry-on-failure: the marker is ONLY cleared on a successful
+        termination. If ``terminate_instance`` raises, the marker is
+        preserved so the next post-graph completion (next message) will
+        retry the cascade. The persistent DB marker
+        ``instance_metadata.watchover_pending_termination`` also remains
+        set for crash recovery. Re-terminating an already-TERMINATED
+        instance is a no-op (the re-entrancy guard at the top of
+        ``terminate_instance`` filters terminal rows), so a residual RAM
+        marker on top of an external termination is harmless.
+
+        Args:
+            instance_id: Owning instance identifier.
+        """
+        if not self._manager.is_watchover_terminate_requested(instance_id):
+            return
+        _term_ok = False
+        try:
+            await asyncio.shield(
+                self._manager.terminate_instance(
+                    instance_id,
+                    terminal_reason="watchover_terminated",
+                )
+            )
+            _term_ok = True
+        except Exception as term_err:
+            logger.warning(
+                f"[watchover_drain] deferred watchover termination "
+                f"failed for {instance_id[:8]}...: "
+                f"{type(term_err).__name__}: {term_err} — "
+                f"marker preserved for retry on next post-graph completion"
+            )
+            # Marker is NOT cleared (H2): the next post-graph completion
+            # will retry the termination. The persistent DB marker
+            # (instance_metadata.watchover_pending_termination) also
+            # remains set for crash-recovery.
+        finally:
+            if _term_ok:
+                self._manager.clear_watchover_terminate_requested(instance_id)
+
     async def send_message(self, instance_id: str, message: str) -> "MessageResult":
         """Send a message to an instance and get the response.
 
@@ -989,6 +1052,15 @@ class InstanceMessagingService:
                     # covers the full cascade-execution window (DB
                     # commit to PAUSED). Closes C1.
                     self._manager.pop_deferred_question_pause(instance_id)
+
+            # Watchover deferred termination (T2.9).
+            #
+            # Consumed here by ``_drain_deferred_watchover_terminate`` — the
+            # C2-safe deferred cascade runs from this post-graph completion
+            # path AFTER ``_graph_tasks`` is popped (mirrors the
+            # question_pause pattern). See the helper docstring for the full
+            # contract (C2 torn-state + H2 retry-on-failure semantics).
+            await self._drain_deferred_watchover_terminate(instance_id)
 
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
@@ -3563,6 +3635,15 @@ class InstanceMessagingService:
                     # covers the full cascade-execution window (DB
                     # commit to PAUSED). Closes C1.
                     self._manager.pop_deferred_question_pause(instance_id)
+
+            # Watchover deferred termination (T2.9).
+            #
+            # Consumed here by ``_drain_deferred_watchover_terminate`` — the
+            # C2-safe deferred cascade runs from this post-graph completion
+            # path AFTER ``_graph_tasks`` is popped (mirrors the
+            # question_pause pattern). See the helper docstring for the full
+            # contract (C2 torn-state + H2 retry-on-failure semantics).
+            await self._drain_deferred_watchover_terminate(instance_id)
 
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)

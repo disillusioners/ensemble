@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, TYPE_CHECKING
 
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
@@ -19,6 +20,16 @@ DEFAULT_CANCEL_GRACE_SECONDS = 10
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_BASE = 60
 DEFAULT_RETRY_BACKOFF_MAX = 3600
+DEFAULT_WATCHOVER_TERMINATE_GRACE_SECONDS = 60
+
+_TERMINAL_INSTANCE_STATUSES = frozenset(
+    {
+        InstanceStatus.TERMINATED.value,
+        InstanceStatus.COMPLETED.value,
+        InstanceStatus.ERROR.value,
+        InstanceStatus.FAILED.value,
+    }
+)
 
 
 class StaleTaskRecovery:
@@ -74,6 +85,7 @@ class StaleTaskRecovery:
         instance_manager=None,  # Phase 2 Batch 2 — InstanceManager for terminal notif enqueue
         work_resolver=None,  # Phase 2 Batch 2 — WorkResolverService for terminal notif routing
         watcher_repo=None,  # Phase 2 Batch 2 — JobWatcherRepository for terminal notif claim
+        watchover_terminate_grace_seconds: int = DEFAULT_WATCHOVER_TERMINATE_GRACE_SECONDS,
     ):
         """Initialize stale task recovery.
         
@@ -96,11 +108,10 @@ class StaleTaskRecovery:
                 when a retry succeeds but the bus watcher was registered against the
                 cancelled task id. The ``origin`` tag identifies the call site
                 (e.g. ``"stale_recovery"``, ``"startup_stale_running"``).
-                called when a task is force-cancelled and a retry task is scheduled
-                (replaces the cancelled task id in any pending bus watchers). This is
-                required to prevent the parent from getting stranded in waiting_children
-                when a retry succeeds but the bus watcher was registered against the
-                cancelled task id.
+            watchover_terminate_grace_seconds: Minimum age of a persistent
+                ``watchover_pending_termination`` marker before the background
+                sweep may trigger its termination cascade. Defaults to 60 seconds
+                to avoid racing the normal post-graph consumer.
         """
         self._task_repo = task_repository
         self._message_repo = message_repository
@@ -123,6 +134,9 @@ class StaleTaskRecovery:
         self._instance_manager = instance_manager
         self._work_resolver = work_resolver
         self._watcher_repo = watcher_repo
+        self._watchover_terminate_grace_seconds = max(
+            0, int(watchover_terminate_grace_seconds)
+        )
     
     def start(self) -> None:
         """Start the background recovery thread."""
@@ -165,6 +179,121 @@ class StaleTaskRecovery:
             
             # Wait for next check interval or stop signal
             self._stop_event.wait(timeout=self._check_interval)
+
+    @staticmethod
+    def _parse_watchover_marker_time(value: object) -> datetime | None:
+        """Parse an ISO marker timestamp as an aware UTC datetime."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _sweep_watchover_terminate_markers(self) -> int:
+        """Schedule cascades for stale persistent watchover termination intents.
+
+        The graph writes ``watchover_pending_termination=True`` before its
+        in-memory deferred marker. If the daemon crashes before the post-graph
+        consumer runs, only this DB marker survives. This sweep finds those
+        intents, ignores terminal instances, applies a grace period to avoid
+        racing the normal consumer, and schedules the regular
+        ``terminate_instance(..., terminal_reason="watchover_terminated")``
+        cascade on the daemon's main asyncio loop.
+
+        Markers created before ``watchover_pending_termination_at`` was added
+        use the instance row's ``updated_at`` as a conservative fallback; the
+        metadata write that created the legacy marker also bumped that field.
+
+        Returns:
+            Number of termination cascades successfully scheduled.
+        """
+        manager = self._instance_manager
+        repo = getattr(manager, "_instance_repository", None) if manager else None
+        finder = getattr(repo, "find_instances_with_metadata_key", None)
+        if manager is None or not callable(finder):
+            return 0
+
+        try:
+            marked_instances = finder("watchover_pending_termination", True)
+        except Exception as exc:
+            logger.warning(
+                "watchover stale-marker sweep: metadata query failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return 0
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=self._watchover_terminate_grace_seconds)
+        scheduled_count = 0
+
+        for instance in marked_instances:
+            instance_id = getattr(instance, "instance_id", None)
+            if not instance_id:
+                continue
+            status = getattr(instance, "status", None)
+            if status in _TERMINAL_INSTANCE_STATUSES:
+                continue
+
+            metadata = getattr(instance, "instance_metadata", None) or {}
+            marker_time = self._parse_watchover_marker_time(
+                metadata.get("watchover_pending_termination_at")
+                if isinstance(metadata, dict)
+                else None
+            )
+            if marker_time is None:
+                marker_time = self._parse_watchover_marker_time(
+                    getattr(instance, "updated_at", None)
+                )
+            if marker_time is None:
+                logger.warning(
+                    "watchover stale-marker sweep: instance %s has no valid "
+                    "watchover_pending_termination_at/updated_at timestamp; skipping",
+                    instance_id,
+                )
+                continue
+            if marker_time > cutoff:
+                continue
+
+            age_seconds = max(0, int((now - marker_time).total_seconds()))
+            logger.warning(
+                "watchover stale-marker sweep: instance %s has a %ss-old "
+                "watchover_pending_termination marker — triggering termination cascade",
+                instance_id,
+                age_seconds,
+            )
+
+            try:
+                from .main_loop_bridge import MainLoopBridge
+
+                scheduled = MainLoopBridge.run_async_no_wait(
+                    manager.terminate_instance(
+                        instance_id,
+                        terminal_reason="watchover_terminated",
+                    )
+                )
+                if scheduled:
+                    scheduled_count += 1
+                else:
+                    logger.warning(
+                        "watchover stale-marker sweep: main loop unavailable for "
+                        "instance %s; marker preserved for retry",
+                        instance_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "watchover stale-marker sweep: failed to schedule termination "
+                    "for instance %s: %s: %s",
+                    instance_id,
+                    type(exc).__name__,
+                    exc,
+                )
+
+        return scheduled_count
     
     def recover_stale_tasks(self) -> int:
         """Execute 5-step recovery protocol.
@@ -172,6 +301,11 @@ class StaleTaskRecovery:
         Returns:
             Number of tasks processed during recovery.
         """
+        # Watchover crash safety: run the persistent termination-intent sweep
+        # on every periodic recovery cycle, independently of whether any stale
+        # worker tasks exist.
+        self._sweep_watchover_terminate_markers()
+
         # Step 1: Find stale running tasks not yet flagged
         stale_tasks = self._task_repo.find_cancellable_tasks(
             threshold_minutes=self._threshold_minutes
@@ -646,6 +780,16 @@ class StaleTaskRecovery:
                     logger.error(
                         f"Startup recovery (orphan) failed for task {task.id}: {e}"
                     )
+
+        # Phase C: recover watchover termination intents that survived a
+        # daemon crash. The 60s default grace prevents a startup/periodic
+        # sweep from racing the normal post-graph marker consumer.
+        swept_watchover = self._sweep_watchover_terminate_markers()
+        if swept_watchover:
+            logger.warning(
+                "Startup recovery: scheduled %s stale watchover termination cascade(s)",
+                swept_watchover,
+            )
         
         logger.info(f"Startup recovery complete: {recovered} tasks recovered")
         return recovered

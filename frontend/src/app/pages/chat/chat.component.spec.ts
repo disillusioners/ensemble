@@ -47,12 +47,15 @@ const mockApiService = {
   deleteInstance: jest.fn(),
   pauseInstance: jest.fn(),
   resumeInstance: jest.fn(),
+  setWatchover: jest.fn(),
   createInstance: jest.fn(),
 };
 
 // Mock SseService for testing
 const mockSseService = {
   messages: signal<any[]>([]),
+  events: signal<any[]>([]),
+  statusChange: signal<{ instance_id: string; status: string } | null>(null),
   isStreaming: signal(false),
   latestError: signal<any>(null),
   connect: jest.fn(),
@@ -82,6 +85,11 @@ class TestableChatComponent {
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
+  readonly watchoverEnabled = signal(false);
+  readonly watchoverContext = signal<string | null>(null);
+  readonly watchoverDenialCount = signal(0);
+  readonly watchoverPending = signal(false);
+  private readonly processedWatchoverDenials = new Set<string>();
 
   // Workspace overlay state — mirrors ChatComponent signals
   readonly showWorkspace = signal(false);
@@ -152,6 +160,131 @@ class TestableChatComponent {
         this.isSending.set(false);
       }
     });
+  }
+
+  onToggleWatchover(): void {
+    const instance = this.currentInstance();
+    if (!instance) return;
+
+    const currentlyEnabled = this.watchoverEnabled();
+    if (!currentlyEnabled) {
+      const savedRequirement = this.getSavedWatchoverRequirement(instance.instance_id) ?? '';
+      const requirement = window.prompt(
+        'Enter watchover requirement (what to monitor for):',
+        savedRequirement || 'Block destructive operations (no writes, no deletes, no external API calls)'
+      );
+      if (requirement === null) return;
+
+      this.persistWatchoverPreference(instance.instance_id, currentlyEnabled, requirement);
+      this.toggleWatchoverApi(instance.instance_id, true, requirement);
+    } else {
+      this.toggleWatchoverApi(instance.instance_id, false, null);
+    }
+  }
+
+  private toggleWatchoverApi(
+    instanceId: string,
+    enabled: boolean,
+    requirement: string | null,
+  ): void {
+    this.api.setWatchover(instanceId, enabled, requirement).subscribe({
+      next: (response: { watchover_enabled: boolean; instance_id: string }) => {
+        this.watchoverEnabled.set(response.watchover_enabled);
+        if (!response.watchover_enabled) {
+          this.watchoverDenialCount.set(0);
+        }
+        this.persistWatchoverPreference(instanceId, response.watchover_enabled, requirement);
+        this.snackBar.open(
+          response.watchover_enabled ? '👁️ Watchover enabled' : '👁️ Watchover disabled',
+          'Dismiss',
+          { duration: 2000, panelClass: 'info-snackbar' }
+        );
+      },
+      error: () => {
+        this.snackBar.open('Failed to toggle watchover', 'Dismiss', { duration: 3000 });
+        this.watchoverPending.set(false);
+      }
+    });
+  }
+
+  private getSavedWatchoverRequirement(instanceId: string): string | null {
+    const raw = localStorage.getItem(`ensemble-watchover-${instanceId}`);
+    if (!raw) return null;
+
+    try {
+      const saved = JSON.parse(raw) as { requirement?: unknown };
+      return typeof saved.requirement === 'string' ? saved.requirement : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private persistWatchoverPreference(
+    instanceId: string,
+    enabled: boolean,
+    requirement: string | null,
+  ): void {
+    const savedRequirement = requirement ?? this.getSavedWatchoverRequirement(instanceId);
+    localStorage.setItem(
+      `ensemble-watchover-${instanceId}`,
+      JSON.stringify({ enabled, requirement: savedRequirement })
+    );
+  }
+
+  runWatchoverStatusEffect(): void {
+    const statusChange = this.sseService.statusChange();
+    const currentInstance = this.currentInstance();
+    if (!statusChange || !currentInstance || statusChange.instance_id !== currentInstance.instance_id) {
+      return;
+    }
+
+    switch (statusChange.status) {
+      case 'watchover_active':
+        this.watchoverEnabled.set(true);
+        break;
+      case 'watchover_inactive':
+        this.watchoverEnabled.set(false);
+        this.watchoverDenialCount.set(0);
+        break;
+      case 'watchover_failed':
+        this.watchoverEnabled.set(false);
+        this.watchoverDenialCount.set(0);
+        break;
+      case 'watchover_terminated':
+        this.watchoverEnabled.set(false);
+        this.watchoverDenialCount.set(0);
+        break;
+    }
+  }
+
+  /**
+   * Mirrors the production syncWatchoverState (chat.component.ts). C1 fix:
+   * only syncs enabled+context from the API; the denial counter is
+   * intentionally NOT synced because the backend always returns 0.
+   */
+  syncWatchoverState(instance: InstanceInfo): void {
+    this.watchoverEnabled.set(instance.watchover_enabled ?? false);
+    this.watchoverContext.set(instance.watchover_context ?? null);
+    // Deliberately NOT syncing watchoverDenialCount (SSE is authoritative)
+  }
+
+  runWatchoverDenialEffect(): void {
+    const messages = this.sseService.messages();
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== 'tool') return;
+    if (
+      typeof last.content !== 'string'
+      || (!last.content.startsWith('Watchover denied') && !last.content.startsWith('Watchover deferred'))
+    ) {
+      return;
+    }
+
+    const currentInstance = this.currentInstance();
+    if (!currentInstance || (last.instance_id && last.instance_id !== currentInstance.instance_id)) return;
+    const messageKey = `${currentInstance.instance_id}:${last.message_id ?? last.created_at ?? ''}:${last.content}`;
+    if (this.processedWatchoverDenials.has(messageKey)) return;
+    this.processedWatchoverDenials.add(messageKey);
+    this.watchoverDenialCount.update(count => count + 1);
   }
 
   protected onTerminateInstance(instanceId: string): void {
@@ -264,6 +397,10 @@ describe('ChatComponent - Project-Aware Navigation', () => {
   let component: TestableChatComponent;
 
   beforeEach(() => {
+    localStorage.clear();
+    mockSseService.messages.set([]);
+    mockSseService.events.set([]);
+    mockSseService.statusChange.set(null);
     tabStateService = new MockTabStateService();
     component = new TestableChatComponent(tabStateService);
     jest.clearAllMocks();
@@ -504,6 +641,182 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       component.onSendMessage({ content: 'hello' });
 
       expect(mockApiService.sendMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Watchover integration', () => {
+    // TECHNICAL DEBT: These tests run against a hand-maintained
+    // TestableChatComponent surrogate that mirrors production logic.
+    // The surrogate can diverge from the real ChatComponent. When
+    // adding new watchover behavior, update BOTH the surrogate and
+    // these tests to stay in sync. Future work: migrate to TestBed
+    // component testing against the real ChatComponent.
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('should prompt for a requirement and call the API when enabling watchover', () => {
+      const instanceId = 'watchover-enable-inst';
+      component.currentInstanceId.set(instanceId);
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      jest.spyOn(window, 'prompt').mockReturnValue('Block filesystem writes');
+      mockApiService.setWatchover.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next({ watchover_enabled: true, instance_id: instanceId });
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onToggleWatchover();
+
+      expect(mockApiService.setWatchover).toHaveBeenCalledWith(
+        instanceId,
+        true,
+        'Block filesystem writes'
+      );
+      expect(component.watchoverEnabled()).toBe(true);
+    });
+
+    it('should increment the denial counter for a watchover ToolMessage', () => {
+      const instanceId = 'watchover-denial-inst';
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      mockSseService.messages.set([{
+        message_id: 'watchover-denial-message',
+        role: 'tool',
+        content: 'Watchover denied this tool call: destructive delete. Please adjust your approach.',
+        created_at: new Date().toISOString(),
+        instance_id: instanceId,
+      }]);
+
+      component.runWatchoverDenialEffect();
+
+      expect(component.watchoverDenialCount()).toBe(1);
+    });
+
+    it('should update watchover state for active and inactive status changes', () => {
+      const instanceId = 'watchover-status-inst';
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+
+      mockSseService.statusChange.set({ instance_id: instanceId, status: 'watchover_active' });
+      component.runWatchoverStatusEffect();
+      expect(component.watchoverEnabled()).toBe(true);
+
+      component.watchoverDenialCount.set(2);
+      mockSseService.statusChange.set({ instance_id: instanceId, status: 'watchover_inactive' });
+      component.runWatchoverStatusEffect();
+      expect(component.watchoverEnabled()).toBe(false);
+      expect(component.watchoverDenialCount()).toBe(0);
+    });
+
+    it('should restore and persist the per-instance watchover requirement', () => {
+      const instanceId = 'watchover-storage-inst';
+      const storageKey = `ensemble-watchover-${instanceId}`;
+      component.currentInstanceId.set(instanceId);
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({ enabled: false, requirement: 'Saved monitoring requirement' })
+      );
+      const promptSpy = jest.spyOn(window, 'prompt').mockReturnValue('Updated monitoring requirement');
+      mockApiService.setWatchover.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next({ watchover_enabled: true, instance_id: instanceId });
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onToggleWatchover();
+
+      expect(promptSpy).toHaveBeenCalledWith(
+        'Enter watchover requirement (what to monitor for):',
+        'Saved monitoring requirement'
+      );
+      expect(JSON.parse(localStorage.getItem(storageKey) ?? '{}')).toEqual({
+        enabled: true,
+        requirement: 'Updated monitoring requirement',
+      });
+    });
+
+    it('should call the API with enabled=false when toggling off watchover', () => {
+      const instanceId = 'watchover-disable-inst';
+      component.currentInstanceId.set(instanceId);
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      component.watchoverEnabled.set(true);
+      mockApiService.setWatchover.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next({ watchover_enabled: false, instance_id: instanceId });
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onToggleWatchover();
+
+      expect(mockApiService.setWatchover).toHaveBeenCalledWith(instanceId, false, null);
+      expect(component.watchoverEnabled()).toBe(false);
+    });
+
+    it('should show error snackbar and not change state on API failure', () => {
+      const instanceId = 'watchover-error-inst';
+      component.currentInstanceId.set(instanceId);
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      jest.spyOn(window, 'prompt').mockReturnValue('Test requirement');
+      mockApiService.setWatchover.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.error(new Error('Network error'));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onToggleWatchover();
+
+      expect(component.watchoverEnabled()).toBe(false);
+      expect(mockSnackBar.open).toHaveBeenCalledWith('Failed to toggle watchover', 'Dismiss', { duration: 3000 });
+      expect(component.watchoverPending()).toBe(false);
+    });
+
+    it('should reset toggle and denial count on watchover_failed SSE event', () => {
+      const instanceId = 'watchover-failed-inst';
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      component.watchoverEnabled.set(true);
+      component.watchoverDenialCount.set(2);
+
+      mockSseService.statusChange.set({ instance_id: instanceId, status: 'watchover_failed' });
+      component.runWatchoverStatusEffect();
+
+      expect(component.watchoverEnabled()).toBe(false);
+      expect(component.watchoverDenialCount()).toBe(0);
+    });
+
+    it('should clear watchover state on watchover_terminated SSE event', () => {
+      const instanceId = 'watchover-terminated-inst';
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      component.watchoverEnabled.set(true);
+      component.watchoverDenialCount.set(3);
+
+      mockSseService.statusChange.set({ instance_id: instanceId, status: 'watchover_terminated' });
+      component.runWatchoverStatusEffect();
+
+      expect(component.watchoverEnabled()).toBe(false);
+      expect(component.watchoverDenialCount()).toBe(0);
+    });
+
+    it('should NOT overwrite denial count when syncing from API poll (C1 fix)', () => {
+      const instanceId = 'watchover-c1-inst';
+      const instance = createMockInstance({
+        instance_id: instanceId,
+        watchover_enabled: true,
+        watchover_context: 'test context',
+        watchover_denial_count: 0,  // backend always returns 0
+      });
+      component.currentInstance.set(instance);
+      component.watchoverDenialCount.set(2);  // SSE incremented this
+
+      component.syncWatchoverState(instance);
+
+      // watchoverEnabled and watchoverContext sync from API...
+      expect(component.watchoverEnabled()).toBe(true);
+      // ...but denial count is preserved (not reset to 0 from API)
+      expect(component.watchoverDenialCount()).toBe(2);
     });
   });
 

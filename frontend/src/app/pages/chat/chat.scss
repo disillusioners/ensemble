@@ -174,7 +174,30 @@ app-workspace {
       color: #10b981;
       border-color: rgba(16, 185, 129, 0.3);
     }
+
+    &.watchover-btn {
+      background-color: rgba(244, 63, 94, 0.2);
+      color: #f43f5e;
+      border-color: rgba(244, 63, 94, 0.3);
+    }
   }
+}
+
+// Watchover denial counter badge — shown when watchover is active
+.watchover-badge {
+  margin-left: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 0.0625rem 0.3125rem;
+  border-radius: 0.25rem;
+  background-color: rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+}
+
+// Disabled state for the watchover toggle during API lifecycle
+.toggle-btn.watchover-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .session-id {

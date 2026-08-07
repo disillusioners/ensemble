@@ -15,9 +15,11 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from typing import Any, ClassVar, Mapping, Optional, cast
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 import openai
@@ -694,6 +696,58 @@ class LoopBreakerSlot:
         return getter(instance_id)
 
 
+class WatchoverSlot:
+    """Lightweight handle around InstanceManager watchover state.
+
+    Mirrors :class:`LoopBreakerSlot`'s duck-typed ``getattr`` pattern: only
+    the methods the watchover nodes/routers need are exposed, the manager
+    reference is duck-typed so tests can pass any object exposing the
+    matching surface without instantiating a real ``InstanceManager``.
+
+    Zero-cost guarantee (NFR-12): :meth:`is_enabled` checks the global
+    kill-switch FIRST — when watchover is globally off,
+    ``WATCHOVER_ENABLED`` env check short-circuits before any DB lookup.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object exposing
+            ``is_watchover_enabled(instance_id) -> bool`` and
+            ``set_deferred_watchover_terminate(instance_id) -> None``).
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    def is_enabled(self, instance_id: str) -> bool:
+        """True when watchover is active for this instance AND global kill-switch is on.
+
+        Global kill-switch is checked FIRST via the ``WATCHOVER_ENABLED``
+        environment variable (defaults to ``True``). When the kill-switch
+        is off, this returns ``False`` immediately — no per-instance DB
+        lookup, no manager call. This is the zero-cost path for
+        non-watched deployments.
+
+        When the kill-switch is on, the per-instance flag is read via
+        ``manager.is_watchover_enabled(instance_id)`` (backed by the
+        instance_metadata JSONB).
+        """
+        if os.environ.get("WATCHOVER_ENABLED", "true").lower() not in ("true", "1", "yes"):
+            return False
+        checker = getattr(self._manager, "is_watchover_enabled", None)
+        if checker is None:
+            return False
+        return checker(instance_id)
+
+    def set_deferred_terminate(self, instance_id: str) -> None:
+        """Set the C2-safe deferred termination marker.
+
+        Calls ``manager.set_deferred_watchover_terminate(instance_id)``.
+        No-op when the manager does not expose the setter.
+        """
+        setter = getattr(self._manager, "set_deferred_watchover_terminate", None)
+        if setter is not None:
+            setter(instance_id)
+
+
 @dataclass
 class LoopDetectionResult:
     """Result of a :class:`LoopDetector` scan.
@@ -807,6 +861,43 @@ class LoopDetector:
                     # Excluded tools break the chain — the agent is polling
                     # something legitimately.
                     break
+                # H1: Watchover denial exclusion. When a tool-call batch is
+                # denied by the watcher, the corresponding ``ToolMessage``s
+                # carry ``additional_kwargs.watchover_denial=True``. The
+                # agent is RESPONDING to a watchover rejection, not looping
+                # on its own — these are not repetitions, so a watchover-
+                # denied batch must break the consecutive chain. Otherwise
+                # the loop detector could fire BEFORE watchover's 3-strike
+                # termination, stealing the termination decision.
+                #
+                # Scan forward from ``i`` to find the ``ToolMessage``s
+                # matching this AIMessage's ``tool_call_ids``. If ALL of
+                # the matched ToolMessages carry ``watchover_denial=True``,
+                # treat this AIMessage as a denial-response unit and break.
+                ai_tool_call_ids = {
+                    tc.get("id", "")
+                    for tc in (msg.tool_calls or [])
+                    if tc.get("id", "")
+                }
+                if ai_tool_call_ids:
+                    matched_tool_msgs: list[ToolMessage] = []
+                    for j in range(i + 1, len(messages)):
+                        fwd = messages[j]
+                        if (
+                            isinstance(fwd, ToolMessage)
+                            and getattr(fwd, "tool_call_id", "") in ai_tool_call_ids
+                        ):
+                            matched_tool_msgs.append(fwd)
+                    if matched_tool_msgs and all(
+                        bool(
+                            getattr(tm, "additional_kwargs", {}).get(
+                                "watchover_denial", False
+                            )
+                        )
+                        for tm in matched_tool_msgs
+                    ):
+                        # Watchover-denied batch — break the chain (NOT a loop).
+                        break
                 units.append((sig, i))
             elif isinstance(msg, ToolMessage):
                 # ToolMessages are folded into the unit when we walk back to
@@ -2004,6 +2095,23 @@ class SessionState(MessagesState):
     language_check_retry: bool = False
     language_check_count: int = 0
 
+    # Watchover per-turn denial counter (resets at agent node entry = turn
+    # boundary). Phase 2 increments this on Deny; Phase 1 declares it for
+    # state-schema stability so checkpoints don't break when Phase 2 lands.
+    watchover_denial_count: int = 0
+    # Watchover turn identification (crash-recovery fallback for counter
+    # reset). Phase 1 declares the key; Phase 2 populates it.
+    # TODO(phase5): crash-recovery path will consume this for counter reset
+    # detection. Keep the key — removing it would break existing checkpoints
+    # (the schema key MUST stay stable across checkpoint serializations).
+    watchover_turn_id: str | None = None
+    # Watchover route hint computed by ``watchover_check`` and read by the
+    # ``should_end_watchover`` router. Set to ``"tools"`` on Allow,
+    # ``"agent"`` on Deny (within strike budget), or
+    # ``"watchover_terminate_node"`` on the third Deny. Phase 1 declares
+    # the key for checkpoint-stability; Phase 2 populates it.
+    watchover_route: str | None = None
+
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
@@ -2355,6 +2463,42 @@ def create_agent_node(
         timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
         instance_id = (config or {}).get('configurable', {}).get('thread_id', 'unknown')
         instance_short = instance_id.split('-')[0] if '-' in instance_id else instance_id
+
+        # ── Phase 2 / T2.5: Watchover counter turn-reset ─────────────────
+        # The per-turn denial counter is reset ONLY at a genuine turn
+        # boundary — when ``agent_node`` runs for the first time on a
+        # NEW user message. ``agent_node`` itself runs MULTIPLE times
+        # per turn (the graph cycle is
+        # ``agent_node → watchover_check → tools → agent_node``), so
+        # resetting the counter unconditionally on every invocation
+        # made 3-strike termination unreachable: the counter oscillated
+        # 0→1→0→1→0→… instead of climbing to 3.
+        #
+        # Turn-boundary detection: a new turn is the
+        # **first** ``agent_node`` invocation after a ``HumanMessage``
+        # lands in ``state['messages']``. Subsequent ``agent_node``
+        # re-entries within the same turn see an ``AIMessage`` (just
+        # produced), a ``ToolMessage`` (tool result or watchover
+        # denial notice), or a ``RemoveMessage`` (repair paths) as the
+        # last message — never a fresh ``HumanMessage``.
+        #
+        # ``watchover_turn_id`` is still threaded on EVERY return so
+        # the LangGraph checkpoint stays consistent (it's safe to
+        # overwrite the same value repeatedly); the value falls back
+        # to ``thread_id`` when the caller does not provide a
+        # per-turn ``configurable.turn_id``.
+        turn_id = (
+            (config or {}).get('configurable', {}).get('turn_id')
+            or instance_id
+        )
+        is_turn_boundary = bool(messages) and isinstance(
+            messages[-1], HumanMessage
+        )
+        watchover_state_reset: dict[str, Any] = {
+            "watchover_turn_id": turn_id,
+        }
+        if is_turn_boundary:
+            watchover_state_reset["watchover_denial_count"] = 0
 
         # ── Context Injection Restructure — Phase 3 / Task 4+5 ──────────
         # Hybrid Context Injection (2026-07-29): the slot returns a
@@ -2925,8 +3069,8 @@ def create_agent_node(
             persisted.extend(injected_msgs)
             persisted.extend(injected_report_msgs)
             persisted.append(response)
-            return {'messages': persisted}
-        return {'messages': [response]}
+            return {**watchover_state_reset, 'messages': persisted}
+        return {**watchover_state_reset, 'messages': [response]}
 
     return agent_node
 
@@ -3053,6 +3197,37 @@ def build_instance_llms(
 #     causes the C2 self-cancel / torn-state bug.
 
 
+def _extract_instance_id(config: Optional[RunnableConfig]) -> str | None:
+    """Extract the instance id from the LangGraph runnable config.
+
+    The instance id is carried as ``configurable.thread_id`` in the
+    LangGraph config dict (the same value set by ``{"configurable":
+    {"thread_id": instance_id}}`` at invocation time). Returns ``None``
+    when config is missing or malformed — callers treat ``None`` as
+    "unknown instance" and fall back to a safe default.
+    """
+    try:
+        if config is None:
+            return None
+        configurable = (
+            config.get("configurable")
+            if isinstance(config, dict)
+            else getattr(config, "configurable", None)
+        )
+        if isinstance(configurable, dict):
+            return configurable.get("thread_id")
+    except (AttributeError, TypeError):
+        # M5: narrow except — the config dict access can only fail with
+        # AttributeError (object doesn't have ``.get`` or ``.configurable``)
+        # or TypeError (config is not subscriptable / not a dict nor a
+        # duck-typed object). A bare ``except Exception`` would also
+        # swallow programming errors (NameError, KeyError, etc.) that
+        # need to surface. Malformed config returns None; callers handle
+        # the ``None`` case as "unknown instance".
+        pass
+    return None
+
+
 def create_post_tools_router(manager: Any):
     """Build the conditional post-tools router that handles question pauses.
 
@@ -3078,18 +3253,7 @@ def create_post_tools_router(manager: Any):
         next-node name (``"agent"`` or ``"question_pause_node"``).
     """
     def post_tools_router(state: Any, config: Optional[RunnableConfig] = None) -> str:
-        instance_id: str | None = None
-        try:
-            if config is not None:
-                configurable = (
-                    config.get("configurable")
-                    if isinstance(config, dict)
-                    else getattr(config, "configurable", None)
-                )
-                if isinstance(configurable, dict):
-                    instance_id = configurable.get("thread_id")
-        except Exception:
-            instance_id = None
+        instance_id = _extract_instance_id(config)
         if instance_id and manager.is_question_pause_requested(instance_id):
             return "question_pause_node"
         return "agent"
@@ -3140,18 +3304,7 @@ def create_question_pause_node(manager: Any):
         An async callable suitable for ``graph.add_node("name", ...)``.
     """
     async def question_pause_node(state: Any, config: Optional[RunnableConfig] = None) -> dict:
-        instance_id: str | None = None
-        try:
-            if config is not None:
-                configurable = (
-                    config.get("configurable")
-                    if isinstance(config, dict)
-                    else getattr(config, "configurable", None)
-                )
-                if isinstance(configurable, dict):
-                    instance_id = configurable.get("thread_id")
-        except Exception:
-            instance_id = None
+        instance_id = _extract_instance_id(config)
 
         if instance_id is None:
             # Should never happen in production (the router requires
@@ -3198,6 +3351,1318 @@ def create_question_pause_node(manager: Any):
         return {}
 
     return question_pause_node
+
+
+# =============================================================================
+# Watchover graph nodes + routers.
+#
+# Watchover inserts a ``watchover_check`` node between ``agent`` and
+# ``tools``. The patterns mirror ``create_post_tools_router`` and
+# ``create_question_pause_node`` above.
+#
+# Phase 2 (T2.1, T2.2, T2.3) introduces the :class:`WatchoverEvaluator`
+# helper class — a single lightweight LLM call per tool-call batch that
+# parses ``Allowed`` / ``Deny: <reason>`` verdicts and handles two error
+# classes (AD-6 / LD-2):
+#   * Infrastructure errors → fail-OPEN (allow + log + degraded SSE)
+#   * Judgment errors        → fail-CLOSED (deny + count)
+#
+# The ``WatchoverSlot`` above already provides zero-cost routing and the
+# deferred-terminate marker pattern (C2). Phase 2 fills the actual
+# decision logic.
+# =============================================================================
+
+# Watchover configuration constants. The instance-side config dict in
+# ``agents/watcher/meta.json`` overrides these defaults when present;
+# the constants exist so tests and the agent_node reset path have a
+# stable value without parsing the meta file at runtime.
+WATCHOVER_MAX_DENIALS_DEFAULT = 3
+WATCHOVER_MIRROR_MESSAGE_COUNT_DEFAULT = 5
+WATCHOVER_TIMEOUT_SECONDS_DEFAULT = 10
+
+# System prompt cache: read ``agents/watcher/soul.md`` ONCE at module
+# load time. ``WatchoverEvaluator`` is created per-instance but re-reads
+# the soul on every invocation would be wasteful (the file is static).
+# The fallback string below covers the (rare) read failure so the
+# evaluator never raises during module import.
+_WATCHER_SOUL_PROMPT_CACHE: str | None = None
+_WATCHER_SOUL_PROMPT_PATH = (
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "agents",
+        "watcher",
+        "soul.md",
+    )
+)
+
+# Meta-config cache: read ``agents/watcher/meta.json`` ONCE. Same
+# rationale as the soul prompt cache — the file is static and re-reading
+# on every ``build_instance_graph`` would be wasteful.
+_WATCHER_META_CACHE: dict | None = None
+_WATCHER_META_PATH = (
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "agents",
+        "watcher",
+        "meta.json",
+    )
+)
+
+
+def _load_watcher_soul_prompt() -> str:
+    """Load and cache the watcher soul prompt from disk.
+
+    Returns the file content on first read, the cached value on subsequent
+    calls. Falls back to a minimal stub string when the file is unreadable
+    so a deployment without the watcher agent directory still loads.
+    """
+    global _WATCHER_SOUL_PROMPT_CACHE
+    if _WATCHER_SOUL_PROMPT_CACHE is not None:
+        return _WATCHER_SOUL_PROMPT_CACHE
+    fallback = (
+        "You are a security auditor for tool calls. "
+        "Reply with exactly one of: 'Allowed' or 'Deny: <short reason>'."
+    )
+    try:
+        with open(_WATCHER_SOUL_PROMPT_PATH, "r", encoding="utf-8") as f:
+            _WATCHER_SOUL_PROMPT_CACHE = f.read()
+    except Exception as exc:
+        logger.warning(
+            f"[Watchover] Could not read {_WATCHER_SOUL_PROMPT_PATH}: "
+            f"{type(exc).__name__}: {exc} — using minimal fallback prompt"
+        )
+        _WATCHER_SOUL_PROMPT_CACHE = fallback
+    return _WATCHER_SOUL_PROMPT_CACHE
+
+
+# Phase 4 — Watcher Context Builder. The builder is a separate persona
+# (``builder-prompt.md``) from the soul (``soul.md``) — the soul is the
+# tool-call evaluator, the builder is the context compiler. Two roles,
+# two files. Mirrors the soul-prompt cache pattern above.
+_WATCHER_BUILDER_PROMPT_CACHE: str | None = None
+_WATCHER_BUILDER_PROMPT_PATH = (
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "agents",
+        "watcher",
+        "builder-prompt.md",
+    )
+)
+
+
+def _load_watcher_builder_prompt() -> str:
+    """Load and cache the watcher builder prompt from disk.
+
+    Mirrors :func:`_load_watcher_soul_prompt` — module-level cache so
+    the file is read ONCE at module load. The builder LLM call is
+    activation-blocking, so re-reading the prompt on every call would
+    be wasteful (the file is static).
+
+    The fallback string below is a minimal "produce a security
+    guardrail" stub so a deployment without the builder prompt file
+    still loads. It is intentionally permissive — the builder call
+    is best-effort and the watcher has its own fallback chain.
+    """
+    global _WATCHER_BUILDER_PROMPT_CACHE
+    if _WATCHER_BUILDER_PROMPT_CACHE is not None:
+        return _WATCHER_BUILDER_PROMPT_CACHE
+    fallback = (
+        "You are a security-profile compiler. Analyze the conversation "
+        "and return a markdown document with sections: ## Agent Activity, "
+        "## Available Tools, ## Allowed, ## Forbidden, ## Requirement."
+    )
+    try:
+        with open(_WATCHER_BUILDER_PROMPT_PATH, "r", encoding="utf-8") as f:
+            _WATCHER_BUILDER_PROMPT_CACHE = f.read()
+    except Exception as exc:
+        logger.warning(
+            f"[Watchover] Could not read {_WATCHER_BUILDER_PROMPT_PATH}: "
+            f"{type(exc).__name__}: {exc} — using minimal fallback prompt"
+        )
+        _WATCHER_BUILDER_PROMPT_CACHE = fallback
+    return _WATCHER_BUILDER_PROMPT_CACHE
+
+
+def _load_watcher_meta_config() -> dict:
+    """Load and cache the watcher ``meta.json`` ``watchover`` section.
+
+    Returns the inner ``watchover`` dict on first read, the cached value
+    on subsequent calls. Returns ``{}`` when the file is unreadable or
+    the section is missing — the :class:`WatchoverEvaluator` constructor
+    fills every key with its module-level default in that case.
+    """
+    global _WATCHER_META_CACHE
+    if _WATCHER_META_CACHE is not None:
+        return _WATCHER_META_CACHE
+    try:
+        with open(_WATCHER_META_PATH, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception as exc:
+        logger.warning(
+            f"[Watchover] Could not read {_WATCHER_META_PATH}: "
+            f"{type(exc).__name__}: {exc} — using empty meta"
+        )
+        meta = {}
+    watchover_section = meta.get("watchover")
+    if not isinstance(watchover_section, dict):
+        watchover_section = {}
+    _WATCHER_META_CACHE = watchover_section
+    return _WATCHER_META_CACHE
+
+
+def _compute_deny_state(state: Any, max_denials: int) -> tuple[int, str]:
+    """Compute the incremented denial count and resulting watchover route.
+
+    M6 dedup: previously the count increment + route computation appeared
+    verbatim in two places inside :func:`create_watchover_check_node`
+    (the evaluator-escape judgment-error path and the normal deny-whole-
+    batch path). Extracted here so the two call sites cannot drift.
+
+    Increments ``watchover_denial_count`` by 1 (the node is at a deny
+    boundary, so the counter advances unconditionally). Computes the
+    route: when the new count reaches ``max_denials`` the route is
+    ``"watchover_terminate_node"`` (3-strike termination), otherwise
+    ``"agent"`` (re-invoke the agent to try again).
+
+    Args:
+        state: LangGraph state — either a dict or a MessagesState object.
+            Both shapes are supported because the existing call sites
+            pass whichever shape the node receives.
+        max_denials: Maximum denials per turn before 3-strike termination.
+
+    Returns:
+        A 2-tuple of ``(new_count, route)``.
+    """
+    current = (
+        state.get("watchover_denial_count", 0)
+        if isinstance(state, dict)
+        else getattr(state, "watchover_denial_count", 0)
+    )
+    new_count = current + 1
+    route = (
+        "watchover_terminate_node" if new_count >= max_denials else "agent"
+    )
+    return new_count, route
+
+
+@dataclass
+class WatcherVerdict:
+    """Structured verdict returned by :class:`WatchoverEvaluator`.
+
+    Attributes:
+        verdict: ``"allow"`` or ``"deny"``. Two-valued on purpose — the
+            watcher is a binary gate, not a graded reviewer.
+        reason: Free-form short reason (only meaningful when
+            ``verdict == "deny"``). Always empty string for allow.
+        body: Optional markdown body after the first blank line
+            following the ``Deny:`` verdict line. Captured verbatim
+            (capped at 1500 chars with a ``…(truncated)`` marker) so
+            the watched agent can read concrete guidance on how to
+            adjust its approach. ``None`` when absent or when the
+            verdict is ``"allow"``. Bifurcated failure handling
+            (AD-6 / LD-2) is preserved — body absence is NOT an
+            error; the parser is strict on the first line and lenient
+            on the body.
+        error_type: ``None`` for the success path, ``"infra"`` for
+            infrastructure failures (timeout / 5xx / network), or
+            ``"judgment"`` for malformed/unparseable responses. The
+            :class:`WatchoverEvaluator` itself collapses infra errors to
+            allow + ``error_type="infra"`` so the node can route SSE
+            emissions, but the field is exposed for tests and telemetry.
+        tool_call_id: The ``tool_call.id`` whose verdict this is. Carried
+            through so the node can pair each verdict with the matching
+            ``ToolMessage.tool_call_id`` for injection.
+    """
+
+    verdict: str  # "allow" | "deny"
+    reason: str = ""
+    body: str | None = None  # optional markdown body after Deny verdict
+    error_type: str | None = None  # "infra" | "judgment" | None
+    tool_call_id: str = ""
+
+
+# Infrastructure error classes — these get fail-OPEN treatment (allow +
+# log + degraded SSE, no count). Network / timeout / provider 5xx must
+# not mass-terminate watched instances during an LLM outage (LD-2).
+# ``openai.APIError`` covers the OpenAI SDK exception tree; we use the
+# broad class to catch provider-specific subclasses without enumerating
+# every one. ``OSError`` covers ``socket.gaierror`` (DNS failure) and
+# ``ssl.SSLError`` (TLS handshake failure) — both are subclasses of
+# ``OSError`` that are NOT under ``ConnectionError`` and would otherwise
+# be misclassified as judgment errors (Deny + count), causing self-DoS
+# during DNS/TLS outages.
+_INFRA_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    asyncio.TimeoutError,
+    ConnectionError,
+    openai.APIError,
+    OSError,  # covers socket.gaierror, ssl.SSLError, ConnectionRefusedError, etc.
+)
+
+
+class WatchoverEvaluator:
+    """Lightweight single-call LLM evaluator for the watcher.
+
+    Mirrors the ``LoopRepairer._summarize_loop`` pattern
+    (``graph.py:1372-1464``): ``asyncio.to_thread`` keeps the sync
+    ``llm.invoke`` off the event loop and ``asyncio.wait_for`` enforces a
+    hard timeout so a hung LLM provider can never freeze the
+    ``agent_node`` chain.
+
+    On a successful response the model returns ``Allowed`` or
+    ``Deny: <reason>`` — both are parsed leniently (whitespace /
+    surrounding text is stripped; the line containing the verdict wins).
+    Anything else is a judgment error and fails CLOSED.
+
+    On infra errors (timeout / 5xx / network) the evaluator fails OPEN
+    per AD-6 / LD-2: returns a single :class:`WatcherVerdict` with
+    ``verdict="allow"``, ``error_type="infra"``. The caller is expected
+    to emit a ``watchover_event{status: "degraded"}`` SSE so the FE can
+    show a "watcher unavailable" banner.
+
+    The evaluator is a per-instance object built once at graph
+    construction time. ``evaluate(...)`` is called once per tool-call
+    batch — the returned list has one :class:`WatcherVerdict` per
+    evaluated call. The evaluator is stateless across calls (no caching
+    of model responses; the LLM provider does that).
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object
+            exposing ``_live_hub.stream_message(instance_id, message,
+            event_type) -> Coroutine``). The manager reference is used
+            only for the degraded-SSE emit on infra errors; tests can
+            pass a mock.
+        llm_config: Session LLM config dict. Cleaned via
+            :func:`clean_llm_config` before constructing
+            :class:`ThinkingChatOpenAI` (same module-level callout as
+            ``LoopRepairer._summarize_loop``).
+        instance_id: Owning instance ID — used for log context and the
+            degraded-SSE ``instance_id`` field.
+        watcher_config: Optional dict of watcher-side overrides read
+            from ``agents/watcher/meta.json`` ``watchover`` section.
+            Recognised keys: ``llm_model`` (currently only ``"quick"`` is
+            honoured — falls through to ``llm_config`` otherwise),
+            ``timeout_seconds`` (default 10),
+            ``max_denials_per_turn`` (default 3 — used by the node, not
+            the evaluator),
+            ``mirror_message_count`` (default 5),
+            ``failure_mode`` (informational; evaluator always runs in
+            bifurcated mode regardless).
+    """
+
+    def __init__(
+        self,
+        manager: Any,
+        llm_config: dict,
+        instance_id: str,
+        watcher_config: dict | None = None,
+    ) -> None:
+        self._manager = manager
+        self._instance_id = instance_id
+        self._llm_config = llm_config
+        watcher_config = watcher_config or {}
+        self._timeout_seconds: int = int(
+            watcher_config.get(
+                "timeout_seconds", WATCHOVER_TIMEOUT_SECONDS_DEFAULT
+            )
+        )
+        self._mirror_message_count: int = int(
+            watcher_config.get(
+                "mirror_message_count", WATCHOVER_MIRROR_MESSAGE_COUNT_DEFAULT
+            )
+        )
+        self._max_denials: int = int(
+            watcher_config.get(
+                "max_denials_per_turn", WATCHOVER_MAX_DENIALS_DEFAULT
+            )
+        )
+        # Lazy LLM construction — defer the (cheap) ChatOpenAI build to
+        # the first ``evaluate`` call so a manager with a bad
+        # ``llm_config`` does not break graph wiring.
+        self._llm = None
+
+    @property
+    def max_denials(self) -> int:
+        """Configured per-turn denial cap (default 3)."""
+        return self._max_denials
+
+    def _get_llm(self):
+        """Lazy-construct the watcher LLM (one-time, cached)."""
+        if self._llm is None:
+            config = clean_llm_config(self._llm_config)
+            self._llm = ThinkingChatOpenAI(**config)
+        return self._llm
+
+    @staticmethod
+    def _parse_verdict(raw_text: str) -> WatcherVerdict | None:
+        """Parse the watcher's raw response text into a verdict.
+
+        Accepts the contract strings ``"Allowed"`` and
+        ``"Deny: <reason>"`` with leading/trailing whitespace ignored.
+        After a ``Deny:`` verdict an optional markdown body may follow
+        — separated from the verdict line by a single blank line.
+        Anything else is a judgment error and fails CLOSED.
+
+        Body parsing (Phase 4 verdict format evolution):
+
+        * The parser is strict on the FIRST non-empty line — anything
+          other than ``Allowed`` or ``Deny: <reason>`` is rejected
+          (preserves AD-6 / LD-2 bifurcated failure handling).
+        * The body is captured VERBATIM from the line after the first
+          blank line following the verdict line, until end-of-input.
+        * Body is capped at 1500 chars with a ``…(truncated)`` marker
+          to prevent ToolMessage token bloat in the watched agent's
+          context.
+        * Body absence is NOT an error — ``Allowed`` stays bare with
+          no body expected; ``Deny`` with no body is valid (the
+          reason on the first line is sufficient).
+
+        Returns ``None`` for unparseable text — the caller converts
+        that to a judgment error.
+        """
+        if not raw_text:
+            return None
+        text = raw_text.strip()
+        if not text:
+            return None
+
+        # Parse ONLY the first non-empty line for the verdict.
+        lines = text.splitlines()
+        first_line = ""
+        first_line_idx = 0
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped:
+                first_line = stripped
+                first_line_idx = idx
+                break
+
+        if first_line == "Allowed" or first_line.startswith("Allowed "):
+            return WatcherVerdict(verdict="allow")
+
+        if first_line.startswith("Deny:"):
+            reason = first_line[len("Deny:"):].strip()
+            if not reason:
+                return None  # judgment error — fail-closed
+
+            # Extract optional markdown body after the first blank line
+            # following the verdict line. Body is OPTIONAL, absence is
+            # not an error.
+            body = WatchoverEvaluator._extract_body(lines, first_line_idx)
+            if body and len(body) > 1500:
+                body = body[:1500] + "\n…(truncated)"
+            return WatcherVerdict(verdict="deny", reason=reason, body=body or None)
+
+        return None  # judgment error — fail-closed
+
+    @staticmethod
+    def _extract_body(lines: list[str], verdict_line_idx: int) -> str:
+        """Extract markdown body after the verdict line.
+
+        Phase 4 verdict format evolution (W4 fix). The body is OPTIONAL
+        and the LLM is allowed to omit the blank line that separates
+        the verdict from the body. Two-pass extraction:
+
+          1. **Preferred (blank-line separation):** look for a blank
+             line after the verdict line. If found, collect everything
+             after the blank (current behaviour, matches the
+             ``soul.md``-documented format).
+          2. **Fallback (immediate next line):** if NO blank line was
+             found but there IS content on the line immediately after
+             the verdict, treat everything from that line onward as
+             the body. LLMs sometimes omit the blank-line separator.
+
+        Returns ``""`` only if neither pattern yields content (i.e.
+        the verdict line is the last line in the input).
+
+        Args:
+            lines: Full ``text.splitlines()`` list.
+            verdict_line_idx: Index of the verdict line in ``lines``.
+
+        Returns:
+            The body text (already stripped of leading/trailing
+            whitespace), or ``""`` if no body is present.
+        """
+        # Phase 4 verdict format evolution (W4 fix). The body is OPTIONAL.
+        # Two-pass extraction:
+        #   1. Preferred: blank line after verdict, then body after the blank.
+        #   2. Fallback: if no blank line but content follows immediately,
+        #      treat the line right after the verdict as the body start.
+        #      (LLMs sometimes omit the blank line.)
+        # Returns "" if neither pattern yields content.
+        for idx in range(verdict_line_idx + 1, len(lines)):
+            if not lines[idx].strip():
+                body_lines = lines[idx + 1:]
+                return "\n".join(body_lines).strip()
+        # Fallback: no blank line found — treat immediate next line as body.
+        if verdict_line_idx + 1 < len(lines):
+            body_lines = lines[verdict_line_idx + 1:]
+            joined = "\n".join(body_lines).strip()
+            return joined
+        return ""
+
+    async def _emit_degraded_sse(self, reason: str) -> None:
+        """Best-effort degraded-mode SSE notification.
+
+        Delegates to the module-level :func:`_emit_watchover_sse` helper
+        (T5.6 consolidation). An outage on the SSE channel must never
+        crash the watchover path — the helper swallows all exceptions.
+        """
+        await _emit_watchover_sse(
+            self._manager,
+            self._instance_id,
+            "degraded",
+            reason=reason,
+        )
+
+    async def evaluate(
+        self,
+        tool_calls: list[dict],
+        messages: list[BaseMessage],
+        watchover_context: str | None,
+    ) -> list[WatcherVerdict]:
+        """Evaluate every tool call in the batch against the watcher.
+
+        The watcher evaluates each call INDEPENDENTLY but the node applies
+        a deny-whole-batch policy (LD-1): if any verdict is deny, the
+        batch is denied. This method therefore always returns one
+        :class:`WatcherVerdict` per input ``tool_calls`` entry — the
+        "deny whole batch" logic lives in the node.
+
+        On infrastructure error the entire batch is allow + degraded-SSE
+        (no count). On a judgment error the offending call is deny + count;
+        unaffected calls default to allow (the node still deny-whole-batches
+        when at least one call is denied).
+
+        Args:
+            tool_calls: List of ``{"id": str, "name": str, "args": dict}``
+                dicts — the LangGraph tool-call payload. The ``id`` is
+                preserved on the returned :class:`WatcherVerdict` so the
+                node can match it with the corresponding ``ToolMessage``.
+            messages: Full conversation history (oldest-first). Only the
+                last ``mirror_message_count`` entries are serialised into
+                the ``[RECENT MESSAGES BEGIN]`` layer (mirrors the
+                ``LoopRepairer._build_excerpt`` pattern). The excerpt is
+                formatted as readable ``[role]: content`` lines via
+                :meth:`_format_recent_messages` so the LLM provider's
+                prefix cache can reuse the older messages across checks.
+            watchover_context: The user-supplied requirement / context
+                for the watchover session. ``None`` or empty string is
+                acceptable — the watcher is told the context is empty and
+                is expected to deny every call as "no context to evaluate
+                against" (judgment error path). The context is wrapped in
+                its own ``[WATCHOVER CONTEXT]`` layer so the provider can
+                cache it across calls until the user rotates it.
+
+        Note:
+            The LLM payload is split into four messages — one
+            ``SystemMessage`` (watcher soul prompt, fully cached) plus
+            three ``HumanMessage`` layers (``[WATCHOVER CONTEXT]``,
+            ``[RECENT MESSAGES BEGIN]``, ``[WATCHOVER CHECK]``). The
+            first three are stable across tool calls in the batch and
+            are built once outside the loop — only the per-call
+            ``[WATCHOVER CHECK]`` is uncached.
+
+        Returns:
+            A list of :class:`WatcherVerdict` of the same length as
+            ``tool_calls``. Never raises — failures are converted to
+            structured verdict + error_type.
+        """
+        if not tool_calls:
+            return []
+
+        # Lazy import — keeps the graph.py top-level import surface stable
+        # for the test collection path (mirrors LoopRepairer._summarize_loop).
+        from .compaction import _extract_text_from_content
+
+        system_prompt = _load_watcher_soul_prompt()
+        excerpt = self._build_excerpt(messages, max_messages=self._mirror_message_count)
+
+        # Build the stable LLM layers ONCE — reused across every tool call
+        # in the batch. Splitting the payload into separate messages lets the
+        # LLM provider's prefix cache hit on the stable layers (system
+        # prompt + watchover context + recent messages); only the per-call
+        # ``[WATCHOVER CHECK]`` is fully uncached.
+        context_text = watchover_context or "(no watchover context provided)"
+        context_message = HumanMessage(
+            content=f"[WATCHOVER CONTEXT]\n{context_text}\n[WATCHOVER CONTEXT END]"
+        )
+        recent_text = self._format_recent_messages(excerpt)
+        recent_message = HumanMessage(
+            content=f"[RECENT MESSAGES BEGIN]\n{recent_text}\n[RECENT MESSAGES END]"
+        )
+
+        results: list[WatcherVerdict] = []
+        infra_error_seen = False
+        for tc in tool_calls:
+            tc_id = (
+                tc.get("id", "")
+                if isinstance(tc, dict)
+                else getattr(tc, "id", "")
+            )
+            tc_name = (
+                tc.get("name", "")
+                if isinstance(tc, dict)
+                else getattr(tc, "name", "")
+            )
+            tc_args = (
+                tc.get("args", {})
+                if isinstance(tc, dict)
+                else getattr(tc, "args", {})
+            )
+
+            # Per-call layer — only the watchover check itself is uncached.
+            # Args are dumped as readable JSON with a ``str()`` fallback for
+            # non-serialisable values; ``repr`` is the last-resort fallback
+            # when JSON itself raises (deeply nested / exotic objects).
+            try:
+                args_repr = json.dumps(tc_args, ensure_ascii=False, default=str)
+            except Exception:
+                args_repr = repr(tc_args)
+            check_message = HumanMessage(
+                content=(
+                    f"[WATCHOVER CHECK]\nEvaluate this tool call:\n"
+                    f"Tool: {tc_name}\nArguments: {args_repr}\n\n"
+                    f"Respond with Allowed or Deny: <reason>"
+                )
+            )
+
+            try:
+                llm = self._get_llm()
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        llm.invoke,
+                        [
+                            SystemMessage(content=system_prompt),
+                            context_message,
+                            recent_message,
+                            check_message,
+                        ],
+                    ),
+                    timeout=self._timeout_seconds,
+                )
+                raw = _extract_text_from_content(response.content)
+                parsed = self._parse_verdict(raw)
+                if parsed is None:
+                    # Judgment error — fail-CLOSED for this call.
+                    logger.warning(
+                        f"[Watchover] judgment error for "
+                        f"{self._instance_id[:8]}... on tool "
+                        f"'{tc_name}': unparseable response (first 120 chars)="
+                        f"{repr(raw[:120]) if raw else '<empty>'}"
+                    )
+                    results.append(
+                        WatcherVerdict(
+                            verdict="deny",
+                            reason="watchover judgment error: unparseable response",
+                            error_type="judgment",
+                            tool_call_id=tc_id,
+                        )
+                    )
+                    continue
+
+                parsed.tool_call_id = tc_id
+                results.append(parsed)
+
+            except _INFRA_ERROR_TYPES as infra_err:
+                # Infrastructure error — fail-OPEN (allow + degraded SSE).
+                # We mark infra_error_seen so the caller can emit one
+                # SSE per batch instead of N per-call duplicates.
+                if not infra_error_seen:
+                    logger.warning(
+                        f"[Watchover] infra error for "
+                        f"{self._instance_id[:8]}... on tool "
+                        f"'{tc_name}': {type(infra_err).__name__}: "
+                        f"{_truncate_error(infra_err)} "
+                        f"— failing OPEN (no count)"
+                    )
+                    await self._emit_degraded_sse(
+                        f"watcher_infra_error: {type(infra_err).__name__}"
+                    )
+                    infra_error_seen = True
+                results.append(
+                    WatcherVerdict(
+                        verdict="allow",
+                        error_type="infra",
+                        tool_call_id=tc_id,
+                    )
+                )
+            except Exception as exc:
+                # Any other exception is treated as judgment error —
+                # fail-CLOSED. The exception class doesn't matter: if
+                # the watcher process itself exploded (config bug,
+                # serializer crash, etc.), the safest default is to
+                # deny and surface the error.
+                logger.warning(
+                    f"[Watchover] judgment error for "
+                    f"{self._instance_id[:8]}... on tool "
+                    f"'{tc_name}': {type(exc).__name__}: {exc}"
+                )
+                results.append(
+                    WatcherVerdict(
+                        verdict="deny",
+                        reason=f"watchover judgment error: {type(exc).__name__}",
+                        error_type="judgment",
+                        tool_call_id=tc_id,
+                    )
+                )
+
+        return results
+
+    @staticmethod
+    def _build_excerpt(messages: list[BaseMessage], max_messages: int) -> list[dict]:
+        """Build a serialisable excerpt of the last ``max_messages`` entries.
+
+        Mirrors :meth:`LoopRepairer._build_excerpt` (``graph.py:1467-1498``)
+        — multimodal content is flattened to plain text via
+        ``_extract_text_from_content`` so the watcher never sees
+        ``str(list_of_dicts)`` garbage.
+
+        Returns:
+            A list of ``{"role": str, "content": str}`` dicts. Empty list
+            when ``messages`` is empty. Newest last.
+        """
+        from .compaction import _extract_text_from_content
+
+        if not messages:
+            return []
+        tail = list(messages[-max_messages:])
+        out: list[dict] = []
+        for msg in tail:
+            role = getattr(msg, "type", None) or "human"
+            content = getattr(msg, "content", "")
+            try:
+                text = _extract_text_from_content(content)
+            except Exception:
+                text = str(content)
+            out.append({"role": role, "content": text})
+        return out
+
+    @staticmethod
+    def _format_recent_messages(excerpt: list[dict]) -> str:
+        """Format the ``_build_excerpt`` output as readable multi-line text.
+
+        Complements :meth:`_build_excerpt`: the excerpt produces
+        ``{"role": str, "content": str}`` dicts; this formats them as
+        ``[role]: content`` lines for the ``[RECENT MESSAGES BEGIN]``
+        block. Readable text (not JSON) lets the LLM provider
+        prefix-cache the older messages — only the newest line differs
+        between checks.
+
+        Args:
+            excerpt: List of ``{"role": str, "content": str}`` dicts
+                (output of :meth:`_build_excerpt`). Empty list → empty
+                string.
+
+        Returns:
+            Newline-joined ``[role]: content`` lines. Empty string when
+            ``excerpt`` is empty.
+        """
+        if not excerpt:
+            return ""
+        # Map raw LangGraph message types to concise human-readable
+        # labels so the watcher never sees ``"HumanMessage"`` /
+        # ``"AIMessage"`` style technical noise in the recent-history
+        # block.
+        role_map = {
+            "human": "human",
+            "user": "human",
+            "ai": "ai",
+            "assistant": "ai",
+            "tool": "tool",
+            "system": "system",
+        }
+        lines: list[str] = []
+        for entry in excerpt:
+            raw_role = entry.get("role", "human")
+            role = role_map.get(raw_role, raw_role)
+            content = entry.get("content", "")
+            lines.append(f"[{role}]: {content}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# T5.6 — Watchover SSE helper (module-level, best-effort, never raises)
+# ---------------------------------------------------------------------------
+
+
+async def _emit_watchover_sse(
+    manager: Any, instance_id: str, status: str, **extra: Any
+) -> None:
+    """Best-effort SSE emit for watchover events.
+
+    Phase 5 (T5.6). Consolidates the duplicated try/getattr/stream_message
+    pattern that previously appeared in ``WatchoverEvaluator._emit_degraded_sse``
+    and inline at every watchover SSE site. Wraps everything in a single
+    try/except so an outage on the SSE channel NEVER crashes the watchover
+    path (the node runs inside the LangGraph execution — a thrown exception
+    would abort the watched instance's turn).
+
+    The payload always carries ``instance_id``, ``event_type`` (fixed to
+    ``"watchover_event"``), and ``status``. Callers pass domain-specific
+    fields (``reason``, ``denial_count``, etc.) via ``**extra``.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object exposing
+            ``_live_hub.stream_message(instance_id, payload, event_type=...)``).
+            Duck-typed via ``getattr`` so test mocks and managers without an
+            SSE surface degrade silently.
+        instance_id: The instance the event pertains to.
+        status: Event status string (e.g. ``"degraded"``, ``"denial"``,
+            ``"terminated"``).
+        **extra: Additional payload fields (e.g. ``reason=...``,
+            ``denial_count=N``).
+    """
+    try:
+        live_hub = getattr(manager, "_live_hub", None)
+        stream_message = getattr(live_hub, "stream_message", None)
+        if stream_message is None:
+            return
+        payload: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "watchover_event",
+            "status": status,
+            **extra,
+        }
+        await stream_message(
+            instance_id, payload, event_type="watchover_event"
+        )
+    except Exception as emit_err:
+        logger.warning(
+            f"[watchover] SSE emit failed for {instance_id[:8]}... "
+            f"(status={status}): {type(emit_err).__name__}: {emit_err}"
+        )
+
+
+def create_watchover_check_node(
+    manager: Any,
+    slot: "WatchoverSlot",
+    llm_config: dict,
+    watcher_config: dict | None = None,
+):
+    """Build the ``watchover_check`` async node (Phase 2 — real decision logic).
+
+    The node runs once per ``AIMessage.tool_calls`` batch between
+    ``agent`` and ``tools``. It:
+
+      1. Fast-path passthrough when watchover is disabled for this
+         instance (``slot.is_enabled(instance_id)`` returns ``False``).
+      2. Fast-path passthrough when the last message has no
+         ``tool_calls`` (routing edge handles it, but defensive here).
+      3. Builds a :class:`WatchoverEvaluator` (lazy — built once per
+         graph) and evaluates every tool call in the batch.
+      4. **Deny-whole-batch (LD-1):** if any verdict is deny, the entire
+         batch is denied. One ``ToolMessage`` is injected per denied
+         call (carrying the denial reason) plus one ``ToolMessage`` per
+         allowed-but-not-executed call (carrying the "deferred"
+         notice). All messages are tagged with
+         ``additional_kwargs.watchover_denial=True`` so the
+         ``LoopDetector.scan`` can exclude them from loop detection
+         (Phase 5).
+      5. **3-strike termination (T2.6):** when the per-turn denial
+         counter reaches ``max_denials_per_turn`` (default 3) after
+         the increment, the node sets ``watchover_route`` to
+         ``"watchover_terminate_node"`` instead of ``"agent"``.
+      6. **Routing hint:** the node writes its computed route into
+         ``state["watchover_route"]``. The
+         :func:`should_end_watchover` router is intentionally dumb — it
+         just reads the hint.
+
+    The denial counter increments ONCE per deny batch (not once per
+    denied call within the batch), matching the requirement that
+    "three unsafe actions in a single turn" terminate the instance —
+    a single batch with two denied calls is one strike, not two.
+
+    Args:
+        manager: The owning :class:`InstanceManager` (or any object
+            exposing ``_instance_repository.get(instance_id) -> row``
+            and ``_live_hub.stream_message(...)``). Used to read the
+            ``watchover_context`` from ``instance_metadata`` and to emit
+            degraded SSE on infra errors.
+        slot: The :class:`WatchoverSlot` wrapping the manager — used
+            for the kill-switch + per-instance enable check.
+        llm_config: Session LLM config; cleaned via
+            :func:`clean_llm_config` before constructing the watcher LLM
+            (same module-level callout as ``LoopRepairer``).
+        watcher_config: Optional dict of watcher-side overrides from
+            ``agents/watcher/meta.json`` ``watchover`` section.
+
+    Returns:
+        An async callable ``watchover_check(state, config) -> dict``
+        suitable for ``graph.add_node``.
+    """
+    # Build the evaluator ONCE at factory time — the LLM construction is
+    # deferred to the first evaluate() call (so a misconfigured manager
+    # does not break graph wiring), but the watcher_config / manager refs
+    # are stable per-instance.
+    evaluator = WatchoverEvaluator(
+        manager=manager,
+        llm_config=llm_config,
+        instance_id="",  # patched on every call below
+        watcher_config=watcher_config,
+    )
+
+    async def watchover_check(state: Any, config: Optional[RunnableConfig] = None) -> dict:
+        instance_id = _extract_instance_id(config)
+
+        # Fast-path 1: kill-switch / not watched. ``slot.is_enabled``
+        # checks ``WATCHOVER_ENABLED`` env var FIRST (zero-cost when off)
+        # then defers to ``manager.is_watchover_enabled(instance_id)``.
+        if instance_id is None or not slot.is_enabled(instance_id):
+            return {
+                "watchover_route": "tools",
+            }
+
+        # Fast-path 2: last message without tool_calls → no-op
+        # passthrough. The conditional edge would route us here only
+        # when ``should_continue`` decided "tools", so the defensive
+        # check below is belt-and-suspenders against a future should_continue
+        # refactor.
+        messages = (
+            state.get("messages", [])
+            if isinstance(state, dict)
+            else getattr(state, "messages", [])
+        )
+        if not messages:
+            return {"watchover_route": "tools"}
+
+        last_message = messages[-1]
+        tool_calls = getattr(last_message, "tool_calls", None) or []
+        if not tool_calls:
+            return {"watchover_route": "tools"}
+
+        # Read the watchover_context from instance_metadata. The context
+        # is set by Phase 3 (activation) and is the user-supplied
+        # requirement the watcher evaluates against. When missing (Phase
+        # 2 alone, before Phase 3 lands), the watcher evaluates with an
+        # empty context — the ``Allowed``/``Deny`` contract still
+        # applies; an empty context normally yields Deny because the
+        # watcher cannot assert safety.
+        # Read the watchover_context from instance_metadata. The context
+        # is set by Phase 3 (activation) and is the user-supplied
+        # requirement the watcher evaluates against. When missing (Phase
+        # 2 alone, before Phase 3 lands), the watcher evaluates with an
+        # empty context — the ``Allowed``/``Deny`` contract still
+        # applies; an empty context normally yields Deny because the
+        # watcher cannot assert safety.
+        #
+        # Phase 5 (T5.4): also read ``watchover_context_turn`` (checks
+        # since the context was last refreshed) and
+        # ``watchover_context_refresh_interval`` (how many checks may
+        # elapse before a refresh is triggered; effective default 20
+        # set by ``enable_watchover`` — C1 fix; the ``= 1`` local
+        # annotation is a safety floor only)
+        # so the freshness check below can detect a stale context after
+        # compaction. ``watchover_requirement`` is read so a refresh can
+        # re-splice the requirement into the fresh tail.
+        watchover_context: str | None = None
+        context_turn: int = 0
+        # C1 fix: the EFFECTIVE default for ``refresh_interval`` is 20
+        # (set by ``enable_watchover`` in ``daemon/manager.py``). The
+        # ``= 1`` here is a SAFETY FLOOR only — used when the metadata
+        # read returns ``None`` / missing / non-integer (the try/except
+        # below applies the same floor via ``if refresh_interval < 1``).
+        # We keep ``1`` as the Python annotation because the floor is
+        # also 1; a value of 0 would trigger refresh every turn, which
+        # would replace the LLM-built guardrail with raw-tail.
+        refresh_interval: int = 1
+        watchover_requirement: str | None = None
+        meta_repo: Any = None
+        try:
+            repo = getattr(manager, "_instance_repository", None)
+            if repo is not None:
+                row = repo.get(instance_id)
+                if row is not None:
+                    meta = getattr(row, "instance_metadata", None) or {}
+                    if isinstance(meta, dict):
+                        watchover_context = meta.get("watchover_context")
+                        # T5.4 freshness keys.
+                        _raw_turn = meta.get("watchover_context_turn", 0)
+                        try:
+                            context_turn = int(_raw_turn) if _raw_turn is not None else 0
+                        except (TypeError, ValueError):
+                            context_turn = 0
+                        _raw_interval = meta.get(
+                            "watchover_context_refresh_interval", 1
+                        )
+                        try:
+                            refresh_interval = (
+                                int(_raw_interval)
+                                if _raw_interval is not None
+                                else 1
+                            )
+                        except (TypeError, ValueError):
+                            refresh_interval = 1
+                        if refresh_interval < 1:
+                            refresh_interval = 1
+                        watchover_requirement = meta.get("watchover_requirement")
+                        meta_repo = repo
+        except (KeyError, AttributeError, ValueError, OSError) as ctx_err:
+            # M4: narrow except — the expected failure modes are DB
+            # connectivity (``OSError``), missing instance metadata
+            # (``AttributeError``), malformed metadata (``ValueError`` /
+            # ``KeyError``). A broad ``except Exception`` would also
+            # catch programming errors (NameError, TypeError, etc.) that
+            # need to crash loudly for visibility. Context-read failure
+            # is treated as "no context" — the watcher denies every call
+            # (judgment path), which is the safe default.
+            logger.warning(
+                f"[watchover_check] watchover_context read failed for "
+                f"{instance_id[:8]}...: {type(ctx_err).__name__}: {ctx_err}"
+            )
+            watchover_context = None
+
+        # ── T5.4 — Context freshness check ───────────────────────────
+        # When watchover is active and compaction runs (the conversation
+        # grows), the ``watchover_context`` snapshot taken at activation
+        # becomes stale. The watcher would then evaluate tool calls
+        # against outdated activity, risking incorrect verdicts. We
+        # detect staleness via a per-check turn counter and, when stale,
+        # re-derive a LIGHTWEIGHT context from the current ``messages``
+        # tail (``_format_raw_tail`` — no LLM call, no full compaction).
+        # The entire rebuild is best-effort and must NEVER block the
+        # watchover check: on failure we continue with the stale context
+        # (better than no context).
+        if context_turn >= refresh_interval:
+            try:
+                # Lazy import to avoid a graph.py ↔ watchover_service
+                # import cycle at module load (mirrors the existing
+                # ``from .compaction import ...`` lazy pattern).
+                from .services.watchover_service import (
+                    DEFAULT_RAW_TAIL_MESSAGES,
+                    _format_raw_tail,
+                )
+                from .services.watcher_context_builder import (
+                    _FALLBACK_GUARDRAIL_PREFIX,
+                )
+
+                fresh_tail = _format_raw_tail(
+                    messages, DEFAULT_RAW_TAIL_MESSAGES
+                )
+                if fresh_tail:
+                    # Prepend the static guardrail prefix so the
+                    # watcher ALWAYS has the universal deny categories
+                    # as a baseline, even when the builder-built
+                    # markdown guardrail is overwritten by the
+                    # raw-tail refresh (C1 fix). The builder's static
+                    # prefix covers system files, credentials,
+                    # destructive writes, production surfaces — these
+                    # must survive every refresh.
+                    parts = [_FALLBACK_GUARDRAIL_PREFIX.rstrip()]
+                    if watchover_requirement:
+                        parts.append(
+                            f"[Requirement] {watchover_requirement}\n\n"
+                            f"[Recent activity]\n{fresh_tail}"
+                        )
+                    else:
+                        parts.append(f"[Recent activity]\n{fresh_tail}")
+                    watchover_context = "\n".join(parts)
+                    # Reset the turn counter — the context is now fresh.
+                    context_turn = 0
+                    # Persist the refreshed context + reset counter
+                    # atomically (best-effort, non-blocking).
+                    if meta_repo is not None:
+                        set_many = getattr(meta_repo, "set_metadata_many", None)
+                        if callable(set_many):
+                            set_many(
+                                instance_id,
+                                {
+                                    "watchover_context": watchover_context,
+                                    "watchover_context_turn": context_turn,
+                                },
+                            )
+            except Exception as refresh_err:
+                # Best-effort: a refresh failure must NEVER block the
+                # watchover check. Continue with the (possibly stale)
+                # context — better than no context. Log at warning so
+                # the operator sees the degradation.
+                logger.warning(
+                    f"[watchover_check] context refresh failed for "
+                    f"{instance_id[:8]}...: {type(refresh_err).__name__}: "
+                    f"{refresh_err} — continuing with stale context"
+                )
+
+        # Increment the turn counter after the freshness check
+        # (whether refreshed or not). This advances the staleness clock
+        # so the next check can detect a fresh staleness window.
+        # Best-effort write — a failure here is non-fatal (the counter
+        # would just be stale next turn, triggering an extra refresh).
+        context_turn += 1
+        try:
+            if meta_repo is not None:
+                set_md = getattr(meta_repo, "set_metadata", None)
+                if callable(set_md):
+                    set_md(instance_id, "watchover_context_turn", context_turn)
+        except Exception as turn_err:
+            logger.debug(
+                f"[watchover_check] turn counter write failed for "
+                f"{instance_id[:8]}...: {type(turn_err).__name__}: {turn_err}"
+            )
+
+        # Patch the instance_id on the evaluator (it was built before
+        # we knew the instance). Safe because the evaluator is closed
+        # over by this node and never shared.
+        evaluator._instance_id = instance_id  # noqa: SLF001 — internal patching
+
+        # Normalize tool_calls to dict form. LangGraph tool_calls may be
+        # either dicts (``{"id":..., "name":..., "args":...}``) or
+        # ``ToolCall`` objects — the evaluator accepts either, but
+        # passing dicts keeps the downstream JSON serialisation clean.
+        normalized: list[dict] = []
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                normalized.append(
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("name", ""),
+                        "args": tc.get("args", {}),
+                    }
+                )
+            else:
+                normalized.append(
+                    {
+                        "id": getattr(tc, "id", ""),
+                        "name": getattr(tc, "name", ""),
+                        "args": getattr(tc, "args", {}),
+                    }
+                )
+
+        # Evaluate the entire batch. The evaluator returns one verdict
+        # per call. On infra error it returns allow + error_type="infra"
+        # for the whole batch (single SSE emit). On a judgment error on
+        # one call, only that call is deny — the node still
+        # deny-whole-batches when at least one call is denied.
+        try:
+            verdicts = await evaluator.evaluate(
+                tool_calls=normalized,
+                messages=messages,
+                watchover_context=watchover_context,
+            )
+        except Exception as eval_err:
+            # The evaluator is documented to never raise (it catches its
+            # own exceptions and converts them to verdicts). This outer
+            # try/except is defensive against a future evaluator bug —
+            # treat any escape as a judgment error (fail-closed).
+            logger.warning(
+                f"[watchover_check] evaluator escaped for "
+                f"{instance_id[:8]}...: {type(eval_err).__name__}: {eval_err} — "
+                f"denying batch (judgment error)"
+            )
+            deny_msgs = [
+                ToolMessage(
+                    content=(
+                        f"Watchover denied this tool call: "
+                        f"watchover judgment error: {type(eval_err).__name__}. "
+                        f"Please adjust your approach."
+                    ),
+                    tool_call_id=tc.get("id", ""),
+                    additional_kwargs={"watchover_denial": True},
+                )
+                for tc in normalized
+            ]
+            new_count, route = _compute_deny_state(state, evaluator.max_denials)
+
+            # T5.6 — best-effort denial SSE emit. The evaluator escaped
+            # so we have no structured verdicts; the reason is the
+            # exception type. Never blocks the watchover check.
+            await _emit_watchover_sse(
+                manager,
+                instance_id,
+                "denial",
+                denial_count=new_count,
+                reason=f"watchover judgment error: {type(eval_err).__name__}",
+            )
+            return {
+                "messages": deny_msgs,
+                "watchover_denial_count": new_count,
+                "watchover_route": route,
+            }
+
+        # ── Decide the route ────────────────────────────────────────
+        # LD-1 deny-whole-batch: ANY deny → entire batch is denied.
+        any_deny = any(v.verdict == "deny" for v in verdicts)
+
+        if not any_deny:
+            # All-allow path. The original ``AIMessage.tool_calls``
+            # passes through unchanged; ``ToolNode`` runs them. We DO
+            # NOT increment the counter on allow.
+            return {
+                "watchover_route": "tools",
+            }
+
+        # Build one ToolMessage per tool_call, pairing with the matching
+        # verdict. For denied calls the message carries the reason; for
+        # allowed-but-not-executed calls (because the batch was
+        # wholesale-denied) the message says so.
+        #
+        # Phase 4 verdict format evolution: when the watcher supplied
+        # an optional markdown ``body`` after the ``Deny:`` line, the
+        # body is included in the ToolMessage so the watched agent
+        # sees concrete guidance on how to adjust its approach. The
+        # body is captured verbatim from the watcher LLM output
+        # (capped at 1500 chars by the parser). The
+        # ``additional_kwargs={"watchover_denial": True}`` tag stays
+        # unchanged — LoopDetector exclusion depends on it.
+        injected: list[ToolMessage] = []
+        for tc, verdict in zip(normalized, verdicts):
+            tc_id = tc.get("id", "")
+            if verdict.verdict == "deny":
+                parts = [f"Watchover denied this tool call: {verdict.reason}."]
+                if verdict.body:
+                    parts.append("")  # blank line separator
+                    parts.append(verdict.body)
+                parts.append("Please adjust your approach.")
+                content = "\n".join(parts)
+            else:
+                # Allow verdict, but the batch was denied by another
+                # call. Surface a "deferred — try again" notice so the
+                # watched agent has a clean tool-result protocol
+                # response for every emitted tool_call.
+                content = (
+                    "Watchover deferred this tool call: another call "
+                    "in this batch was denied. Please retry."
+                )
+            injected.append(
+                ToolMessage(
+                    content=content,
+                    tool_call_id=tc_id,
+                    additional_kwargs={"watchover_denial": True},
+                )
+            )
+
+        new_count, route = _compute_deny_state(state, evaluator.max_denials)
+
+        # T5.6 — best-effort denial SSE emit. Surface the first denied
+        # verdict's reason (the batch is denied because of it). Never
+        # blocks the watchover check.
+        denial_reason = next(
+            (v.reason for v in verdicts if v.verdict == "deny"),
+            "unknown",
+        )
+        await _emit_watchover_sse(
+            manager,
+            instance_id,
+            "denial",
+            denial_count=new_count,
+            reason=denial_reason,
+        )
+
+        return {
+            "messages": injected,
+            "watchover_denial_count": new_count,
+            "watchover_route": route,
+        }
+
+    return watchover_check
+
+
+def create_watchover_terminate_node(slot: "WatchoverSlot", manager: Any = None):
+    """Build the ``watchover_terminate_node`` async function.
+
+    Mirrors the ``question_pause_node`` deferred-marker pattern (C2 fix):
+    the node sets a deferred termination marker via
+    ``slot.set_deferred_terminate(instance_id)`` and returns ``{}``. The
+    actual cascade runs from the post-graph completion path — NEVER inside
+    the graph task (self-cancel / torn-state bug).
+
+    Phase 2 (T2.6b — TD-8) also persists the termination intent to
+    ``instance_metadata.watchover_pending_termination=True`` BEFORE the
+    RAM marker is set. Phase 5 adds the atomic companion timestamp
+    ``watchover_pending_termination_at`` so stale recovery can enforce its
+    grace period. This closes the crash window between the graph END and the
+    post-graph callback: on restart the metadata flag is read by the recovery
+    path and the cascade is run. The RAM marker remains the normal path; the
+    DB marker is the crash-safety net.
+
+    Args:
+        slot: The :class:`WatchoverSlot` wrapping the manager.
+        manager: Optional ``InstanceManager`` reference (or any object
+            exposing ``_instance_repository.set_metadata_many(instance_id,
+            updates) -> row|None``). When ``None``, the DB write is skipped —
+            backwards-compatible with Phase 1 tests that only exercised the
+            RAM marker.
+
+    Returns:
+        An async callable suitable for ``graph.add_node``.
+    """
+
+    async def watchover_terminate_node(state: Any, config: Optional[RunnableConfig] = None) -> dict:
+        instance_id = _extract_instance_id(config)
+
+        if instance_id is None:
+            logger.warning(
+                "[watchover_terminate_node] missing instance_id from config — "
+                "skipping deferred terminate marker"
+            )
+            return {}
+
+        # Phase 5 / T5.1: persist both the intent and its age anchor in
+        # ONE metadata UPDATE before setting the RAM marker. The timestamp
+        # lets stale-task recovery enforce its 60s race-avoidance grace
+        # period without relying on process-local state.
+        if manager is not None:
+            try:
+                repo = getattr(manager, "_instance_repository", None)
+                set_metadata_many = getattr(repo, "set_metadata_many", None)
+                if callable(set_metadata_many):
+                    set_metadata_many(
+                        instance_id,
+                        {
+                            "watchover_pending_termination": True,
+                            "watchover_pending_termination_at": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                        },
+                    )
+            except Exception as persist_err:
+                logger.warning(
+                    f"[watchover_terminate_node] DB persist failed for "
+                    f"{instance_id[:8]}...: {type(persist_err).__name__}: "
+                    f"{persist_err} — continuing with RAM marker"
+                )
+
+        # C2-safe deferred marker — the cascade runs post-graph, not here.
+        slot.set_deferred_terminate(instance_id)
+
+        # T5.6 — best-effort ``watchover_terminated`` SSE emit so the
+        # frontend sees the 3-strike transition immediately (the actual
+        # cascade runs post-graph, so without this event the frontend
+        # would not know termination is pending until the cascade
+        # completes). Never blocks the node.
+        if manager is not None:
+            await _emit_watchover_sse(
+                manager,
+                instance_id,
+                "terminated",
+                reason="3-strike termination",
+            )
+
+        return {}
+
+    return watchover_terminate_node
+
+
+def should_end_watchover(state: Any, config: Optional[RunnableConfig] = None) -> str:
+    """Router for the ``watchover_check`` conditional edge.
+
+    Phase 2: the router is intentionally dumb — ``watchover_check``
+    computes the route (Allow/Deny/Terminate) and writes it into
+    ``state["watchover_route"]``. This function just reads the hint and
+    returns it. Defaulting to ``"agent"`` (fail-closed) when the hint is
+    missing handles a state corruption case where the node ran but
+    failed to set the route — better to re-route into the agent than to
+    let a denial silently slip through to ``tools``.
+    """
+    if isinstance(state, dict):
+        route = state.get("watchover_route")
+    else:
+        route = getattr(state, "watchover_route", None)
+    if route in ("tools", "agent", "watchover_terminate_node"):
+        return route
+    # Defensive default — fail-closed (route back to agent so the
+    # watched instance gets another chance to produce a clean response).
+    return "agent"
 
 
 def build_instance_graph(
@@ -3347,6 +4812,16 @@ def build_instance_graph(
     # retries (back to agent) or ends the graph.
     # When language_check_enabled=False, we use the original should_continue
     # unchanged and no language_check node is added to the graph.
+    # Determine whether watchover interception is active. When a manager
+    # is threaded, the ``agent → tools`` path is re-routed through
+    # ``watchover_check`` (the per-tool-call security gate). Non-watched
+    # instances pass through instantly (zero cost — the Phase 1 stub
+    # returns ``{}`` and ``should_end_watchover`` routes to ``"tools"``).
+    # When ``manager is None`` (tests / backward compat), keep the direct
+    # ``"tools": "tools"`` mapping — no watchover nodes are added.
+    watchover_active = manager is not None
+    tools_target = "watchover_check" if watchover_active else "tools"
+
     if language_check_enabled:
         graph.add_node("language_check", create_language_check_node(user_language))
 
@@ -3354,7 +4829,7 @@ def build_instance_graph(
         routing_fn = create_should_continue(language_check_enabled=True)
 
         graph.add_conditional_edges("agent", routing_fn, {
-            "tools": "tools",          # Normal: LLM made tool calls
+            "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: retry agent
             "nudge": "nudge",          # Empty after tool: inject prompt
             "end_candidate": "language_check",  # Would-be END: validate language
@@ -3368,11 +4843,53 @@ def build_instance_graph(
     else:
         # Language check disabled: use original should_continue, no language_check node
         graph.add_conditional_edges("agent", should_continue, {
-            "tools": "tools",          # Normal: LLM made tool calls
+            "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: LLM promised but no tool_call, retry
             "nudge": "nudge",          # Empty after tool: inject prompt to continue
             END: END,
         })
+
+    # Watchover interception nodes — sits between agent and tools.
+    # Added only when a manager is provided. Non-watched instances pass
+    # through instantly (the stub returns ``{}`` and the router picks
+    # ``"tools"``). Phase 2 fills the LLM evaluation in
+    # ``create_watchover_check_node`` and threads ``manager`` into the
+    # terminate node for the persistent DB marker (T2.6b / TD-8).
+    if watchover_active:
+        watchover_slot = WatchoverSlot(manager)
+        # Lazy import of the watcher meta — keeps the meta-file read off
+        # the graph wiring hot path. The defaults in the
+        # ``WatchoverEvaluator`` constructor cover the (rare) read-fail
+        # case so the graph still builds.
+        watcher_cfg = _load_watcher_meta_config()
+        graph.add_node(
+            "watchover_check",
+            create_watchover_check_node(
+                manager=manager,
+                slot=watchover_slot,
+                llm_config=llm_config_with_headers,
+                watcher_config=watcher_cfg,
+            ),
+        )
+        graph.add_node(
+            "watchover_terminate_node",
+            create_watchover_terminate_node(watchover_slot, manager=manager),
+        )
+
+        # watchover_check → conditional: tools (allow) / agent (deny) /
+        # watchover_terminate_node (3-strikes). The node sets
+        # ``watchover_route`` and the router reads it.
+        graph.add_conditional_edges(
+            "watchover_check",
+            should_end_watchover,
+            {
+                "tools": "tools",
+                "agent": "agent",
+                "watchover_terminate_node": "watchover_terminate_node",
+            },
+        )
+        # watchover_terminate_node → END (deferred cascade runs post-graph)
+        graph.add_edge("watchover_terminate_node", END)
 
     # Conditional post-tools edge: route to ``question_pause_node`` when
     # the question tool has requested a pause (F1). The original
@@ -3424,10 +4941,14 @@ __all__ = [
     "LoopBreakerConfig",
     "LoopRepairer",
     "LoopBreakerSlot",
+    "WatchoverSlot",
     "ToolThrottleSlot",
     "InjectionSlot",
     "build_instance_graph",
     "build_session_graph",
     "create_agent_node",
+    "create_watchover_check_node",
+    "create_watchover_terminate_node",
+    "should_end_watchover",
+    "_emit_watchover_sse",
 ]
-

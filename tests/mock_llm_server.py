@@ -10,7 +10,7 @@ import time
 import json
 import argparse
 from datetime import datetime
-from typing import Generator
+from typing import Generator, Any
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +28,9 @@ app.add_middleware(
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: str | None = None
+    tool_calls: Any = None
+    tool_call_id: Any = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -78,6 +80,269 @@ class MockLLMState:
 state = MockLLMState()
 
 
+# ---------------------------------------------------------------------------
+# Watchover test support
+# ---------------------------------------------------------------------------
+
+# Canonical markdown guardrails returned by the watcher context builder.
+BUILDER_GUARDRAILS = """## Agent Activity
+The instance is performing Kubernetes cluster operations — checking node status and pod health.
+
+## Available Tools
+- bash: execute shell commands
+- read_file: read file contents
+
+## Allowed
+- kubectl get, kubectl describe, kubectl top — read-only cluster inspection
+- reading files within the working tree
+
+## Forbidden
+- kubectl delete, kubectl apply, kubectl edit — mutating operations
+- kubectl exec into production pods
+- modifying system configuration files
+
+## Requirement
+no destructive operations; read-only cluster inspection only"""
+
+
+class WatchoverTestState:
+    """Deterministic, scenario-driven state for watchover test responses."""
+
+    def __init__(self):
+        self.watcher_call_count: int = 0
+        self.builder_call_count: int = 0
+        self.agent_call_count: int = 0
+        self.scenario: str = "allow"
+        self.active: bool = False  # set True when a scenario is activated via /scenario
+        self._watcher_call_index: int = 0  # internal counter within scenario
+        self._agent_call_index: int = 0
+
+    def set_scenario(self, scenario: str) -> str:
+        """Switch scenario and reset internal counters. Returns old scenario."""
+        old = self.scenario
+        self.scenario = scenario
+        self.active = True
+        self.watcher_call_count = 0
+        self.builder_call_count = 0
+        self.agent_call_count = 0
+        self._watcher_call_index = 0
+        self._agent_call_index = 0
+        return old
+
+
+watchover_state = WatchoverTestState()
+
+
+def reset_watchover_state() -> None:
+    """Reset the watchover test state to defaults (useful between tests)."""
+    watchover_state.scenario = "allow"
+    watchover_state.active = False
+    watchover_state.watcher_call_count = 0
+    watchover_state.builder_call_count = 0
+    watchover_state.agent_call_count = 0
+    watchover_state._watcher_call_index = 0
+    watchover_state._agent_call_index = 0
+
+
+def build_watchover_response(
+    content: str | None,
+    tool_calls: list | None,
+    model: str,
+    finish_reason: str = "stop",
+) -> JSONResponse:
+    """Build an OpenAI-compatible chat completion response for watchover tests.
+
+    Supports both text-only (verdict/builder) responses and tool_call responses.
+    """
+    message: dict = {"role": "assistant"}
+    if content is not None:
+        message["content"] = content
+    else:
+        message["content"] = None
+    message["reasoning_content"] = None  # backward compat
+    if tool_calls is not None:
+        message["tool_calls"] = tool_calls
+
+    completion_tokens = 0
+    if content:
+        completion_tokens = len(content.split())
+    if tool_calls:
+        completion_tokens += sum(
+            len(str(tc.get("function", {}).get("arguments", "")).split())
+            for tc in tool_calls
+        )
+
+    return JSONResponse(
+        content={
+            "id": f"mockchat-{int(time.time() * 1000)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason,
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": completion_tokens,
+                "total_tokens": completion_tokens,
+            },
+        }
+    )
+
+
+def _extract_message_text(req: ChatCompletionRequest) -> str:
+    """Concatenate all message contents into a single lowercased string for detection."""
+    parts = []
+    for msg in req.messages:
+        if msg.content:
+            parts.append(msg.content)
+    return "\n".join(parts).lower()
+
+
+def _detect_call_type(req: ChatCompletionRequest) -> str:
+    """Classify an incoming LLM call into one of: watcher, builder, agent.
+
+    Detection priority:
+      1. Any message contains '[WATCHOVER CHECK]' -> watcher evaluator
+      2. Any message contains '[WATCHOVER CONTEXT]' -> watcher evaluator
+      3. System message contains 'security-profile compiler',
+         'Watcher Context Builder', or 'Build the watchover context' -> builder
+      4. Otherwise -> agent
+    """
+    text = _extract_message_text(req)
+
+    if "[watchover check]" in text:
+        return "watcher"
+    if "[watchover context]" in text:
+        return "watcher"
+
+    for msg in req.messages:
+        if msg.role == "system" and msg.content:
+            sys_lower = msg.content.lower()
+            if (
+                "security-profile compiler" in sys_lower
+                or "watcher context builder" in sys_lower
+                or "build the watchover context" in sys_lower
+            ):
+                return "builder"
+
+    return "agent"
+
+
+def _agent_tool_call(name: str, args_json: str, call_id: str = "call_mock_001") -> dict:
+    """Build a single OpenAI tool_call object."""
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": args_json},
+    }
+
+
+def _has_watchover_markers(req: ChatCompletionRequest) -> bool:
+    """Decide whether a request should be routed to the watchover handler.
+
+    True when:
+      - The request carries explicit watchover markers (watcher evaluator
+        or context builder calls), OR
+      - A scenario has been explicitly activated via ``POST /scenario`` and
+        the request is an agent call (no markers but scenario expects agent
+        responses).
+
+    This keeps generic (non-watchover) tests working: when no scenario is
+    active and there are no markers, requests fall through to the generic
+    mock path.
+    """
+    call_type = _detect_call_type(req)
+    if call_type in ("watcher", "builder"):
+        return True
+    # Agent calls route to the watchover handler only while a scenario is active
+    return watchover_state.active
+
+
+def _handle_watchover_request(req: ChatCompletionRequest) -> JSONResponse | StreamingResponse:
+    """Route a detected watchover call to its scenario-driven response."""
+    call_type = _detect_call_type(req)
+    scenario = watchover_state.scenario
+
+    # ---- Watcher evaluator ----------------------------------------------
+    if call_type == "watcher":
+        watchover_state.watcher_call_count += 1
+        idx = watchover_state._watcher_call_index
+        watchover_state._watcher_call_index += 1
+
+        if scenario == "deny_then_correct":
+            if idx == 0:
+                content = (
+                    "Deny: kubectl delete is a mutating operation. "
+                    "Use kubectl get or kubectl describe instead."
+                )
+            else:
+                content = "Allowed"
+        elif scenario == "three_strikes":
+            content = "Deny: destructive operation not permitted under watchover."
+        elif scenario == "infra_error":
+            if idx == 0:
+                # First call fails so the fail-open path executes
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "Mock infra error (watchover infra_error scenario)"},
+                )
+            content = "Allowed"
+        else:
+            # allow / builder_quality / unknown -> always allow
+            content = "Allowed"
+
+        if req.stream:
+            return StreamingResponse(
+                stream_response(req.model, "", content, "", req),
+                media_type="text/event-stream",
+            )
+        return build_watchover_response(content, None, req.model, "stop")
+
+    # ---- Watcher context builder ----------------------------------------
+    if call_type == "builder":
+        watchover_state.builder_call_count += 1
+        content = BUILDER_GUARDRAILS
+
+        if req.stream:
+            return StreamingResponse(
+                stream_response(req.model, "", content, "", req),
+                media_type="text/event-stream",
+            )
+        return build_watchover_response(content, None, req.model, "stop")
+
+    # ---- Agent -----------------------------------------------------------
+    # fallthrough: agent call
+    watchover_state.agent_call_count += 1
+    idx = watchover_state._agent_call_index
+    watchover_state._agent_call_index += 1
+
+    if scenario == "deny_then_correct":
+        if idx == 0:
+            tc = _agent_tool_call(
+                "bash", '{"command": "kubectl delete pod old-pod"}'
+            )
+        else:
+            tc = _agent_tool_call("bash", '{"command": "kubectl get pods"}')
+    elif scenario == "three_strikes":
+        tc = _agent_tool_call(
+            "bash", '{"command": "kubectl delete deployment prod-app"}'
+        )
+    else:
+        # allow / infra_error / builder_quality / unknown -> safe command
+        tc = _agent_tool_call("bash", '{"command": "kubectl top nodes"}')
+
+    # Streaming tool_calls is complex and not needed for tests — return
+    # non-streaming regardless of req.stream.
+    return build_watchover_response(
+        None, [tc], req.model, "tool_calls"
+    )
+
+
 def format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
@@ -100,7 +365,24 @@ async def stats():
         "response_index": state.response_index,
         "available_responses": MOCK_CONTENT_RESPONSES,
         "available_thinking": MOCK_THINKING_RESPONSES,
+        "watcher_call_count": watchover_state.watcher_call_count,
+        "builder_call_count": watchover_state.builder_call_count,
+        "agent_call_count": watchover_state.agent_call_count,
+        "current_scenario": watchover_state.scenario,
     }
+
+
+@app.post("/scenario")
+async def set_scenario(req: Request):
+    """Set the watchover test scenario and reset internal counters.
+
+    Body: ``{"scenario": "allow" | "deny_then_correct" | "three_strikes" |
+    "infra_error" | "builder_quality"}``
+    """
+    body = await req.json()
+    scenario = body.get("scenario", "allow")
+    old = watchover_state.set_scenario(scenario)
+    return {"scenario": watchover_state.scenario, "previous": old}
 
 
 @app.post("/v1/chat/completions")
@@ -111,10 +393,17 @@ async def chat_completions(req: ChatCompletionRequest):
     """
     state.increment()
 
+    # ---- Watchover detection --------------------------------------------
+    # If the request carries watchover markers (watcher evaluator, context
+    # builder), delegate to the scenario-driven handler. Otherwise fall
+    # through to the generic mock path so existing tests keep working.
+    if _has_watchover_markers(req):
+        return _handle_watchover_request(req)
+
     user_message = ""
     for msg in reversed(req.messages):
         if msg.role == "user":
-            user_message = msg.content
+            user_message = msg.content or ""
             break
 
     if req.mock_response:

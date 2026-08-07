@@ -118,6 +118,18 @@ export class ApiService {
     });
   }
 
+  // Watchover — toggle security monitoring on/off for an instance.
+  setWatchover(
+    instanceId: string,
+    enabled: boolean,
+    requirement?: string | null,
+  ): Observable<{ watchover_enabled: boolean; instance_id: string }> {
+    return this.http.post<{ watchover_enabled: boolean; instance_id: string }>(
+      `${this.API_BASE}/instances/${instanceId}/watchover`,
+      { enabled, requirement: requirement ?? null, context: null }
+    );
+  }
+
   // UI preferences (pinned + color tag + icon tag).
   //
   // Body fields are independent: the caller may send only ``pinned``,

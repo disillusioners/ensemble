@@ -82,6 +82,31 @@ class InstanceInfo(BaseModel):
             "meta.json or the daemon config)."
         ),
     )
+    watchover_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether watchover (security monitoring) is active for this "
+            "instance. Sourced from instance_metadata.watchover_enabled."
+        ),
+    )
+    watchover_context: str | None = Field(
+        default=None,
+        description=(
+            "The watchover context string (compaction summary + requirement) "
+            "used by the watcher agent. Sourced from "
+            "instance_metadata.watchover_context. Null when watchover is off."
+        ),
+    )
+    watchover_denial_count: int = Field(
+        default=0,
+        description=(
+            "Current watchover denial count for this turn. Reset to 0 at "
+            "the start of each turn. The list/get endpoints always return "
+            "0 (graph state is not fetched per-instance for performance); "
+            "the frontend tracks the real-time count via SSE denial "
+            "events. This field is a best-effort default."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -94,7 +119,10 @@ class InstanceInfo(BaseModel):
                 "parent_id": None,
                 "mcp_tool_names": ["webfetch", "context7_fetch_docs"],
                 "created_at": "2024-01-01T00:00:00Z",
-                "updated_at": "2024-01-01T00:01:00Z"
+                "updated_at": "2024-01-01T00:01:00Z",
+                "watchover_enabled": False,
+                "watchover_context": None,
+                "watchover_denial_count": 0,
             }
         }
     )

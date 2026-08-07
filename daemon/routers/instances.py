@@ -1,5 +1,6 @@
 """Instance management API endpoints."""
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -142,6 +143,72 @@ class AnswerRequest(BaseModel):
             "event) — text-keyed fallbacks are also accepted."
         ),
     )
+
+
+class WatchoverRequest(BaseModel):
+    """Request body for ``POST /api/instances/{id}/watchover``.
+
+    Phase 3 / Watchover (2026-08-05) + Phase 4 / Watcher Context
+    Builder (2026-08-07). Toggles the watchover flag
+    (``watchover_enabled`` in ``instance_metadata`` JSONB) for the
+    target instance and supplies the operator-defined requirement /
+    context that drives the watcher's Allow/Deny prompt.
+
+    Attributes:
+        enabled: ``True`` activates watchover (full pause → context →
+            flag → resume lifecycle). ``False`` deactivates it
+            (pause → clear flag → resume). Required.
+        requirement: Operator-supplied requirement string the watcher
+            will use as the Allow/Deny prompt (e.g. ``"no destructive
+            operations"``). Optional — when ``None`` the watcher
+            uses its own persona prompt without an operator-supplied
+            requirement line. Stored on the instance as
+            ``watchover_requirement``.
+        context: Optional pre-built context string. Production
+            callers pass ``None`` and let the service build the
+            context via the WatcherContextBuilder (LLM-built markdown
+            document with raw-tail + static guardrail fallback).
+            Tests / advanced callers may inject a context string
+            directly. Stored on the instance as
+            ``watchover_context``.
+    """
+
+    enabled: bool = Field(
+        ...,
+        description=(
+            "True activates watchover; False deactivates it. "
+            "Required."
+        ),
+    )
+    requirement: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Operator-supplied requirement string the watcher uses "
+            "as the Allow/Deny prompt. Optional; max 2000 chars."
+        ),
+    )
+    context: str | None = Field(
+        default=None,
+        max_length=50_000,
+        description=(
+            "Optional pre-built watchover_context. Production callers "
+            "should leave this None so the service builds the context "
+            "via ContextCompactor + raw-tail fallback. Maximum 50000 "
+            "characters (the raw-tail fallback keeps the last 10 "
+            "messages; the upper bound is set so a caller-supplied "
+            "context cannot blow up the watcher's prompt)."
+        ),
+    )
+    # SECURITY NOTE (W2 / defense-in-depth): The ``context`` field is
+    # user-supplied and flows into the watcher agent's prompt. The
+    # watcher (agents/watcher/soul.md) is designed to treat all
+    # context/arguments as UNTRUSTED input — the watcher's Allow/Deny
+    # verdict is based on the operator requirement and observed tool
+    # calls, NOT on instructions embedded in the context string.
+    # Prompt-injection resistance is a property of the watcher prompt,
+    # not of this endpoint. The 50K char limit is a size guard, not a
+    # content guard.
 
 
 class InstanceUiPrefsUpdateRequest(BaseModel):
@@ -359,6 +426,9 @@ async def list_instances(
             children=inst.get("children", []),
             mcp_tool_names=inst.get("metadata", {}).get("mcp_tool_names"),
             model=inst.get("metadata", {}).get("model_override"),
+            watchover_enabled=bool(inst.get("metadata", {}).get("watchover_enabled", False)),
+            watchover_context=inst.get("metadata", {}).get("watchover_context"),
+            watchover_denial_count=0,
             created_at=parse_utc_datetime(inst["created_at"]),
             updated_at=parse_utc_datetime(inst.get("updated_at")),
             project_id=inst.get("project_id"),
@@ -416,6 +486,9 @@ async def get_instance(
         children=instance_meta.get("children", []),
         mcp_tool_names=instance_meta.get("metadata", {}).get("mcp_tool_names"),
         model=instance_meta.get("metadata", {}).get("model_override"),
+        watchover_enabled=bool(instance_meta.get("metadata", {}).get("watchover_enabled", False)),
+        watchover_context=instance_meta.get("metadata", {}).get("watchover_context"),
+        watchover_denial_count=0,
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),
@@ -605,6 +678,130 @@ async def resume_instance(
         "skipped_ids": result["skipped_ids"],
         "target_id": target_id,
         "resume_results": resume_results,
+    }
+
+
+# 6c. POST /instances/{instance_id}/watchover - Toggle watchover on/off
+#
+# Phase 3 / Watchover (2026-08-05). Toggles the per-instance
+# ``watchover_enabled`` flag in ``instance_metadata`` JSONB via the
+# full pause → context-build → flag-write → resume lifecycle
+# (T3.5/T3.6). Follows the EXACT pattern of the pause/resume
+# endpoints above (lines 578-659) for the write-paused gate + 404
+# handling.
+#
+# Phase 1 descope (FR-27/TD-9): manager-internal authorization only.
+# The project has no existing instance-session-ownership primitive
+# (every authenticated caller is allowed to toggle any instance's
+# watchover flag), so a full 403 cross-session rejection is deferred
+# to a future phase.
+#
+# In-flight limitation (W-9, CR-3, LD-4 ACCEPTED):
+#   Watchover activation does NOT guarantee interception of tool
+#   calls that began executing BEFORE activation was requested.
+#   ``pause_instance_cascade`` cancels the graph task but cannot
+#   stop a tool already running in a worker thread (synchronous
+#   tool threads are uncancellable). For maximum safety, activate
+#   watchover BEFORE starting autonomous work, or pause manually
+#   first.
+@router.post("/{instance_id}/watchover")
+async def toggle_watchover(
+    instance_id: str,
+    body: WatchoverRequest,
+    request: Request,
+) -> dict:
+    """Activate or deactivate watchover for the target instance.
+
+    The activation path runs the full
+    ``pause → quiescence-barrier → context-build → atomic-flag-write →
+    resume`` lifecycle. The deactivation path runs the symmetric
+    ``pause → clear-flag → resume`` sequence. Both paths emit a
+    ``status_change`` SSE event (``watchover_active`` /
+    ``watchover_inactive``) so the frontend can reflect the toggle.
+
+    Phase 1 descope (FR-27/TD-9): manager-internal authorization only
+    — every authenticated caller can toggle any instance's watchover
+    flag. Full cross-session ownership check deferred to a future
+    phase.
+
+    In-flight limitation (W-9, CR-3, LD-4 ACCEPTED):
+        Watchover activation does NOT guarantee interception of tool
+        calls that began executing before activation was requested.
+        For maximum safety, activate watchover before starting
+        autonomous work, or pause manually first.
+
+    Args:
+        instance_id: Owning instance identifier (path param).
+        body: :class:`WatchoverRequest` with ``enabled`` (required),
+            ``requirement`` (optional), ``context`` (optional).
+        request: FastAPI request — used to reach the manager from
+            ``app.state``.
+
+    Returns:
+        ``{"watchover_enabled": bool, "instance_id": str}`` on
+        success. On a not-found instance returns ``404`` with the
+        standard ``ErrorResponse`` shape.
+
+    Raises:
+        HTTPException: 404 if the instance is unknown; 503 if writes
+            are paused for a migration. Underlying lifecycle failures
+            propagate to FastAPI as ``500`` (after rollback).
+    """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+    # Confirm instance exists BEFORE attempting the lifecycle. The
+    # helper mirrors the ``KeyError → 404`` translation every other
+    # instance-scoped endpoint uses (M1).
+    await _check_instance_exists(manager, instance_id)
+
+    # Phase 4 / R-1: activation now includes a builder LLM call that
+    # can take up to 15s (the builder_timeout_seconds default) plus
+    # lifecycle steps. Wrap the activation in ``asyncio.wait_for``
+    # with a 30s ceiling so a hung builder does not leave the client
+    # blocking on a long-tail LLM call. The activation lifecycle has
+    # its own rollback path; if we timeout here the lifecycle may
+    # still be running in the background — the rollback will clear
+    # the partial flags and resume the instance. The 504 surfaces a
+    # clean error to the operator.
+    _ACTIVATION_TIMEOUT_SECONDS = 30
+
+    try:
+        if body.enabled:
+            result = await asyncio.wait_for(
+                manager.enable_watchover_lifecycle(
+                    instance_id,
+                    requirement=body.requirement,
+                    user_context=body.context,
+                ),
+                timeout=_ACTIVATION_TIMEOUT_SECONDS,
+            )
+        else:
+            result = await asyncio.wait_for(
+                manager.disable_watchover_lifecycle(instance_id),
+                timeout=_ACTIVATION_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "instances.toggle_watchover(%s): lifecycle timed out after %ds",
+            instance_id,
+            _ACTIVATION_TIMEOUT_SECONDS,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Watchover lifecycle timed out after "
+                f"{_ACTIVATION_TIMEOUT_SECONDS}s"
+            ),
+        )
+
+    return {
+        "watchover_enabled": result.get("watchover_enabled", body.enabled),
+        "instance_id": instance_id,
     }
 
 

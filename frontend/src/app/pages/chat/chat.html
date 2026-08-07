@@ -60,6 +60,19 @@
           }
           <!-- Toggle buttons -->
           <div class="toggle-buttons">
+            <!-- Watchover toggle -->
+            <button
+              (click)="onToggleWatchover()"
+              [class.active]="watchoverEnabled()"
+              [disabled]="watchoverPending()"
+              class="toggle-btn watchover-btn"
+              [title]="watchoverEnabled() ? 'Watchover ON — click to disable' : 'Enable watchover (security monitoring)'"
+            >
+              👁️ Watchover
+              @if (watchoverEnabled()) {
+                <span class="watchover-badge">⚠️ {{ watchoverDenialCount() }}/3</span>
+              }
+            </button>
             <button
               (click)="onToggleThinking()"
               [class.active]="showThinking()"

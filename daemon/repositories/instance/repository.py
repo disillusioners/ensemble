@@ -779,6 +779,64 @@ class SQLModelInstanceRepository:
         """
         return self.set_metadata(instance_id, "title", title)
 
+    def find_instances_with_metadata_key(
+        self, key: str, value: Any
+    ) -> list[Instance]:
+        """Return instances whose top-level metadata key equals ``value``.
+
+        Uses the native JSON operator on each supported database rather than
+        loading every instance and filtering in Python:
+
+        * PostgreSQL compares ``metadata -> key`` with a bound JSONB value.
+        * SQLite compares two ``json_extract`` results so booleans, strings,
+          numbers, nulls, arrays, and objects retain JSON semantics.
+
+        Args:
+            key: Top-level JSON metadata key.
+            value: JSON-serialisable value to match exactly.
+
+        Returns:
+            Enriched matching instance rows.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            encoded_value = json.dumps(value)
+            stmt = select(Instance)
+            if dialect == "postgresql":
+                stmt = stmt.where(
+                    text(
+                        "(metadata -> CAST(:metadata_key AS TEXT)) = "
+                        "CAST(:metadata_value AS jsonb)"
+                    )
+                ).params(
+                    metadata_key=key,
+                    metadata_value=encoded_value,
+                )
+            else:
+                if value is None:
+                    stmt = stmt.where(
+                        text("json_type(metadata, :metadata_path) = 'null'")
+                    ).params(metadata_path=f"$.{key}")
+                else:
+                    # Extract the expected value from a one-key JSON wrapper
+                    # so SQLite applies the same scalar/object conversion to
+                    # both sides of the equality comparison.
+                    stmt = stmt.where(
+                        text(
+                            "json_extract(metadata, :metadata_path) = "
+                            "json_extract(:metadata_wrapper, '$.value')"
+                        )
+                    ).params(
+                        metadata_path=f"$.{key}",
+                        metadata_wrapper=json.dumps({"value": value}),
+                    )
+            instances = list(db_session.exec(stmt).all())
+            return self._enrich_instances(db_session, instances)
+
     def set_metadata(self, instance_id: str, key: str, value: Any) -> Instance | None:
         """Atomically set an instance_metadata key-value pair.
 
@@ -848,6 +906,106 @@ class SQLModelInstanceRepository:
                     "instance_id": instance_id,
                 },
             )
+            db_session.commit()
+
+            instance = db_session.get(Instance, instance_id)
+            if instance is None:
+                return None
+            return self._enrich_instance(db_session, instance)
+
+    def set_metadata_many(
+        self, instance_id: str, updates: dict[str, Any]
+    ) -> Instance | None:
+        """Atomically set multiple ``instance_metadata`` JSONB keys in a single UPDATE.
+
+        Phase 3 / Watchover (2026-08-05, T3.3b). Writes N keys in ONE
+        SQL statement so a partial crash or concurrent read cannot expose
+        torn state (e.g. ``watchover_enabled=true`` but
+        ``watchover_context`` still empty). The single-key :meth:`set_metadata`
+        is composable for callers that touch one key at a time, but the
+        watchover activation path sets 3-4 keys together and MUST use this
+        atomic helper.
+
+        Implementation reuses the dialect-aware ``jsonb_set`` (PostgreSQL) /
+        ``json_set`` (SQLite) pattern from :meth:`set_metadata` and nests
+        N calls — one chain per key. ``COALESCE(metadata, '{}')`` keeps
+        the call safe when the column is NULL.
+
+        Args:
+            instance_id: The instance ID whose metadata to update.
+            updates: Mapping of top-level JSON key to JSON-serialisable
+                value. Each value is ``json.dumps``'d before binding.
+                Must be non-empty.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+
+        Raises:
+            ValueError: If ``updates`` is empty (caller bug — silently
+                no-op'ing an empty write would be ambiguous).
+        """
+        if not updates:
+            raise ValueError("set_metadata_many requires at least one key")
+
+        with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            now = datetime.now(timezone.utc).isoformat()
+
+            # Pre-encode every value once so dialect branches can bind them.
+            encoded: dict[str, str] = {k: json.dumps(v) for k, v in updates.items()}
+
+            if dialect == "postgresql":
+                # Build a nested jsonb_set chain — one layer per key.
+                # The deepest layer wraps COALESCE(metadata, '{}'::jsonb)
+                # and each shallower layer wraps the previous result.
+                # Final SQL: jsonb_set(jsonb_set(jsonb_set(COALESCE(...),
+                # path0, val0, true), path1, val1, true), path2, val2, true)
+                params: dict[str, Any] = {"now": now, "instance_id": instance_id}
+                nested_expr = "COALESCE(metadata, '{}'::jsonb)"
+                for i, key in enumerate(updates.keys()):
+                    nested_expr = (
+                        f"jsonb_set({nested_expr}, :path{i}, "
+                        f"CAST(:value{i} AS jsonb), true)"
+                    )
+                    params[f"path{i}"] = f"{{{key}}}"
+                    params[f"value{i}"] = encoded[key]
+
+                update_sql = text(
+                    f"""
+                    UPDATE instances
+                    SET metadata = {nested_expr},
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+            else:
+                # SQLite — nested json_set() chain. The JSON1 ``json_set``
+                # function takes (target, path, value) and returns the
+                # patched document; nesting composes multiple writes.
+                nested_expr = "COALESCE(metadata, '{}')"
+                params = {"now": now, "instance_id": instance_id}
+                for i, key in enumerate(updates.keys()):
+                    nested_expr = (
+                        f"json_set({nested_expr}, :path{i}, json(:value{i}))"
+                    )
+                    params[f"path{i}"] = f"$.{key}"
+                    params[f"value{i}"] = encoded[key]
+
+                update_sql = text(
+                    f"""
+                    UPDATE instances
+                    SET metadata = {nested_expr},
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+
+            db_session.execute(update_sql, params)
             db_session.commit()
 
             instance = db_session.get(Instance, instance_id)
