@@ -96,7 +96,17 @@ class TitleGenerationService:
 
             llm = ThinkingChatOpenAI(**llm_config)
 
-            title_prompt = f"""Generate a short, descriptive title (3-6 words max) for this user message. The title should summarize what the user is asking about or trying to accomplish.
+            # The completion safety-net path (daemon/services/child_reports.py:
+            # _trigger_title_generation) fires when Path 1 (first message) failed,
+            # and at that point the instance's tail is usually dominated by git
+            # activity (commit messages, merge output, push logs) — the LLM would
+            # otherwise obediently title the instance "Merge branch feature/x"
+            # or "Commit changes". The instruction below steers the LLM to
+            # extract the underlying user goal from any non-git prose (original
+            # request, file names, error messages) when git activity is present.
+            title_prompt = f"""Generate a short, descriptive title (3-6 words max) that captures the user's underlying goal or task — not the surface content of the message.
+
+Important: if the message contains raw tool output from version-control commands (commit hashes, merge logs, push output, or diff lines), de-emphasize that output — it is tool noise, not the user's goal. Ignore it as a title subject and focus on the substantive ask from any non-tool prose (original request, file names referenced, error messages, etc.), even when the ask is about git itself. If the entire message is git activity with no other content, produce a short title describing the high-level operation (e.g., "Code Merge" or "Release Prep").
 
 User message:
 {message_content[:500]}

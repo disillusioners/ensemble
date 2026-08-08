@@ -7,6 +7,7 @@ visible text only. If the response is thinking-only, no title is set
 """
 
 import pytest
+import re
 from unittest.mock import MagicMock, patch
 
 from daemon.services.title_generation import TitleGenerationService
@@ -140,3 +141,104 @@ async def test_title_with_multiple_think_blocks(mock_manager):
     mock_manager._instance_repository.update_title.assert_called_once()
     args, _kwargs = mock_manager._instance_repository.update_title.call_args
     assert args[1] == "Deploy Auth Patch"
+
+
+@pytest.mark.asyncio
+async def test_prompt_instructs_llm_to_ignore_git_activity(mock_manager):
+    """Regression guard: the title-generation prompt must instruct the LLM to
+    ignore git/version-control activity.
+
+    The completion safety-net path in ``daemon/services/child_reports.py`` fires
+    when the first-message title path failed. At that point the instance's tail
+    is usually dominated by git activity (commits, merges, pushes), and a naive
+    prompt would let the LLM title the instance "Merge branch …" or "Commit
+    changes". The prompt must explicitly steer the LLM toward the user's
+    underlying goal when git output is present.
+
+    This test asserts the *prompt* (not the LLM response, since the LLM is
+    mocked) contains the anti-git instruction. It is a structural guard:
+    removing the instruction would silently regress behavior on real LLM calls
+    while still passing every other title-generation test.
+    """
+    from langchain_core.messages import HumanMessage
+
+    service = TitleGenerationService(manager=mock_manager)
+
+    # Simulate a git-heavy tail (what the completion safety-net typically sees).
+    git_heavy_message = (
+        "Merge branch 'feature/login-fix' into main\n"
+        "Commit 7a3f9b2: 'fix: handle null session in auth middleware'\n"
+        "[main 8e1c4d9] push origin feature/login-fix\n"
+    )
+    mock_llm = _make_mock_llm("Fix Login Bug")
+
+    with patch(
+        "daemon.services.title_generation.ThinkingChatOpenAI",
+        return_value=mock_llm,
+    ):
+        await service._generate_and_broadcast_title(
+            "instance-git-tail", git_heavy_message
+        )
+
+    # Inspect the HumanMessage sent to the LLM.
+    mock_llm.invoke.assert_called_once()
+    messages = mock_llm.invoke.call_args[0][0]
+    human_message = next(m for m in messages if isinstance(m, HumanMessage))
+    prompt = human_message.content
+
+    # The prompt must explicitly mention git/version-control activity and
+    # instruct the LLM to ignore it. We assert key substrings rather than the
+    # full string so the test tolerates minor rewording of the prompt.
+    assert "git" in prompt.lower(), (
+        "Prompt must mention git activity so the LLM can identify it"
+    )
+    assert "ignore" in prompt.lower(), (
+        "Prompt must instruct the LLM to ignore git activity"
+    )
+    # Mention at least one specific git operation (commits, merges, or pushes)
+    # so the LLM can pattern-match reliably.
+    git_keywords = ("commit", "merge", "push")
+    assert any(kw in prompt.lower() for kw in git_keywords), (
+        f"Prompt must reference at least one git operation keyword: {git_keywords}"
+    )
+    # The git instruction must be conditional rather than suppressing git topics
+    # even when they are the user's substantive subject matter.
+    conditional_match = re.search(
+        r"\bif\b.*\bignore\b|\bif\b.*\bde-?emphasis",
+        prompt,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert conditional_match, "Git-noise instruction must be conditional"
+
+    # The git-heavy message body should still be embedded so the LLM has
+    # something to reason about (e.g., a non-git line elsewhere in the tail).
+    assert "Merge branch" in prompt, (
+        "Prompt must include the git-heavy message body so the LLM sees the noise"
+    )
+
+@pytest.mark.asyncio
+async def test_prompt_preserves_goal_framing_for_non_git_message(mock_manager):
+    """The git-noise guidance remains conditional for ordinary user asks."""
+    from langchain_core.messages import HumanMessage
+
+    service = TitleGenerationService(manager=mock_manager)
+    mock_llm = _make_mock_llm("Fix Login Bug")
+
+    with patch(
+        "daemon.services.title_generation.ThinkingChatOpenAI",
+        return_value=mock_llm,
+    ):
+        await service._generate_and_broadcast_title(
+            "instance-non-git", "Please fix the login bug"
+        )
+
+    messages = mock_llm.invoke.call_args[0][0]
+    human_message = next(m for m in messages if isinstance(m, HumanMessage))
+    prompt = human_message.content
+
+    assert "underlying goal" in prompt.lower()
+    assert re.search(
+        r"\bif\b.*\bignore\b|\bif\b.*\bde-?emphasis",
+        prompt,
+        re.IGNORECASE | re.DOTALL,
+    )
