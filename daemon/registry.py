@@ -309,6 +309,15 @@ class AgentMetadata(BaseModel):
             "heuristic_match_shared_md_files=False."
         ),
     )
+    lifecycle_hooks: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Maps lifecycle event names (e.g. 'on_complete') to a list of hook "
+            "function names registered in the dispatcher. Empty dict (default) "
+            "= no hooks. The value is a list so multiple hook functions can be "
+            "configured per event. Example: {\"on_complete\": [\"add_to_shared_context_md_files\"]}"
+        ),
+    )
     inject_allowed_models: bool = Field(
         default=False,
         description="When true, inject the allowed-models list into this agent's system prompt at spawn time.",

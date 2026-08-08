@@ -13,5 +13,8 @@
   },
   "context_injection": {
     "heuristic_match_shared_md_files": true
+  },
+  "lifecycle_hooks": {
+    "on_complete": ["add_to_shared_context_md_files"]
   }
 }

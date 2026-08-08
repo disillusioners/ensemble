@@ -21,6 +21,8 @@ from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWa
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
+from .context_messages import _resolve_tree_root_id
+from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .job_queue_service import TERMINAL_STATUSES
 from .main_loop_bridge import MainLoopBridge
 
@@ -2880,6 +2882,72 @@ Provide a concise summary:"""
             
             # Title generation
             self._trigger_title_generation(instance_id, completed_message_id)
+
+            # --- Lifecycle hooks (on_complete) ------------------------------
+            # Only ``regular_child_completed`` reaches here (W6); every other
+            # outcome returns earlier. The dispatch is bounded by
+            # ``asyncio.wait_for(..., timeout=5.0)`` (W2) and uses
+            # ``except asyncio.CancelledError: raise`` (W3) so cancellation
+            # propagates rather than being swallowed. The bus terminal hook
+            # above has already fired by this point, so a slow/hanging hook
+            # does not block it.
+            try:
+                child_agent_id = result.child_agent_id or agent_id
+                registry = get_registry()
+                agent_meta = registry.get_version(child_agent_id, None)
+                if agent_meta is None:
+                    agent_meta = registry.get_resolved(child_agent_id)
+                if agent_meta is not None:
+                    lifecycle_hooks = getattr(agent_meta, "lifecycle_hooks", {})
+                    hook_names = lifecycle_hooks.get("on_complete", [])
+                    if hook_names:
+                        # Resolve context_key per W7 — try tree-root, fall
+                        # back to instance_id, skip if no repo at all.
+                        context_key: str | None = None
+                        instance_repo = getattr(
+                            self._manager, "_instance_repository", None
+                        )
+                        if instance_repo is not None:
+                            try:
+                                context_key = await asyncio.to_thread(
+                                    _resolve_tree_root_id,
+                                    instance_id,
+                                    parent_id,
+                                    instance_repo,
+                                )
+                            except Exception as e:
+                                logger.debug(
+                                    f"hook context_key resolution failed: {e}"
+                                )
+                                context_key = instance_id
+                        else:
+                            logger.debug(
+                                "context_key unavailable; hook dispatch skipped"
+                            )
+                        if context_key is not None:
+                            ctx = LifecycleHookContext(
+                                instance_id=instance_id,
+                                agent_id=child_agent_id,
+                                parent_id=parent_id,
+                                last_content=last_content,
+                                outcome=outcome,
+                                context_key=context_key,
+                                manager=self._manager,
+                            )
+                            try:
+                                await asyncio.wait_for(
+                                    dispatch_lifecycle_hooks(
+                                        "on_complete", hook_names, ctx
+                                    ),
+                                    timeout=5.0,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                logger.warning(f"lifecycle hook failed: {e}")
+            except Exception as e:
+                logger.warning(f"lifecycle hook dispatch setup failed: {e}")
+
             return
 
         # instance_not_found or unknown outcome: nothing to do

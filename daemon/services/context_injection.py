@@ -131,7 +131,7 @@ def _extract_slug_from_filename(filename: str) -> str:
         The slug portion of the filename.
     """
     # Pattern: _YYYYMMDD_HHMMSS.md
-    pattern = r"_\d{8}_\d{6}\.md$"
+    pattern = r"_\d{8}_\d{6}(?:_[A-Za-z0-9_-]{1,32})?\.md$"
     slug = re.sub(pattern, "", filename)
     # Fallback: strip .md if still present (for non-timestamp filenames)
     if slug.endswith(".md"):

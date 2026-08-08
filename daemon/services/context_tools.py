@@ -11,6 +11,7 @@ modules call them via :func:`asyncio.to_thread` to avoid blocking the event loop
 """
 
 import logging
+import os
 import re
 import tempfile
 from datetime import datetime, timezone
@@ -39,7 +40,31 @@ def resolve_context_dir(context_key: str | None) -> Path:
     return base / "ensemble" / "context" / str(context_key or "")
 
 
-_TIMESTAMP_PATTERN = re.compile(r"_\d{8}_\d{6}\.md$")
+_TIMESTAMP_PATTERN = re.compile(r"_\d{8}_\d{6}(?:_[A-Za-z0-9_-]{1,32})?\.md$")
+
+
+def _build_filename(slug: str, suffix: str, instance_id: str | None = None) -> str:
+    """Build a timestamped context filename."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    iid_suffix = f"_{instance_id[:8]}" if instance_id is not None else ""
+    return f"{slug}_{timestamp}{iid_suffix}{suffix}"
+
+
+def write_context_file(
+    context_key: str | None,
+    content: str,
+    slug: str,
+    suffix: str = ".md",
+    instance_id: str | None = None,
+) -> Path:
+    """Atomically write content to a timestamped shared-context file."""
+    dir_path = resolve_context_dir(context_key)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    file_path = dir_path / _build_filename(slug, suffix, instance_id)
+    tmp_path = Path(f"{file_path}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, file_path)
+    return file_path
 
 # Preview extraction tuning knobs.
 _PREVIEW_MAX_LINES = 5
