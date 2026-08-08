@@ -342,6 +342,72 @@ class TestSystemLogSearchInvocation:
         match_markers = [l for l in result.split("\n") if ">>>" in l]
         assert len(match_markers) <= 50
 
+    def test_search_context_clamped_to_max(self, tools, log_dir, monkeypatch):
+        """W2 fix: ``context=200`` is clamped to MAX_CONTEXT (100).
+
+        Regression: the old code passed ``int(context)`` straight to the
+        deque buffer, which would happily allocate huge rolling buffers
+        and produce enormous responses. Now the value is clamped to
+        ``MAX_CONTEXT`` before any I/O.
+        """
+        from daemon.tools import system_log_tools
+
+        # Force MAX_CONTEXT to a known small value so we can assert the
+        # clamp actually took effect (not just that no error was raised).
+        monkeypatch.setattr(system_log_tools, "MAX_CONTEXT", 5)
+
+        # Build a file with 50 lines so context_before/after have data.
+        f = log_dir / "ensemble.log"
+        f.write_text(
+            "\n".join(
+                f"2026-08-08 08:00:{i:02d} - daemon.test - ERROR - line {i}"
+                for i in range(50)
+            ),
+            encoding="utf-8",
+        )
+
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "ERROR", "filename": "ensemble.log", "context": 200},
+        )
+        # No error returned (clamp is silent).
+        assert "error" not in result.lower() or "truncated" in result.lower()
+        # The match block for the first ERROR should contain AT MOST
+        # MAX_CONTEXT (5) lines of pre-context. Easier assertion: scan
+        # the first match block and count context-indented lines.
+        # A context value of 200 would yield 200 pre-context lines; a
+        # clamped value of 5 yields at most 5.
+        # Find first match marker.
+        lines = result.split("\n")
+        first_match_idx = next(
+            (i for i, l in enumerate(lines) if ">>>" in l), None
+        )
+        assert first_match_idx is not None, "expected at least one match"
+        # Walk back from the match: count consecutive context lines (no '>>>')
+        context_lines = 0
+        for j in range(first_match_idx - 1, -1, -1):
+            l = lines[j]
+            if "match(es)" in l or l.strip().startswith("---"):
+                break
+            context_lines += 1
+        assert context_lines <= system_log_tools.MAX_CONTEXT
+
+    def test_search_context_invalid_string_returns_friendly_error(self, tools, log_file):
+        """W3 fix: ``context="abc"`` returns a friendly error (no traceback).
+
+        Regression: ``int(context)`` raised ValueError and the bare
+        ``except`` chain didn't catch it — agent saw a stack trace.
+        """
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "ERROR", "filename": "ensemble.log", "context": "abc"},
+        )
+        # Friendly error, no traceback.
+        assert "Traceback" not in result
+        assert "invalid context" in result.lower() or "context" in result.lower()
+        # Message is non-empty.
+        assert len(result) > 0
+
 
 class TestSystemLogTailInvocation:
     """Invocation tests for ens_system_log_tail."""
@@ -555,6 +621,80 @@ class TestSystemLogRedaction:
         assert "[REDACTED]" in _redact_line("token=tkn")
         assert "[REDACTED]" in _redact_line("Bearer abc123")
         assert "[REDACTED]" in _redact_line("Authorization: Basic dXNlcjpwYXNz")
+
+    def test_json_key_redaction(self):
+        r"""C1 fix: JSON quoted-key secrets are fully redacted.
+
+        Regression: previously the closing quote terminated the value
+        match and the secret leaked (e.g. ``"api_key": "sk-secret123"``
+        → ``"api_key": "[REDACTED]"`` kept the leading quote, but the
+        pattern ``\w*_API_KEY=[^\s]+`` matched the literal substring
+        ``key":"sk-secret123`` and only redacted from there, leaving
+        parts visible). Now the entire ``"key":"value"`` pair is masked.
+        """
+        from daemon.tools.system_log_tools import _redact_line
+
+        redacted = _redact_line('payload = {"api_key": "secret123"}')
+        assert "[REDACTED]" in redacted
+        assert "secret123" not in redacted
+
+    def test_json_token_redaction(self):
+        """C1 fix: JSON ``"token":`` value is fully redacted."""
+        from daemon.tools.system_log_tools import _redact_line
+
+        redacted = _redact_line('config = {"token": "abc.def.ghi"}')
+        assert "[REDACTED]" in redacted
+        assert "abc.def.ghi" not in redacted
+
+    def test_json_password_redaction(self):
+        """C1 fix: JSON ``"password":`` value is fully redacted."""
+        from daemon.tools.system_log_tools import _redact_line
+
+        redacted = _redact_line('db = {"password": "hunter2!"}')
+        assert "[REDACTED]" in redacted
+        assert "hunter2!" not in redacted
+
+    def test_hyphenated_header_redaction(self):
+        """C1 fix: Hyphenated ``X-API-Key:`` header is redacted.
+
+        Regression: legacy patterns expected ``_API_KEY`` (underscore),
+        not ``-API-Key`` (hyphen), so ``X-API-Key: abcdef`` leaked.
+        """
+        from daemon.tools.system_log_tools import _redact_line
+
+        redacted = _redact_line("request header: X-API-Key: abcdef")
+        assert "[REDACTED]" in redacted
+        assert "abcdef" not in redacted
+
+    def test_authorization_basic_full_header_redacted(self):
+        """C1 fix: ``Authorization: Basic <base64>`` — the base64 value is
+        redacted, not just the literal ``Basic`` scheme word.
+
+        Regression: ``Authorization\\s*:\\s*\\S+`` matched only the
+        first whitespace-delimited token (``Basic``), leaving the
+        base64 credential (``dXNlcjpwYXNz``) visible. Now the entire
+        header value (scheme + credential) is masked.
+        """
+        from daemon.tools.system_log_tools import _redact_line
+
+        redacted = _redact_line("Authorization: Basic dXNlcjpwYXNz")
+        assert "[REDACTED]" in redacted
+        assert "dXNlcjpwYXNz" not in redacted
+        assert "Basic" not in redacted  # entire scheme+value replaced
+
+    def test_multword_password_value_redacted(self):
+        """C1 fix: Multi-word values like ``password=my secret`` have
+        both words redacted.
+
+        Regression: ``password\\s*=\\s*\\S+`` only matched ``my``,
+        leaking ``secret``.
+        """
+        from daemon.tools.system_log_tools import _redact_line
+
+        redacted = _redact_line("password=my secret value")
+        assert "[REDACTED]" in redacted
+        assert "my" not in redacted
+        assert "secret" not in redacted
 
     def test_truncate_helper_directly(self):
         """Test _truncate_line helper: short lines unchanged, long truncated."""

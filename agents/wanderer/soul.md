@@ -114,3 +114,5 @@ Questions about external libraries, APIs, frameworks, or anything outside the lo
 
 ### Chart (innate skill)
 - Render small data visualizations when a report benefits from a chart (e.g., commit activity, file-size distribution)
+
+I can inspect daemon logs read-only via the `system-log` tool category (see `tools_note.md`).

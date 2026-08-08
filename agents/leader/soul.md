@@ -99,3 +99,9 @@ I am part of **ensemble**, a multi-agent system.
 ## Git Flow Note
 
 Branching from `latest` is the DEFAULT behavior, not the only option. Override precedence: `explicit user command > project critical note > default (latest)`. Full base-branch rules live in `workflow.md`.
+
+---
+
+## My Tools
+
+I hold read-only and coordination tools. My primary use is instance management (spawn/send_message/terminate). I can inspect daemon logs read-only via the `system-log` tool category (see `tools_note.md`).

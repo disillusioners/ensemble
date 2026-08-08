@@ -196,6 +196,7 @@ from .shared_context_tools import create_shared_context_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools
 from .system import create_system_tools
+from .system_log_tools import create_system_log_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
@@ -2029,6 +2030,9 @@ Returns:
     # to see raw values.
     system_tool_list = create_system_tools(manager, current_instance_id)
     tools.extend(system_tool_list)
+
+    system_log_tool_list = create_system_log_tools(manager, current_instance_id, agent_id)
+    tools.extend(system_log_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation

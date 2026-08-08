@@ -562,6 +562,16 @@ When user reports a bug or issue after a task is completed:
 
 **Spawn a NEW session for bug fixes.** Do NOT rely on previous discussion.
 
+### Runtime-Log Self-Healing
+
+When a code change causes a regression, use the system-log tools in this order:
+
+1. Use `ens_system_log_search` to find the failing pattern in the logs.
+2. Use `ens_system_log_read` with paging (`offset`/`limit`) to inspect context around matching lines.
+3. After the fix is applied, re-run the same `ens_system_log_search` query to validate that the regression is resolved.
+
+Use the full read-only tool reference in `tools_note.md` for the available system-log operations.
+
 ### Decision Flow
 
 ```

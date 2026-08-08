@@ -14,7 +14,9 @@ warnings.filterwarnings(
 )
 
 import time
+import sys
 import logging
+from logging.handlers import RotatingFileHandler
 import asyncio
 import json
 import os
@@ -31,12 +33,45 @@ _daemon_log_level = os.environ.get("LOG_LEVEL_DAEMON", "info").upper()
 _root_log_level = getattr(logging, _LOG_LEVEL, logging.INFO)
 _daemon_log_level = getattr(logging, _daemon_log_level, logging.INFO)
 
-# Root logger: level set by LOG_LEVEL (libs like http, sql stay at info unless overridden)
-logging.basicConfig(
-    level=_root_log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
+# Resolve log directory from env directly (no DaemonConfig import — avoids
+# circular import, no dead config field).
+_LOG_DIR = os.environ.get("DAEMON_LOG_DIR", "./data/logs")
+
+# Shared format for all handlers.
+_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+# Stderr handler — format unchanged for backward compatibility.
+_stderr_handler = logging.StreamHandler(sys.stderr)
+_stderr_handler.setFormatter(logging.Formatter(
+    fmt=_LOG_FORMAT,
+    datefmt='%H:%M:%S',
+))
+
+# File handler — same format with full date. Wrapped in try/except so
+# unwritable log dir does NOT crash the daemon (graceful degradation).
+_file_handler = None
+try:
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        filename=os.path.join(_LOG_DIR, "ensemble.log"),
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    _file_handler.setFormatter(logging.Formatter(
+        fmt=_LOG_FORMAT,
+        datefmt='%H:%M:%S',
+    ))
+except OSError as exc:
+    # Log to stderr (the only handler guaranteed to work) and continue.
+    print(f"WARNING: Could not set up file logging in {_LOG_DIR}: {exc}", file=sys.stderr)
+
+# Configure root logger by adding handlers explicitly (NOT basicConfig).
+_root_logger = logging.getLogger()
+_root_logger.setLevel(_root_log_level)
+_root_logger.addHandler(_stderr_handler)
+if _file_handler is not None:
+    _root_logger.addHandler(_file_handler)
 
 # Daemon logger hierarchy: respects LOG_LEVEL_DAEMON for our app logs
 daemon_logger = logging.getLogger("daemon")

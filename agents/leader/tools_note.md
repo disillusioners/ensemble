@@ -70,3 +70,20 @@ send_message(
 | Know what project does | "Developer: read README.md" | "Developer: Understand the project purpose and provide overview" |
 | Check dependencies | "Developer: cat package.json" | "Developer: Review project dependencies and identify concerns" |
 | Explore codebase | "Developer: find all *.go files" | "Developer: Explore codebase architecture and report findings" |
+
+---
+
+## System Log
+
+Read-only access to the daemon's own log files under `data/logs/` for
+self-healing — investigate runtime bugs by inspecting log output.
+
+**Available tools (category: `system-log`):**
+- `ens_system_log_list` — List available log files with sizes and last-modified timestamps
+- `ens_system_log_read` — Paged read of log lines with line numbers (offset/limit)
+- `ens_system_log_search` — Regex search with context lines and optional level filter
+- `ens_system_log_tail` — Read last N lines (tail equivalent) with optional level filter
+
+**Security:** All output is redacted — API keys, tokens, passwords, and
+Bearer tokens are replaced with `[REDACTED]`. Path traversal is blocked.
+Maximum 500 lines / 12KB per response.

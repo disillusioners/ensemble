@@ -17,4 +17,4 @@ self-healing — investigate runtime bugs by inspecting log output.
 Bearer tokens are replaced with `[REDACTED]`. Path traversal is blocked.
 Maximum 500 lines / 12KB per response.
 
-**Self-healing workflow:** When a code change causes a regression, use `ens_system_log_search` to find the failing pattern, then `ens_system_log_read` with paging to get context. Validate fix success by re-running the same search.
+**Self-healing use case:** If a tool call fails with an opaque error, check the daemon logs before reporting the error back. Often the root cause is in a recent log line.

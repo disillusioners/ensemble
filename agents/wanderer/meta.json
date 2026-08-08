@@ -9,7 +9,7 @@
   "skill_injection": true,
   "team_members": ["explorer", "worker"],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance", "blueprint"]
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance", "blueprint", "system-log"]
   },
   "context_injection": {
     "heuristic_match_shared_md_files": true

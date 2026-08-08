@@ -44,6 +44,10 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "tool_help",
     "explore",
     "experience",
+    "ens_system_log_list",
+    "ens_system_log_read",
+    "ens_system_log_search",
+    "ens_system_log_tail",
 })
 
 
@@ -267,6 +271,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "proc": "daemon.tools.proc_tools",
     "council": "daemon.tools.instance",  # Phase 2: spawn_councilor + clear_councilor_errors
     "blueprint": "daemon.tools.blueprint",
+    "system-log": "daemon.tools.system_log_tools",
 }
 
 

@@ -85,6 +85,8 @@ These come from the `dynamic-skill` tool category, granted automatically when `d
 | `context` | Shared context inspection |
 | `todo` | Multi-step task tracking with `todo_list_*` / `todo_graph_*` |
 
+I can inspect daemon logs read-only via the `system-log` tool category (see `tools_note.md`).
+
 ---
 
 ## What I Do
