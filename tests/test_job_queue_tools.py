@@ -90,6 +90,7 @@ class TestJobCreateTool:
         job_create = tools[0]
 
         mock_job_item = MagicMock()
+        mock_job_item.job_id = "job-1"
         expected_dict = {
             "job_id": "job-1", "status": "pending", "agent_id": "developer",
             "message": "test", "source": "api", "project_id": None, "queue_id": None,
@@ -180,6 +181,149 @@ class TestJobCreateTool:
         # Verify source was NOT overridden (stays as 'manual')
         call_kwargs = job_service.enqueue.call_args.kwargs
         assert call_kwargs["source"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_job_create_watch_registered_before_enqueue(self, mock_services):
+        """Regression: watcher must be registered BEFORE enqueue (TOCTOU fix).
+
+        If add_watch runs after enqueue, a fast job can complete before the
+        watch is in place, causing a missed [JOB_EVENT] notification. This
+        test verifies the call order: add_watch precedes enqueue.
+        """
+        job_service, _, _ = mock_services
+
+        watcher_repo = MagicMock()
+        watcher_repo.count_watches_for_instance.return_value = 0
+
+        tools = create_job_tools(
+            job_service,
+            mock_services[1],
+            mock_services[2],
+            agent_id="test-agent",
+            current_instance_id="inst-1",
+            watcher_repo=watcher_repo,
+        )
+        job_create = tools[0]
+
+        mock_job_item = MagicMock()
+        mock_job_item.job_id = "job-watch-1"
+        mock_job_item.to_dict.return_value = {"job_id": "job-watch-1"}
+        job_service.enqueue.return_value = mock_job_item
+
+        await job_create.ainvoke({
+            "agent_id": "developer",
+            "message": "test",
+            "watch": True,
+        })
+
+        # Watcher should have been consulted and registered.
+        # add_watch is called twice: once before enqueue (pre-gen UUID)
+        # and once after (actual job_id) because the mock job_id differs
+        # from the pre-generated UUID. This is correct idempotency behavior.
+        watcher_repo.count_watches_for_instance.assert_called_once_with("inst-1")
+        assert watcher_repo.add_watch.call_count >= 1
+
+        # Prove ordering: the add_watch (on watcher_repo) happened before
+        # enqueue (on job_service). Mock.call_args_list timestamps via
+        # call order, so we check relative ordering using a shared tracker.
+        call_log = []
+
+        def track_add_watch(job_id, instance_id, *a, **kw):
+            call_log.append(("add_watch", job_id))
+
+        def track_enqueue(*a, **kw):
+            call_log.append(("enqueue", kw.get("job_id")))
+            return mock_job_item
+
+        watcher_repo.add_watch.side_effect = track_add_watch
+        job_service.enqueue.side_effect = track_enqueue
+        watcher_repo.reset_mock()
+        job_service.reset_mock()
+        watcher_repo.count_watches_for_instance.return_value = 0
+        job_service.enqueue.return_value = mock_job_item
+
+        await job_create.ainvoke({
+            "agent_id": "developer",
+            "message": "test",
+            "watch": True,
+        })
+
+        # add_watch must appear before enqueue in the call log
+        add_watch_idx = call_log.index(next(c for c in call_log if c[0] == "add_watch"))
+        enqueue_idx = call_log.index(next(c for c in call_log if c[0] == "enqueue"))
+        assert add_watch_idx < enqueue_idx, (
+            f"add_watch must be called BEFORE enqueue, got order: {call_log}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_job_create_watch_limit_no_job_created(self, mock_services):
+        """When watch limit (50) is hit, job must NOT be created (no enqueue)."""
+        job_service, _, _ = mock_services
+
+        watcher_repo = MagicMock()
+        watcher_repo.count_watches_for_instance.return_value = 50
+
+        tools = create_job_tools(
+            job_service,
+            mock_services[1],
+            mock_services[2],
+            agent_id="test-agent",
+            current_instance_id="inst-1",
+            watcher_repo=watcher_repo,
+        )
+        job_create = tools[0]
+
+        result = await job_create.ainvoke({
+            "agent_id": "developer",
+            "message": "test",
+            "watch": True,
+        })
+
+        assert "Maximum watch limit (50)" in result["error"]
+        assert "not created" in result["error"]
+        # enqueue must NOT have been called
+        job_service.enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_create_watch_idempotency_reregister(self, mock_services):
+        """Idempotency dedup: if enqueue returns existing job with different
+        job_id, the watch is re-registered against the actual job_id and the
+        stale pre-generated watch is cleaned up."""
+        job_service, _, _ = mock_services
+
+        watcher_repo = MagicMock()
+        watcher_repo.count_watches_for_instance.return_value = 0
+
+        tools = create_job_tools(
+            job_service,
+            mock_services[1],
+            mock_services[2],
+            agent_id="test-agent",
+            current_instance_id="inst-1",
+            watcher_repo=watcher_repo,
+        )
+        job_create = tools[0]
+
+        # The returned job has a DIFFERENT job_id than the pre-generated UUID
+        mock_job_item = MagicMock()
+        mock_job_item.job_id = "existing-job-id"
+        mock_job_item.to_dict.return_value = {"job_id": "existing-job-id"}
+        job_service.enqueue.return_value = mock_job_item
+
+        await job_create.ainvoke({
+            "agent_id": "developer",
+            "message": "test",
+            "watch": True,
+            "idempotency_key": "dedup-key",
+        })
+
+        # add_watch called twice: once with pre-gen UUID, once with actual job_id
+        assert watcher_repo.add_watch.call_count == 2
+        # Second add_watch uses the actual job_id
+        second_call_args = watcher_repo.add_watch.call_args_list[1]
+        assert second_call_args.args[0] == "existing-job-id"
+        # remove_watch called once to clean up the stale watch
+        watcher_repo.remove_watch.assert_called_once()
 
 
 class TestJobGetTool:
@@ -1663,6 +1807,280 @@ class TestResolverRoutedTools:
         assert call_args.args[1] == "watcher-inst-1"
         # notify_watchers should NOT fire on a non-terminal record
         job_service.notify_watchers.assert_not_called()
+
+    # ── watch_job / watch_jobs terminal enrichment ─────────────────────
+
+    @pytest.mark.asyncio
+    async def test_watch_job_terminal_enriches_result_from_instance(self):
+        """``watch_job`` on a terminal ``kind="job"`` record whose
+        ``result_summary`` is ``None`` (the Phase-5 WorkResolver
+        behavior) must fetch the actual content from the instance via
+        ``manager._get_last_assistant_message_raw`` and pass it to
+        ``notify_watchers`` so the ``[JOB_EVENT]`` notification has a
+        populated ``Result:`` block.
+
+        Regression: the bare ``record.result_summary`` lookup
+        previously passed ``None`` straight through, producing a
+        notification without the ``Result:`` block.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock(return_value=MagicMock(name="JobWatcher"))
+
+        manager = AsyncMock(name="InstanceManager")
+        manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="Task completed successfully"
+        )
+
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            current_instance_id="watcher-inst-1",
+            watcher_repo=watcher_repo,
+            manager=manager,
+        )
+        watch_job = tools[13]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="job", status="completed",
+            instance_id="inst-target-1", project_id="proj-1", agent_id="developer",
+            result_summary=None,  # Phase 5: WorkResolver returns None for kind="job"
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        result = await watch_job.ainvoke({"job_id": work_id})
+
+        # Manager was called to fetch the result
+        manager._get_last_assistant_message_raw.assert_awaited_once_with(
+            "inst-target-1"
+        )
+        # notify_watchers received the enriched result, not None
+        job_service.notify_watchers.assert_awaited_once()
+        notify_kwargs = job_service.notify_watchers.call_args.kwargs
+        assert notify_kwargs.get("result_summary") == "Task completed successfully"
+        # Tool reports the immediate-notification path
+        assert "completed" in result
+
+    @pytest.mark.asyncio
+    async def test_watch_job_terminal_no_enrich_when_already_set(self):
+        """When the WorkRecord already carries a ``result_summary``
+        (e.g., ``kind="report"`` records), the helper must NOT
+        override it — the record's own value wins.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock(return_value=MagicMock(name="JobWatcher"))
+
+        manager = AsyncMock(name="InstanceManager")
+        manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="OVERRIDE — should not be used"
+        )
+
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            current_instance_id="watcher-inst-1",
+            watcher_repo=watcher_repo,
+            manager=manager,
+        )
+        watch_job = tools[13]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="report", status="completed",
+            instance_id="inst-target-1", result_summary="Original report body",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        await watch_job.ainvoke({"job_id": work_id})
+
+        # Manager must NOT have been called — record already has content
+        manager._get_last_assistant_message_raw.assert_not_called()
+        # Original value is preserved
+        notify_kwargs = job_service.notify_watchers.call_args.kwargs
+        assert notify_kwargs.get("result_summary") == "Original report body"
+
+    @pytest.mark.asyncio
+    async def test_watch_job_terminal_no_manager_is_best_effort(self):
+        """When ``manager`` is not wired into ``create_job_tools`` (some
+        legacy/test configurations), the notification still goes out —
+        just with ``result_summary=None``. The watch must register
+        cleanly without raising.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock(return_value=MagicMock(name="JobWatcher"))
+
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            current_instance_id="watcher-inst-1",
+            watcher_repo=watcher_repo,
+            # NOTE: no manager= → enrichment is a no-op
+        )
+        watch_job = tools[13]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="job", status="completed",
+            instance_id="inst-target-1", result_summary=None,
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        result = await watch_job.ainvoke({"job_id": work_id})
+
+        # Notification still fires — just with None
+        job_service.notify_watchers.assert_awaited_once()
+        notify_kwargs = job_service.notify_watchers.call_args.kwargs
+        assert notify_kwargs.get("result_summary") is None
+        assert "completed" in result
+
+    @pytest.mark.asyncio
+    async def test_watch_job_terminal_manager_exception_is_swallowed(self):
+        """If ``manager._get_last_assistant_message_raw`` raises, the
+        helper must swallow the exception and let the notification
+        fire with the unchanged (None) result_summary. Best-effort.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock(return_value=MagicMock(name="JobWatcher"))
+
+        manager = AsyncMock(name="InstanceManager")
+        manager._get_last_assistant_message_raw = AsyncMock(
+            side_effect=RuntimeError("DB down")
+        )
+
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            current_instance_id="watcher-inst-1",
+            watcher_repo=watcher_repo,
+            manager=manager,
+        )
+        watch_job = tools[13]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="job", status="completed",
+            instance_id="inst-target-1", result_summary=None,
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        result = await watch_job.ainvoke({"job_id": work_id})
+
+        # Exception was swallowed; notification still fired
+        job_service.notify_watchers.assert_awaited_once()
+        notify_kwargs = job_service.notify_watchers.call_args.kwargs
+        assert notify_kwargs.get("result_summary") is None
+        assert "completed" in result
+
+    @pytest.mark.asyncio
+    async def test_watch_jobs_terminal_enriches_result_from_instance(self):
+        """``watch_jobs`` (bulk path) on terminal ``kind="job"``
+        records must also enrich via the helper, per-record inside the
+        loop. The terminal-completion notification must carry the
+        fetched ``result_summary``.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock(return_value=MagicMock(name="JobWatcher"))
+
+        manager = AsyncMock(name="InstanceManager")
+
+        async def _fake_last_assistant(instance_id):
+            return {
+                "inst-1": "Done — body 1",
+                "inst-2": "Done — body 2",
+            }[instance_id]
+
+        manager._get_last_assistant_message_raw = AsyncMock(
+            side_effect=_fake_last_assistant
+        )
+
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            current_instance_id="watcher-inst-1",
+            watcher_repo=watcher_repo,
+            manager=manager,
+        )
+        watch_jobs = tools[16]  # see tools list: ..., watch_job, unwatch_job, list_watched_jobs, watch_jobs
+
+        rec1 = _make_work_record(
+            "job-aaaa-1111", kind="job", status="completed",
+            instance_id="inst-1", result_summary=None,
+        )
+        rec2 = _make_work_record(
+            "job-bbbb-2222", kind="job", status="failed",
+            instance_id="inst-2", result_summary=None, error=None,
+        )
+        rec3 = _make_work_record(
+            "job-cccc-3333", kind="report", status="completed",
+            instance_id="inst-3", result_summary="Pre-existing body",
+        )
+
+        async def _get_work(work_id):
+            return {
+                "job-aaaa-1111": rec1,
+                "job-bbbb-2222": rec2,
+                "job-cccc-3333": rec3,
+            }[work_id]
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        result = await watch_jobs.ainvoke({
+            "job_ids": ["job-aaaa-1111", "job-bbbb-2222", "job-cccc-3333"]
+        })
+
+        # Manager fetched only for the two records whose values are None
+        # (rec1 completed+None, rec2 failed+None+error-None is the
+        # needs_error path; rec3 is a non-job record with content so
+        # not touched).
+        assert manager._get_last_assistant_message_raw.await_count == 2
+
+        # notify_watchers fired once per terminal record
+        assert job_service.notify_watchers.await_count == 3
+
+        # Inspect each notify call: the first two should carry the
+        # enriched body for completed / the helper still returns the
+        # fetched content; the third is pre-existing.
+        notify_calls = job_service.notify_watchers.call_args_list
+        bodies = [c.kwargs.get("result_summary") for c in notify_calls]
+        assert "Done — body 1" in bodies
+        # rec2 was a "failed" record, so the helper still fetched the
+        # last assistant message (via the needs_error branch) — the
+        # helper does not source ``error`` from the message (comment
+        # in helper), but it does fetch the message and stash it as
+        # the only enrichment slot. Per the helper's contract, error
+        # stays None but result_summary is populated.
+        # Note: the helper ONLY sets result_summary on completed
+        # records, and only triggers the fetch when needs_result or
+        # needs_error. For rec2 (failed), needs_error is true, so the
+        # fetch happens; the helper's else-if does not write
+        # result_summary for non-completed statuses, so the fetched
+        # value is dropped. error remains None.
+        assert notify_calls[1].kwargs.get("result_summary") is None
+        assert notify_calls[1].kwargs.get("error") is None
+        # rec3 untouched
+        assert notify_calls[2].kwargs.get("result_summary") == "Pre-existing body"
+        # Tool result reports the terminal path
+        assert "already terminal" in result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

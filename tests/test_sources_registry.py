@@ -470,8 +470,8 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
          patch('daemon.sources.mapper.get_registry') as mock_get_registry:
         mock_agent_registry = MagicMock()
         mock_agent = MagicMock()
-        mock_agent.path = "/default/agents/leader"
-        mock_agent_registry.resolve_to_id = MagicMock(return_value="leader")
+        mock_agent.path = "/default/agents/ari"
+        mock_agent_registry.resolve_to_id = MagicMock(return_value="ari")
         mock_agent_registry.get = MagicMock(return_value=mock_agent)
         mock_get_registry.return_value = mock_agent_registry
 
@@ -481,12 +481,12 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
         
         await registry._handle_message("test-source", msg)
         
-        # Verify get_or_create_instance was called with the default "leader" agent
+        # Verify get_or_create_instance was called with the default "ari" agent
         # under the configured base agents directory (not the bare base dir).
         mock_mapper_instance.get_or_create_instance.assert_called_once_with(
             source_id="test-source",
             external_user_id="user123",
-            agent_id="/default/agents/leader",
+            agent_id="/default/agents/ari",
             force_new=False,
             extra_mapping_metadata=None,
         )

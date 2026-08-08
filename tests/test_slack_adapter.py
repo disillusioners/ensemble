@@ -24,7 +24,7 @@ def make_slack_config(
     source_id: str = "slack-main",
     bot_token: str = "xoxb-test-token-123",
     app_token: str = "xapp-test-app-token-456",
-    default_agent: str = "leader",
+    default_agent: str = "ari",
     **config_kwargs
 ) -> SourceConfig:
     """Create a Slack SourceConfig for testing."""
@@ -170,7 +170,7 @@ class TestSlackAdapterInit:
         assert adapter._default_agent == "custom-agent"
 
     def test_init_with_default_agent_fallback(self, mock_on_message):
-        """Should default to 'leader' if no default_agent in config."""
+        """Should default to 'ari' if no default_agent in config."""
         config = SourceConfig(
             source_id="test",
             source_type="slack",
@@ -183,7 +183,7 @@ class TestSlackAdapterInit:
         )
         adapter = SlackAdapter(config, mock_on_message)
 
-        assert adapter._default_agent == "leader"
+        assert adapter._default_agent == "ari"
 
     def test_init_stores_credentials(self, slack_config, mock_on_message):
         """Should store bot_token and app_token."""
@@ -767,7 +767,7 @@ class TestSlackAdapterProcessEvent:
         assert result.metadata["slack"]["thread_ts"] == "1234567890.999999"
         assert result.metadata["slack"]["workspace_id"] == "T123456"
         assert result.metadata["slack"]["workspace_name"] == "Test Workspace"
-        assert result.metadata["agent"] == "leader"
+        assert result.metadata["agent"] == "ari"
         assert result.metadata["reply_chat_id"] == "C123456"
 
     @pytest.mark.asyncio
@@ -1653,7 +1653,7 @@ class TestSlackAdapterNewCommand:
         assert msg.external_user_id == "T111111:C123456"
         assert msg.metadata.get("force_new_instance") is True
         assert msg.metadata.get("command") == "/new"
-        assert msg.metadata.get("agent") == "leader"
+        assert msg.metadata.get("agent") == "ari"
         assert msg.metadata["slack"]["channel_id"] == "C123456"
         assert msg.metadata["slack"]["workspace_id"] == "T111111"
         assert msg.metadata["slack"]["user_id"] == "U654321"

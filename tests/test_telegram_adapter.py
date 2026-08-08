@@ -79,6 +79,24 @@ class TestTelegramAdapterInit:
         assert adapter._polling_enabled is False
         assert adapter._polling_timeout == 60
 
+    def test_init_with_default_agent_fallback(self, mock_on_message):
+        """Should default to 'ari' if no default_agent in config."""
+        config = SourceConfig(
+            source_id="test",
+            source_type="telegram",
+            name="Test",
+            config={},  # No default_agent
+            credentials={"bot_token": "test_token_123"},
+        )
+        adapter = TelegramAdapter(config, mock_on_message)
+        assert adapter._default_agent == "ari"
+
+    def test_init_extracts_default_agent(self, mock_on_message):
+        """Should extract default_agent from config."""
+        config = make_telegram_config(default_agent="custom-agent")
+        adapter = TelegramAdapter(config, mock_on_message)
+        assert adapter._default_agent == "custom-agent"
+
 
 class TestTelegramAdapterStartStop:
     """Tests for start/stop lifecycle."""

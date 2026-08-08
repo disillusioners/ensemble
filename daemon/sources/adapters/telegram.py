@@ -91,7 +91,7 @@ class TelegramAdapter(MessageSourceAdapter):
             raise ValueError("Telegram adapter requires 'bot_token' in credentials")
         
         self._secret_token = config.config.get("secret_token")  # For webhook verification
-        self._default_agent = config.config.get("default_agent")
+        self._default_agent = config.config.get("default_agent", "ari")
         self._polling_enabled = config.config.get("polling_enabled", True)
         self._polling_timeout = config.config.get("polling_timeout", POLLING_TIMEOUT)
         

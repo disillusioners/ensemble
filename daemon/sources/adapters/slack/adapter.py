@@ -95,7 +95,7 @@ class SlackAdapter(MessageSourceAdapter):
             raise ValueError("app_token must start with 'xapp-'")
 
         # Configuration
-        self._default_agent = config.config.get("default_agent", "leader")
+        self._default_agent = config.config.get("default_agent", "ari")
         # In channels/group DMs, only respond when the bot is @-mentioned.
         # DMs and threads with an explicit mention are always allowed.
         # Default: True (matches Slack's app_mention semantics; defensive in case

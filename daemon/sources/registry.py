@@ -734,11 +734,11 @@ class SourceRegistry:
                     agent_dir = f"{base_dir}/{agent_name}"
                     logger.info(f"📍 Using agent from metadata: agent={agent_name}, agent_dir={agent_dir}")
                 else:
-                    # Fall back to a sane default agent name ("leader") rather than the
+                    # Fall back to a sane default agent name ("ari") rather than the
                     # bare base directory, which would fail to resolve to a registered
                     # agent and produce confusing "Agent not found: ./agents" errors.
                     base_dir = self._manager.config.agents.directory
-                    default_agent_name = "leader"
+                    default_agent_name = "ari"
                     agent_dir = f"{base_dir}/{default_agent_name}"
                     logger.warning(
                         f"⚠️ No agent specified in metadata, using default agent: {agent_dir}"

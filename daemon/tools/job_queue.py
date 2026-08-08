@@ -1,6 +1,7 @@
 """Job queue management tools for LangGraph agents."""
 
 import asyncio
+import uuid
 from datetime import datetime
 from typing import Annotated, Any, TYPE_CHECKING
 
@@ -326,6 +327,23 @@ def create_job_tools(
             if source == "api" and caller_agent_id:
                 source = f"agent:{caller_agent_id}"
             normalized_project_id = normalize_project_id(project_id)
+
+            # Pre-generate job_id so we can register the watcher BEFORE
+            # dispatching. This closes the TOCTOU window where a fast job
+            # could complete between enqueue() and add_watch(), causing the
+            # watcher to miss the terminal [JOB_EVENT] notification.
+            pre_generated_job_id = str(uuid.uuid4())
+
+            # Register watch BEFORE enqueue (if requested). If the watch
+            # limit is hit, we return early without creating the job at all.
+            if watch and watcher_repo is not None and current_instance_id:
+                count = watcher_repo.count_watches_for_instance(current_instance_id)
+                if count >= 50:
+                    return {
+                        "error": "Maximum watch limit (50) reached for this instance. Job was not created.",
+                    }
+                watcher_repo.add_watch(pre_generated_job_id, current_instance_id)
+
             job_item = await job_service.enqueue(
                 agent_id=agent_id,
                 message=message,
@@ -340,25 +358,23 @@ def create_job_tools(
                 # versioned ``agent_dir`` instead of the base. Falls back to
                 # base resolution when None (non-versioned caller).
                 agent_tag=caller_agent_tag,
+                # Pass the pre-generated job_id so the watch registered above
+                # matches the actual job in the queue.
+                job_id=pre_generated_job_id,
             )
-            # Register watch if requested (job is PENDING here, no race with observer)
+
+            # Idempotency: enqueue() may return an existing job with a
+            # different job_id than our pre-generated one (dedup hit). In
+            # that case, re-register the watch against the actual job_id
+            # and clean up the stale pre-generated watch (best-effort).
             if watch and watcher_repo is not None and current_instance_id:
-                count = watcher_repo.count_watches_for_instance(current_instance_id)
-                if count >= 50:
-                    return {
-                        "error": "Maximum watch limit (50) reached for this instance",
-                        "job_id": job_item.job_id,
-                        # F16 fix: route through ``_derive_legacy_status``
-                        # so the watch-limit error response carries the
-                        # discriminator-aware status (a ``done`` job with
-                        # ``terminal_reason='failed'`` reports
-                        # ``"failed"`` instead of the lossy ``"completed"``).
-                        "status": _derive_legacy_status(
-                            job_item.admission_state,
-                            getattr(job_item, "terminal_reason", None),
-                        ),
-                    }
-                watcher_repo.add_watch(job_item.job_id, current_instance_id)
+                if job_item.job_id != pre_generated_job_id:
+                    watcher_repo.add_watch(job_item.job_id, current_instance_id)
+                    try:
+                        watcher_repo.remove_watch(pre_generated_job_id, current_instance_id)
+                    except Exception:
+                        pass  # best-effort cleanup; stale row is harmless
+
             return job_item.to_dict()
         except ValueError as e:
             return {"error": str(e)}
@@ -750,7 +766,7 @@ def create_job_tools(
             #     The check is sync (TaskRepository.has_inflight_task is a
             #     pure DB query); wrap in asyncio.to_thread so the event
             #     loop isn't blocked.
-            if manager._task_repo is not None:
+            if getattr(manager, "_task_repo", None) is not None:
                 has_inflight = await asyncio.to_thread(
                     manager._task_repo.has_inflight_task, instance_id
                 )
@@ -897,6 +913,60 @@ def create_job_tools(
             return f"ERROR: Failed to replay DLQ entry {dlq_id}: {str(e)}"
     dlq_replay._full_doc_ = _FULL_DOCS["dlq_replay"]
 
+    async def _enrich_terminal_record(record):
+        """Fetch ``result_summary``/``error`` from the instance when the
+        WorkRecord has ``None`` for them.
+
+        Context: the WorkResolver at
+        ``daemon/services/work_resolver.py`` deliberately returns
+        ``result_summary=None`` and ``error=None`` for ``kind="job"``
+        records (Phase 5 dropped the JobItem mirror columns). The
+        natural-completion path in ``job_feedback_observer`` works
+        around this by fetching the actual content from the instance
+        via ``manager._get_last_assistant_message_raw`` before calling
+        ``notify_watchers``. ``watch_job``/``watch_jobs`` need the
+        same enrichment so the ``[JOB_EVENT]`` notification has a
+        populated ``Result:`` block when the caller watches an
+        already-terminal JobItem.
+
+        Best-effort: any failure (manager not wired, instance missing,
+        fetch exception) leaves the record untouched — the
+        notification still goes out, just with ``result_summary=None``
+        which degrades to no ``Result:`` block (matches prior
+        behavior).
+        """
+        if manager is None or not getattr(record, "instance_id", None):
+            return record
+        needs_result = (
+            getattr(record, "result_summary", None) is None
+            and getattr(record, "status", None) == "completed"
+        )
+        needs_error = (
+            getattr(record, "error", None) is None
+            and getattr(record, "status", None) in {"failed", "dead_letter"}
+        )
+        if not needs_result and not needs_error:
+            return record
+        try:
+            fetched = await manager._get_last_assistant_message_raw(
+                record.instance_id
+            )
+        except Exception:
+            # best-effort — notification still fires with whatever the
+            # record already carries
+            return record
+        if needs_result and fetched:
+            record.result_summary = fetched
+        elif needs_result and record.status == "completed":
+            # Match the observer's fallback so the ``Result:`` block
+            # always renders a non-empty body for completed jobs whose
+            # instance produced no captureable assistant message.
+            record.result_summary = "Job completed (no agent response captured)"
+        # ``error`` is sourced separately by the instance-status path;
+        # the manager's last-assistant-message raw hook does not carry
+        # the failure message, so we leave ``error`` untouched here.
+        return record
+
     @register_tool_category("job")
     @tool
     async def watch_job(
@@ -932,15 +1002,27 @@ def create_job_tools(
 
             # Terminal state check — includes dead_letter
             if _is_terminal(record.status):
+                # Enrich from the instance before notifying. The
+                # WorkResolver returns ``result_summary=None`` for
+                # ``kind="job"`` records (Phase 5 dropped the JobItem
+                # mirror columns); without this enrichment the
+                # ``[JOB_EVENT]`` notification would be missing its
+                # ``Result:`` block. Mirrors the natural-completion
+                # path in ``job_feedback_observer`` — see
+                # ``_enrich_terminal_record`` above.
+                record = await _enrich_terminal_record(record)
                 # Register watch first, then notify (notify_watchers sends + cleans up)
                 watcher_repo.add_watch(job_id, current_instance_id, events)
                 # notify_watchers in Phase 2 Batch 2 is itself
                 # resolver-aware — it accepts the work_id (here
                 # ``job_id``) and routes through WorkResolverService.
-                # ``record.error`` carries the canonical error message
-                # regardless of which table backed the row.
+                # ``error`` and ``result_summary`` are sourced from the
+                # record (now possibly enriched from the instance).
                 await job_service.notify_watchers(
-                    job_id, record.status, record.error
+                    job_id,
+                    record.status,
+                    error=record.error,
+                    result_summary=record.result_summary,
                 )
                 return f"Job {job_id[:8]}... is already {record.status}. Immediate notification sent."
 
@@ -1058,10 +1140,20 @@ def create_job_tools(
                     continue
 
                 if _is_terminal(record.status):
+                    # Enrich from the instance before notifying.
+                    # Same rationale as in ``watch_job`` (single-job)
+                    # — see ``_enrich_terminal_record`` above. Without
+                    # this the bulk-path notifications on terminal
+                    # ``kind="job"`` records would be missing the
+                    # ``Result:`` block.
+                    record = await _enrich_terminal_record(record)
                     # Register watch first, then notify (notify_watchers sends + cleans up)
                     watcher_repo.add_watch(jid, current_instance_id, events)
                     await job_service.notify_watchers(
-                        jid, record.status, record.error
+                        jid,
+                        record.status,
+                        error=record.error,
+                        result_summary=record.result_summary,
                     )
                     already_terminal.append(jid)
                 else:
