@@ -10,7 +10,10 @@ echo "=== Test Pack: mock_job_queue_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 300s python tests/mock_test_job_queue_api.py 2>&1
+# Run with PYTHONPATH set so the bare ``python tests/...`` invocation
+# can import the ``daemon`` package (other packs use ``.venv/bin/pytest``
+# which already handles this; this script is run via raw ``python``).
+PYTHONPATH="$PROJECT_DIR" timeout 300s .venv/bin/python tests/mock_test_job_queue_api.py 2>&1
 
 EXIT_CODE=$?
 

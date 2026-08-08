@@ -389,6 +389,10 @@ class TestManagerThrottle:
                 self._question_manager = MagicMock()
                 self._question_pause_requested: dict[str, Any] = {}
                 self._deferred_question_pause: set[str] = set()
+                # Watchover cleanup surface. Without this attribute
+                # ``_cleanup_instance_state`` raises ``AttributeError``
+                # on the deferred-watchover pop call.
+                self._deferred_watchover_terminate: set[str] = set()
                 self.clear_question_pause_requested = (
                     manager_module.InstanceManager.clear_question_pause_requested.__get__(self)
                 )

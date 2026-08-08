@@ -1115,13 +1115,17 @@ class TestResume:
     async def test_resume_uses_hardcoded_text_resume(
         self, manager: OpenCodeSessionManager, mock_client: AsyncMock
     ) -> None:
-        """The text part contains the hardcoded 'resume' string."""
+        """The text part contains the hardcoded resume text.
+
+        Updated 2026-08-08 to match daemon/opencode/constants.py
+        ``RESUME_TEXT = "continue"`` (commit 2b40d427).
+        """
         await manager.resume()
 
         _, prompt_req = mock_client.send_prompt.call_args[0]
         assert len(prompt_req.parts) == 1
         assert prompt_req.parts[0].type == "text"
-        assert prompt_req.parts[0].text == "resume"
+        assert prompt_req.parts[0].text == "continue"
 
     @pytest.mark.asyncio
     async def test_resume_returns_api_response(

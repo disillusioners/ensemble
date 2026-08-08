@@ -6,8 +6,11 @@ echo "=== Test Pack: legacy_agents_regression_test ==="
 cd "$PROJECT_DIR"
 
 # Regression pack — 5 min hard limit. Dual-layer timeout.
+# NOTE: tests/regression/test_legacy_agents.py was deleted in eeef8845
+# (legacy context injection removal). Repointed to test_f16_legacy_status.
 timeout 280s .venv/bin/pytest \
-  tests/regression/test_legacy_agents.py \
+  tests/unit/services/test_f16_legacy_status.py \
+  tests/postgres/test_legacy_column_drop.py \
   -v --override-ini="addopts=" --tb=short -q 2>&1
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then

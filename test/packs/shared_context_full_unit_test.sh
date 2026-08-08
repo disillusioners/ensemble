@@ -24,13 +24,14 @@ echo "=== Test Pack: shared_context_full_unit_test ==="
 
 cd "$PROJECT_DIR"
 
-# Run with timeout - kill if hangs. 180s covers 46 original + 6 new tests.
+# Run with timeout - kill if hangs. 180s covers the original tests + concurrency.
+# NOTE: test_shared_context_injection.py and test_shared_context_prompt_injection.py
+# were deleted in eeef8845.
 timeout 180s .venv/bin/pytest \
   tests/unit/test_shared_context_metadata_repo.py \
-  tests/unit/test_shared_context_injection.py \
+  tests/unit/services/test_context_injection.py \
   tests/unit/test_shared_context_tool.py \
   tests/unit/test_shared_context_concurrency.py \
-  tests/unit/test_shared_context_prompt_injection.py \
   --tb=short -q 2>&1
 
 EXIT_CODE=$?

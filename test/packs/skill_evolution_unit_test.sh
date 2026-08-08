@@ -10,10 +10,11 @@ echo "=== Test Pack: skill_evolution_unit_test ==="
 
 cd "$PROJECT_DIR"
 
+# NOTE: tests/unit/test_auto_load_skills.py was deleted in eeef8845
+# (legacy context injection removal). Removed from pack.
 timeout 120s .venv/bin/pytest \
   tests/unit/test_skill_seeding.py \
   tests/unit/test_skill_clone_service.py \
-  tests/unit/test_auto_load_skills.py \
   --tb=short -q 2>&1
 
 EXIT_CODE=$?

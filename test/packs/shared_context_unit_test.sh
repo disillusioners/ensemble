@@ -20,9 +20,10 @@ echo "=== Test Pack: shared_context_unit_test ==="
 cd "$PROJECT_DIR"
 
 # Run with timeout - kill if hangs. 120s is the unit-test hard cap.
+# NOTE: test_shared_context_injection.py was deleted in eeef8845.
 timeout 120s .venv/bin/pytest \
   tests/unit/test_shared_context_metadata_repo.py \
-  tests/unit/test_shared_context_injection.py \
+  tests/unit/services/test_context_injection.py \
   tests/unit/test_shared_context_tool.py \
   --tb=short -q 2>&1
 

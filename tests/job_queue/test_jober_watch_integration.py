@@ -790,10 +790,27 @@ class TestJoberWatchIntegration:
         assert instance_manager.enqueue_message.call_count >= len(terminal_jobs)
 
     def test_ensure_dev_sh_still_works(self):
-        """ensure.md requirement: dev.sh should be runnable."""
+        """ensure.md requirement: dev.sh should be runnable.
+
+        Skip when port 8079 is already in use (e.g., the dev daemon is
+        already running locally) — dev.sh tries to bind to 8079 and
+        will exit immediately with ``[Errno 48] Address already in use``
+        in that case, which is not a real regression.
+        """
         import os
         import signal
+        import socket
         import subprocess
+
+        def _port_in_use(port: int) -> bool:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                return s.connect_ex(("127.0.0.1", port)) == 0
+
+        if _port_in_use(8079):
+            pytest.skip(
+                "port 8079 is already in use (dev daemon is running); "
+                "cannot exercise dev.sh startup in this environment"
+            )
 
         proc: subprocess.Popen | None = None
         project_root = "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble"

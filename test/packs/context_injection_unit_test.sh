@@ -8,7 +8,7 @@ cd "$PROJECT_DIR"
 # Script-internal timeout guard (Layer 2): 110s — interrupts hung tests
 # Command-level timeout (Layer 1): 120s via `timeout` wrapper below (unit pack ≤ 2 min)
 timeout 110s .venv/bin/pytest \
-  tests/unit/test_context_injection_prompt.py \
+  tests/unit/services/test_context_injection.py \
   -v --override-ini="addopts=" --tb=short -q 2>&1
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then

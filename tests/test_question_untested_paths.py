@@ -399,6 +399,10 @@ def _make_manager_stub_with_question_state():
             self._pending_injections: dict = {}
             self._gii_throttle: dict = {}
             self._deferred_question_pause: set[str] = set()
+            # Watchover cleanup surface (added with watchover feature).
+            # Without this attribute ``_cleanup_instance_state`` raises
+            # ``AttributeError`` on the deferred-watchover pop call.
+            self._deferred_watchover_terminate: set[str] = set()
             # Loop-breaker cleanup surface (added with the 5-path
             # cleanup pattern — ``_cleanup_instance_state`` now also
             # pops ``_loop_breaker_state``). Without this attribute the

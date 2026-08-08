@@ -422,13 +422,21 @@ class TestThreeLevelIdempotency:
         first = instance_repo.hard_delete_tree(tree_ids)
         assert first["deleted"] is True
         # The first run moved every dependent row; all counts > 0.
-        assert all(v > 0 for v in first["counts"].values())
+        # ``instance_ui_prefs`` was added after this test was authored and
+        # the seed fixture does not create UI prefs rows, so it stays 0
+        # here. Filter it out of the all-positive check.
+        assert all(
+            v > 0 for k, v in first["counts"].items()
+            if k != "instance_ui_prefs"
+        )
 
         # ── Second call — no exception, all counts == 0 ───────────
         second = instance_repo.hard_delete_tree(tree_ids)
 
         assert second["deleted"] is False
         assert second["tree_ids"] == sorted(tree_ids) or set(second["tree_ids"]) == set(tree_ids)
+        # ``instance_ui_prefs`` stays 0 on the second call too; added
+        # to the expected dict to match the actual hard_delete output.
         assert second["counts"] == {
             "job_locks": 0,
             "job_queue_items": 0,
@@ -439,6 +447,7 @@ class TestThreeLevelIdempotency:
             "dependency_watchers": 0,
             "instance_mappings": 0,
             "instance_hierarchy": 0,
+            "instance_ui_prefs": 0,
             "instances": 0,
         }
 
