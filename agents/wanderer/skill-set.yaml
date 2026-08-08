@@ -1,0 +1,27 @@
+agent_id: wanderer
+skills:
+  - name: investigation-strategy
+    version: "1.0.0"
+    auto_load: true
+    category: investigation-strategy
+    description: "Task routing, delegation planning, worker dispatch for read-only investigation"
+  - name: codebase-mapping
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Systematic codebase structure discovery, module boundary mapping, dependency graphing"
+  - name: root-cause-analysis
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Trace defects/issues to their origin: data flow tracing, call graph analysis, fault isolation"
+  - name: library-research
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "External library/API research: version compatibility, usage patterns, known issues, migration guides"
+  - name: code-investigation
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Deep code reading and analysis for dispatched workers: targeted tracing, pattern identification, evidence collection"

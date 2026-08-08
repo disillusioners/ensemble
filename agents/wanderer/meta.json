@@ -1,12 +1,13 @@
 {
   "id": "wanderer",
   "name": "Wanderer",
-  "description": "Read-only investigation and research specialist. Explores codebases, answers questions, does deep research on libraries from GitHub/internet. Does all investigation directly — read_file, grep_files, glob_files, bash, web search, and RAG. For complex, multi-file investigations, delegates bounded investigation sub-tasks to coder instances.",
+  "description": "Read-only investigation and research specialist. Explores codebases, answers questions, does deep research on libraries from GitHub/internet. Does all investigation directly — read_file, grep_files, glob_files, bash, web search, and RAG. For complex, multi-file investigations, delegates bounded investigation sub-tasks to worker instances with skill-guided execution.",
   "icon": "🧭",
   "color": "accent-green",
-  "version": "0.3.0",
-  "innate_skills": ["todo", "chart"],
-  "team_members": ["coder"],
+  "version": "0.4.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": true,
+  "team_members": ["explorer", "worker"],
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_context", "rag", "instance", "blueprint"]
   },
