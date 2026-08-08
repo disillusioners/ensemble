@@ -1,0 +1,37 @@
+// WatchoverDialogComponent — scoped dark-theme styling for the
+// watchover activation dialog.
+//
+// The dialog container itself is themed via the caller-supplied
+// `panelClass: 'watchover-dialog-panel'` (layered on top of the
+// project-wide `dark-modal-panel` hook). The rules below only handle
+// the dialog's internal spacing, the optional instance-name subtitle,
+// and the button strip so the dialog stays consistent with the rest
+// of the destructive-action flows (ConfirmDialog, ProjectDeleteDialog,
+// SystemCleanupConfirmDialog).
+
+:host {
+  display: block;
+  color: var(--text-color, #e0e0e0);
+}
+
+.full-width {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.dialog-instance-name {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+
+mat-dialog-content {
+  min-width: 400px;
+  max-width: 500px;
+  padding-top: 8px;
+}
+
+mat-dialog-actions {
+  gap: 8px;
+  padding-right: 0;
+}

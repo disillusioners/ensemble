@@ -105,6 +105,16 @@ def make_full_manager() -> MagicMock:
     manager.disable_watchover = MagicMock()
     manager.set_metadata_many = MagicMock()
     manager.get_instance = AsyncMock()
+    # ``get_instance_info`` is consumed by
+    # ``WatchoverService._is_instance_running`` to branch between
+    # the running path (Case 1) and the terminal/idle path
+    # (Case 2 — Watchover Dialog Redesign). Existing tests
+    # exercise the running path, so the default returns
+    # ``status='running'`` to keep Case 1 in scope. Tests for
+    # Case 2 override this to a non-running status.
+    manager.get_instance_info = MagicMock(
+        return_value={"status": "running"}
+    )
 
     # Live hub
     manager._live_hub = MagicMock()
@@ -1582,6 +1592,7 @@ class TestManagerLifecycleFacade:
             requirement="r",
             user_context="c",
             resume_message=None,
+            next_command=None,
         )
         assert result["watchover_enabled"] is True
 
@@ -1603,6 +1614,7 @@ class TestManagerLifecycleFacade:
             requirement="r",
             user_context="c",
             resume_message="go",
+            next_command=None,
         )
 
     @pytest.mark.asyncio
@@ -1656,6 +1668,7 @@ class TestWatchoverEndpoint:
             requirement="r",
             user_context=None,
             resume_message=None,
+            next_command=None,
         )
 
     @pytest.mark.asyncio
@@ -1754,6 +1767,7 @@ class TestWatchoverEndpoint:
             requirement="r",
             user_context="pre-built ctx",
             resume_message=None,
+            next_command=None,
         )
 
     @pytest.mark.asyncio
@@ -1784,6 +1798,7 @@ class TestWatchoverEndpoint:
             requirement="r",
             user_context=None,
             resume_message="custom",
+            next_command=None,
         )
 
 

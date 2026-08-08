@@ -6,6 +6,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
@@ -18,6 +19,10 @@ import { ChatInterfaceComponent } from '../../components/chat-interface/chat-int
 import { MessageInputComponent, MessagePayload } from '../../components/message-input/message-input.component';
 import { TodoListComponent } from '../../components/todo-list/todo-list.component';
 import { QuestionWizardComponent } from '../../components/question-wizard/question-wizard.component';
+import {
+  WatchoverDialogComponent,
+  WatchoverDialogResult,
+} from '../../components/watchover-dialog/watchover-dialog.component';
 import { WorkspaceComponent } from '../workspace/workspace.component';
 import type { Agent, InstanceInfo, Message } from '../../models';
 
@@ -33,6 +38,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     MatProgressSpinnerModule,
     MatSnackBarModule,
     MatTooltipModule,
+    MatDialogModule,
     InstanceListComponent,
     ProjectTabBarComponent,
     ChatInterfaceComponent,
@@ -53,6 +59,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
   private readonly projectService = inject(ProjectService);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly dialog = inject(MatDialog);
   private routeSubscription: Subscription | null = null;
 
   protected get projectId(): string {
@@ -766,35 +773,79 @@ export class ChatComponent implements OnInit, OnDestroy {
     const instance = this.currentInstance();
     if (!instance) return;
 
-    const currentlyEnabled = this.watchoverEnabled();
-
-    if (!currentlyEnabled) {
-      // Turning ON — prompt for monitoring requirement.
-      const savedRequirement = this.getSavedWatchoverRequirement(instance.instance_id) ?? '';
-      const requirement = window.prompt(
-        'Enter watchover requirement (what to monitor for):',
-        savedRequirement || 'Block destructive operations (no writes, no deletes, no external API calls)'
-      );
-      if (requirement === null) return;
-
-      // Keep the requirement even if activation fails so the operator does
-      // not have to re-enter it on the next attempt. The enabled value is
-      // never restored from storage; InstanceInfo remains the source of truth.
-      this.persistWatchoverPreference(instance.instance_id, currentlyEnabled, requirement);
-      this._toggleWatchoverApi(instance.instance_id, true, requirement);
-    } else {
-      // Turning OFF.
+    if (this.watchoverEnabled()) {
+      // Turning OFF — simple API call, no dialog
       this._toggleWatchoverApi(instance.instance_id, false, null);
+      return;
     }
+
+    // Turning ON — check instance state.
+    // Running instances: no dialog. The backend's intelligent context
+    // builder derives guardrails from the live message stream, so the
+    // operator only needs to click the button.
+    // Terminal / idle instances: show the dialog so the operator can
+    // name the next command (required) and tighten the watcher's
+    // guardrails (optional). The backend forwards ``next_command``
+    // as the resume message on the post-activation graph turn.
+    //
+    // NOTE: the task spec referenced 'running' | 'active' as the
+    // running states, but `InstanceStatus` (models/index.ts) only
+    // includes 'running' — 'active' is not part of the instance
+    // status union. Only 'running' is checked here so the type
+    // stays consistent with the backend contract.
+    const status = instance.status;
+    const isRunning = status === 'running';
+
+    if (isRunning) {
+      this._toggleWatchoverApi(instance.instance_id, true, null);
+      this.snackBar.open(
+        '👁️ Watchover enabled — analyzing instance activity...',
+        'Dismiss',
+        { duration: 3000, panelClass: 'info-snackbar' }
+      );
+    } else {
+      this._openWatchoverDialog(instance.instance_id, instance.instance_name);
+    }
+  }
+
+  /**
+   * Open the watchover activation dialog for a non-running instance.
+   * On confirm, the captured result is forwarded to
+   * ``_toggleWatchoverApi`` so the watchover preference is persisted
+   * with the requirement and the next command is sent to the backend
+   * via the new ``next_command`` field. Cancel / no-op result is
+   * silently ignored — the watchover state stays unchanged.
+   */
+  private _openWatchoverDialog(
+    instanceId: string,
+    instanceName?: string | null,
+  ): void {
+    const dialogRef = this.dialog.open(WatchoverDialogComponent, {
+      data: { instanceId, instanceName },
+      width: '520px',
+      panelClass: 'watchover-dialog-panel',
+    });
+
+    dialogRef.afterClosed().subscribe((result: WatchoverDialogResult | null) => {
+      if (!result) return; // Cancelled or backdrop-dismissed
+
+      this._toggleWatchoverApi(
+        instanceId,
+        true,
+        result.watchoverRequirement,
+        result.nextCommand,
+      );
+    });
   }
 
   private _toggleWatchoverApi(
     instanceId: string,
     enabled: boolean,
     requirement: string | null,
+    nextCommand?: string | null,
   ): void {
     this.watchoverPending.set(true);
-    this.api.setWatchover(instanceId, enabled, requirement).subscribe({
+    this.api.setWatchover(instanceId, enabled, requirement, nextCommand).subscribe({
       next: (response) => {
         // Guard: ignore stale responses after instance switch
         if (this.currentInstanceId() !== instanceId) return;

@@ -1,0 +1,41 @@
+<h2 mat-dialog-title>Enable Watchover</h2>
+<mat-dialog-content>
+  @if (data.instanceName) {
+    <p class="dialog-instance-name">{{ data.instanceName }}</p>
+  }
+  <mat-form-field appearance="outline" class="full-width">
+    <mat-label>Next command</mat-label>
+    <textarea
+      matInput
+      [ngModel]="nextCommand()"
+      (ngModelChange)="nextCommand.set($event)"
+      rows="2"
+      placeholder="What should the agent do next? (e.g. 'check cluster status')"
+    ></textarea>
+    <mat-hint>Required — this command will be sent after watchover is enabled</mat-hint>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline" class="full-width">
+    <mat-label>Watchover requirement (optional)</mat-label>
+    <textarea
+      matInput
+      [ngModel]="watchoverRequirement()"
+      (ngModelChange)="watchoverRequirement.set($event)"
+      rows="3"
+      placeholder="What to monitor for (leave empty for automatic analysis)"
+    ></textarea>
+    <mat-hint>Optional — constraints for the watcher (e.g. 'read-only operations only')</mat-hint>
+  </mat-form-field>
+</mat-dialog-content>
+<mat-dialog-actions align="end">
+  <button mat-button type="button" (click)="onCancel()">Cancel</button>
+  <button
+    mat-raised-button
+    color="primary"
+    type="button"
+    [disabled]="!canEnable()"
+    (click)="onEnable()"
+  >
+    Enable Watchover
+  </button>
+</mat-dialog-actions>

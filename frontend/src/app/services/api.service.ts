@@ -120,19 +120,26 @@ export class ApiService {
 
   // Watchover — toggle security monitoring on/off for an instance.
   //
-  // Body shape is { enabled, requirement, context, resume_message }.
-  // ``resume_message`` is forwarded to the watchover activation
-  // lifecycle so the target instance receives the operator-supplied
-  // message on the post-activation resume (or "continue" when null).
-  // Out of scope to surface a UI prompt for the message — the field
-  // is sent as ``null`` for now and the backend uses the default.
-  // The field is included in the body explicitly so the backend
-  // contract is stable and a future UI prompt can drop in without a
-  // body-shape change.
+  // Body shape is { enabled, requirement, context, resume_message,
+  // next_command }.
+  //   * ``resume_message`` is forwarded to the watchover activation
+  //     lifecycle so the target instance receives the operator-supplied
+  //     message on the post-activation resume (or "continue" when null).
+  //   * ``next_command`` is the explicit "next command" captured by the
+  //     ChatComponent watchover dialog when the instance is NOT in a
+  //     running state. The backend forwards this as the resume message
+  //     so the operator can both enable watchover and tell the agent
+  //     what to do next in a single step. When the instance IS running
+  //     the dialog is skipped and ``next_command`` is null — the
+  //     intelligent context builder generates guardrails from the
+  //     current message stream.
+  // Both fields are sent as ``null`` when the caller does not supply
+  // them so the backend contract is stable and the wiring is opt-in.
   setWatchover(
     instanceId: string,
     enabled: boolean,
     requirement?: string | null,
+    nextCommand?: string | null,
   ): Observable<{ watchover_enabled: boolean; instance_id: string }> {
     return this.http.post<{ watchover_enabled: boolean; instance_id: string }>(
       `${this.API_BASE}/instances/${instanceId}/watchover`,
@@ -141,6 +148,7 @@ export class ApiService {
         requirement: requirement ?? null,
         context: null,
         resume_message: null,
+        next_command: nextCommand ?? null,
       }
     );
   }
