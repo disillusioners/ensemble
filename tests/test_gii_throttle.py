@@ -122,6 +122,10 @@ def _make_manager_with_cleanup_surface():
             # this stub attribute the helper raises ``AttributeError`` on
             # every test that exercises it through the stub.
             self._deferred_question_pause: set[str] = set()
+            # Watchover cleanup surface. Without this attribute
+            # ``_cleanup_instance_state`` raises ``AttributeError`` on
+            # the deferred-watchover pop call.
+            self._deferred_watchover_terminate: set[str] = set()
             self.clear_question_pause_requested = manager_module.InstanceManager.clear_question_pause_requested.__get__(self)
             self.bump_gii_throttle = manager_module.InstanceManager.bump_gii_throttle.__get__(self)
             self.reset_gii_throttle = manager_module.InstanceManager.reset_gii_throttle.__get__(self)
