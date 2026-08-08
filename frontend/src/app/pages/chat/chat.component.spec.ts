@@ -162,24 +162,49 @@ class TestableChatComponent {
     });
   }
 
+  /**
+   * Mirrors production ChatComponent.onToggleWatchover: turning OFF is
+   * a no-dialog path; turning ON on a running instance is also a no-dialog
+   * path (the backend builds the watcher context from the live message
+   * stream); turning ON on a non-running instance opens the dialog so the
+   * operator can supply the next command and tighten the guardrails.
+   *
+   * The dialog flow is delegated to ``openWatchoverDialog`` so the
+   * surrogate (which has no MatDialog) can still expose a single hook
+   * for tests to spy on or override.
+   */
   onToggleWatchover(): void {
     const instance = this.currentInstance();
     if (!instance) return;
 
-    const currentlyEnabled = this.watchoverEnabled();
-    if (!currentlyEnabled) {
-      const savedRequirement = this.getSavedWatchoverRequirement(instance.instance_id) ?? '';
-      const requirement = window.prompt(
-        'Enter watchover requirement (what to monitor for):',
-        savedRequirement || 'Block destructive operations (no writes, no deletes, no external API calls)'
-      );
-      if (requirement === null) return;
-
-      this.persistWatchoverPreference(instance.instance_id, currentlyEnabled, requirement);
-      this.toggleWatchoverApi(instance.instance_id, true, requirement);
-    } else {
+    if (this.watchoverEnabled()) {
+      // Turning OFF — simple API call, no dialog.
       this.toggleWatchoverApi(instance.instance_id, false, null);
+      return;
     }
+
+    // Running instances skip the dialog.
+    const isRunning = instance.status === 'running';
+    if (isRunning) {
+      this.toggleWatchoverApi(instance.instance_id, true, null);
+      return;
+    }
+
+    // Non-running instances go through the dialog.
+    this.openWatchoverDialog(instance.instance_id);
+  }
+
+  /**
+   * Test seam for the watchover dialog flow. The real ChatComponent
+   * injects MatDialog and opens WatchoverDialogComponent, then
+   * subscribes to afterClosed() to forward the captured result to
+   * ``toggleWatchoverApi``. The surrogate has no MatDialog, so it
+   * exposes this as a single overridable hook — tests can spy on it
+   * to assert the dialog was triggered, or override it per-test to
+   * drive a fake dialog result.
+   */
+  openWatchoverDialog(instanceId: string): void {
+    // No-op in the surrogate. Production wires MatDialog.open() here.
   }
 
   private toggleWatchoverApi(
@@ -655,11 +680,13 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       jest.restoreAllMocks();
     });
 
-    it('should prompt for a requirement and call the API when enabling watchover', () => {
-      const instanceId = 'watchover-enable-inst';
+    it('should call the API directly when enabling watchover on a running instance', () => {
+      // Running instances skip the dialog — the backend builds the
+      // watcher context from the live message stream. Mirrors the
+      // no-dialog branch in production ChatComponent.onToggleWatchover.
+      const instanceId = 'watchover-enable-running-inst';
       component.currentInstanceId.set(instanceId);
-      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
-      jest.spyOn(window, 'prompt').mockReturnValue('Block filesystem writes');
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId, status: 'running' }));
       mockApiService.setWatchover.mockReturnValue({
         subscribe: (handlers: any) => {
           handlers.next({ watchover_enabled: true, instance_id: instanceId });
@@ -669,12 +696,23 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       component.onToggleWatchover();
 
-      expect(mockApiService.setWatchover).toHaveBeenCalledWith(
-        instanceId,
-        true,
-        'Block filesystem writes'
-      );
+      expect(mockApiService.setWatchover).toHaveBeenCalledWith(instanceId, true, null);
       expect(component.watchoverEnabled()).toBe(true);
+    });
+
+    it('should open the watchover dialog when enabling on a non-running instance', () => {
+      // Non-running (terminal/idle) instances need the operator to
+      // supply the next command + guardrails, so the dialog is opened
+      // and the API is NOT called yet.
+      const instanceId = 'watchover-enable-terminal-inst';
+      component.currentInstanceId.set(instanceId);
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId, status: 'paused' }));
+      const dialogSpy = jest.spyOn(component, 'openWatchoverDialog');
+
+      component.onToggleWatchover();
+
+      expect(dialogSpy).toHaveBeenCalledWith(instanceId);
+      expect(mockApiService.setWatchover).not.toHaveBeenCalled();
     });
 
     it('should increment the denial counter for a watchover ToolMessage', () => {
@@ -708,32 +746,33 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       expect(component.watchoverDenialCount()).toBe(0);
     });
 
-    it('should restore and persist the per-instance watchover requirement', () => {
+    it('should open the dialog with the saved requirement available as default for non-running instances', () => {
+      // The legacy window.prompt flow used the saved requirement as
+      // the prompt's default value. The dialog flow exposes a single
+      // openWatchoverDialog hook instead, but the saved requirement
+      // is still read from localStorage so the dialog (or any caller)
+      // can pre-fill its requirement field. This test guards that
+      // read path so the dialog initializer can rely on it.
       const instanceId = 'watchover-storage-inst';
       const storageKey = `ensemble-watchover-${instanceId}`;
       component.currentInstanceId.set(instanceId);
-      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId, status: 'paused' }));
       localStorage.setItem(
         storageKey,
         JSON.stringify({ enabled: false, requirement: 'Saved monitoring requirement' })
       );
-      const promptSpy = jest.spyOn(window, 'prompt').mockReturnValue('Updated monitoring requirement');
-      mockApiService.setWatchover.mockReturnValue({
-        subscribe: (handlers: any) => {
-          handlers.next({ watchover_enabled: true, instance_id: instanceId });
-          return { unsubscribe: () => {} };
-        }
-      });
+      const dialogSpy = jest.spyOn(component, 'openWatchoverDialog');
 
       component.onToggleWatchover();
 
-      expect(promptSpy).toHaveBeenCalledWith(
-        'Enter watchover requirement (what to monitor for):',
-        'Saved monitoring requirement'
-      );
+      expect(dialogSpy).toHaveBeenCalledWith(instanceId);
+      expect(mockApiService.setWatchover).not.toHaveBeenCalled();
+      // Saved requirement remains readable so the dialog (or any
+      // caller) can pre-fill its requirement field. Read localStorage
+      // directly because ``getSavedWatchoverRequirement`` is private.
       expect(JSON.parse(localStorage.getItem(storageKey) ?? '{}')).toEqual({
-        enabled: true,
-        requirement: 'Updated monitoring requirement',
+        enabled: false,
+        requirement: 'Saved monitoring requirement',
       });
     });
 
@@ -756,10 +795,12 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     });
 
     it('should show error snackbar and not change state on API failure', () => {
+      // Running-instance path so no dialog is involved — the API call
+      // fails synchronously and the error handler must surface the
+      // snackbar without flipping the watchover toggle.
       const instanceId = 'watchover-error-inst';
       component.currentInstanceId.set(instanceId);
-      component.currentInstance.set(createMockInstance({ instance_id: instanceId }));
-      jest.spyOn(window, 'prompt').mockReturnValue('Test requirement');
+      component.currentInstance.set(createMockInstance({ instance_id: instanceId, status: 'running' }));
       mockApiService.setWatchover.mockReturnValue({
         subscribe: (handlers: any) => {
           handlers.error(new Error('Network error'));
