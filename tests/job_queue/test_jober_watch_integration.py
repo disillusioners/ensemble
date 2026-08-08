@@ -739,8 +739,18 @@ class TestJoberWatchIntegration:
         assert result["job_id"] == "job-123"
         # Verify enqueue was called
         job_service.enqueue.assert_called_once()
-        # Verify watch was registered (only 2 args for job_create's watch=True)
-        watcher_repo.add_watch.assert_called_once_with("job-123", "test-instance")
+        # TOCTOU fix: job_create pre-generates a job_id and registers the
+        # watch BEFORE enqueue to close the TOCTOU window. If enqueue
+        # returns a different job_id (idempotency/dedup), a second
+        # add_watch is registered against the real job_id and the stale
+        # pre-generated watch is removed. Here the mock returns
+        # job_id="job-123" which differs from the pre-generated UUID,
+        # so we expect exactly 2 add_watch calls + 1 remove_watch cleanup.
+        assert watcher_repo.add_watch.call_count == 2
+        # Second call registers the watch against the real job_id
+        watcher_repo.add_watch.assert_called_with("job-123", "test-instance")
+        # Stale pre-generated watch is cleaned up
+        assert watcher_repo.remove_watch.call_count == 1
 
     # ==================== TASK 6: AGENT DEFINITION VERIFICATION ====================
 
