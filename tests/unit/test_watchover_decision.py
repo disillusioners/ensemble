@@ -446,6 +446,69 @@ class TestWatcherVerdictParsing:
         # Stripping gives empty.
         assert body == ""
 
+    # ----- Mistake verdict parsing (Phase 6 / 3-valued contract) -----
+
+    def test_parse_verdict_mistake_with_reason(self):
+        """``"Mistake: <reason>"`` → verdict='mistake', reason=<reason>."""
+        v = WatchoverEvaluator._parse_verdict("Mistake: malformed arguments")
+        assert v is not None
+        assert v.verdict == "mistake"
+        assert v.reason == "malformed arguments"
+        assert v.body is None  # No body when only one line
+
+    def test_parse_verdict_mistake_bad_tool_name(self):
+        """``"Mistake: bad tool name"`` → verdict='mistake', reason captured."""
+        v = WatchoverEvaluator._parse_verdict("Mistake: bad tool name")
+        assert v is not None
+        assert v.verdict == "mistake"
+        assert v.reason == "bad tool name"
+
+    def test_parse_verdict_mistake_empty_reason_returns_none(self):
+        """``"Mistake:"`` with empty reason → ``None`` (still unparseable).
+
+        The contract requires a reason; an empty-reason Mistake falls
+        through to the same ``return None`` path as ``Deny:`` with an
+        empty reason. The caller converts that to a judgment error
+        (mistake verdict + error_type='judgment').
+        """
+        assert WatchoverEvaluator._parse_verdict("Mistake:") is None
+        assert WatchoverEvaluator._parse_verdict("Mistake:   ") is None
+
+    def test_parse_verdict_mistake_strips_whitespace(self):
+        """Leading/trailing whitespace around the reason is stripped."""
+        v = WatchoverEvaluator._parse_verdict("  Mistake: trimmed  ")
+        assert v is not None
+        assert v.verdict == "mistake"
+        assert v.reason == "trimmed"
+
+    def test_parse_verdict_mistake_with_body(self):
+        """``"Mistake: <reason>"`` + blank line + body → body captured."""
+        raw = (
+            "Mistake: malformed arguments\n"
+            "\n"
+            "The 'command' field must be a non-empty string.\n"
+            "Example: bash(command='ls -la')"
+        )
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "mistake"
+        assert v.reason == "malformed arguments"
+        assert v.body is not None
+        assert "'command' field must be a non-empty string" in v.body
+        assert "bash(command='ls -la')" in v.body
+
+    def test_parse_verdict_mistake_body_truncated_at_1500_chars(self):
+        """Mistake bodies longer than 1500 chars are truncated with ``…(truncated)``."""
+        long_body = "X" * 1500 + "YYY"
+        raw = f"Mistake: bad args\n\n{long_body}"
+        v = WatchoverEvaluator._parse_verdict(raw)
+        assert v is not None
+        assert v.verdict == "mistake"
+        assert v.body is not None
+        assert len(v.body) <= 1500 + len("\n…(truncated)") + 5
+        assert "…(truncated)" in v.body
+        assert v.body.startswith("X" * 1500)
+
 
 # =============================================================================
 # WatchoverEvaluator — evaluate() integration
@@ -591,7 +654,12 @@ class TestWatchoverEvaluatorEvaluate:
         assert verdicts[0].error_type == "infra"
 
     async def test_judgment_error_garbage_fails_closed(self, monkeypatch):
-        """Garbage response → deny + error_type='judgment'."""
+        """Garbage response → mistake + error_type='judgment' (no count).
+
+        Mistake (not deny): the watcher violated its own contract, not
+        the agent's intent, so this MUST NOT consume the per-turn
+        denial budget. The agent gets a fix-and-retry nudge.
+        """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm = _make_fake_llm_class(["not a verdict"])
         manager = make_manager()
@@ -606,12 +674,17 @@ class TestWatchoverEvaluatorEvaluate:
                 messages=[],
                 watchover_context="any",
             )
-        assert verdicts[0].verdict == "deny"
+        assert verdicts[0].verdict == "mistake"
         assert verdicts[0].error_type == "judgment"
         assert "judgment error" in verdicts[0].reason
 
     async def test_judgment_error_deny_without_reason_fails_closed(self, monkeypatch):
-        """``"Deny:"`` with empty reason → deny + judgment error."""
+        """``"Deny:"`` with empty reason → mistake + judgment error.
+
+        An empty-reason Deny is still an unparseable response (the
+        contract requires a reason); it now fails via the mistake
+        path instead of being treated as a regular deny.
+        """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm = _make_fake_llm_class(["Deny:"])
         manager = make_manager()
@@ -626,7 +699,7 @@ class TestWatchoverEvaluatorEvaluate:
                 messages=[],
                 watchover_context="any",
             )
-        assert verdicts[0].verdict == "deny"
+        assert verdicts[0].verdict == "mistake"
         assert verdicts[0].error_type == "judgment"
 
     async def test_infra_error_emits_degraded_sse(self, monkeypatch):
@@ -1641,8 +1714,15 @@ class TestCheckNodeBifurcatedFailure:
         # Degraded SSE emitted.
         assert manager._live_hub.stream_message.await_count >= 1
 
-    async def test_judgment_failure_increments_counter(self, monkeypatch):
-        """LD-2: judgment error → deny + count."""
+    async def test_judgment_failure_routes_to_agent_no_count(self, monkeypatch):
+        """LD-2: judgment error → mistake + NO count + route to agent.
+
+        Pre-mistake, judgment errors consumed a denial slot (treating
+        them as deny). Now they route back to the agent for fix-and-
+        retry without burning the per-turn denial budget, because the
+        watcher violated its own contract rather than blocking an
+        inappropriate agent action.
+        """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         manager = make_manager(watchover_enabled=True)
         from daemon.graph import WatchoverSlot
@@ -1657,9 +1737,337 @@ class TestCheckNodeBifurcatedFailure:
                 _state_with_tool_calls(), config=_config("iid")
             )
 
-        # Judgment error → deny + count + route to agent.
+        # Judgment error → mistake + NO count increment + route to agent.
+        assert result["watchover_route"] == "agent"
+        # NO watchover_denial_count in the result (mistakes don't consume).
+        assert "watchover_denial_count" not in result
+
+
+# =============================================================================
+# create_watchover_check_node — Mistake verdict path (3-valued contract)
+# =============================================================================
+
+
+class TestCheckNodeMistakePath:
+    """Mistake verdict path → router routes to ``agent``, NO count increment.
+
+    A ``Mistake: <reason>`` verdict comes from the watcher noticing a
+    problem with the agent's tool call (malformed arguments, wrong tool
+    name, etc.) — distinct from a ``Deny:`` which blocks an
+    inappropriate action. Mistakes route the batch back to the agent
+    for fix-and-retry without burning the per-turn denial budget.
+    """
+
+    async def test_mistake_routes_to_agent_no_count(self, monkeypatch):
+        """A ``Mistake:`` verdict → route to ``agent``, counter NOT incremented.
+
+        State has ``denial_count=0``. After the node runs the count
+        stays ``0`` (mistakes don't consume budget) and the route is
+        ``"agent"`` (not ``"tools"``).
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        factory, _ = _make_fake_llm_class(["Mistake: bad args"])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(denial_count=0),
+                config=_config("iid"),
+            )
+
+        # Route: agent (not tools).
+        assert result["watchover_route"] == "agent"
+        # NO count increment — mistakes don't consume budget.
+        assert "watchover_denial_count" not in result
+
+        # Router: agent.
+        route = should_end_watchover(result, config=_config("iid"))
+        assert route == "agent"
+
+    async def test_mistake_toolmessage_includes_reason(self, monkeypatch):
+        """Mistake ToolMessage content carries the reason + fix-and-retry prompt.
+
+        The ToolMessage content starts with ``"Watchover noticed a
+        mistake"`` and includes the verdict reason. The
+        ``additional_kwargs`` carries ``watchover_mistake: True`` (NOT
+        ``watchover_denial``) so downstream consumers can distinguish
+        the two.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        factory, _ = _make_fake_llm_class(["Mistake: bad args"])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(
+                    calls=[{"id": "tc-1", "name": "bash", "args": {"command": ""}}]
+                ),
+                config=_config("iid"),
+            )
+
+        msgs = result["messages"]
+        from langchain_core.messages import ToolMessage
+
+        assert isinstance(msgs[0], ToolMessage)
+        assert msgs[0].tool_call_id == "tc-1"
+        # First line carries the mistake + reason.
+        assert "Watchover noticed a mistake in this tool call: bad args" in msgs[0].content
+        # Closing line is the fix-and-retry prompt.
+        assert "Please fix and retry" in msgs[0].content
+        # Mistake tag (not denial tag).
+        assert msgs[0].additional_kwargs.get("watchover_mistake") is True
+        assert "watchover_denial" not in msgs[0].additional_kwargs
+
+    async def test_mistake_with_body_includes_body_in_tool_message(self, monkeypatch):
+        """A ``Mistake:`` verdict with a markdown body surfaces the body in the ToolMessage."""
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        mistake_with_body = (
+            "Mistake: malformed arguments\n"
+            "\n"
+            "The 'command' field must be a non-empty string.\n"
+            "Example: bash(command='ls -la')"
+        )
+        factory, _ = _make_fake_llm_class([mistake_with_body])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(
+                    calls=[{"id": "tc-1", "name": "bash", "args": {}}]
+                ),
+                config=_config("iid"),
+            )
+
+        msgs = result["messages"]
+        from langchain_core.messages import ToolMessage
+
+        assert isinstance(msgs[0], ToolMessage)
+        content = msgs[0].content
+        # The first line carries the mistake + reason.
+        assert "Watchover noticed a mistake in this tool call: malformed arguments" in content
+        # The body is present.
+        assert "'command' field must be a non-empty string" in content
+        assert "bash(command='ls -la')" in content
+        # Closing line is the fix-and-retry prompt.
+        assert "Please fix and retry" in content
+        # Mistake tag preserved.
+        assert msgs[0].additional_kwargs.get("watchover_mistake") is True
+
+    async def test_mistake_emits_mistake_sse(self, monkeypatch):
+        """A ``Mistake:`` verdict emits an SSE event with status='mistake'."""
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        factory, _ = _make_fake_llm_class(["Mistake: bad args"])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            await node(
+                _state_with_tool_calls(), config=_config("iid")
+            )
+
+        # Exactly one SSE emitted, with status='mistake'.
+        assert manager._live_hub.stream_message.await_count == 1
+        call_kwargs = manager._live_hub.stream_message.await_args
+        # The SSE payload is the second positional arg, dict-shaped.
+        payload = call_kwargs.args[1] if len(call_kwargs.args) >= 2 else call_kwargs.kwargs.get("payload", {})
+        assert payload.get("status") == "mistake"
+        assert payload.get("reason") == "bad args"
+
+    async def test_mistake_whole_batch_routes_to_agent(self, monkeypatch):
+        """LD-1 / Mistake: any mistake → send the whole batch back to the agent.
+
+        Mirrors the deny-whole-batch shape but without count increment.
+        Each call gets a ToolMessage: mistake calls get the fix-and-
+        retry guidance; allow calls get a deferred notice.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        # 3 calls: mistake, allow, allow.
+        factory, _ = _make_fake_llm_class(
+            ["Mistake: bad args", "Allowed", "Allowed"]
+        )
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(
+                    calls=[
+                        {"id": "tc-1", "name": "bash", "args": {}},
+                        {"id": "tc-2", "name": "bash", "args": {}},
+                        {"id": "tc-3", "name": "bash", "args": {}},
+                    ],
+                    denial_count=1,  # Pre-set count — should NOT be incremented.
+                ),
+                config=_config("iid"),
+            )
+
+        # Whole batch routed back to agent.
+        assert result["watchover_route"] == "agent"
+        # NO count increment — mistakes don't consume budget.
+        assert "watchover_denial_count" not in result
+
+        # 3 ToolMessages, one per call.
+        from langchain_core.messages import ToolMessage
+
+        msgs = result["messages"]
+        assert len(msgs) == 3
+        assert all(isinstance(m, ToolMessage) for m in msgs)
+
+        # Each message has the right tool_call_id.
+        ids = {m.tool_call_id for m in msgs}
+        assert ids == {"tc-1", "tc-2", "tc-3"}
+
+        # First message carries the mistake reason.
+        mistake_msg = next(m for m in msgs if m.tool_call_id == "tc-1")
+        assert "Watchover noticed a mistake" in mistake_msg.content
+        assert "bad args" in mistake_msg.content
+        assert mistake_msg.additional_kwargs.get("watchover_mistake") is True
+
+        # The other two carry the "deferred" message and the mistake tag.
+        for m in msgs:
+            if m.tool_call_id != "tc-1":
+                assert "Watchover deferred this tool call" in m.content
+                assert m.additional_kwargs.get("watchover_mistake") is True
+
+    async def test_mistake_does_not_increment_count_after_denial(self, monkeypatch):
+        """After a mistake (no count), state is unchanged — next deny still counts from baseline.
+
+        The deny path increments by 1 from ``watchover_denial_count``;
+        the mistake path leaves it untouched. This verifies the
+        counter is preserved across a mistake round-trip.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        factory, _ = _make_fake_llm_class(["Mistake: bad args"])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            # Pre-set denial_count=2 — would trigger 3-strike termination
+            # on the next deny. A mistake must leave this intact so
+            # the next legitimate deny still terminates correctly.
+            result = await node(
+                _state_with_tool_calls(denial_count=2),
+                config=_config("iid"),
+            )
+
+        # Route: agent (no termination from mistake).
+        assert result["watchover_route"] == "agent"
+        # Count NOT incremented.
+        assert "watchover_denial_count" not in result
+
+    async def test_deny_wins_over_mistake_in_mixed_batch(self, monkeypatch):
+        """A mixed deny+mistake batch → deny wins (deny-whole-batch + count).
+
+        Deny is the more severe verdict and LD-1 says ANY deny
+        denies the whole batch. Mistake calls in the same batch
+        receive the mistake template (with ``watchover_mistake`` tag)
+        but the batch is still denied and counted.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        # 2 calls: deny + mistake.
+        factory, _ = _make_fake_llm_class(
+            ["Deny: too sensitive", "Mistake: malformed arguments"]
+        )
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(
+                    calls=[
+                        {"id": "tc-1", "name": "bash", "args": {"command": "rm -rf /"}},
+                        {"id": "tc-2", "name": "bash", "args": {"command": ""}},
+                    ]
+                ),
+                config=_config("iid"),
+            )
+
+        # Batch denied, count +1.
         assert result["watchover_route"] == "agent"
         assert result["watchover_denial_count"] == 1
+
+        msgs = result["messages"]
+        from langchain_core.messages import ToolMessage
+
+        assert len(msgs) == 2
+        # Deny call gets the deny template.
+        deny_msg = next(m for m in msgs if m.tool_call_id == "tc-1")
+        assert "Watchover denied this tool call" in deny_msg.content
+        assert "too sensitive" in deny_msg.content
+        assert deny_msg.additional_kwargs.get("watchover_denial") is True
+        # Mistake call gets the mistake template (even though the batch
+        # is denied) — concrete guidance is more useful than "deferred".
+        mistake_msg = next(m for m in msgs if m.tool_call_id == "tc-2")
+        assert "Watchover noticed a mistake" in mistake_msg.content
+        assert "malformed arguments" in mistake_msg.content
+        assert mistake_msg.additional_kwargs.get("watchover_mistake") is True
+
+    async def test_unparseable_response_becomes_mistake(self, monkeypatch):
+        """Unparseable LLM response → verdict='mistake' + error_type='judgment'.
+
+        The unparseable path (LLM returns garbage text, not in the
+        ``Allowed`` / ``Deny:`` / ``Mistake:`` contract) collapses to
+        a mistake verdict at the evaluator level. The node then
+        routes to ``agent`` without incrementing the counter.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        manager = make_manager(watchover_enabled=True)
+        from daemon.graph import WatchoverSlot
+
+        slot = WatchoverSlot(manager)
+        # Garbage response — doesn't match any contract form.
+        factory, _ = _make_fake_llm_class(["not a verdict, just text"])
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            node = create_watchover_check_node(
+                manager=manager, slot=slot, llm_config={"model": "test"}
+            )
+            result = await node(
+                _state_with_tool_calls(), config=_config("iid")
+            )
+
+        # Evaluator returns mistake verdict → node routes to agent.
+        assert result["watchover_route"] == "agent"
+        # No count increment.
+        assert "watchover_denial_count" not in result
+        # ToolMessage reflects the mistake verdict.
+        msgs = result["messages"]
+        from langchain_core.messages import ToolMessage
+
+        assert isinstance(msgs[0], ToolMessage)
+        assert "Watchover noticed a mistake" in msgs[0].content
+        assert "unparseable response" in msgs[0].content
+        assert msgs[0].additional_kwargs.get("watchover_mistake") is True
 
 
 # =============================================================================
