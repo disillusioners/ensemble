@@ -60,25 +60,35 @@ DEFAULT_BUILDER_TIMEOUT_SECONDS = 300
 
 # Fallback prefix applied when the builder LLM call fails or times out.
 # Covers the common deny categories from ``agents/watcher/rule.md``
-# (system files, credentials, destructive writes, production surfaces).
-# The builder call itself produces richer, task-specific guidance — this
-# is the degraded-mode baseline so the watcher is never without
-# structure even when the LLM provider is unreachable.
+# (system files, destructive writes, production surfaces). The
+# credential patterns (``.env``, ``*.pem``, ``*.key``, ``~/.aws/``, etc.)
+# are NOT blanket-denied here — they are evaluated by blast radius (see
+# ``builder-prompt.md`` → Blast Radius Assessment). In-scope reads and
+# writes against credential files are allowed; out-of-scope or
+# exfiltrating operations are denied. The builder call itself produces
+# richer, task-specific guidance — this is the degraded-mode baseline
+# so the watcher is never without structure even when the LLM
+# provider is unreachable.
 _FALLBACK_GUARDRAIL_PREFIX = """## Static Guardrail (degraded mode — builder LLM unavailable)
 
 ## Allowed
+- all operations within the current deployment/task scope
 - read files under the project's working tree
 - run the project's standard test suite
 - edit files inside the working tree (outside /tmp)
+- reading configs, secrets, .env as needed for debugging
+- modifying, creating, updating files related to the current task
+- restarting, redeploying services in the current namespace
 
 ## Forbidden
+- operations that affect OTHER namespaces, clusters, or systems
 - any rm -rf on a path starting at / or at a home root
 - modify /etc/, /var/, /usr/, /lib/, /boot/, /proc/, /sys/, /sbin/, /bin/
-- read or write .env, *.pem, *.key, id_rsa*, ~/.kube/, ~/.aws/, ~/.ssh/
-- destructive database ops (DROP TABLE, DROP DATABASE, TRUNCATE)
+- destructive database ops (DROP TABLE, DROP DATABASE, TRUNCATE) on unrelated databases
 - modify sshd_config, sudoers, firewall rules, IAM policies
-- any production surface (prod, prd, live) without explicit pre-approval
-- push --force to main, master, or a release branch
+- force-pushing to protected branches (main, master, release/*)
+- exfiltrating secrets to external systems
+- deleting resources unrelated to the current task
 
 """
 

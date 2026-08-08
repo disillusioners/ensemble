@@ -593,13 +593,18 @@ class TestDenialSseEmission:
         assert payload["denial_count"] == 1
         assert payload["reason"] == "reads /etc/shadow"
 
-    async def test_evaluator_escape_emits_denial_sse(self, monkeypatch):
-        """Evaluator raises → denial SSE with judgment-error reason.
+    async def test_evaluator_escape_emits_mistake_sse(self, monkeypatch):
+        """Evaluator raises → mistake SSE with judgment-error reason.
 
         The evaluator is documented to never raise (it catches its own
         exceptions), so to test the escape path we patch
         ``WatchoverEvaluator.evaluate`` at the class level to raise —
         simulating a future evaluator bug.
+
+        Phase 6 update: the escape path now emits a ``mistake`` SSE
+        (not ``denial``) because the watcher violated its own
+        contract — the agent gets a fix-and-retry nudge without
+        burning a denial slot on the watcher's own failure.
         """
         from daemon.graph import WatchoverEvaluator
 
@@ -619,17 +624,22 @@ class TestDenialSseEmission:
                 "evaluate",
                 new=AsyncMock(side_effect=RuntimeError("escaped")),
             ):
-                await node(
+                result = await node(
                     _state_with_tool_calls(),
                     config=_config("iid"),
                 )
 
         calls = manager._live_hub.stream_message.await_args_list
-        denial_calls = [
-            c for c in calls if c.args[1].get("status") == "denial"
+        mistake_calls = [
+            c for c in calls if c.args[1].get("status") == "mistake"
         ]
-        assert len(denial_calls) == 1
-        assert "RuntimeError" in denial_calls[0].args[1]["reason"]
+        assert len(mistake_calls) == 1
+        assert "RuntimeError" in mistake_calls[0].args[1]["reason"]
+        # Phase 6: mistake path does NOT increment the denial counter
+        # (it's the watcher's own failure, not the agent's).
+        assert "watchover_denial_count" not in result
+        # Route back to agent so the agent can fix and retry.
+        assert result["watchover_route"] == "agent"
 
     async def test_allow_path_does_not_emit_denial_sse(self, monkeypatch):
         """All-allow → no denial SSE."""

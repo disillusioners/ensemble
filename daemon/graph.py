@@ -3552,33 +3552,42 @@ class WatcherVerdict:
     """Structured verdict returned by :class:`WatchoverEvaluator`.
 
     Attributes:
-        verdict: ``"allow"`` or ``"deny"``. Two-valued on purpose — the
-            watcher is a binary gate, not a graded reviewer.
-        reason: Free-form short reason (only meaningful when
-            ``verdict == "deny"``). Always empty string for allow.
+        verdict: ``"allow"``, ``"deny"``, or ``"mistake"``. Three-valued:
+            ``"allow"`` passes through, ``"deny"`` blocks the batch and
+            counts toward the per-turn cap (3-strike termination), and
+            ``"mistake"`` blocks the batch but does NOT consume the
+            budget — the agent is asked to fix and retry. Mistakes come
+            from the watcher noticing a problem with the agent's tool
+            call (e.g. malformed arguments) rather than a judgement call
+            about whether the call is appropriate in principle.
+        reason: Free-form short reason (meaningful when
+            ``verdict == "deny"`` or ``verdict == "mistake"``). Always
+            empty string for allow.
         body: Optional markdown body after the first blank line
-            following the ``Deny:`` verdict line. Captured verbatim
-            (capped at 1500 chars with a ``…(truncated)`` marker) so
-            the watched agent can read concrete guidance on how to
-            adjust its approach. ``None`` when absent or when the
-            verdict is ``"allow"``. Bifurcated failure handling
-            (AD-6 / LD-2) is preserved — body absence is NOT an
-            error; the parser is strict on the first line and lenient
-            on the body.
+            following the ``Deny:`` or ``Mistake:`` verdict line.
+            Captured verbatim (capped at 1500 chars with a
+            ``…(truncated)`` marker) so the watched agent can read
+            concrete guidance on how to adjust its approach. ``None``
+            when absent or when the verdict is ``"allow"``. Bifurcated
+            failure handling (AD-6 / LD-2) is preserved — body absence
+            is NOT an error; the parser is strict on the first line and
+            lenient on the body.
         error_type: ``None`` for the success path, ``"infra"`` for
             infrastructure failures (timeout / 5xx / network), or
             ``"judgment"`` for malformed/unparseable responses. The
             :class:`WatchoverEvaluator` itself collapses infra errors to
             allow + ``error_type="infra"`` so the node can route SSE
-            emissions, but the field is exposed for tests and telemetry.
+            emissions, and judgment errors to ``verdict="mistake"`` +
+            ``error_type="judgment"`` so they bypass the denial counter;
+            the field is exposed for tests and telemetry.
         tool_call_id: The ``tool_call.id`` whose verdict this is. Carried
             through so the node can pair each verdict with the matching
             ``ToolMessage.tool_call_id`` for injection.
     """
 
-    verdict: str  # "allow" | "deny"
+    verdict: str  # "allow" | "deny" | "mistake"
     reason: str = ""
-    body: str | None = None  # optional markdown body after Deny verdict
+    body: str | None = None  # optional markdown body after verdict line
     error_type: str | None = None  # "infra" | "judgment" | None
     tool_call_id: str = ""
 
@@ -3712,28 +3721,38 @@ class WatchoverEvaluator:
     def _parse_verdict(raw_text: str) -> WatcherVerdict | None:
         """Parse the watcher's raw response text into a verdict.
 
-        Accepts the contract strings ``"Allowed"`` and
-        ``"Deny: <reason>"`` with leading/trailing whitespace ignored.
-        After a ``Deny:`` verdict an optional markdown body may follow
-        — separated from the verdict line by a single blank line.
-        Anything else is a judgment error and fails CLOSED.
+        Accepts the contract strings ``"Allowed"``,
+        ``"Deny: <reason>"``, and ``"Mistake: <reason>"`` with
+        leading/trailing whitespace ignored. After a ``Deny:`` or
+        ``Mistake:`` verdict an optional markdown body may follow —
+        separated from the verdict line by a single blank line.
+        Anything else is a judgment error and fails CLOSED (with
+        ``verdict="mistake"`` — see ``evaluate()`` — so the agent
+        gets a fix-and-retry nudge rather than burning a denial
+        slot on the watcher's own contract violation).
+
+        ``Mistake: <reason>`` is for cases where the watcher noticed
+        a problem with the tool call itself (malformed arguments,
+        wrong tool name, etc.) — the agent is told to fix and retry
+        without consuming the per-turn denial budget.
 
         Body parsing (Phase 4 verdict format evolution):
 
         * The parser is strict on the FIRST non-empty line — anything
-          other than ``Allowed`` or ``Deny: <reason>`` is rejected
-          (preserves AD-6 / LD-2 bifurcated failure handling).
+          other than ``Allowed`` / ``Deny: <reason>`` /
+          ``Mistake: <reason>`` is rejected (preserves AD-6 / LD-2
+          bifurcated failure handling).
         * The body is captured VERBATIM from the line after the first
           blank line following the verdict line, until end-of-input.
         * Body is capped at 1500 chars with a ``…(truncated)`` marker
           to prevent ToolMessage token bloat in the watched agent's
           context.
         * Body absence is NOT an error — ``Allowed`` stays bare with
-          no body expected; ``Deny`` with no body is valid (the
-          reason on the first line is sufficient).
+          no body expected; ``Deny`` / ``Mistake`` with no body is
+          valid (the reason on the first line is sufficient).
 
         Returns ``None`` for unparseable text — the caller converts
-        that to a judgment error.
+        that to a judgment error (mistake verdict).
         """
         if not raw_text:
             return None
@@ -3767,6 +3786,21 @@ class WatchoverEvaluator:
             if body and len(body) > 1500:
                 body = body[:1500] + "\n…(truncated)"
             return WatcherVerdict(verdict="deny", reason=reason, body=body or None)
+
+        if first_line.startswith("Mistake:"):
+            # Same parsing shape as Deny: — reason on the first line,
+            # optional markdown body after a blank line. An empty reason
+            # still counts as unparseable (the contract requires a
+            # reason) and falls through to ``return None`` below.
+            reason = first_line[len("Mistake:"):].strip()
+            if reason:
+                body = WatchoverEvaluator._extract_body(lines, first_line_idx)
+                if body and len(body) > 1500:
+                    body = body[:1500] + "\n…(truncated)"
+                return WatcherVerdict(
+                    verdict="mistake", reason=reason, body=body or None
+                )
+            return None  # Empty reason = still unparseable
 
         return None  # judgment error — fail-closed
 
@@ -4042,6 +4076,11 @@ class WatchoverEvaluator:
                 parsed = self._parse_verdict(raw)
                 if parsed is None:
                     # Judgment error — fail-CLOSED for this call.
+                    # Mistake verdict (not deny): the watcher violated
+                    # its own contract (unparseable text), not the
+                    # agent's intent, so this MUST NOT consume the
+                    # per-turn denial budget. The agent gets a fix-and-
+                    # retry nudge; the next turn can retry cleanly.
                     logger.warning(
                         f"[Watchover] judgment error for "
                         f"{self._instance_id[:8]}... on tool "
@@ -4050,7 +4089,7 @@ class WatchoverEvaluator:
                     )
                     results.append(
                         WatcherVerdict(
-                            verdict="deny",
+                            verdict="mistake",
                             reason="watchover judgment error: unparseable response",
                             error_type="judgment",
                             tool_call_id=tc_id,
@@ -4086,10 +4125,12 @@ class WatchoverEvaluator:
                 )
             except Exception as exc:
                 # Any other exception is treated as judgment error —
-                # fail-CLOSED. The exception class doesn't matter: if
-                # the watcher process itself exploded (config bug,
-                # serializer crash, etc.), the safest default is to
-                # deny and surface the error.
+                # fail-CLOSED via the mistake path (NOT deny): the
+                # exception class doesn't matter, but the watcher
+                # process exploding (config bug, serializer crash,
+                # etc.) is not the agent's fault, so we do NOT consume
+                # the per-turn denial budget. The agent gets a
+                # fix-and-retry nudge instead.
                 logger.warning(
                     f"[Watchover] judgment error for "
                     f"{self._instance_id[:8]}... on tool "
@@ -4097,7 +4138,7 @@ class WatchoverEvaluator:
                 )
                 results.append(
                     WatcherVerdict(
-                        verdict="deny",
+                        verdict="mistake",
                         reason=f"watchover judgment error: {type(exc).__name__}",
                         error_type="judgment",
                         tool_call_id=tc_id,
@@ -4572,47 +4613,61 @@ def create_watchover_check_node(
             # The evaluator is documented to never raise (it catches its
             # own exceptions and converts them to verdicts). This outer
             # try/except is defensive against a future evaluator bug —
-            # treat any escape as a judgment error (fail-closed).
+            # treat any escape as a judgment error via the mistake
+            # path (NOT deny): the agent gets a fix-and-retry nudge
+            # without burning a denial slot on the watcher's own
+            # failure.
             logger.warning(
                 f"[watchover_check] evaluator escaped for "
                 f"{instance_id[:8]}...: {type(eval_err).__name__}: {eval_err} — "
-                f"denying batch (judgment error)"
+                f"sending back to agent (mistake, no count)"
             )
-            deny_msgs = [
+            mistake_msgs = [
                 ToolMessage(
                     content=(
-                        f"Watchover denied this tool call: "
+                        f"Watchover noticed a mistake in this tool call: "
                         f"watchover judgment error: {type(eval_err).__name__}. "
-                        f"Please adjust your approach."
+                        f"Please fix and retry."
                     ),
                     tool_call_id=tc.get("id", ""),
-                    additional_kwargs={"watchover_denial": True},
+                    additional_kwargs={"watchover_mistake": True},
                 )
                 for tc in normalized
             ]
-            new_count, route = _compute_deny_state(state, evaluator.max_denials)
 
-            # T5.6 — best-effort denial SSE emit. The evaluator escaped
+            # T5.6 — best-effort mistake SSE emit. The evaluator escaped
             # so we have no structured verdicts; the reason is the
             # exception type. Never blocks the watchover check.
             await _emit_watchover_sse(
                 manager,
                 instance_id,
-                "denial",
-                denial_count=new_count,
+                "mistake",
                 reason=f"watchover judgment error: {type(eval_err).__name__}",
             )
             return {
-                "messages": deny_msgs,
-                "watchover_denial_count": new_count,
-                "watchover_route": route,
+                "messages": mistake_msgs,
+                "watchover_route": "agent",
             }
 
         # ── Decide the route ────────────────────────────────────────
-        # LD-1 deny-whole-batch: ANY deny → entire batch is denied.
+        # Three-valued routing:
+        #   * deny (LD-1)    — ANY deny → deny whole batch, count +1.
+        #   * mistake (new)  — any mistake → send batch back to agent,
+        #                       but NO count increment. Mistakes come
+        #                       from the watcher noticing problems with
+        #                       the agent's tool call (malformed args,
+        #                       wrong tool name, …) and should not burn
+        #                       the per-turn denial budget.
+        #   * allow          — all allow → pass through to tools.
+        #
+        # Deny wins over mistake: if any call is denied the whole batch
+        # is denied and counted, regardless of whether other calls in
+        # the same batch are mistakes. This preserves LD-1
+        # deny-whole-batch semantics.
         any_deny = any(v.verdict == "deny" for v in verdicts)
+        any_mistake = any(v.verdict == "mistake" for v in verdicts)
 
-        if not any_deny:
+        if not any_deny and not any_mistake:
             # All-allow path. The original ``AIMessage.tool_calls``
             # passes through unchanged; ``ToolNode`` runs them. We DO
             # NOT increment the counter on allow.
@@ -4620,67 +4675,150 @@ def create_watchover_check_node(
                 "watchover_route": "tools",
             }
 
-        # Build one ToolMessage per tool_call, pairing with the matching
-        # verdict. For denied calls the message carries the reason; for
-        # allowed-but-not-executed calls (because the batch was
-        # wholesale-denied) the message says so.
-        #
-        # Phase 4 verdict format evolution: when the watcher supplied
-        # an optional markdown ``body`` after the ``Deny:`` line, the
-        # body is included in the ToolMessage so the watched agent
-        # sees concrete guidance on how to adjust its approach. The
-        # body is captured verbatim from the watcher LLM output
-        # (capped at 1500 chars by the parser). The
-        # ``additional_kwargs={"watchover_denial": True}`` tag stays
-        # unchanged — LoopDetector exclusion depends on it.
-        injected: list[ToolMessage] = []
+        if any_deny:
+            # ── Deny path (existing deny-whole-batch logic) ────────
+            # Build one ToolMessage per tool_call, pairing with the
+            # matching verdict. For denied calls the message carries
+            # the reason; for allowed-but-not-executed calls (because
+            # the batch was wholesale-denied) the message says so.
+            # For mistake calls in the same batch the message uses the
+            # mistake template so the agent sees the concrete fix-and-
+            # retry guidance even though the batch itself was denied.
+            #
+            # Phase 4 verdict format evolution: when the watcher
+            # supplied an optional markdown ``body`` after the
+            # ``Deny:`` / ``Mistake:`` line, the body is included in
+            # the ToolMessage so the watched agent sees concrete
+            # guidance on how to adjust its approach. The body is
+            # captured verbatim from the watcher LLM output (capped
+            # at 1500 chars by the parser). The denial ToolMessages
+            # keep ``additional_kwargs={"watchover_denial": True}`` for
+            # LoopDetector exclusion; the mistake ToolMessages in this
+            # branch carry ``watchover_mistake: True`` instead.
+            injected: list[ToolMessage] = []
+            for tc, verdict in zip(normalized, verdicts):
+                tc_id = tc.get("id", "")
+                if verdict.verdict == "deny":
+                    parts = [f"Watchover denied this tool call: {verdict.reason}."]
+                    if verdict.body:
+                        parts.append("")  # blank line separator
+                        parts.append(verdict.body)
+                    parts.append("Please adjust your approach.")
+                    content = "\n".join(parts)
+                    injected.append(
+                        ToolMessage(
+                            content=content,
+                            tool_call_id=tc_id,
+                            additional_kwargs={"watchover_denial": True},
+                        )
+                    )
+                elif verdict.verdict == "mistake":
+                    # Mistake call sharing a denied batch — surface the
+                    # fix-and-retry guidance but tag with watchover_mistake.
+                    parts = [f"Watchover noticed a mistake in this tool call: {verdict.reason}."]
+                    if verdict.body:
+                        parts.append("")  # blank line separator
+                        parts.append(verdict.body)
+                    parts.append("Please fix and retry.")
+                    content = "\n".join(parts)
+                    injected.append(
+                        ToolMessage(
+                            content=content,
+                            tool_call_id=tc_id,
+                            additional_kwargs={"watchover_mistake": True},
+                        )
+                    )
+                else:
+                    # Allow verdict, but the batch was denied by another
+                    # call. Surface a "deferred — try again" notice so the
+                    # watched agent has a clean tool-result protocol
+                    # response for every emitted tool_call.
+                    content = (
+                        "Watchover deferred this tool call: another call "
+                        "in this batch was denied. Please retry."
+                    )
+                    injected.append(
+                        ToolMessage(
+                            content=content,
+                            tool_call_id=tc_id,
+                            additional_kwargs={"watchover_denial": True},
+                        )
+                    )
+
+            new_count, route = _compute_deny_state(state, evaluator.max_denials)
+
+            # T5.6 — best-effort denial SSE emit. Surface the first denied
+            # verdict's reason (the batch is denied because of it). Never
+            # blocks the watchover check.
+            denial_reason = next(
+                (v.reason for v in verdicts if v.verdict == "deny"),
+                "unknown",
+            )
+            await _emit_watchover_sse(
+                manager,
+                instance_id,
+                "denial",
+                denial_count=new_count,
+                reason=denial_reason,
+            )
+
+            return {
+                "messages": injected,
+                "watchover_denial_count": new_count,
+                "watchover_route": route,
+            }
+
+        # ── Mistake-only path ──────────────────────────────────────
+        # any_deny is False here; any_mistake is True.
+        # Build ToolMessages for each verdict: mistakes get a "mistake"
+        # message (with reason + optional body); allows get a
+        # "deferred" message because the batch is being sent back to
+        # the agent. DO NOT increment the counter — mistakes do not
+        # consume budget.
+        injected_mistakes: list[ToolMessage] = []
         for tc, verdict in zip(normalized, verdicts):
             tc_id = tc.get("id", "")
-            if verdict.verdict == "deny":
-                parts = [f"Watchover denied this tool call: {verdict.reason}."]
+            if verdict.verdict == "mistake":
+                parts = [f"Watchover noticed a mistake in this tool call: {verdict.reason}."]
                 if verdict.body:
                     parts.append("")  # blank line separator
                     parts.append(verdict.body)
-                parts.append("Please adjust your approach.")
+                parts.append("Please fix and retry.")
                 content = "\n".join(parts)
             else:
-                # Allow verdict, but the batch was denied by another
-                # call. Surface a "deferred — try again" notice so the
+                # Allow verdict, but the batch is being sent back
+                # because another call was flagged as a mistake.
+                # Surface a "deferred — try again" notice so the
                 # watched agent has a clean tool-result protocol
                 # response for every emitted tool_call.
                 content = (
                     "Watchover deferred this tool call: another call "
-                    "in this batch was denied. Please retry."
+                    "in this batch had a mistake. Please retry."
                 )
-            injected.append(
+            injected_mistakes.append(
                 ToolMessage(
                     content=content,
                     tool_call_id=tc_id,
-                    additional_kwargs={"watchover_denial": True},
+                    additional_kwargs={"watchover_mistake": True},
                 )
             )
 
-        new_count, route = _compute_deny_state(state, evaluator.max_denials)
-
-        # T5.6 — best-effort denial SSE emit. Surface the first denied
-        # verdict's reason (the batch is denied because of it). Never
-        # blocks the watchover check.
-        denial_reason = next(
-            (v.reason for v in verdicts if v.verdict == "deny"),
+        # NO count increment — mistakes don't consume budget. Route back
+        # to the agent so it can fix and retry on the next turn.
+        mistake_reason = next(
+            (v.reason for v in verdicts if v.verdict == "mistake"),
             "unknown",
         )
         await _emit_watchover_sse(
             manager,
             instance_id,
-            "denial",
-            denial_count=new_count,
-            reason=denial_reason,
+            "mistake",
+            reason=mistake_reason,
         )
 
         return {
-            "messages": injected,
-            "watchover_denial_count": new_count,
-            "watchover_route": route,
+            "messages": injected_mistakes,
+            "watchover_route": "agent",
         }
 
     return watchover_check

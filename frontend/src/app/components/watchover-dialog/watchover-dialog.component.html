@@ -22,9 +22,9 @@
       [ngModel]="watchoverRequirement()"
       (ngModelChange)="watchoverRequirement.set($event)"
       rows="3"
-      placeholder="What to monitor for (leave empty for automatic analysis)"
+      placeholder="Evaluate tool calls considering blast radius. Operations within the scope of the current task are ALLOWED. Only DENY operations that break things OUTSIDE the task scope. (leave empty for blast-radius-aware defaults)"
     ></textarea>
-    <mat-hint>Optional — constraints for the watcher (e.g. 'read-only operations only')</mat-hint>
+    <mat-hint>Optional — constraints for the watcher (e.g. 'prevent changes to production databases'). Leave empty for blast-radius-aware defaults.</mat-hint>
   </mat-form-field>
 </mat-dialog-content>
 <mat-dialog-actions align="end">

@@ -274,7 +274,17 @@ class TestConcurrentInstanceIsolation:
             },
         )
         slot_a = WatchoverSlot(manager_a)
-        factory, _ = _make_fake_llm_class(["Deny: unsafe", "Deny: unsafe"])
+        # 3 calls expected: 2 for instance A (denial 0→1, 1→2) + 1 for
+        # instance B (denial 0→1). The previous code relied on the
+        # LLM mock exhausting the 3rd time, which produced an
+        # AssertionError → judgment error → Deny + count (old behavior).
+        # Phase 6 collapses judgment errors to Mistake (no count), so
+        # the mock must supply all 3 expected deny responses up front
+        # — otherwise the test would exercise the Mistake path instead
+        # of the deny path the test is actually asserting.
+        factory, _ = _make_fake_llm_class(
+            ["Deny: unsafe", "Deny: unsafe", "Deny: unsafe"]
+        )
         with patch("daemon.graph.ThinkingChatOpenAI", factory):
             node_a = create_watchover_check_node(
                 manager=manager_a, slot=slot_a, llm_config={"model": "test"}
@@ -336,8 +346,16 @@ class TestConcurrentInstanceIsolation:
             },
         )
         slot = WatchoverSlot(manager)
+        # 4 calls expected: 3 for instance A (0→1, 1→2, 2→3 terminate)
+        # + 1 for instance B (0→1). The previous code relied on the
+        # LLM mock exhausting the 4th time, which produced an
+        # AssertionError → judgment error → Deny + count (old behavior).
+        # Phase 6 collapses judgment errors to Mistake (no count), so
+        # the mock must supply all 4 expected deny responses up front
+        # — otherwise the test would exercise the Mistake path instead
+        # of the deny path the test is actually asserting.
         factory, _ = _make_fake_llm_class(
-            ["Deny: 1", "Deny: 2", "Deny: 3"]
+            ["Deny: 1", "Deny: 2", "Deny: 3", "Deny: 4"]
         )
         with patch("daemon.graph.ThinkingChatOpenAI", factory):
             node = create_watchover_check_node(

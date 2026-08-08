@@ -391,6 +391,18 @@ export class ChatComponent implements OnInit, OnDestroy {
           );
         }
         break;
+      case 'mistake':
+        // Mistake verdict — amber/warning toast, NOT red/danger
+        // Does NOT increment denial count
+        if (shouldNotify) {
+          const mistakeReason = (candidate['reason'] as string) || 'tool call has an error';
+          this.snackBar.open(
+            `⚠️ Watchover noticed a mistake: ${mistakeReason}. No action counted.`,
+            'Dismiss',
+            { duration: 3000, panelClass: 'info-snackbar' }
+          );
+        }
+        break;
       default:
         return;
     }
@@ -415,10 +427,36 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (candidate['role'] !== undefined && candidate['role'] !== 'tool') return;
 
     const content = candidate['content'];
-    if (
-      typeof content !== 'string'
-      || (!content.startsWith('Watchover denied') && !content.startsWith('Watchover deferred'))
-    ) {
+    if (typeof content !== 'string') return;
+
+    // Check for mistake messages — show toast but DON'T increment count
+    if (content.startsWith('Watchover noticed a mistake')) {
+      const currentInstance = this.currentInstance();
+      if (!currentInstance) return;
+      const messageInstanceId = candidate['instance_id'];
+      if (typeof messageInstanceId === 'string' && messageInstanceId !== currentInstance.instance_id) {
+        return;
+      }
+      const messageKey = [
+        currentInstance.instance_id,
+        candidate['message_id'] ?? candidate['tool_call_id'] ?? candidate['created_at'] ?? '',
+        content,
+      ].join(':');
+      if (this.processedWatchoverDenials.has(messageKey)) return;
+      this.processedWatchoverDenials.add(messageKey);
+
+      // Mistake — amber toast, NO count increment
+      const reason = content.replace(/^Watchover noticed a mistake.*?:\s*/, '').split('.')[0];
+      this.snackBar.open(
+        `⚠️ Watchover noticed a mistake: ${reason || 'fix and retry'}`,
+        'Dismiss',
+        { duration: 3000, panelClass: 'info-snackbar' }
+      );
+      return;  // IMPORTANT: return early, do NOT increment count
+    }
+
+    // Existing denial/deferred handling — unchanged below
+    if (!content.startsWith('Watchover denied') && !content.startsWith('Watchover deferred')) {
       return;
     }
 
