@@ -49,8 +49,13 @@ cd "$PROJECT_DIR"
 #   --override-ini="addopts="              — strip project-level pytest addopts so
 #                                            this script's flags aren't shadowed
 #                                            by config-level options like -x.
-#   -m integration                          — only run @pytest.mark.integration tests.
 #   -k "<4 names or'd>"                     — select the 4 Release Gate tests by name.
+#                                            (No -m integration: only 1 of the 4 target
+#                                            tests is @pytest.mark.integration; the
+#                                            others would be silently deselected,
+#                                            making the pack report PASS while running
+#                                            zero of the 4 ensure.md Release Gate tests.
+#                                            The -k filter alone is sufficient.)
 #   --tb=short -q                           — short tracebacks, quiet summary; do NOT
 #                                            pass -x because we want to see the result
 #                                            of all 4 tests even if one fails (per
@@ -64,7 +69,6 @@ cd "$PROJECT_DIR"
 PYTEST_TIMEOUT=280 timeout 300 .venv/bin/pytest \
     tests/e2e/test_e2e_workflows.py \
     --override-ini="addopts=" \
-    -m integration \
     -k "test_parent_child_workflow_happy_path or test_pause_after_spawn_then_resume or test_terminate_after_spawn_then_revive or test_three_level_cascade_reports" \
     --tb=short -q 2>&1
 
