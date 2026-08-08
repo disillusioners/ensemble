@@ -88,7 +88,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-BASE_URL = "http://localhost:8079"           # Dev server port
+BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:8079")  # Dev server port (override via E2E_BASE_URL)
 API_BASE = f"{BASE_URL}/api"
 PROJECT_ID = os.environ.get("ENSEMBLE_PROJECT_ID", None)
 
