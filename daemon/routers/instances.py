@@ -220,6 +220,18 @@ class WatchoverRequest(BaseModel):
             "POST /instances/{id}/answer. Maximum 2000 characters."
         ),
     )
+    next_command: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "When the instance is in a terminal/idle state (NOT "
+            "running): the next command to send as a new message "
+            "AFTER enabling watchover. Ignored when the instance is "
+            "running (running instances use the pause -> resume "
+            "with 'continue' / resume_message flow). Maximum 2000 "
+            "characters."
+        ),
+    )
     # SECURITY NOTE (W2 / defense-in-depth): The ``context`` field is
     # user-supplied and flows into the watcher agent's prompt. The
     # watcher (agents/watcher/soul.md) is designed to treat all
@@ -765,7 +777,8 @@ async def toggle_watchover(
         instance_id: Owning instance identifier (path param).
         body: :class:`WatchoverRequest` with ``enabled`` (required),
             ``requirement`` (optional), ``context`` (optional),
-            ``resume_message`` (optional).
+            ``resume_message`` (optional), ``next_command`` (optional,
+            used only on the terminal-state activation path).
         request: FastAPI request — used to reach the manager from
             ``app.state``.
 
@@ -812,12 +825,21 @@ async def toggle_watchover(
             # is a transition window, not a message-passing scenario,
             # so it does not accept a custom message and uses the
             # default "continue" / "resume" fan-out.
+            #
+            # ``next_command`` is threaded for the terminal-state
+            # activation path: when the instance is NOT running the
+            # service skips pause/resume and enqueues ``next_command``
+            # as a fresh message so the watched instance picks it up
+            # on its next dispatch. The service ignores
+            # ``next_command`` when the instance is running (the
+            # pause -> resume path uses ``resume_message`` instead).
             result = await asyncio.wait_for(
                 manager.enable_watchover_lifecycle(
                     instance_id,
                     requirement=body.requirement,
                     user_context=body.context,
                     resume_message=body.resume_message,
+                    next_command=body.next_command,
                 ),
                 timeout=_ACTIVATION_TIMEOUT_SECONDS,
             )

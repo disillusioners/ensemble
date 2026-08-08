@@ -661,10 +661,37 @@ class WatchoverService:
         requirement: str | None,
         user_context: str | None = None,
         resume_message: str | None = None,
+        next_command: str | None = None,
     ) -> dict[str, Any]:
         """Run the activation lifecycle: pause → bounded_barrier → context → flag → resume.
 
-        Phase 3 (T3.5) orchestration. The sequence is:
+        Phase 3 (T3.5) orchestration. Two paths now exist:
+
+          * **Running path (Case 1).** When ``is_instance_running`` is
+            ``True`` (status in ``{"running", "active"}``): the full
+            sequence runs — ``pause_instance_cascade`` →
+            ``wait_for_instance_quiescent(timeout=2.0)`` →
+            ``_build_watchover_context`` → ``enable_watchover`` →
+            ``_resume_with_graph_restart`` → SSE emit
+            ``status_change: watchover_active``. This is the original
+            T3.5 pause-first ordering — pause comes FIRST so the user
+            sees the instance flip to ``PAUSED`` immediately while
+            the context snapshot is built (M-2 in-flight hang fix).
+          * **Terminal/idle path (Case 2 — Watchover Dialog
+            Redesign).** When ``is_instance_running`` is ``False``
+            (any non-running status: idle, paused, completed, error,
+            terminated, queued, waiting_children, failed, waiting):
+            the pause/resume cycle is skipped — there is nothing
+            in-flight to cancel. The service builds the context from
+            the existing checkpoint messages, atomically enables the
+            watchover flag, optionally enqueues ``next_command`` as a
+            new message so the watched instance picks it up on its
+            next dispatch, then emits the ``watchover_active`` SSE.
+            No ``pause_instance_cascade``, no
+            ``resume_instance_cascade`` — the instance was already
+            idle so neither is needed.
+
+        Case 1 — running path sequence:
 
           1. ``pause_instance_cascade`` — cancel the in-flight graph
              task (Checkpoint-safe; resume replays from the last
@@ -741,7 +768,15 @@ class WatchoverService:
                 fixed string ``"resume"``. Mirrors the resume fan-out
                 in :meth:`daemon.routers.instances.resume_instance`
                 and ``/answer``. Default ``None`` → target gets
-                ``"continue"``.
+                ``"continue"``. Ignored on the terminal-state path
+                (Case 2).
+            next_command: Optional command to enqueue as a fresh
+                message AFTER enabling watchover on the
+                terminal-state path (Case 2). The watched instance
+                picks the message up on its next dispatch. Default
+                ``None`` → no extra message is enqueued. Ignored on
+                the running path (Case 1) — running instances use
+                ``resume_message`` instead.
 
         Returns:
             Dict with the activation outcome:
@@ -749,8 +784,10 @@ class WatchoverService:
               * ``instance_id`` — echoes the input.
               * ``watchover_enabled`` — always ``True`` on success.
               * ``context_length`` — length of the context string.
-              * ``quiescent`` — whether the barrier succeeded
-                (``True``/``False``).
+              * ``quiescent`` — whether the post-pause barrier
+                succeeded (``True``/``False``) on the running path,
+                or ``True`` on the terminal-state path (no barrier
+                was needed — the instance was already idle).
 
         Raises:
             KeyError: When the instance is not found.
@@ -759,7 +796,31 @@ class WatchoverService:
         """
         manager = self._manager
 
-        # Step 1 — PAUSE FIRST (bug fix for the M-2 in-flight hang).
+        # Case 2 (Watchover Dialog Redesign) — terminal/idle path.
+        #
+        # Skip the pause → barrier → resume cycle when the instance
+        # is NOT actively running. There is nothing in-flight to
+        # cancel, so the running-path machinery (``pause_instance_cascade``
+        # + bounded barrier + ``_resume_with_graph_restart``) would
+        # only add latency (a round-trip to DB + a Task cancel that
+        # finds no Task) for no safety benefit. The terminal path
+        # builds context from the existing checkpoint, writes the
+        # watchover flag atomically, optionally enqueues a follow-up
+        # message via ``next_command``, then emits the SSE. The
+        # ``is_instance_running`` lookup is defensive — if status
+        # cannot be determined we fall back to the running path,
+        # which is the historically-proven safe default (the pause
+        # and barrier are idempotent on an already-idle instance).
+        if not await self._is_instance_running(instance_id):
+            return await self._activate_terminal(
+                instance_id,
+                requirement=requirement,
+                user_context=user_context,
+                next_command=next_command,
+            )
+
+        # Case 1 — running path (PAUSE FIRST — bug fix for the
+        # M-2 in-flight hang).
         #
         # The previous ordering ran ``wait_for_instance_quiescent``
         # (30s default) BEFORE pause. When the instance was mid-LLM-call
@@ -971,6 +1032,213 @@ class WatchoverService:
             "watchover_enabled": True,
             "context_length": len(context_text or ""),
             "quiescent": quiescent,
+        }
+
+    # ------------------------------------------------------------------
+    # Watchover Dialog Redesign — terminal/idle activation path
+    # ------------------------------------------------------------------
+
+    async def _is_instance_running(self, instance_id: str) -> bool:
+        """Return ``True`` when ``instance_id`` is in an actively-running state.
+
+        Watchover Dialog Redesign (2026-08-08). The activation lifecycle
+        now branches on the instance's current status: an actively-running
+        instance uses the full pause → context → flag → resume flow (Case
+        1), while a terminal/idle instance skips the pause/resume cycle
+        entirely (Case 2). This helper is the branch predicate.
+
+        Active states are ``"running"`` and ``"active"`` (defensive — the
+        canonical :class:`InstanceStatus` enum currently emits
+        ``"running"`` only; ``"active"`` is included for any
+        compatibility / caller-side aliases observed in the field).
+        Every other status (``idle``, ``paused``, ``completed``,
+        ``error``, ``terminated``, ``queued``, ``waiting_children``,
+        ``failed``, ``waiting``, missing row, or anything unrecognized)
+        is treated as NOT running.
+
+        Defensive fallback: when the instance metadata cannot be read
+        (DB hiccup, repo error, malformed payload), this returns
+        ``True`` so the existing pause → barrier → resume path runs.
+        The running path is the historically-proven safe default —
+        pause + barrier are idempotent on an already-idle instance,
+        so a wrong-but-safe branch is preferable to a wrong-and-broken
+        branch.
+
+        Args:
+            instance_id: Owning instance identifier.
+
+        Returns:
+            ``True`` when the instance status is ``"running"`` /
+            ``"active"``; ``False`` for any other value or on error.
+        """
+        try:
+            info = self._manager.get_instance_info(instance_id)
+        except Exception as exc:
+            # Defensive: if we cannot read the instance (DB hiccup,
+            # missing row, repo error) we fall back to the running
+            # path — historically the safe default. Log so operators
+            # can spot an unexpected branch if it ever fires.
+            logger.warning(
+                "watchover_service._is_instance_running(%s): could not "
+                "read instance info (%s); defaulting to running path "
+                "(pause + barrier are idempotent on an idle instance)",
+                instance_id,
+                exc,
+            )
+            return True
+
+        status = ""
+        if isinstance(info, dict):
+            raw = info.get("status", "")
+            status = str(raw).lower() if raw is not None else ""
+        return status in ("running", "active")
+
+    async def _activate_terminal(
+        self,
+        instance_id: str,
+        *,
+        requirement: str | None,
+        user_context: str | None = None,
+        next_command: str | None = None,
+    ) -> dict[str, Any]:
+        """Activate watchover for a terminal/idle instance (no pause/resume).
+
+        Watchover Dialog Redesign (2026-08-08). Companion to
+        :meth:`activate_watchover` for Case 2 — the instance is NOT
+        actively running, so the pause → barrier → resume machinery is
+        unnecessary (nothing is in-flight to cancel or restart).
+        Instead:
+
+          1. Build the context string. Same builder as the running
+             path (``_build_watchover_context``) with the same
+             empty-context guard — if the builder returns empty and
+             no requirement was supplied, fall back to the same
+             sentinel ``"[Recent activity] (no prior activity)"`` so
+             the lifecycle always writes SOMETHING.
+          2. Atomic flag write — ``manager.enable_watchover`` writes
+             the full watchover config (``watchover_enabled``,
+             ``watchover_context``, ``watchover_requirement``,
+             ``watchover_context_turn``, etc.) in a SINGLE
+             ``set_metadata_many`` call so a crash mid-write cannot
+             produce torn state. Same call as the running path.
+          3. Optionally enqueue ``next_command`` as a NEW message so
+             the watched instance picks it up on its next dispatch.
+             This is the post-activation message on the terminal path
+             — there is no ``resume_instance_cascade`` to carry a
+             ``"continue"`` / ``resume_message``, so an explicit
+             ``next_command`` is the only way to feed a follow-up
+             message to the instance. Best-effort: an enqueue
+             failure logs but does NOT roll back the flag — the
+             watchover is still enabled, the operator may issue a
+             follow-up message themselves.
+          4. SSE emit ``status_change: watchover_active`` so the
+             frontend sees the transition. Best-effort — SSE failure
+             is logged but does NOT roll back the flag.
+
+        No pause, no resume, no rollback block. The instance was
+        already idle so a rollback would have nothing to recover.
+
+        Args:
+            instance_id: Owning instance identifier.
+            requirement: User-supplied requirement string. May be
+                ``None``.
+            user_context: Pre-built context string (skips the
+                ``_build_watchover_context`` step when supplied).
+                Mirrors the running-path behaviour.
+            next_command: Optional command to enqueue as a new
+                message AFTER enabling watchover. ``None`` (default)
+                → no extra message is enqueued; the watched
+                instance remains idle until the operator issues a
+                follow-up.
+
+        Returns:
+            Dict with ``instance_id``, ``watchover_enabled=True``,
+            ``context_length``, and ``quiescent=True`` (no barrier
+            was needed — the instance was already idle).
+        """
+        manager = self._manager
+
+        # Step 1 — build context (same builder as the running path).
+        # The empty-context guard is the same so we never write an
+        # empty ``watchover_context`` to the DB.
+        if user_context is not None:
+            context_text: str | None = user_context
+        else:
+            context_text = await self._build_watchover_context(
+                instance_id, requirement=requirement
+            )
+
+        if not context_text:
+            if requirement:
+                context_text = f"[Requirement] {requirement}"
+            else:
+                context_text = "[Recent activity] (no prior activity)"
+
+        # Step 2 — atomic flag write. Same call as the running path;
+        # the context may be ``None`` at the metadata level (empty
+        # string is normalized by Pydantic + DB JSONB), the requirement
+        # is independent.
+        manager.enable_watchover(
+            instance_id,
+            requirement=requirement,
+            context=context_text,
+        )
+
+        # Step 3 — best-effort enqueue of ``next_command``. This is
+        # the terminal-path equivalent of the running path's
+        # ``_resume_with_graph_restart(resume_message=...)``: there
+        # is no cascade to resume, so the only way to deliver a
+        # follow-up message is to enqueue one. Failure here is
+        # logged but does NOT roll back the flag — watchover is
+        # already enabled and the operator can issue a follow-up
+        # message themselves if the enqueue fails.
+        if next_command:
+            try:
+                await manager.enqueue_message(
+                    instance_id=instance_id,
+                    message=next_command,
+                    source="watchover_next_command",
+                )
+            except (Exception, asyncio.CancelledError) as exc:
+                # W1 fix: also catch ``asyncio.CancelledError``
+                # (Python 3.13+ promotes it to ``BaseException`` so a
+                # plain ``except Exception`` would miss it).
+                logger.error(
+                    "watchover_service._activate_terminal(%s): enqueue "
+                    "next_command failed (%s); watchover is active but "
+                    "the next command was not delivered",
+                    instance_id,
+                    exc,
+                )
+
+        # Step 4 — best-effort SSE emit. Same call as the running
+        # path; ``stream_status_change`` is the frontend signal that
+        # flips the toggle UI to "active".
+        try:
+            await manager._live_hub.stream_status_change(
+                instance_id, "watchover_active"
+            )
+        except (Exception, asyncio.CancelledError) as exc:
+            logger.warning(
+                "watchover_service._activate_terminal(%s): SSE emit "
+                "failed: %s",
+                instance_id,
+                exc,
+            )
+
+        logger.info(
+            "watchover_service._activate_terminal(%s): activated "
+            "(context_length=%d, next_command=%s)",
+            instance_id,
+            len(context_text or ""),
+            bool(next_command),
+        )
+
+        return {
+            "instance_id": instance_id,
+            "watchover_enabled": True,
+            "context_length": len(context_text or ""),
+            "quiescent": True,
         }
 
     # ------------------------------------------------------------------

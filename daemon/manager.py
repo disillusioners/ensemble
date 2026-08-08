@@ -2769,6 +2769,7 @@ class InstanceManager:
         requirement: str | None = None,
         user_context: str | None = None,
         resume_message: str | None = None,
+        next_command: str | None = None,
     ) -> dict[str, Any]:
         """Orchestrate watchover activation: pause → context → flag → resume.
 
@@ -2788,6 +2789,15 @@ class InstanceManager:
                 target receives ``resume_message or "continue"``;
                 cascade children resume silently with ``"resume"``.
                 ``None`` (default) → target gets ``"continue"``.
+                Ignored on the terminal-state path (the service
+                dispatches ``next_command`` instead).
+            next_command: Optional next command to enqueue as a new
+                message AFTER enabling watchover on the terminal-state
+                activation path. The service uses this ONLY when the
+                instance is in a terminal/idle state (NOT running);
+                running instances use the pause → resume flow with
+                ``resume_message``. ``None`` (default) → no extra
+                message is enqueued.
 
         Returns:
             Dict with ``instance_id``, ``watchover_enabled``,
@@ -2803,6 +2813,7 @@ class InstanceManager:
             requirement=requirement,
             user_context=user_context,
             resume_message=resume_message,
+            next_command=next_command,
         )
 
     async def disable_watchover_lifecycle(self, instance_id: str) -> dict[str, Any]:
