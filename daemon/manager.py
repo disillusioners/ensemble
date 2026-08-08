@@ -2580,7 +2580,6 @@ class InstanceManager:
 
         * ``watchover_enabled``: True
         * ``watchover_context``: ``context`` (may be ``None``)
-        * ``watchover_denial_count``: 0
         * ``watchover_requirement``: ``requirement`` (may be ``None``)
         * ``watchover_context_turn``: 0 (T5.4)
         * ``watchover_context_refresh_interval``: N (T5.4, default 20)
@@ -2625,7 +2624,11 @@ class InstanceManager:
 
         updates: dict[str, Any] = {
             "watchover_enabled": True,
-            "watchover_denial_count": 0,
+            # watchover_denial_count is NOT persisted here — the live
+            # runtime counter lives in LangGraph state
+            # (state["watchover_denial_count"]); instance_metadata copy
+            # was dead code. The InstanceInfo API field still reads
+            # from LangGraph state for the frontend.
             # T5.4 — context freshness tracking keys.
             "watchover_context_turn": 0,
             "watchover_context_refresh_interval": refresh_interval,

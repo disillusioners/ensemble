@@ -3968,6 +3968,32 @@ class WatchoverEvaluator:
         msg_list.extend(self._delta_messages)
         msg_list.append(end_marker)
 
+        # DEBUG: surface the 5-layer message structure for the watcher
+        # LLM call so the user can verify the separators are present
+        # and see the delta composition during testing.
+        logger.debug(
+            "[WATCHOVER][%s] Message structure for watcher LLM call: "
+            "L1=System(%d chars), L2=Context(%d chars), L3=Snapshot(%s, %d chars), "
+            "L4=Delta(%d msgs: %s), L5=Check(per-call)",
+            self._instance_id,
+            len(system_prompt),
+            len(watchover_context) if watchover_context else 0,
+            "present" if self._snapshot else "empty",
+            len(self._snapshot) if self._snapshot else 0,
+            len(self._delta_messages),
+            ", ".join(f"{type(m).__name__}" for m in self._delta_messages),
+        )
+        logger.debug(
+            "[WATCHOVER][%s] Full message list: %s",
+            self._instance_id,
+            [
+                f"{type(m).__name__}:{str(m.content)[:80]}..."
+                if len(str(m.content)) > 80
+                else f"{type(m).__name__}:{m.content}"
+                for m in msg_list
+            ],
+        )
+
         results: list[WatcherVerdict] = []
         infra_error_seen = False
         for tc in tool_calls:

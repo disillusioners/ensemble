@@ -370,7 +370,6 @@ class TestManagerFlagManagement:
         args = repo.set_metadata_many.call_args.args
         updates = args[1]
         assert updates["watchover_enabled"] is True
-        assert updates["watchover_denial_count"] == 0
         assert updates["watchover_requirement"] == "no destructive ops"
         assert updates["watchover_context"] == "recent activity summary"
 
@@ -394,7 +393,6 @@ class TestManagerFlagManagement:
         updates = repo.set_metadata_many.call_args.args[1]
         assert updates == {
             "watchover_enabled": True,
-            "watchover_denial_count": 0,
             "watchover_context_turn": 0,
             "watchover_context_refresh_interval": 20,
         }
