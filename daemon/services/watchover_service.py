@@ -56,6 +56,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.task.models import SuspensionReason
+from daemon.repositories.message_queue.models import (
+    MessageStatus,
+    MessageType,
+)
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -257,6 +261,124 @@ class WatchoverService:
     # T3.4 — context construction
     # ------------------------------------------------------------------
 
+    async def _recover_inflight_human_message(
+        self,
+        instance_id: str,
+        checkpoint_messages: list[Any],
+    ) -> list[Any]:
+        """Recover the in-flight HUMAN message that ``pause_instance_cascade``
+        dropped from the checkpoint.
+
+        When ``activate_watchover`` is invoked while an instance is
+        RUNNING, ``pause_instance_cascade`` cancels the in-flight graph
+        task via ``graph_task.cancel()``. LangGraph only commits state
+        at **node boundaries**, so the input ``HumanMessage`` for the
+        current super-step is a PENDING WRITE that is rolled back when
+        the cancel fires mid-``agent_node`` LLM call. The result:
+        ``graph.aget_state().values["messages"]`` does NOT contain the
+        message that triggered the current turn — exactly the message
+        the watcher most needs to see.
+
+        The ``message_queue`` DB table is the reliable source. While a
+        graph task is running, its triggering message is in
+        ``status == processing`` with ``type == human``; pause only
+        cancels the graph task and flips the instance to ``PAUSED``,
+        it does NOT delete the queue row. This helper reads those
+        processing HUMAN rows and returns them as
+        :class:`HumanMessage` objects ready to be appended to the
+        conversation the builder sees.
+
+        Dedup is content-equality against the last ``HumanMessage``
+        already in ``checkpoint_messages``: if the node committed
+        before the cancel fired (rare but possible) the message is
+        already represented and we must not double-insert.
+
+        Graceful degradation: any DB failure logs a warning and
+        returns an empty list — the caller proceeds with the
+        checkpoint-only messages rather than crashing the activation
+        lifecycle.
+
+        Args:
+            instance_id: Owning instance identifier.
+            checkpoint_messages: Messages already read from
+                ``graph.aget_state().values["messages"]``.
+
+        Returns:
+            A list of :class:`HumanMessage` (or empty) representing
+            the in-flight user message(s) not yet visible in the
+            checkpoint. Order matches ``enqueued_at desc`` from
+            :meth:`MessageQueueRepository.get_by_instance`.
+        """
+        try:
+            from langchain_core.messages import HumanMessage
+
+            repo = getattr(self._manager, "_queue_repository", None)
+            if repo is None:
+                logger.warning(
+                    "watchover_service._recover_inflight_human_message(%s): "
+                    "no _queue_repository on manager; skipping recovery",
+                    instance_id,
+                )
+                return []
+
+            rows = repo.get_by_instance(instance_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "watchover_service._recover_inflight_human_message(%s): "
+                "queue read failed (%s); skipping recovery "
+                "(checkpoint-only messages will be used)",
+                instance_id,
+                exc,
+            )
+            return []
+
+        # Compute the last HumanMessage content already in the
+        # checkpoint for dedup. Tolerate both BaseMessage and dict.
+        last_human_content: str | None = None
+        for msg in reversed(checkpoint_messages):
+            content: Any
+            if isinstance(msg, dict):
+                content = msg.get("content")
+                msg_type = msg.get("type") or msg.get("role")
+            else:
+                content = getattr(msg, "content", None)
+                msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)
+            if msg_type and str(msg_type).lower() == "human":
+                last_human_content = _stringify_content(content)
+                break
+
+        recovered: list[Any] = []
+        # ``get_by_instance`` returns newest-first; iterate in that
+        # order so the LAST recovered message is also the most recent
+        # in-flight message — we append in original order to the
+        # caller list below.
+        for row in rows:
+            row_status = getattr(row, "status", None)
+            row_type = getattr(row, "type", None)
+            if row_status != MessageStatus.PROCESSING.value:
+                continue
+            if row_type != MessageType.HUMAN.value:
+                continue
+            row_content = getattr(row, "content", None)
+            if not row_content:
+                continue
+            if last_human_content is not None and _stringify_content(
+                row_content
+            ) == last_human_content:
+                # Already represented in the checkpoint — skip.
+                continue
+            recovered.append(HumanMessage(content=row_content))
+
+        if recovered:
+            logger.info(
+                "watchover_service._recover_inflight_human_message(%s): "
+                "recovered %d in-flight human message(s) from "
+                "message_queue (not present in checkpoint state)",
+                instance_id,
+                len(recovered),
+            )
+        return recovered
+
     async def _build_watchover_context(
         self, instance_id: str, *, requirement: str | None
     ) -> str:
@@ -298,6 +420,19 @@ class WatchoverService:
         current_state = await graph.aget_state(thread_config)
         state_values = current_state.values if current_state else {}
         messages = state_values.get("messages", []) if state_values else []
+
+        # Watchover-mid-flight fix: ``pause_instance_cascade`` cancels
+        # the in-flight graph task at a node boundary, so the
+        # input ``HumanMessage`` that triggered the current turn is
+        # rolled back from the checkpoint. The ``message_queue`` row
+        # in PROCESSING status is the reliable source — recover it
+        # here so the builder sees the most recent user intent. See
+        # ``_recover_inflight_human_message`` for the dedup contract.
+        recovered = await self._recover_inflight_human_message(
+            instance_id, messages
+        )
+        if recovered:
+            messages = list(messages) + recovered
 
         # Try the LLM-driven builder first. If the builder is not
         # importable or the manager is missing the LLM config the
