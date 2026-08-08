@@ -299,8 +299,10 @@ class TestContextKeyInjection:
             mock_build_graph.return_value = MagicMock()
             mock_append_context_key.return_value = "You are a test agent."
 
-            # Execute - call _restore_instance
-            service._restore_instance("restore-instance-789", mock_meta)
+            # Execute - call _restore_instance (async since Instance
+            # Lifecycle Hooks feature made it a coroutine)
+            import asyncio
+            asyncio.run(service._restore_instance("restore-instance-789", mock_meta))
 
             # Verify append_context_key was called with meta.parent_id
             mock_append_context_key.assert_called_once()

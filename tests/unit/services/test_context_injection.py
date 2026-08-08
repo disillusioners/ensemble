@@ -885,7 +885,7 @@ High
         assert "# Pre-loaded Context (auto-matched)" in result
         assert "There is no context yet" in result
 
-    def test_returns_fallback_injection_when_no_threshold_match(self, tmp_path):
+    def test_returns_fallback_injection_when_no_threshold_match(self, tmp_path, monkeypatch):
         """Directory with files but no threshold match still gets a
         pre-loaded block — the highest-scoring file is included as
         Match 1 (even at 0%) per the "always include the highest match"
@@ -900,6 +900,7 @@ High
         unrelated.write_text("## Answer\nUnrelated content.\n")
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            monkeypatch.delenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", raising=False)
             result = get_shared_context("no-match-key", "zzzzz yyyyy")
 
         assert result is not None
@@ -1084,7 +1085,7 @@ class TestSharedContextHints:
         assert 'project_id="proj-123"' not in result
         assert "Internal must not see this." not in result
 
-    def test_no_matches_format_preloads_fallback_and_shows_index(self, tmp_path):
+    def test_no_matches_format_preloads_fallback_and_shows_index(self, tmp_path, monkeypatch):
         """When the query has no threshold match but the dir has files,
         the highest-scoring file is pre-loaded as Match 1 (even at 0%),
         the file index is shown, and the "Need more?" hint is included.
@@ -1097,6 +1098,7 @@ class TestSharedContextHints:
         (context_dir / "unrelated_20260601_000000.md").write_text("## Answer\nfoo bar\n")
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            monkeypatch.delenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", raising=False)
             result = get_shared_context("no-match-hint", "zzzzz yyyyy")
 
         # Match 1 fallback is present (0% match is acceptable).
@@ -1110,7 +1112,7 @@ class TestSharedContextHints:
         assert "list_context(context_key)" in result
         assert "read_context(context_key, filename)" in result
 
-    def test_always_include_highest_match_even_at_zero(self, tmp_path):
+    def test_always_include_highest_match_even_at_zero(self, tmp_path, monkeypatch):
         """Regression test for the "always include highest match" rule.
 
         When the dir has files, the pre-loaded block is never empty:
@@ -1126,6 +1128,7 @@ class TestSharedContextHints:
         (context_dir / "beta-topic_20260602_000000.md").write_text("## Answer\nbeta stuff\n")
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            monkeypatch.delenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", raising=False)
             result = get_shared_context("always-highest", "completely unrelated query")
 
         # Match 1 is pre-loaded with the highest-scoring file (0% in this
