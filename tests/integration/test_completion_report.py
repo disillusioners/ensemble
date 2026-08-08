@@ -434,6 +434,141 @@ async def test_completion_report_message_format(
     logger.info("[TEST] ✅ Test completed")
 
 
+# =============================================================================
+# Unhappy-path report repair integration test
+#
+# This test does NOT require a live LLM — it mocks the LLM call but uses a
+# real ``ChildReportsService`` with mocked checkpointer to verify the
+# ``_get_last_assistant_message_raw`` repair path end-to-end. It exercises
+# the same code path that runs when a real child instance completes with a
+# truncated final message.
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_unhappy_path_report_repair_returns_repaired_content():
+    """Child produces short last message after 2 long messages → parent receives repaired content.
+
+    This test constructs a real ``ChildReportsService`` with a mock checkpointer
+    that returns a realistic message history (2 long assistant messages +
+    1 short sign-off). It verifies the repair path triggers and the parent
+    would receive repaired (or combined) content — NOT just the short last
+    message.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from daemon.services.child_reports import ChildReportsService
+    from daemon.config import Config
+
+    # Build a realistic message history where the child did substantive
+    # work in messages n-2 and n-1, then sent a short sign-off.
+    long_1 = " ".join(f"word{i}" for i in range(50))
+    long_2 = " ".join(f"step{i}" for i in range(40))
+    short_signoff = "done"
+
+    messages = [
+        {"role": "user", "content": "Please implement feature X"},
+        {"role": "assistant", "content": long_1},
+        {"role": "user", "content": "Looks good, continue"},
+        {"role": "assistant", "content": long_2},
+        {"role": "assistant", "content": short_signoff},
+    ]
+
+    manager = MagicMock(name="InstanceManager")
+    manager.config = Config()
+    checkpointer_adapter = MagicMock()
+    checkpointer_adapter.raw_saver = MagicMock()
+    manager._checkpointer = checkpointer_adapter
+
+    service = ChildReportsService.__new__(ChildReportsService)
+    service._manager = manager
+    service._events_service = None
+
+    # Mock LLM to return a repaired report
+    mock_llm_instance = MagicMock()
+    mock_llm_instance.invoke = MagicMock(
+        return_value=MagicMock(content="Repaired: I implemented feature X with tests.")
+    )
+    mock_llm_class = MagicMock(return_value=mock_llm_instance)
+
+    with (
+        patch(
+            "daemon.services.child_reports.get_instance_messages",
+            new=AsyncMock(return_value=messages),
+        ),
+        patch(
+            "daemon.services.child_reports.ThinkingChatOpenAI",
+            mock_llm_class,
+        ),
+    ):
+        result = await service._get_last_assistant_message_raw("child-instance-123")
+
+    # The parent should receive the repaired content, NOT just "done"
+    assert result is not None
+    assert result != short_signoff
+    assert "feature X" in result or long_1[:20] in result or long_2[:20] in result
+    # LLM was actually called
+    mock_llm_class.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unhappy_path_report_repair_combine_fallback():
+    """When LLM fails, the combine fallback ensures the parent gets full content.
+
+    The parent should still receive content containing the substantive work
+    from earlier messages, not just the short sign-off.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from daemon.services.child_reports import ChildReportsService
+    from daemon.config import Config
+
+    # Pad earlier messages to >=20 words so the W5 heuristic floor
+    # (ChildReportsService._is_likely_truncated_report, line ~1075) fires;
+    # otherwise the function returns the last_content directly (happy path)
+    # and the combine fallback is never exercised. Mirrors the fix applied
+    # to tests/postgres/test_report_repair_pg.py (commit 21381589) where
+    # 4-word messages caused the same W5 short-circuit.
+    long_1 = "alpha report content detailed findings " + " ".join(f"item{i}" for i in range(20))
+    long_2 = "beta report content implementation details " + " ".join(f"item{i}" for i in range(20))
+    short_signoff = "ok"
+
+    messages = [
+        {"role": "assistant", "content": long_1},
+        {"role": "assistant", "content": long_2},
+        {"role": "assistant", "content": short_signoff},
+    ]
+
+    manager = MagicMock(name="InstanceManager")
+    manager.config = Config()
+    checkpointer_adapter = MagicMock()
+    checkpointer_adapter.raw_saver = MagicMock()
+    manager._checkpointer = checkpointer_adapter
+
+    service = ChildReportsService.__new__(ChildReportsService)
+    service._manager = manager
+    service._events_service = None
+
+    # LLM fails → combine fallback should include the substantive content
+    mock_llm_class = MagicMock(side_effect=RuntimeError("LLM unavailable"))
+
+    with (
+        patch(
+            "daemon.services.child_reports.get_instance_messages",
+            new=AsyncMock(return_value=messages),
+        ),
+        patch(
+            "daemon.services.child_reports.ThinkingChatOpenAI",
+            mock_llm_class,
+        ),
+    ):
+        result = await service._get_last_assistant_message_raw("child-instance-456")
+
+    assert result is not None
+    assert result != short_signoff
+    # Combined content should include both long messages
+    assert "alpha report content" in result
+    assert "beta report content" in result
+
+
 if __name__ == "__main__":
     # Run directly for debugging
     import sys

@@ -25,13 +25,43 @@ from .job_queue_service import TERMINAL_STATUSES
 from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
-    from ..config import Config
+    from ..config import Config, ReportRepairConfig
     from ..repositories.instance.repository import SQLModelInstanceRepository
     from .event_publisher import EventPublisherService
     from .error_reporting import ErrorReportingService
 
 
 logger = logging.getLogger(__name__)
+
+
+REPORT_REPAIR_PROMPT = """\
+The following are the last {count} assistant messages from a child agent that has \
+just completed its task. The LAST message (message {n}) may be truncated, incomplete, \
+or a short sign-off, while the substantive report content may be in an earlier message.
+
+Your job: produce a SINGLE coherent report message that captures the real completion \
+content. If the last message is a valid summary, return it. If the real content is \
+in an earlier message, extract and compose the correct report. Be concise — your \
+output REPLACES the report content sent to the parent agent.
+
+--- Message {n_minus_2} (word count: {wc_n_minus_2}) ---
+{msg_n_minus_2}
+
+--- Message {n_minus_1} (word count: {wc_n_minus_1}) ---
+{msg_n_minus_1}
+
+--- Message {n} — LAST (word count: {wc_n}) ---
+{msg_n}
+
+Return ONLY the report text, no preamble."""
+
+
+# W3: Hard cap on combined-report output to keep the parent context window
+# bounded. Large tool output or stack traces otherwise blow up the parent's
+# next prompt. Mirrors the 500-char cap at child_reports.py:563 but uses a
+# larger ceiling because combined text replaces the last assistant message
+# rather than sitting inline in a conversation.
+MAX_COMBINED_REPORT_CHARS = 10_000
 
 
 class _ChildCompletionDbResult(NamedTuple):
@@ -1010,18 +1040,188 @@ Provide a concise summary:"""
             return f"{prefix}, below is the response:\n{raw_content}"
         return None
 
+    @staticmethod
+    def _is_likely_truncated_report(messages: list[dict], *, ratio: float = 3.0) -> bool:
+        """Check if the last assistant message is likely truncated.
+
+        Returns True if any of the penultimate messages (n-1 or n-2) has a
+        word count > ``ratio`` × the last message's word count, indicating
+        the real content may be in an earlier message.
+
+        W5 tuning: skip repair when the last message has >=5 words (a 5+
+        word message is unlikely to be a truncation) AND require the earlier
+        message to have >=20 words (don't trigger on tiny earlier messages).
+
+        Args:
+            messages: List of message dicts (already filtered to real
+                assistant messages — no synthetic/context_kind). Must be
+                in chronological order.
+            ratio: Size ratio threshold (default 3.0).
+
+        Returns:
+            True if the report looks truncated and should trigger repair.
+        """
+        if len(messages) < 2:
+            return False
+        last_content = messages[-1].get("content", "")
+        if not last_content or not last_content.strip():
+            return True  # empty last message → definitely truncated
+        last_wc = len(last_content.split())
+        # W5: floor — a 5+ word last message is unlikely to be a truncation.
+        if last_wc >= 5:
+            return False
+        for msg in messages[-3:-1]:  # n-1 and n-2 (if present)
+            earlier_wc = len((msg.get("content", "") or "").split())
+            # W5: also require the earlier message to have >=20 words so
+            # tiny earlier messages don't false-positive the heuristic.
+            if earlier_wc >= 20 and earlier_wc > ratio * last_wc:
+                return True
+        return False
+
+    async def _repair_report_with_llm(
+        self, messages: list[dict], config: "ReportRepairConfig", *, instance_id: str
+    ) -> str | None:
+        """Call the LLM to compose a repaired report from the last messages.
+
+        Mirrors ``LoopRepairer._summarize_loop`` (graph.py:1455) and the
+        existing ``_generate_completion_report`` LLM-call pattern
+        (child_reports.py:549). Returns the repaired text, or None on
+        failure/timeout (caller falls back to combining messages).
+
+        W1 fix: indexing uses NEGATIVE offsets so n=2 lands the earlier
+        message in ``msg_n_minus_1`` correctly (previously ``_get(1)`` and
+        ``_get(n-1)`` both resolved to the same last message when n=2).
+
+        Args:
+            messages: Last N assistant message dicts (chronological).
+            config: Report repair config for timeout/threshold.
+            instance_id: Instance ID for log correlation (W2).
+
+        Returns:
+            Repaired report text, or None if LLM failed/timed out.
+        """
+        # S5: lazy import — mirrors the convention at graph.py:1011-1017.
+        # Keeps the module-level import surface small and avoids the cycle
+        # risk if compaction ever imports child_reports.
+        from ..compaction import _extract_text_from_content
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        n = len(messages)
+
+        # Build the prompt — use NEGATIVE indexing so n=2 correctly maps
+        # msg_n_minus_1 → the earlier (longer) message and msg_n → the last.
+        def _get(idx: int) -> tuple[str, int]:
+            c = messages[idx].get("content", "") or ""
+            return c, len(c.split())
+
+        msg_n_minus_2, wc_n_minus_2 = _get(-3) if n >= 3 else ("", 0)
+        msg_n_minus_1, wc_n_minus_1 = _get(-2) if n >= 2 else ("", 0)
+        msg_n, wc_n = _get(-1) if n >= 1 else ("", 0)
+
+        prompt = REPORT_REPAIR_PROMPT.format(
+            count=n,
+            n=n,
+            n_minus_1=n - 1,
+            n_minus_2=n - 2,
+            wc_n_minus_2=wc_n_minus_2,
+            wc_n_minus_1=wc_n_minus_1,
+            wc_n=wc_n,
+            msg_n_minus_2=msg_n_minus_2,
+            msg_n_minus_1=msg_n_minus_1,
+            msg_n=msg_n,
+        )
+
+        timeout = config.timeout_seconds
+        try:
+            # Mirror the existing LLM-call pattern in this module
+            # (child_reports.py:549-561): build a manual dict, clean it,
+            # and construct via ThinkingChatOpenAI.
+            llm_config = {
+                "base_url": self._config.llm.base_url,
+                "api_key": self._config.llm.api_key,
+                "model": self._config.llm.model,
+                "temperature": 0.3,
+                "default_headers": {"x-proxy-app": "ensemble"},
+            }
+            cleaned = clean_llm_config(llm_config)
+            llm = ThinkingChatOpenAI(**cleaned)
+
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm.invoke,
+                    [
+                        SystemMessage(
+                            content="You are a report summarizer. Compose the single best report message from the given child agent messages."
+                        ),
+                        HumanMessage(content=prompt),
+                    ],
+                ),
+                timeout=timeout,
+            )
+            return _extract_text_from_content(response.content)
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[ReportRepairer] LLM timed out after {timeout}s for instance "
+                f"{instance_id[:8]}..., using combine-fallback"
+            )
+            return None
+        except Exception as e:
+            # S7: include instance_id in the generic exception log too.
+            logger.warning(
+                f"[ReportRepairer] LLM failed for instance {instance_id[:8]}...: "
+                f"{type(e).__name__}: {e}"
+            )
+            return None
+
+    @staticmethod
+    def _combine_messages(messages: list[dict]) -> str:
+        """Combine multiple messages into a single report text (fallback).
+
+        Chronological order: earliest first, last message last. Output is
+        capped at :data:`MAX_COMBINED_REPORT_CHARS` (10_000) to keep the
+        parent context window from blowing up on large tool output or stack
+        traces — the LLM-side truncation pattern at child_reports.py:563
+        (``_summarize_instance_conversation``) caps at 500 chars; this
+        fallback cap is much higher because the combined text replaces the
+        last assistant message rather than sitting inline in a conversation.
+
+        When truncation kicks in, a warning is logged and the suffix
+        ``…[truncated]…`` is appended so the parent can see the report
+        was cut short.
+        """
+        combined = "\n\n---\n\n".join(
+            (m.get("content", "") or "").strip()
+            for m in messages
+            if (m.get("content", "") or "").strip()
+        )
+        if len(combined) > MAX_COMBINED_REPORT_CHARS:
+            logger.warning(
+                f"[ReportRepairer] Combined report truncated: "
+                f"{len(combined)} -> {MAX_COMBINED_REPORT_CHARS} chars"
+            )
+            combined = combined[:MAX_COMBINED_REPORT_CHARS] + "…[truncated]…"
+        return combined
+
     async def _get_last_assistant_message_raw(self, instance_id: str) -> str | None:
         """Get the raw last assistant message content (no formatting).
-        
+
         Returns just the actual agent response content, matching the format
         used by MessageJobHandler when setting result_summary=result.content.
-        
+
+        When unhappy-path report repair is enabled (``report_repair.enabled``),
+        checks whether the last message looks truncated (an earlier message
+        is much larger). If so, attempts LLM repair; on LLM failure/timeout,
+        combines the last messages into one report.
+
         Args:
             instance_id: The instance ID to get message from.
-            
+
         Returns:
             The raw assistant message content, or None if not found.
         """
+        # --- Fetch and filter messages (existing logic) ---
         if self._checkpointer:
             messages = await get_instance_messages(self._checkpointer, instance_id)
             # Exclude both synthetic system messages (is_synthetic) and real checkpointed
@@ -1030,15 +1230,51 @@ Provide a concise summary:"""
             messages = [m for m in messages if not (m.get("is_synthetic") or m.get("context_kind"))]
         else:
             messages = []
-        
-        # Find the last assistant message with actual content
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if content and content.strip():
-                    return content.strip()
-        
-        return None
+
+        # Collect real assistant messages with content (chronological)
+        assistant_msgs = [
+            m for m in messages
+            if m.get("role") == "assistant" and (m.get("content", "") or "").strip()
+        ]
+        if not assistant_msgs:
+            return None
+
+        last = assistant_msgs[-1]
+        last_content = (last.get("content", "") or "").strip()
+
+        # --- Repair disable short-circuit ---
+        # S4: Config has ``default_factory`` for ``report_repair`` — always
+        # present, no need for ``getattr`` defensive guard.
+        report_repair_cfg = self._config.report_repair
+        if not report_repair_cfg.enabled:
+            return last_content  # happy path, skip repair entirely
+
+        # --- Truncation check ---
+        # NOTE: lookback_messages currently affects only the combine fallback
+        # slice (recent = assistant_msgs[-lookback:]). The heuristic/repair
+        # slices use [-3:] internally.
+        lookback = report_repair_cfg.lookback_messages
+        recent = assistant_msgs[-lookback:] if len(assistant_msgs) >= lookback else assistant_msgs
+        if not self._is_likely_truncated_report(recent, ratio=report_repair_cfg.size_ratio_threshold):
+            return last_content  # happy path — sizes are similar
+
+        logger.info(
+            f"[ReportRepairer] Unhappy path triggered for instance {instance_id[:8]}... "
+            f"({len(recent)} recent messages, ratio>{report_repair_cfg.size_ratio_threshold})"
+        )
+
+        # --- LLM repair ---
+        repaired = await self._repair_report_with_llm(
+            recent, report_repair_cfg, instance_id=instance_id
+        )
+        if repaired and repaired.strip():
+            logger.info(f"[ReportRepairer] LLM repair succeeded for instance {instance_id[:8]}...")
+            return repaired.strip()
+
+        # --- Fallback: combine messages ---
+        logger.info(f"[ReportRepairer] Using combine-fallback for instance {instance_id[:8]}...")
+        combined = self._combine_messages(recent)
+        return combined if combined.strip() else last_content
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
