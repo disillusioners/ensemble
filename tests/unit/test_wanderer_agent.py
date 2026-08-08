@@ -53,10 +53,13 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
-# Expected tool categories in meta.json allow list (11 declared categories).
+# Expected tool categories in meta.json allow list (13 declared categories).
+# Updated for worker migration: 'knowledge' category was replaced by the
+# top-level 'explore' tool + 'dynamic-skill' innate skill. Added 'proc' and
+# 'blueprint' per migration.
 EXPECTED_ALLOW_CATEGORIES = [
-    "bash", "filesystem", "time", "self", "help",
-    "knowledge", "mcp", "context", "shared_context", "rag", "instance",
+    "bash", "proc", "filesystem", "time", "self", "help",
+    "explore", "mcp", "context", "shared_context", "rag", "instance", "blueprint",
 ]
 
 
@@ -210,16 +213,16 @@ class TestWandererMetaJsonValidation:
             "complex investigations to coder"
         )
 
-    def test_team_members_contains_coder(self) -> None:
-        """Wanderer's only team member is coder."""
+    def test_team_members_contains_worker(self) -> None:
+        """Wanderer's team members are explorer + worker (post coder→worker migration)."""
         meta_path = WANDERER_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         team_members = meta.get("team_members", [])
         assert isinstance(team_members, list)
-        assert team_members == ["coder"], (
-            f"team_members must be exactly ['coder'] (read-only invariant). "
-            f"Got: {team_members}"
+        assert team_members == ["explorer", "worker"], (
+            f"team_members must be exactly ['explorer', 'worker'] after "
+            f"coder→worker migration. Got: {team_members}"
         )
 
     def test_team_members_does_not_contain_opencode(self) -> None:
@@ -295,9 +298,9 @@ class TestWandererToolFilter:
         # mcp tools should resolve
         assert "mcp_list_servers" in allowed_tools
         assert "mcp_invoke" in allowed_tools
-        # knowledge tools should resolve
+        # knowledge tools should resolve (note: 'experience' tool was removed in
+        # commit a813454e — replaced by 'explore' tool + 'dynamic-skill' innate skill)
         assert "explore" in allowed_tools
-        assert "experience" in allowed_tools
         # rag tools should resolve
         assert "rag_query" in allowed_tools
         # self tools should resolve
@@ -421,17 +424,17 @@ class TestWandererSoulContent:
         assert "Wanderer" in content
         assert "investigator" in content.lower() or "investigation" in content.lower()
 
-    def test_soul_declares_readonly_discipline_with_coder_hands(self) -> None:
-        """Soul must declare read-only for wanderer and identify coder as hands."""
+    def test_soul_declares_readonly_discipline_with_worker_hands(self) -> None:
+        """Soul must declare read-only for wanderer and identify worker as hands."""
         soul_path = WANDERER_AGENT_DIR / "soul.md"
         content = soul_path.read_text(encoding="utf-8").lower()
         # Wanderer is read-only
         assert "read-only" in content or "read only" in content, (
             "soul.md must explicitly declare read-only discipline"
         )
-        # But wanderer delegates bounded investigation work to coder instances
-        assert "coder" in content, (
-            "soul.md must mention coder as the hands for complex investigations"
+        # But wanderer delegates bounded investigation work to worker instances
+        assert "worker" in content, (
+            "soul.md must mention worker as the hands for complex investigations"
         )
 
     def test_soul_forbids_modifying_files(self) -> None:
@@ -443,14 +446,14 @@ class TestWandererSoulContent:
         # Must contain "never" near these references
         assert "never" in content
 
-    def test_soul_mentions_coder_delegation(self) -> None:
-        """Soul documents coder delegation for complex, multi-file investigations."""
+    def test_soul_mentions_worker_delegation(self) -> None:
+        """Soul documents worker delegation for complex, multi-file investigations."""
         soul_path = WANDERER_AGENT_DIR / "soul.md"
         content = soul_path.read_text(encoding="utf-8").lower()
-        # Must mention delegation / spawn to coder
-        assert "coder" in content
+        # Must mention delegation / spawn to worker
+        assert "worker" in content
         assert "delegat" in content or "spawn" in content, (
-            "soul.md must describe delegating to coder instances"
+            "soul.md must describe delegating to worker instances"
         )
         # Must NOT mention the obsolete coder→developer alias note
         assert "coder→developer" not in content, (
@@ -467,11 +470,16 @@ class TestWandererSoulContent:
         # Should mention research/web/github
         assert any(term in content for term in ["web", "github", "research"])
 
-    def test_soul_mentions_explore_experience(self) -> None:
+    def test_soul_mentions_explore_and_dynamic_skill(self) -> None:
+        """Soul documents explore (knowledge search) + dynamic-skill tools.
+
+        Post-migration: 'experience' tool was removed (see commit a813454e)
+        and replaced by the dynamic-skill innate skill (skill_search/view/feedback).
+        """
         soul_path = WANDERER_AGENT_DIR / "soul.md"
         content = soul_path.read_text(encoding="utf-8")
         assert "explore" in content
-        assert "experience" in content
+        assert "skill_search" in content or "skill_view" in content
 
     def test_soul_has_required_sections(self) -> None:
         """Match the structural pattern of coder/soul.md."""
