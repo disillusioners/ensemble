@@ -16,11 +16,13 @@ from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from typing import Any, ClassVar, Mapping, Optional, cast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 import asyncio
 import json
 import logging
 import os
 import re
+import sys
 import uuid
 import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
@@ -3386,27 +3388,21 @@ WATCHOVER_TIMEOUT_SECONDS_DEFAULT = 10
 # The fallback string below covers the (rare) read failure so the
 # evaluator never raises during module import.
 _WATCHER_SOUL_PROMPT_CACHE: str | None = None
-_WATCHER_SOUL_PROMPT_PATH = (
-    os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "agents",
-        "watcher",
-        "soul.md",
-    )
-)
+# Frozen-aware agents base: when running under PyInstaller, ``__file__``
+# resolves inside the ephemeral ``_MEIPASS`` archive which has no ``agents/``
+# subdir. Use ``sys.executable``'s parent (the install dir) instead, mirroring
+# daemon/manager.py:1950-1953.
+if getattr(sys, "frozen", False):
+    _WATCHER_AGENTS_BASE = Path(sys.executable).parent / "agents"
+else:
+    _WATCHER_AGENTS_BASE = Path(__file__).parent.parent / "agents"
+_WATCHER_SOUL_PROMPT_PATH = str(_WATCHER_AGENTS_BASE / "watcher" / "soul.md")
 
 # Meta-config cache: read ``agents/watcher/meta.json`` ONCE. Same
 # rationale as the soul prompt cache — the file is static and re-reading
 # on every ``build_instance_graph`` would be wasteful.
 _WATCHER_META_CACHE: dict | None = None
-_WATCHER_META_PATH = (
-    os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "agents",
-        "watcher",
-        "meta.json",
-    )
-)
+_WATCHER_META_PATH = str(_WATCHER_AGENTS_BASE / "watcher" / "meta.json")
 
 
 def _load_watcher_soul_prompt() -> str:
@@ -3440,14 +3436,7 @@ def _load_watcher_soul_prompt() -> str:
 # tool-call evaluator, the builder is the context compiler. Two roles,
 # two files. Mirrors the soul-prompt cache pattern above.
 _WATCHER_BUILDER_PROMPT_CACHE: str | None = None
-_WATCHER_BUILDER_PROMPT_PATH = (
-    os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "agents",
-        "watcher",
-        "builder-prompt.md",
-    )
-)
+_WATCHER_BUILDER_PROMPT_PATH = str(_WATCHER_AGENTS_BASE / "watcher" / "builder-prompt.md")
 
 
 def _load_watcher_builder_prompt() -> str:

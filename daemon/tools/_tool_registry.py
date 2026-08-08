@@ -48,6 +48,11 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_system_log_read",
     "ens_system_log_search",
     "ens_system_log_tail",
+    "commit_docs_validated",
+    "doc_write",
+    "comment_edit",
+    "skill_search",
+    "shared_context_metadata",
 })
 
 
