@@ -2250,6 +2250,234 @@ class TestResumeMessageFieldOnRequest:
 
 
 # =============================================================================
+# Terminal-activation fix (2026-08-08)
+# =============================================================================
+#
+# Bug: ``WatchoverService._activate_terminal`` invoked
+# ``_build_watchover_context`` BEFORE enqueuing ``next_command``. The
+# builder never saw ``next_command`` — yet ``next_command`` is the most
+# important input for the watcher ("what is the agent about to do?").
+# The fix threads ``next_command`` through
+# ``_build_watchover_context(extra_messages=...)`` so the builder sees
+# it at the tail of the conversation it consumes.
+#
+# These tests cover both the direct ``_activate_terminal`` call path
+# and the dispatcher (``activate_watchover``) routing a non-running
+# instance onto the terminal path.
+
+
+class TestActivateTerminalNextCommand:
+    """``_activate_terminal`` threads ``next_command`` to the builder."""
+
+    @pytest.mark.asyncio
+    async def test_activate_terminal_passes_next_command_as_extra_message(self):
+        """``next_command`` is forwarded to ``_build_watchover_context``
+        as ``extra_messages=[HumanMessage(content=next_command)]``.
+
+        This is the core fix — without it the builder never sees
+        ``next_command`` and the watcher guardrails against an
+        outdated conversation. The test patches
+        ``_build_watchover_context`` on the instance to capture the
+        kwargs the terminal path forwards.
+        """
+        manager = make_full_manager()
+        # Non-running status — keeps the activate path on the
+        # terminal branch.
+        manager.get_instance_info = MagicMock(
+            return_value={"status": "idle"}
+        )
+        manager.get_instance = AsyncMock(return_value=MagicMock())
+        manager.enqueue_message = AsyncMock(
+            return_value=MagicMock(message_id="m1", job_id="j1")
+        )
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+
+        # Capture the call to ``_build_watchover_context``.
+        captured: dict[str, Any] = {}
+
+        async def fake_build(instance_id, *, requirement, extra_messages=None):
+            captured["instance_id"] = instance_id
+            captured["requirement"] = requirement
+            captured["extra_messages"] = extra_messages
+            return "## Built context"
+
+        svc._build_watchover_context = fake_build  # type: ignore[method-assign]
+
+        result = await svc._activate_terminal(
+            "iid-1",
+            requirement="watch memory pressure",
+            next_command="check high memory pods",
+        )
+
+        assert result["watchover_enabled"] is True
+        assert result["instance_id"] == "iid-1"
+
+        # Builder received ``next_command`` as a HumanMessage in
+        # ``extra_messages``.
+        from langchain_core.messages import HumanMessage
+
+        assert captured["instance_id"] == "iid-1"
+        assert captured["requirement"] == "watch memory pressure"
+        assert captured["extra_messages"] is not None
+        assert len(captured["extra_messages"]) == 1
+        msg = captured["extra_messages"][0]
+        assert isinstance(msg, HumanMessage)
+        assert msg.content == "check high memory pods"
+
+        # ``enqueue_message`` still gets called with the same text
+        # (the terminal fix does NOT replace the enqueue — it just
+        # also feeds the builder).
+        manager.enqueue_message.assert_awaited_once_with(
+            instance_id="iid-1",
+            message="check high memory pods",
+            source="watchover_next_command",
+        )
+
+    @pytest.mark.asyncio
+    async def test_activate_terminal_without_next_command_passes_none(self):
+        """Default ``next_command=None`` → ``extra_messages=None``.
+
+        When the caller does NOT supply ``next_command`` the terminal
+        path must still work (no extra messages to inject, no enqueue).
+        """
+        manager = make_full_manager()
+        manager.get_instance_info = MagicMock(
+            return_value={"status": "idle"}
+        )
+        manager.get_instance = AsyncMock(return_value=MagicMock())
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+
+        captured: dict[str, Any] = {}
+
+        async def fake_build(instance_id, *, requirement, extra_messages=None):
+            captured["extra_messages"] = extra_messages
+            return "## Built context"
+
+        svc._build_watchover_context = fake_build  # type: ignore[method-assign]
+
+        await svc._activate_terminal(
+            "iid-1",
+            requirement="r",
+            next_command=None,
+        )
+
+        # ``extra_messages`` defaults to ``None`` — backward compat.
+        assert captured["extra_messages"] is None
+        # No enqueue when ``next_command`` is None.
+        manager.enqueue_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_terminal_user_context_skips_builder(self):
+        """When ``user_context`` is supplied the builder is skipped —
+        the user-supplied context goes straight to ``enable_watchover``.
+        ``next_command`` is still enqueued.
+        """
+        manager = make_full_manager()
+        manager.get_instance_info = MagicMock(
+            return_value={"status": "idle"}
+        )
+        manager.get_instance = AsyncMock(return_value=MagicMock())
+        manager.enqueue_message = AsyncMock(
+            return_value=MagicMock(message_id="m1", job_id="j1")
+        )
+
+        from daemon.services.watchover_service import WatchoverService
+
+        svc = WatchoverService(manager)
+
+        # If the terminal path called the builder with
+        # ``user_context`` set this mock would trip.
+        svc._build_watchover_context = AsyncMock(  # type: ignore[method-assign]
+            side_effect=AssertionError(
+                "_build_watchover_context must not run when "
+                "user_context is supplied"
+            )
+        )
+
+        result = await svc._activate_terminal(
+            "iid-1",
+            requirement="r",
+            user_context="user-supplied context",
+            next_command="continue please",
+        )
+
+        assert result["watchover_enabled"] is True
+        # The user-supplied context is what the flag write uses.
+        manager.enable_watchover.assert_called_once()
+        enable_kwargs = manager.enable_watchover.call_args.kwargs
+        assert enable_kwargs["context"] == "user-supplied context"
+        # The next_command is enqueued normally.
+        manager.enqueue_message.assert_awaited_once_with(
+            instance_id="iid-1",
+            message="continue please",
+            source="watchover_next_command",
+        )
+
+    @pytest.mark.asyncio
+    async def test_activate_watchover_routes_terminal_with_extra_messages(self):
+        """Top-level ``activate_watchover`` correctly routes a
+        non-running instance onto ``_activate_terminal`` and the
+        terminal path threads ``next_command`` to the builder.
+        """
+        manager = make_full_manager()
+        # Non-running status forces the terminal branch.
+        manager.get_instance_info = MagicMock(
+            return_value={"status": "paused"}
+        )
+        manager.get_instance = AsyncMock(return_value=MagicMock())
+        manager.enqueue_message = AsyncMock(
+            return_value=MagicMock(message_id="m1", job_id="j1")
+        )
+
+        from daemon.services.watchover_service import WatchoverService
+        from langchain_core.messages import HumanMessage
+
+        svc = WatchoverService(manager)
+
+        captured: dict[str, Any] = {}
+
+        async def fake_build(instance_id, *, requirement, extra_messages=None):
+            captured["extra_messages"] = extra_messages
+            captured["requirement"] = requirement
+            return "## Built context"
+
+        svc._build_watchover_context = fake_build  # type: ignore[method-assign]
+
+        await svc.activate_watchover(
+            "iid-1",
+            requirement="be safe",
+            next_command="deploy the v2 schema",
+        )
+
+        # Pause/resume machinery should NOT have run on the
+        # terminal branch.
+        manager.pause_instance_cascade.assert_not_called()
+        manager.resume_instance_cascade.assert_not_called()
+        manager.wait_for_instance_quiescent.assert_not_called()
+
+        # The builder was called with ``next_command`` as a HumanMessage.
+        assert captured["requirement"] == "be safe"
+        assert captured["extra_messages"] is not None
+        assert len(captured["extra_messages"]) == 1
+        msg = captured["extra_messages"][0]
+        assert isinstance(msg, HumanMessage)
+        assert msg.content == "deploy the v2 schema"
+
+        # The next_command was also enqueued (post-builder).
+        manager.enqueue_message.assert_awaited_once_with(
+            instance_id="iid-1",
+            message="deploy the v2 schema",
+            source="watchover_next_command",
+        )
+
+
+# =============================================================================
 # Message-shape helpers
 # =============================================================================
 

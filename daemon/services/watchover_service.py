@@ -380,7 +380,11 @@ class WatchoverService:
         return recovered
 
     async def _build_watchover_context(
-        self, instance_id: str, *, requirement: str | None
+        self,
+        instance_id: str,
+        *,
+        requirement: str | None,
+        extra_messages: list | None = None,
     ) -> str:
         """Construct the ``watchover_context`` string for ``instance_id``.
 
@@ -391,6 +395,15 @@ class WatchoverService:
         ``requirement`` is passed as an INPUT to the builder so the
         LLM can weave it into ``## Requirement`` rather than being
         appended as a hybrid post-splice.
+
+        ``extra_messages`` (terminal-activation fix, 2026-08-08) lets
+        the caller inject additional ``HumanMessage`` objects — most
+        importantly the ``next_command`` that ``_activate_terminal``
+        is about to enqueue. Without this hook the builder runs BEFORE
+        the next_command is enqueued and therefore NEVER sees it; the
+        watcher would guardrail against an outdated conversation. The
+        extra messages are appended AFTER inflight recovery so they
+        sit at the very tail of the conversation the builder sees.
 
         Fallback chain:
 
@@ -407,6 +420,13 @@ class WatchoverService:
             requirement: Operator-supplied requirement string. Passed
                 to the builder as a JSON input field so the LLM can
                 weave it into ``## Requirement``.
+            extra_messages: Optional list of additional
+                :class:`HumanMessage` (or compatible) objects to
+                append to the conversation after inflight recovery.
+                Used by :meth:`_activate_terminal` to pass
+                ``next_command`` so the watcher sees what the agent
+                is about to do. ``None`` (default) → no extra
+                messages; behavior identical to previous versions.
 
         Returns:
             A non-empty context string. If the conversation is empty
@@ -433,6 +453,18 @@ class WatchoverService:
         )
         if recovered:
             messages = list(messages) + recovered
+
+        # Terminal-activation fix (2026-08-08): ``_activate_terminal``
+        # enqueues ``next_command`` AFTER building the watchover
+        # context. Without this seam the builder never sees the
+        # ``next_command`` — the single most important input for the
+        # watcher ("what is the agent about to do?"). We append the
+        # extra messages LAST so they appear at the tail of the
+        # conversation the builder consumes (and so the raw-tail
+        # fallback at the end of this method picks them up
+        # automatically since the fallback reads ``messages``).
+        if extra_messages:
+            messages = list(messages) + list(extra_messages)
 
         # Try the LLM-driven builder first. If the builder is not
         # importable or the manager is missing the LLM config the
@@ -1299,8 +1331,23 @@ class WatchoverService:
         if user_context is not None:
             context_text: str | None = user_context
         else:
+            # Terminal-activation fix (2026-08-08): ``next_command`` is
+            # the most critical input for the watcher — it tells the
+            # LLM guardrail what the agent is about to do. The
+            # enqueue (Step 3 below) happens AFTER this builder call,
+            # so we must thread ``next_command`` in via
+            # ``extra_messages`` so the builder actually sees it.
+            # Without this the watcher would guardrail against the
+            # PRE-``next_command`` conversation — an outdated snapshot.
+            extra_messages: list | None = None
+            if next_command:
+                from langchain_core.messages import HumanMessage
+
+                extra_messages = [HumanMessage(content=next_command)]
             context_text = await self._build_watchover_context(
-                instance_id, requirement=requirement
+                instance_id,
+                requirement=requirement,
+                extra_messages=extra_messages,
             )
 
         if not context_text:
