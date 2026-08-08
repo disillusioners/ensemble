@@ -678,6 +678,29 @@ class LoopBreakerConfig(BaseSettings):
     excluded_tools: list[str] = Field(default_factory=list, description="Tool names to skip during detection (e.g. legitimately polled resources)")
 
 
+class ReportRepairConfig(BaseSettings):
+    """Configuration for unhappy-path report repair.
+
+    When a child instance's last assistant message is much shorter than
+    its earlier messages, the LLM repair node re-composed the report from
+    the last 3 assistant messages. If the LLM fails or times out, the 3
+    messages are combined into one report.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_")
+
+    enabled: bool = Field(default=True, description="Enable unhappy-path report repair")
+    # S2: validators + W5: tighter default (3.0 instead of 2.0) reduces
+    # false-positive LLM calls on legitimately-concise reports.
+    size_ratio_threshold: float = Field(default=3.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
+    # W2: tighter default timeout (30s instead of 120s) — repair should be
+    # fast; on timeout we fall back to combine. 120s is excessive given the
+    # prompt is bounded to ~3 messages.
+    timeout_seconds: int = Field(default=30, description="Timeout for the repair LLM call")
+    # S2: validator — must be >=1 message.
+    lookback_messages: int = Field(default=3, ge=1, description="Number of assistant messages to consider")
+
+
 class LanguageConfig(BaseSettings):
     """Language check configuration."""
 
@@ -790,6 +813,7 @@ class Config(BaseSettings):
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
+    report_repair: ReportRepairConfig = Field(default_factory=ReportRepairConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
     vscode: VSCodeConfig = Field(default_factory=VSCodeConfig)
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
