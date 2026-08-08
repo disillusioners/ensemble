@@ -823,6 +823,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     const dialogRef = this.dialog.open(WatchoverDialogComponent, {
       data: { instanceId, instanceName },
       width: '520px',
+      backdropClass: 'watchover-dialog-backdrop',
       panelClass: 'watchover-dialog-panel',
     });
 

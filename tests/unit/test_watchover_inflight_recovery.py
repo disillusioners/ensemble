@@ -397,3 +397,272 @@ class TestBuildContextWithInflightRecovery:
 
         # Fallback path renders the recovered message into the raw tail.
         assert in_flight_text in result
+
+
+# =============================================================================
+# Tests — _build_watchover_context extra_messages parameter
+# =============================================================================
+#
+# Terminal-activation fix (2026-08-08):
+#   ``_activate_terminal`` enqueues ``next_command`` AFTER building the
+#   watchover context. To prevent the builder from running against an
+#   outdated conversation the lifecycle now threads ``next_command``
+#   through ``_build_watchover_context(extra_messages=...)``. These
+#   tests verify the seam works end-to-end:
+#
+#     1. The builder sees the extra message as the LAST element in the
+#        ``messages`` list it receives.
+#     2. Ordering is preserved: checkpoint → recovered inflight → extra.
+#     3. Default ``extra_messages=None`` preserves prior behavior.
+#     4. The fallback (raw-tail) path also picks up extra messages
+#        because the local ``messages`` list is extended BEFORE the
+#        ``except Exception`` branch reads it.
+
+
+class TestBuildContextWithExtraMessages:
+    """Verify the ``extra_messages`` parameter is honored."""
+
+    def _make_manager_with_graph_and_queue(
+        self,
+        checkpoint_messages: list,
+        queue_rows: list[_FakeQueueRow] | None,
+    ) -> Any:
+        """Build a manager mock for ``_build_watchover_context`` tests.
+
+        The manager has a graph whose ``aget_state`` returns
+        ``checkpoint_messages`` and a queue repo that returns
+        ``queue_rows`` (or no repo if ``queue_rows`` is ``None``).
+        LLM config is wired so the builder path can run.
+        """
+        manager = MagicMock()
+        graph = MagicMock()
+        state = MagicMock()
+        state.values = {"messages": list(checkpoint_messages)}
+        graph.aget_state = AsyncMock(return_value=state)
+        manager.get_instance = AsyncMock(return_value=graph)
+        manager.config = MagicMock()
+        manager.config.llm = MagicMock()
+        manager.config.llm.api_key = "test"
+        manager.config.llm.model = "test-model"
+        manager.config.llm.model_vision = "test-model"
+        manager.config.llm.temperature = 0.0
+        manager.config.llm.request_timeout = 30
+        if queue_rows is None:
+            del manager._queue_repository
+        else:
+            repo = MagicMock()
+            repo.get_by_instance = MagicMock(return_value=queue_rows)
+            manager._queue_repository = repo
+        return manager
+
+    async def test_builder_sees_next_command_as_extra_message(self):
+        """The ``extra_messages`` parameter is forwarded to the builder
+        and the LAST element is the ``HumanMessage`` the caller passed.
+        """
+        manager = self._make_manager_with_graph_and_queue(
+            checkpoint_messages=[
+                HumanMessage(content="Earlier user msg"),
+                AIMessage(content="Earlier AI reply"),
+            ],
+            queue_rows=None,
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def fake_build(messages, requirement):
+            captured["messages"] = messages
+            captured["requirement"] = requirement
+            return "## Built context"
+
+        with patch(
+            "daemon.services.watcher_context_builder.WatcherContextBuilder"
+        ) as BuilderCls:
+            builder_instance = MagicMock()
+            builder_instance.build = AsyncMock(side_effect=fake_build)
+            BuilderCls.return_value = builder_instance
+
+            svc = WatchoverService(manager)
+            result = await svc._build_watchover_context(
+                "iid-1",
+                requirement=None,
+                extra_messages=[HumanMessage(content="check high memory pods")],
+            )
+
+        assert result == "## Built context"
+        msgs = captured["messages"]
+        # Last message in the list passed to the builder is the
+        # extra_messages entry.
+        assert msgs[-1].content == "check high memory pods"
+        assert isinstance(msgs[-1], HumanMessage)
+        # Original checkpoint messages are preserved.
+        assert msgs[0].content == "Earlier user msg"
+        assert msgs[1].content == "Earlier AI reply"
+        # Three messages total (2 from checkpoint + 1 extra).
+        assert len(msgs) == 3
+
+    async def test_extra_messages_appended_after_inflight_recovery(self):
+        """Ordering is preserved: checkpoint → recovered → extra.
+
+        This is the critical invariant for the terminal fix — the
+        ``next_command`` (extra) MUST come AFTER the recovered in-flight
+        message so the builder sees them in chronological order with
+        ``next_command`` at the tail.
+        """
+        in_flight_text = "Trigger for current turn (rolled back)"
+        next_command_text = "Now check high memory pods"
+        manager = self._make_manager_with_graph_and_queue(
+            checkpoint_messages=[
+                HumanMessage(content="Earlier user msg"),
+                AIMessage(content="Earlier AI reply"),
+            ],
+            queue_rows=[_FakeQueueRow(content=in_flight_text)],
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def fake_build(messages, requirement):
+            captured["messages"] = messages
+            return "## Built context"
+
+        with patch(
+            "daemon.services.watcher_context_builder.WatcherContextBuilder"
+        ) as BuilderCls:
+            builder_instance = MagicMock()
+            builder_instance.build = AsyncMock(side_effect=fake_build)
+            BuilderCls.return_value = builder_instance
+
+            svc = WatchoverService(manager)
+            await svc._build_watchover_context(
+                "iid-1",
+                requirement=None,
+                extra_messages=[HumanMessage(content=next_command_text)],
+            )
+
+        msgs = captured["messages"]
+        # 2 checkpoint + 1 recovered + 1 extra = 4 total.
+        assert len(msgs) == 4
+        # Checkpoint first.
+        assert msgs[0].content == "Earlier user msg"
+        assert msgs[1].content == "Earlier AI reply"
+        # Recovered inflight next.
+        assert msgs[2].content == in_flight_text
+        assert isinstance(msgs[2], HumanMessage)
+        # Extra (next_command) LAST — most recent in the tail window.
+        assert msgs[3].content == next_command_text
+        assert isinstance(msgs[3], HumanMessage)
+
+    async def test_no_extra_messages_works_same_as_before(self):
+        """Default ``extra_messages=None`` preserves prior behavior.
+
+        Verifies the optional parameter is backward-compatible: callers
+        that omit it (notably the running-path ``activate_watchover``
+        call at watchover_service.py:1018) see the same message
+        ordering they did before this change.
+        """
+        manager = self._make_manager_with_graph_and_queue(
+            checkpoint_messages=[
+                HumanMessage(content="Earlier user msg"),
+                AIMessage(content="Earlier AI reply"),
+            ],
+            queue_rows=None,
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def fake_build(messages, requirement):
+            captured["messages"] = messages
+            return "## Built context"
+
+        with patch(
+            "daemon.services.watcher_context_builder.WatcherContextBuilder"
+        ) as BuilderCls:
+            builder_instance = MagicMock()
+            builder_instance.build = AsyncMock(side_effect=fake_build)
+            BuilderCls.return_value = builder_instance
+
+            svc = WatchoverService(manager)
+            # Call WITHOUT the extra_messages kwarg.
+            await svc._build_watchover_context(
+                "iid-1", requirement=None
+            )
+
+        msgs = captured["messages"]
+        # Only the 2 checkpoint messages, no extra, no recovered.
+        assert len(msgs) == 2
+        assert msgs[0].content == "Earlier user msg"
+        assert msgs[1].content == "Earlier AI reply"
+
+    async def test_fallback_path_includes_extra_messages(self):
+        """The raw-tail fallback also includes the extra_messages.
+
+        When the builder raises (or is unavailable) the local
+        ``messages`` list — which has been extended with
+        ``extra_messages`` — is fed into the raw-tail formatter. This
+        test forces the ``except Exception`` branch and asserts the
+        extra content surfaces in the rendered fallback.
+        """
+        manager = self._make_manager_with_graph_and_queue(
+            checkpoint_messages=[],
+            queue_rows=None,
+        )
+
+        svc = WatchoverService(manager)
+
+        next_command_text = "next command raw tail fallback"
+        # Force the except branch: raise inside ``build``.
+        with patch(
+            "daemon.services.watcher_context_builder.WatcherContextBuilder"
+        ) as BuilderCls:
+            builder_instance = MagicMock()
+            builder_instance.build = AsyncMock(
+                side_effect=RuntimeError("Builder unavailable")
+            )
+            BuilderCls.return_value = builder_instance
+
+            result = await svc._build_watchover_context(
+                "iid-1",
+                requirement=None,
+                extra_messages=[HumanMessage(content=next_command_text)],
+            )
+
+        # Fallback path renders the extra message into the raw tail.
+        assert next_command_text in result
+
+    async def test_empty_extra_messages_list_is_noop(self):
+        """An empty list (``extra_messages=[]``) is treated as no-op.
+
+        The implementation guards on truthiness (``if extra_messages:``)
+        so an empty list skips the extend — matches the ``None`` default
+        behavior exactly.
+        """
+        manager = self._make_manager_with_graph_and_queue(
+            checkpoint_messages=[
+                HumanMessage(content="only checkpoint msg"),
+            ],
+            queue_rows=None,
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def fake_build(messages, requirement):
+            captured["messages"] = messages
+            return "## Built context"
+
+        with patch(
+            "daemon.services.watcher_context_builder.WatcherContextBuilder"
+        ) as BuilderCls:
+            builder_instance = MagicMock()
+            builder_instance.build = AsyncMock(side_effect=fake_build)
+            BuilderCls.return_value = builder_instance
+
+            svc = WatchoverService(manager)
+            await svc._build_watchover_context(
+                "iid-1",
+                requirement=None,
+                extra_messages=[],
+            )
+
+        msgs = captured["messages"]
+        # Only the 1 checkpoint message; empty list = no extension.
+        assert len(msgs) == 1
+        assert msgs[0].content == "only checkpoint msg"

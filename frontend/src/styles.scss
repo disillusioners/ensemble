@@ -50,3 +50,8 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #64748b;
 }
+
+// Watchover dialog — semi-transparent backdrop (dim, not full black)
+.watchover-dialog-backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
