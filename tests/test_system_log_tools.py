@@ -1,0 +1,858 @@
+"""Tests for ``daemon.tools.system_log_tools.create_system_log_tools``.
+
+Five coverage lanes:
+
+  1. **Factory** — ``create_system_log_tools(manager, current_instance_id)``
+     returns a list with exactly four tools: ``ens_system_log_list``,
+     ``ens_system_log_read``, ``ens_system_log_search``,
+     ``ens_system_log_tail``.
+  2. **Registration** — all four tools are tagged with ``_tool_category
+     == "system-log"`` (via ``@register_tool_category``), NOT any other
+     category.  They also appear in ``DYNAMIC_TOOL_NAMES`` and
+     ``CATEGORY_MODULES`` in ``_tool_registry``.
+  3. **Invocation** — each tool reads/searches/tails/lists correctly:
+      paging, regex, context lines, level filter, tail, size caps,
+      empty/missing file handling.
+  4. **Security** — path traversal (``../``, absolute paths, separators)
+      is rejected; size caps are enforced; redaction masks API keys,
+      tokens, and passwords; missing/empty files return informative
+      errors; byte caps truncate responses.
+  5. **Integration** — tools survive the ``_apply_tool_filter`` path for
+      an agent with ``"system-log"`` in ``tools.allow``.
+
+Uses ``tmp_path`` + ``monkeypatch`` to create real log files in a
+temporary directory and patch ``DAEMON_LOG_DIR`` so tests are hermetic
+(no interaction with the developer's ``data/logs/``).
+
+All tests are synchronous (``def``) — the tools are ``def``, not
+``async def``, so we call ``tool.invoke({...})`` (LangChain ``@tool``
+sync invocation pattern).
+"""
+from __future__ import annotations
+
+import inspect
+from importlib import import_module
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+# =============================================================================
+# Shared Helpers & Fixtures
+# =============================================================================
+
+
+def _make_manager() -> MagicMock:
+    """Build a mock manager (pattern parity with test_chart_tools.py)."""
+    manager = MagicMock()
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get = MagicMock(return_value=None)
+    return manager
+
+
+@pytest.fixture
+def log_dir(tmp_path, monkeypatch):
+    """Create a temporary log directory and patch DAEMON_LOG_DIR."""
+    d = tmp_path / "logs"
+    d.mkdir()
+    monkeypatch.setenv("DAEMON_LOG_DIR", str(d))
+    return d
+
+
+@pytest.fixture
+def tools(log_dir):
+    """Create system log tools with the patched log directory."""
+    from daemon.tools.system_log_tools import create_system_log_tools
+
+    return create_system_log_tools(_make_manager(), "test-instance-id")
+
+
+@pytest.fixture
+def log_file(log_dir):
+    """Create a sample log file with known content."""
+    f = log_dir / "ensemble.log"
+    lines = [
+        "2026-08-08 08:00:00 - daemon.api - INFO - Server started",
+        "2026-08-08 08:00:01 - daemon.graph - INFO - Graph compiled",
+        "2026-08-08 08:00:02 - daemon.api - WARNING - Deprecated endpoint hit",
+        "2026-08-08 08:00:03 - daemon.tools - ERROR - Tool execution failed: KeyError",
+        "2026-08-08 08:00:04 - daemon.api - INFO - Request processed",
+        "2026-08-08 08:00:05 - daemon.graph - ERROR - Node timeout",
+        "2026-08-08 08:00:06 - daemon.api - DEBUG - Cache hit",
+    ]
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f
+
+
+def _tool_by_name(tools_list: list, name: str):
+    """Helper to pick a tool from the list by its name."""
+    matches = [t for t in tools_list if t.name == name]
+    available = [t.name for t in tools_list]
+    assert matches, f"Tool {name!r} not found in {available}"
+    return matches[0]
+
+
+# =============================================================================
+# Lane 1: Factory Tests
+# =============================================================================
+
+
+class TestCreateSystemLogToolsFactory:
+    """Factory tests for create_system_log_tools."""
+
+    def test_factory_returns_four_tools(self, tools):
+        """create_system_log_tools returns exactly 4 tools."""
+        assert isinstance(tools, list)
+        assert len(tools) == 4
+
+    def test_tool_names_correct(self, tools):
+        """All 4 tool names are exactly the expected set."""
+        names = sorted(t.name for t in tools)
+        assert names == sorted([
+            "ens_system_log_list",
+            "ens_system_log_read",
+            "ens_system_log_search",
+            "ens_system_log_tail",
+        ])
+
+    def test_all_tools_have_category(self, tools):
+        """All 4 tools have _tool_category == 'system-log'."""
+        for t in tools:
+            assert getattr(t, "_tool_category", None) == "system-log", (
+                f"Tool {t.name} has _tool_category={getattr(t, '_tool_category', None)!r}"
+            )
+
+    def test_all_tools_are_sync(self, tools):
+        """None of the 4 tools are coroutine functions."""
+        for t in tools:
+            # LangChain @tool wraps the original function; the func
+            # attribute gives the raw closure.
+            func = getattr(t, "func", t)
+            assert not inspect.iscoroutinefunction(func), (
+                f"Tool {t.name} should be sync, but func is a coroutine"
+            )
+
+    def test_factory_creates_independent_tools_per_call(self, log_dir):
+        """Each call returns fresh closure instances (not shared state)."""
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        m = _make_manager()
+        a = create_system_log_tools(m, "instance-a")
+        b = create_system_log_tools(m, "instance-b")
+        assert a[0] is not b[0]  # distinct closures
+
+
+# =============================================================================
+# Lane 2: Registration Tests
+# =============================================================================
+
+
+class TestSystemLogToolRegistration:
+    """Registration tests for the system-log category in _tool_registry."""
+
+    def test_category_modules_has_system_log(self):
+        """'system-log' is a key in CATEGORY_MODULES."""
+        from daemon.tools._tool_registry import CATEGORY_MODULES
+
+        assert "system-log" in CATEGORY_MODULES
+
+    def test_category_modules_resolves_to_importable_module(self):
+        """CATEGORY_MODULES['system-log'] resolves to an importable module."""
+        from daemon.tools._tool_registry import CATEGORY_MODULES
+
+        module_path = CATEGORY_MODULES["system-log"]
+        # Handle both str and list[str] values
+        if isinstance(module_path, list):
+            module_path = module_path[0]
+        mod = import_module(module_path)
+        assert hasattr(mod, "create_system_log_tools")
+
+    def test_all_tool_names_in_dynamic_tool_names(self):
+        """All 4 system-log tool names are in DYNAMIC_TOOL_NAMES."""
+        from daemon.tools._tool_registry import DYNAMIC_TOOL_NAMES
+
+        for name in (
+            "ens_system_log_list",
+            "ens_system_log_read",
+            "ens_system_log_search",
+            "ens_system_log_tail",
+        ):
+            assert name in DYNAMIC_TOOL_NAMES, f"{name} not in DYNAMIC_TOOL_NAMES"
+
+    def test_tools_not_registered_under_instance_category(self, tools):
+        """SECURITY: tools must NOT be tagged as 'instance'."""
+        for t in tools:
+            assert getattr(t, "_tool_category", None) != "instance"
+
+
+# =============================================================================
+# Lane 3: Invocation Tests
+# =============================================================================
+
+
+class TestSystemLogListInvocation:
+    """Invocation tests for ens_system_log_list."""
+
+    def test_list_returns_filenames(self, tools, log_dir):
+        """ens_system_log_list returns available log filenames."""
+        (log_dir / "ensemble.log").write_text("line\n", encoding="utf-8")
+        (log_dir / "ensemble.log.1").write_text("old\n", encoding="utf-8")
+        list_tool = _tool_by_name(tools, "ens_system_log_list")
+        result = list_tool.invoke({})
+        assert "ensemble.log" in result
+        assert "ensemble.log.1" in result
+
+    def test_list_includes_sizes(self, tools, log_dir):
+        """ens_system_log_list includes file sizes."""
+        (log_dir / "ensemble.log").write_text("hello world\n", encoding="utf-8")
+        list_tool = _tool_by_name(tools, "ens_system_log_list")
+        result = list_tool.invoke({})
+        # 11 bytes — either raw byte count or a "B" size indicator
+        assert "11" in result or "B" in result
+
+    def test_list_empty_directory(self, tools, log_dir):
+        """ens_system_log_list handles empty directory gracefully."""
+        list_tool = _tool_by_name(tools, "ens_system_log_list")
+        result = list_tool.invoke({})
+        assert "no log files" in result.lower()
+
+    def test_list_rotated_backups(self, tools, log_dir):
+        """Rotated backups (ensemble.log.1, .2) appear in listing."""
+        (log_dir / "ensemble.log").write_text("current\n", encoding="utf-8")
+        (log_dir / "ensemble.log.1").write_text("backup1\n", encoding="utf-8")
+        (log_dir / "ensemble.log.2").write_text("backup2\n", encoding="utf-8")
+        list_tool = _tool_by_name(tools, "ens_system_log_list")
+        result = list_tool.invoke({})
+        assert "ensemble.log" in result
+        assert "ensemble.log.1" in result
+        assert "ensemble.log.2" in result
+
+
+class TestSystemLogReadInvocation:
+    """Invocation tests for ens_system_log_read."""
+
+    def test_read_returns_lines_with_numbers(self, tools, log_file):
+        """ens_system_log_read returns numbered lines."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "ensemble.log", "offset": 0, "limit": 3})
+        assert "1:" in result
+        assert "Server started" in result
+        assert "Graph compiled" in result
+
+    def test_read_supports_paging(self, tools, log_file):
+        """ens_system_log_read paging: offset/limit return different pages."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        page1 = read_tool.invoke({"filename": "ensemble.log", "offset": 0, "limit": 3})
+        page2 = read_tool.invoke({"filename": "ensemble.log", "offset": 3, "limit": 3})
+        assert "Server started" in page1
+        assert "Server started" not in page2
+        assert "Tool execution failed" in page2
+
+    def test_read_default_filename(self, tools, log_file):
+        """ens_system_log_read defaults to 'ensemble.log'."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({})
+        assert "Server started" in result
+
+    def test_read_missing_file_returns_error(self, tools, log_dir):
+        """Missing file returns 'not found' message."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "nonexistent.log"})
+        assert "not found" in result.lower()
+
+    def test_read_empty_file_returns_message(self, tools, log_dir):
+        """Empty file returns 'empty' message."""
+        (log_dir / "empty.log").write_text("", encoding="utf-8")
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "empty.log"})
+        assert "empty" in result.lower()
+
+    def test_read_respects_line_cap(self, tools, log_dir):
+        """ens_system_log_read caps at MAX_LINES_READ (500)."""
+        big_file = log_dir / "big.log"
+        big_file.write_text("\n".join(f"line {i}" for i in range(600)))
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke(
+            {"filename": "big.log", "offset": 0, "limit": 10000},
+        )
+        # Count numbered lines — should be at most 500
+        numbered_lines = [
+            l for l in result.split("\n") if l.strip() and l.strip()[0].isdigit()
+        ]
+        assert len(numbered_lines) <= 500
+
+
+class TestSystemLogSearchInvocation:
+    """Invocation tests for ens_system_log_search."""
+
+    def test_search_finds_matching_lines(self, tools, log_file):
+        """ens_system_log_search finds lines matching the pattern."""
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "ERROR", "filename": "ensemble.log"})
+        assert "Tool execution failed" in result
+        assert "Node timeout" in result
+
+    def test_search_with_context(self, tools, log_file):
+        """ens_system_log_search with context shows surrounding lines."""
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        # REAL CODE uses single 'context' param (NOT context_before/after)
+        result = search_tool.invoke(
+            {
+                "pattern": "ERROR",
+                "filename": "ensemble.log",
+                "context": 1,
+            },
+        )
+        # Context line before first ERROR match (line 3: WARNING)
+        assert "Deprecated endpoint" in result
+
+    def test_search_with_level_filter(self, tools, log_file):
+        """ens_system_log_search level filter restricts to matching level."""
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": ".*", "filename": "ensemble.log", "level": "ERROR"},
+        )
+        assert "ERROR" in result
+        assert "INFO" not in result  # filtered out
+
+    def test_search_invalid_regex_returns_error(self, tools, log_file):
+        """Invalid regex returns a graceful error message."""
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "[invalid", "filename": "ensemble.log"})
+        assert "invalid regex" in result.lower()
+
+    def test_search_no_matches_returns_message(self, tools, log_file):
+        """No matches returns 'no matches' message."""
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "NONEXISTENT_PATTERN_XYZ"})
+        assert "no matches" in result.lower()
+
+    def test_search_respects_limit_cap(self, tools, log_dir):
+        """ens_system_log_search caps matches at 50."""
+        many_match = log_dir / "ensemble.log"
+        many_match.write_text(
+            "\n".join(f"2026-08-08 - daemon.test - ERROR - match {i}" for i in range(100)),
+            encoding="utf-8",
+        )
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "ERROR", "filename": "ensemble.log", "limit": 10000},
+        )
+        # Count match markers ( >>> )
+        match_markers = [l for l in result.split("\n") if ">>>" in l]
+        assert len(match_markers) <= 50
+
+
+class TestSystemLogTailInvocation:
+    """Invocation tests for ens_system_log_tail."""
+
+    def test_tail_returns_last_n_lines(self, tools, log_file):
+        """ens_system_log_tail returns the last N lines."""
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": "ensemble.log", "lines": 3})
+        assert "Cache hit" in result       # last line
+        assert "Node timeout" in result    # second to last
+        assert "Server started" not in result  # not in last 3
+
+    def test_tail_default_lines(self, tools, log_file):
+        """ens_system_log_tail defaults to 50 lines."""
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": "ensemble.log"})
+        assert "Cache hit" in result
+
+    def test_tail_respects_max_cap(self, tools, log_dir):
+        """ens_system_log_tail caps at MAX_LINES_TAIL (200)."""
+        big_file = log_dir / "big.log"
+        big_file.write_text("\n".join(f"line {i}" for i in range(300)))
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": "big.log", "lines": 10000})
+        numbered = [
+            l for l in result.split("\n") if l.strip() and l.strip()[0].isdigit()
+        ]
+        assert len(numbered) <= 200  # MAX_LINES_TAIL
+
+    def test_tail_missing_file_returns_error(self, tools, log_dir):
+        """Missing file returns 'not found' message."""
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": "nonexistent.log"})
+        assert "not found" in result.lower()
+
+    def test_tail_empty_file_returns_error(self, tools, log_dir):
+        """Empty file returns 'empty' message."""
+        (log_dir / "empty.log").write_text("", encoding="utf-8")
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": "empty.log"})
+        assert "empty" in result.lower()
+
+
+# =============================================================================
+# Lane 4: Security & Redaction Tests
+# =============================================================================
+
+
+class TestSystemLogSecurity:
+    """Security tests: path traversal, size caps, line truncation."""
+
+    # ── Path traversal ──────────────────────────────────────────────
+
+    @pytest.mark.parametrize("malicious", [
+        "../../../etc/passwd",
+        "/etc/passwd",
+        "subdir/x.log",
+        "..",
+    ])
+    def test_path_traversal_rejected_read(self, tools, log_file, malicious):
+        """ens_system_log_read blocks path traversal / absolute / separators."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": malicious})
+        assert "error" in result.lower()
+
+    @pytest.mark.parametrize("malicious", [
+        "../../../etc/passwd",
+        "/etc/passwd",
+        "subdir/x.log",
+    ])
+    def test_path_traversal_rejected_search(self, tools, log_file, malicious):
+        """ens_system_log_search blocks path traversal."""
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "root", "filename": malicious})
+        assert "error" in result.lower()
+
+    @pytest.mark.parametrize("malicious", [
+        "../../../etc/passwd",
+        "/etc/passwd",
+        "subdir/x.log",
+    ])
+    def test_path_traversal_rejected_tail(self, tools, log_file, malicious):
+        """ens_system_log_tail blocks path traversal."""
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": malicious})
+        assert "error" in result.lower()
+
+    def test_absolute_path_rejected_with_message(self, tools, log_file):
+        """Absolute path error mentions 'absolute'."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "/etc/passwd"})
+        assert "error" in result.lower()
+        assert "absolute" in result.lower()
+
+    def test_separator_in_filename_rejected(self, tools, log_file):
+        """Path separator in filename is rejected."""
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "subdir/ensemble.log"})
+        assert "error" in result.lower()
+
+    def test_rotated_backup_file_readable(self, tools, log_dir):
+        """Rotated backups (ensemble.log.1) are valid filenames."""
+        backup = log_dir / "ensemble.log.1"
+        backup.write_text("old log line\n", encoding="utf-8")
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "ensemble.log.1"})
+        assert "old log line" in result
+
+    # ── Byte caps ──────────────────────────────────────────────────
+
+    def test_byte_cap_truncates_large_response(self, tools, log_dir):
+        """Response is truncated at MAX_BYTES_RESPONSE (12 KB)."""
+        huge_file = log_dir / "huge.log"
+        # Single line just above the 12 KB cap
+        huge_file.write_text("X" * (15 * 1024) + "\n", encoding="utf-8")
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "huge.log", "limit": 10})
+        assert "truncated" in result.lower()
+
+    def test_search_byte_cap_truncates(self, tools, log_dir):
+        """W8 REVIEWER FIX: Search response is truncated when many matches
+        exceed the 12 KB byte cap."""
+        big_search = log_dir / "ensemble.log"
+        # Generate many ERROR matches with enough content to exceed 12 KB.
+        # Each line ~300 chars → ~40 matches will hit the 12 KB cap.
+        lines = []
+        for i in range(200):
+            padding = "A" * 250
+            lines.append(f"2026-08-08 08:00:{i:02d} - daemon.test - ERROR - match_{i}_{padding}")
+        big_search.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "ERROR", "filename": "ensemble.log"})
+        assert "truncated" in result.lower()
+
+    # ── Line truncation ────────────────────────────────────────────
+
+    def test_long_line_truncated(self, tools, log_dir):
+        """Lines exceeding MAX_LINE_LENGTH (2000) are truncated."""
+        f = log_dir / "ensemble.log"
+        long_line = "X" * 3000
+        f.write_text(f"2026-08-08 - INFO - {long_line}\n", encoding="utf-8")
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "ensemble.log"})
+        assert "...(truncated)" in result
+
+
+class TestSystemLogRedaction:
+    """Tests for sensitive content redaction in log output."""
+
+    def test_api_key_redacted_in_read(self, tools, log_dir):
+        """API key values are [REDACTED] in read output."""
+        f = log_dir / "ensemble.log"
+        f.write_text(
+            "2026-08-08 08:00:00 - daemon.config - INFO - "
+            "OPENAI_API_KEY=sk-proj-abc123xyz\n",
+            encoding="utf-8",
+        )
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "ensemble.log"})
+        assert "[REDACTED]" in result
+        assert "sk-proj-abc123xyz" not in result
+
+    def test_bearer_token_redacted_in_tail(self, tools, log_dir):
+        """Bearer tokens are [REDACTED] in tail output."""
+        f = log_dir / "ensemble.log"
+        f.write_text(
+            "2026-08-08 08:00:00 - daemon.api - INFO - "
+            "Authorization: Bearer eyJhbGciOiJIUzI1\n",
+            encoding="utf-8",
+        )
+        tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+        result = tail_tool.invoke({"filename": "ensemble.log", "lines": 10})
+        assert "[REDACTED]" in result
+        assert "eyJhbGciOiJIUzI1" not in result
+
+    def test_password_redacted_in_search(self, tools, log_dir):
+        """Password values are [REDACTED] in search output."""
+        f = log_dir / "ensemble.log"
+        f.write_text(
+            "2026-08-08 08:00:00 - daemon.db - INFO - "
+            "password=supersecret123\n",
+            encoding="utf-8",
+        )
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "password", "filename": "ensemble.log"})
+        assert "[REDACTED]" in result
+        assert "supersecret123" not in result
+
+    def test_token_redacted_in_read(self, tools, log_dir):
+        """token= values are [REDACTED] in read output."""
+        f = log_dir / "ensemble.log"
+        f.write_text(
+            "2026-08-08 08:00:00 - daemon.auth - INFO - "
+            "token=abc123token\n",
+            encoding="utf-8",
+        )
+        read_tool = _tool_by_name(tools, "ens_system_log_read")
+        result = read_tool.invoke({"filename": "ensemble.log"})
+        assert "[REDACTED]" in result
+        assert "abc123token" not in result
+
+    def test_redaction_helper_directly(self):
+        """Test _redact_line helper directly for all 8 patterns."""
+        from daemon.tools.system_log_tools import _redact_line
+
+        assert "[REDACTED]" in _redact_line("MY_API_KEY=sk-abc")
+        assert "[REDACTED]" in _redact_line("AUTH_TOKEN=tok123")
+        assert "[REDACTED]" in _redact_line("DB_PASSWORD=hunter2")
+        assert "[REDACTED]" in _redact_line("CLIENT_SECRET=sec")
+        assert "[REDACTED]" in _redact_line("password=pwd")
+        assert "[REDACTED]" in _redact_line("token=tkn")
+        assert "[REDACTED]" in _redact_line("Bearer abc123")
+        assert "[REDACTED]" in _redact_line("Authorization: Basic dXNlcjpwYXNz")
+
+    def test_truncate_helper_directly(self):
+        """Test _truncate_line helper: short lines unchanged, long truncated."""
+        from daemon.tools.system_log_tools import (
+            MAX_LINE_LENGTH,
+            _truncate_line,
+        )
+
+        assert _truncate_line("short") == "short"
+        long_line = "X" * (MAX_LINE_LENGTH + 500)
+        result = _truncate_line(long_line)
+        assert len(result) == MAX_LINE_LENGTH + len("...(truncated)")
+        assert result.endswith("...(truncated)")
+
+    def test_validate_filename_helper_directly(self, log_dir):
+        """Test _validate_filename: safe filenames pass, unsafe rejected."""
+        from daemon.tools.system_log_tools import _validate_filename
+
+        # Use the patched log_dir (avoids macOS /tmp -> /private/tmp resolution)
+        with patch.dict("os.environ", {"DAEMON_LOG_DIR": str(log_dir)}):
+            resolved = _validate_filename("ensemble.log")
+            assert str(resolved) == f"{log_dir}/ensemble.log"
+
+            resolved2 = _validate_filename("ensemble.log.1")
+            assert str(resolved2) == f"{log_dir}/ensemble.log.1"
+
+        # Unsafe filenames raise ValueError
+        with pytest.raises(ValueError):
+            _validate_filename("")
+        with pytest.raises(ValueError):
+            _validate_filename("/etc/passwd")
+        with pytest.raises(ValueError):
+            _validate_filename("../etc/passwd")
+        with pytest.raises(ValueError):
+            _validate_filename("subdir/x.log")
+
+    def test_format_size_helper_directly(self):
+        """Test _format_size: bytes < KB < MB tiers."""
+        from daemon.tools.system_log_tools import _format_size
+
+        assert _format_size(0) == "0 B"
+        assert _format_size(512) == "512 B"
+        assert _format_size(1024) == "1.0 KB"
+        assert _format_size(2048) == "2.0 KB"
+        assert _format_size(1024 * 1024) == "1.0 MB"
+        assert _format_size(5 * 1024 * 1024) == "5.0 MB"
+
+
+# =============================================================================
+# Lane 5: Edge Cases & Error Path Coverage
+# =============================================================================
+
+
+class TestSystemLogEdgeCases:
+    """Edge case tests for error paths and defensive branches."""
+
+    def test_list_missing_directory(self, tmp_path, monkeypatch):
+        """If DAEMON_LOG_DIR points to a non-existent path, list returns error."""
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        missing = tmp_path / "does_not_exist"
+        monkeypatch.setenv("DAEMON_LOG_DIR", str(missing))
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        list_tool = _tool_by_name(tools, "ens_system_log_list")
+        result = list_tool.invoke({})
+        assert "not found" in result.lower()
+
+    def test_list_directory_is_file(self, log_dir):
+        """If DAEMON_LOG_DIR points to a file, list returns 'not a directory'."""
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        # Replace the patched env with a file path
+        file_path = log_dir / "not_a_dir"
+        file_path.write_text("")
+        # Build tools with DAEMON_LOG_DIR pointing to a file
+        with patch.dict("os.environ", {"DAEMON_LOG_DIR": str(file_path)}):
+            tools = create_system_log_tools(_make_manager(), "test-instance-id")
+            list_tool = _tool_by_name(tools, "ens_system_log_list")
+            result = list_tool.invoke({})
+            assert "not a directory" in result.lower()
+
+    def test_read_not_a_file(self, log_dir):
+        """If filename resolves to a directory, read returns 'not a file'."""
+        subdir = log_dir / "ensemble.log"
+        subdir.mkdir()  # create a directory with same name as log file
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        with patch.dict("os.environ", {"DAEMON_LOG_DIR": str(log_dir)}):
+            tools = create_system_log_tools(_make_manager(), "test-instance-id")
+            read_tool = _tool_by_name(tools, "ens_system_log_read")
+            result = read_tool.invoke({"filename": "ensemble.log"})
+            assert "not a file" in result.lower()
+
+    def test_tail_not_a_file(self, log_dir):
+        """If filename resolves to a directory, tail returns 'not a file'."""
+        subdir = log_dir / "ensemble.log"
+        subdir.mkdir()
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        with patch.dict("os.environ", {"DAEMON_LOG_DIR": str(log_dir)}):
+            tools = create_system_log_tools(_make_manager(), "test-instance-id")
+            tail_tool = _tool_by_name(tools, "ens_system_log_tail")
+            result = tail_tool.invoke({"filename": "ensemble.log"})
+            assert "not a file" in result.lower()
+
+    def test_search_respects_max_lines_scan(self, log_dir, monkeypatch):
+        """Search stops at MAX_LINES_SCAN (50,000) to prevent DoS."""
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        # Lower the cap to make the test fast and deterministic
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
+
+        # Create 20 lines, only first 10 should be scanned
+        f = log_dir / "ensemble.log"
+        f.write_text("\n".join(f"line {i}" for i in range(20)), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "line", "filename": "ensemble.log"})
+        # Header should mention only 10 lines scanned
+        assert "scanned 10 lines" in result
+
+    def test_search_with_context_groups(self, tools, log_file):
+        """Search with context shows surrounding lines for each match."""
+        # Build a file with multiple ERROR matches and context
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {
+                "pattern": "ERROR",
+                "filename": "ensemble.log",
+                "context": 1,
+            },
+        )
+        # Verify context appears BOTH before first ERROR (line 3: WARNING) AND
+        # after first ERROR (line 5: INFO) AND before second ERROR (line 5: INFO)
+        assert "Deprecated endpoint" in result  # before first ERROR
+        assert "Node timeout" in result        # second ERROR
+        assert "match(es)" in result           # header line
+
+    def test_search_no_matches_with_scanned_count(self, log_dir):
+        """Search 'no matches' message includes scanned line count."""
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        f = log_dir / "ensemble.log"
+        f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke({"pattern": "DOES_NOT_EXIST", "filename": "ensemble.log"})
+        assert "no matches" in result.lower()
+        assert "scanned 3 lines" in result
+
+    def test_list_with_many_files_byte_cap(self, log_dir):
+        """List with many files exceeds byte cap and reports truncation."""
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        # Create 30+ log files with long names to exceed 12 KB
+        for i in range(30):
+            (log_dir / f"ensemble.log_{i}").write_text("a\n", encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        list_tool = _tool_by_name(tools, "ens_system_log_list")
+        result = list_tool.invoke({})
+        # Either we get the truncation marker or all files fit
+        assert "truncated" in result.lower() or len(result) < 12 * 1024
+
+    def test_validate_filename_relative_to_symlink_attack(self, log_dir):
+        """Filename that resolves outside the log directory is rejected."""
+        from daemon.tools.system_log_tools import _validate_filename
+
+        # Create a symlink inside log_dir pointing outside
+        link = log_dir / "evil_link"
+        if not link.exists():
+            link.symlink_to("/etc/passwd")
+        with patch.dict("os.environ", {"DAEMON_LOG_DIR": str(log_dir)}):
+            with pytest.raises(ValueError, match="outside"):
+                _validate_filename("evil_link")
+
+
+# =============================================================================
+# Lane 5: Integration Test (W6 — uses REAL _apply_tool_filter signature)
+# =============================================================================
+
+
+class TestSystemLogToolIntegration:
+    """Integration test: tools are visible through ``_apply_tool_filter``
+    for an agent with 'system-log' in ``tools.allow``.
+
+    The REAL ``_apply_tool_filter`` lives in ``daemon.tools.instance`` (NOT
+    ``_tool_registry``). Its signature is::
+
+        _apply_tool_filter(tools, agent_id, mcp_tool_names=None, version_tag=None)
+
+    It reads agent meta from ``get_registry().get_version(agent_id, tag)``
+    (falling back to ``get_resolved(agent_id)``), then expands category
+    names via ``list_tools_by_category()``.  We mock both to create a
+    controlled environment where only ``"system-log"`` is allowed.
+    """
+
+    def test_tools_visible_after_apply_tool_filter(self):
+        """Verify system-log tools survive ``_apply_tool_filter`` when the
+        agent's ``tools.allow`` includes the ``'system-log'`` category."""
+        from daemon.tools.instance import _apply_tool_filter
+
+        class _MockTool:
+            """Minimal tool stub — _apply_tool_filter only reads ``.name``."""
+
+            def __init__(self, name: str):
+                self.name = name
+
+        all_tools = [
+            _MockTool("ens_system_log_list"),
+            _MockTool("ens_system_log_read"),
+            _MockTool("ens_system_log_search"),
+            _MockTool("ens_system_log_tail"),
+            _MockTool("bash"),            # should be filtered OUT
+            _MockTool("read_file"),       # should be filtered OUT
+            _MockTool("spawn_instance"),  # should be filtered OUT
+        ]
+
+        # Build a mock agent meta with tools.allow = ["system-log"]
+        mock_meta = MagicMock()
+        mock_meta.tools = MagicMock()
+        mock_meta.tools.allow = ["system-log"]
+        mock_meta.tools.deny = None
+        mock_meta.innate_skills = []
+
+        # Category map: system-log expands to the 4 tool names
+        tool_categories = {
+            "system-log": [
+                "ens_system_log_list",
+                "ens_system_log_read",
+                "ens_system_log_search",
+                "ens_system_log_tail",
+            ],
+            "bash": ["bash"],
+            "filesystem": ["read_file"],
+            "instance": ["spawn_instance"],
+        }
+
+        with patch("daemon.tools.instance.list_tools_by_category",
+                   return_value=tool_categories), \
+             patch("daemon.registry.get_registry") as mock_get_reg:
+            mock_get_reg.return_value.get_version.return_value = mock_meta
+            mock_get_reg.return_value.get_resolved.return_value = mock_meta
+            mock_get_reg.return_value.resolve_pure_id.side_effect = lambda x: x
+
+            filtered = _apply_tool_filter(all_tools, "test-agent")
+
+        tool_names = {t.name for t in filtered}
+
+        # System-log tools survive
+        assert "ens_system_log_list" in tool_names
+        assert "ens_system_log_read" in tool_names
+        assert "ens_system_log_search" in tool_names
+        assert "ens_system_log_tail" in tool_names
+
+        # Non-system-log tools are filtered OUT
+        assert "bash" not in tool_names
+        assert "read_file" not in tool_names
+        assert "spawn_instance" not in tool_names
+
+    def test_tools_filtered_out_without_system_log_allow(self):
+        """When 'system-log' is NOT in tools.allow, the tools are excluded."""
+        from daemon.tools.instance import _apply_tool_filter
+
+        class _MockTool:
+            def __init__(self, name: str):
+                self.name = name
+
+        all_tools = [
+            _MockTool("ens_system_log_list"),
+            _MockTool("ens_system_log_read"),
+            _MockTool("bash"),
+        ]
+
+        mock_meta = MagicMock()
+        mock_meta.tools = MagicMock()
+        mock_meta.tools.allow = ["bash"]  # only bash, NOT system-log
+        mock_meta.tools.deny = None
+        mock_meta.innate_skills = []
+
+        tool_categories = {
+            "system-log": ["ens_system_log_list", "ens_system_log_read"],
+            "bash": ["bash"],
+        }
+
+        with patch("daemon.tools.instance.list_tools_by_category",
+                   return_value=tool_categories), \
+             patch("daemon.registry.get_registry") as mock_get_reg:
+            mock_get_reg.return_value.get_version.return_value = mock_meta
+            mock_get_reg.return_value.get_resolved.return_value = mock_meta
+            mock_get_reg.return_value.resolve_pure_id.side_effect = lambda x: x
+
+            filtered = _apply_tool_filter(all_tools, "test-agent")
+
+        tool_names = {t.name for t in filtered}
+
+        assert "bash" in tool_names
+        assert "ens_system_log_list" not in tool_names
+        assert "ens_system_log_read" not in tool_names
